@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from octop_harness.config import ModelConfig, ProviderConfig
 
+from octop.infra.agents.managed import is_managed_agent
 from octop.infra.agents.providers.model_flags import is_chat_eligible_model, is_vision_model
 from octop.infra.agents.providers.opencode_session import session_header_for_provider
 from octop.infra.agents.providers.reasoning import reasoning_capability
@@ -86,6 +87,8 @@ def clear_stale_pins_for_provider(
     prefix = f"{provider_name}/"
     cleared: list[str] = []
     for row in agent_repo.list_all():
+        if is_managed_agent(row):
+            continue
         dm = (row.default_model or "").strip()
         if not dm.startswith(prefix) or dm in valid:
             continue

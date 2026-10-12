@@ -107,7 +107,8 @@ class ProactiveCareConfigRepo:
                 "c.active_hours_end, c.min_interval_hours, c.max_interval_hours "
                 "FROM agents a "
                 "LEFT JOIN proactive_care_config c ON c.agent_id = a.agent_id "
-                "WHERE a.enabled = 1 AND (c.agent_id IS NULL OR c.enabled = 1)",
+                "WHERE a.enabled = 1 AND a.managed_by IS NULL "
+                "AND (c.agent_id IS NULL OR c.enabled = 1)",
             ).fetchall()
         configs: list[ProactiveCareConfig] = []
         for row in rows:

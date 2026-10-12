@@ -226,7 +226,7 @@ async def test_database_failure_returns_retryable_safe_503(env, monkeypatch) -> 
 
 async def test_command_writes_remain_unavailable(env) -> None:
     client, server, auth = env
-    for path in (f"{PREFIX}/commands", f"{PREFIX}/projects", f"{PREFIX}/tasks/{uuid4()}/turns"):
+    for path in (f"{PREFIX}/commands", f"{PREFIX}/tasks/{uuid4()}/turns"):
         response = await client.post(path, headers=auth, json={})
         # An unmatched POST can be rejected by the dashboard's static mount.
         assert response.status_code in (404, 405)
@@ -255,7 +255,10 @@ async def test_openapi_documents_receipt_as_immutable_acceptance(tmp_path: Path)
         assert parameter["schema"]["format"] == "uuid"
         assert "current Run state" in operation["description"]
         response = operation["responses"]["200"]["content"]["application/json"]
-        assert response["schema"]["$ref"].endswith("/CommandReceipt")
+        assert {item["$ref"].rsplit("/", 1)[1] for item in response["schema"]["anyOf"]} == {
+            "CommandReceipt",
+            "ProjectCreateReceipt",
+        }
         example = response["example"]
         assert CommandReceipt.model_validate(example).runState == "queued"
         assert example["accepted"] is True

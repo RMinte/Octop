@@ -17,6 +17,13 @@ User-session authentication does not bind a device or enable task execution.
 See [AgentComputer integration](agentcomputer-integration.md) for fields, limits,
 current capabilities, and the local development profile.
 
+The AgentComputer project surface now includes `POST /api/agentcomputer/v1/projects`
+and `GET /api/agentcomputer/v1/projects/{projectID}`. Creation registers an immutable
+intent receipt and prepares stopped resources; the project query reports current
+preparation progress. Full execution readiness remains unavailable. See
+[project preparation](agentcomputer-projects.md) for request fields, retry rules,
+resource ownership, and the enforced 65536-byte command limit.
+
 | Header | Value |
 |--------|-------|
 | `Authorization` | `Bearer <access_token>` from `POST /api/auth/login` |

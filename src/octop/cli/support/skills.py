@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from octop.cli.repl.embedded_session import embedded_runtime
+from octop.infra.agents.managed import assert_legacy_agent_access
 from octop.infra.agents.manager import skills_disabled_set
 from octop.infra.errors import ErrorCode, OctopError
 
@@ -30,6 +31,7 @@ def set_skill_enabled(agent_id: str, name: str, *, enabled: bool) -> None:
         row = svc.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
+        assert_legacy_agent_access(row)
         raw = row.config_json or "{}"
         try:
             cfg = json.loads(raw)

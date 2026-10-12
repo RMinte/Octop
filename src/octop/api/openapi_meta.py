@@ -69,10 +69,10 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {
         "name": "agentcomputer",
         "description": (
-            "Versioned AgentComputer discovery and existing command receipt queries. "
-            "Requires a user Bearer token. Receipts preserve original admission facts, "
-            "not current Run state; HTTP submission, device binding, and execution "
-            "remain unavailable."
+            "Versioned AgentComputer discovery, local project intent registration, "
+            "and existing command receipt queries. Requires a user Bearer token. "
+            "Receipts preserve original admission facts; project preparation has a separate view. "
+            "Device binding, full project readiness, and task execution remain unavailable."
         ),
     },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},
@@ -234,6 +234,44 @@ def configure_openapi(app: FastAPI) -> None:
                 "runState": "queued",
                 "taskRevision": 2,
                 "acceptedSequence": 1,
+            }
+
+        project_receipt = {
+            "protocolVersion": 1,
+            "operation": "project.create",
+            "boxID": "11111111-1111-4111-8111-111111111111",
+            "commandID": "22222222-2222-4222-8222-222222222222",
+            "receiptRevision": 1,
+            "accepted": True,
+            "replayed": False,
+            "acceptedAt": "2026-10-12T00:00:00Z",
+            "restoreEpoch": 1,
+            "projectID": "33333333-3333-4333-8333-333333333333",
+            "workspaceID": "44444444-4444-4444-8444-444444444444",
+            "preparationID": "55555555-5555-4555-8555-555555555555",
+            "projectRevision": 1,
+            "preparationStateAtAcceptance": "pending",
+        }
+        create_project = schema.get("paths", {}).get(f"{API_PREFIX}/projects", {}).get("post")
+        if create_project is not None:
+            create_project["responses"]["201"]["content"]["application/json"]["example"] = (
+                project_receipt
+            )
+        project = schema.get("paths", {}).get(f"{API_PREFIX}/projects/{{projectID}}", {}).get("get")
+        if project is not None:
+            project["responses"]["200"]["content"]["application/json"]["example"] = {
+                "projectID": project_receipt["projectID"],
+                "workspaceID": project_receipt["workspaceID"],
+                "preparationID": project_receipt["preparationID"],
+                "name": "Local project",
+                "projectRevision": 1,
+                "configDigest": "sha256:" + "0" * 64,
+                "preparationRevision": 4,
+                "preparationState": "failed",
+                "steps": {"agent": "verified", "workspace": "verified"},
+                "reasonCode": "providerUnavailable",
+                "retryable": True,
+                "executionReady": False,
             }
 
         for path, path_item in schema.get("paths", {}).items():

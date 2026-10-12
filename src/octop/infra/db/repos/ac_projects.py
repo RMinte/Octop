@@ -16,6 +16,7 @@ class AcProjectRow:
     owner_id: int
     box_id: str
     workspace_id: str
+    name: str
     default_agent_id: str | None
     preparation_state: str
     revision: int
@@ -38,6 +39,7 @@ class AcProjectRow:
             owner_id=int(r["owner_id"]),
             box_id=str(r["box_id"]),
             workspace_id=str(r["workspace_id"]),
+            name=str(r["name"]),
             default_agent_id=str(r["default_agent_id"])
             if r["default_agent_id"] is not None
             else None,
@@ -67,6 +69,60 @@ class AcProjectRepo:
             (project_id, owner_id),
         ).fetchone()
         return AcProjectRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def insert(
+        conn: Any,
+        *,
+        project_id: str,
+        owner_id: int,
+        box_id: str,
+        workspace_id: str,
+        name: str,
+        config_json: str,
+        config_digest: str,
+        created_at: int,
+        updated_at: int,
+    ) -> AcProjectRow | None:
+        row = conn.execute(
+            "INSERT INTO ac_projects (project_id, owner_id, box_id, workspace_id, name, "
+            "config_json, config_digest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT DO NOTHING RETURNING *",
+            (
+                project_id,
+                owner_id,
+                box_id,
+                workspace_id,
+                name,
+                config_json,
+                config_digest,
+                created_at,
+                updated_at,
+            ),
+        ).fetchone()
+        return AcProjectRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def set_preparation(
+        conn: Any, project_id: str, owner_id: int, state: str, *, updated_at: int
+    ) -> None:
+        conn.execute(
+            "UPDATE ac_projects SET preparation_state = ?, updated_at = ? "
+            "WHERE project_id = ? AND owner_id = ?",
+            (state, updated_at, project_id, owner_id),
+        )
+
+    @staticmethod
+    def bind_agent(
+        conn: Any, project_id: str, owner_id: int, agent_id: str, *, updated_at: int
+    ) -> bool:
+        cursor = conn.execute(
+            "UPDATE ac_projects SET default_agent_id = ?, updated_at = ? "
+            "WHERE project_id = ? AND owner_id = ? "
+            "AND (default_agent_id IS NULL OR default_agent_id = ?)",
+            (agent_id, updated_at, project_id, owner_id, agent_id),
+        )
+        return bool(cursor.rowcount == 1)
 
     @staticmethod
     def acquire_run(

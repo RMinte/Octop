@@ -11,9 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from octop import __version__
 from octop.infra.agentcomputer.identity import get_or_create_identity
+from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.db.services import SharedServices
 
-ADAPTER_VERSION = "0.2.0"
+ADAPTER_VERSION = "0.3.0"
 PROTOCOL_VERSION: Literal[1] = 1
 
 
@@ -38,10 +39,12 @@ class CapabilityStatus(ProtocolModel):
 
 
 class BusinessCapabilities(ProtocolModel):
-    projects: CapabilityStatus
+    projects: CapabilityStatus = Field(
+        description="Full project readiness; local intent registration alone is not execution readiness."
+    )
     tasks: CapabilityStatus
     commandReceipts: CapabilityStatus = Field(
-        description="Queries for existing immutable receipts; submission is not enabled."
+        description="Queries for existing immutable receipts; this flag never grants execution."
     )
     runs: CapabilityStatus
     cancellation: CapabilityStatus
@@ -102,13 +105,19 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                     "serverTime": "2026-10-12T00:00:00Z",
                     "timezone": "Asia/Shanghai",
                     "executionPlatform": {"system": "Darwin", "architecture": "arm64"},
-                    "capabilityRevision": 2,
+                    "capabilityRevision": 3,
                     "restoreEpoch": 1,
                     "supportedPermissionModes": [],
                     "capabilities": {
                         name: (
                             {"supported": True, "available": True, "reasonCode": None}
                             if name == "commandReceipts"
+                            else {
+                                "supported": True,
+                                "available": False,
+                                "reasonCode": "executionUnavailable",
+                            }
+                            if name == "projects"
                             else {
                                 "supported": False,
                                 "available": False,
@@ -117,7 +126,10 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                         )
                         for name in BusinessCapabilities.model_fields
                     },
-                    "limits": dict.fromkeys(ServiceLimits.model_fields),
+                    "limits": {
+                        **dict.fromkeys(ServiceLimits.model_fields),
+                        "maxCommandBytes": MAX_COMMAND_BYTES,
+                    },
                 }
             ]
         }
@@ -136,7 +148,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
     serverTime: datetime
     timezone: str
     executionPlatform: ExecutionPlatform
-    capabilityRevision: Literal[2] = 2
+    capabilityRevision: Literal[3] = 3
     restoreEpoch: Annotated[int, Field(strict=True, ge=1)] = Field(
         description="Persisted initial epoch; restore fencing remains unavailable."
     )
@@ -160,7 +172,9 @@ def get_capabilities(services: SharedServices) -> AgentComputerCapabilitiesRespo
         restoreEpoch=identity.restoreEpoch,
         supportedPermissionModes=[],
         capabilities=BusinessCapabilities(
-            projects=unavailable,
+            projects=CapabilityStatus(
+                supported=True, available=False, reasonCode="executionUnavailable"
+            ),
             tasks=unavailable,
             commandReceipts=CapabilityStatus(supported=True, available=True),
             runs=unavailable,
@@ -179,5 +193,5 @@ def get_capabilities(services: SharedServices) -> AgentComputerCapabilitiesRespo
             deviceBinding=unavailable,
             recovery=unavailable,
         ),
-        limits=ServiceLimits(),
+        limits=ServiceLimits(maxCommandBytes=MAX_COMMAND_BYTES),
     )

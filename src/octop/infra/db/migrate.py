@@ -18,6 +18,14 @@ from octop.infra.utils.ulid import new_ulid
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _SQL_STMT_RE = re.compile(r";\s*\n")
+_AGENTCOMPUTER_CORE_TABLES = (
+    "ac_projects",
+    "ac_tasks",
+    "ac_turns",
+    "ac_runs",
+    "ac_commands",
+    "ac_events",
+)
 
 
 def _split_pg_sql(sql: str) -> list[str]:
@@ -1612,8 +1620,36 @@ def _ensure_bridge_connections_schema(db: DatabasePool) -> None:
         )
 
 
+def _ensure_missing_initial_tables(db: DatabasePool) -> None:
+    """Materialize missing v1 tables without replaying existing tables or seed rows."""
+    if _current_version(db) <= 0:
+        return
+    path = next(path for version, path in _discover(db.dialect) if version == 1)
+    statements = _split_pg_sql(path.read_text(encoding="utf-8"))
+    missing = {
+        match[1]
+        for stmt in statements
+        if (match := re.match(r"CREATE TABLE (\w+)\b", stmt)) is not None
+        and match[1] != "_schema_version"
+        and not _table_exists(db, match[1])
+    }
+    if not missing:
+        return
+    with db.transaction() as conn:
+        for stmt in statements:
+            table = re.match(r"CREATE TABLE (\w+)\b", stmt)
+            index = re.match(r"CREATE (?:UNIQUE )?INDEX \w+ ON (\w+)\b", stmt)
+            if (
+                (table is not None and table[1] in missing)
+                or (index is not None and index[1] in missing)
+                or ("settings" in missing and stmt.startswith("INSERT INTO settings("))
+            ):
+                conn.execute(stmt)
+
+
 def _repair_legacy_schema(db: DatabasePool) -> None:
     """Idempotent compatibility repairs for local databases from old builds."""
+    _ensure_missing_initial_tables(db)
     if _table_exists(db, "users"):
         _ensure_column(db, "users", "locale", "TEXT NOT NULL DEFAULT 'zh'")
         _ensure_column(db, "users", "login_failed_count", "INTEGER NOT NULL DEFAULT 0")
@@ -1672,6 +1708,41 @@ def _ensure_agentcomputer_core_schema(db: DatabasePool) -> None:
             raise
 
 
+def _ensure_agentcomputer_projects_schema(db: DatabasePool) -> None:
+    """Apply v22 atomically, including missing-column and skipped-watermark repair."""
+    if any(not _table_exists(db, table) for table in _AGENTCOMPUTER_CORE_TABLES):
+        _ensure_agentcomputer_core_schema(db)
+    path = next(path for version, path in _discover(db.dialect) if version == 22)
+    sql = path.read_text(encoding="utf-8")
+    with db.transaction() as conn:
+        if db.dialect == "postgresql":
+            _apply_postgresql_migration(conn, sql)
+            return
+        columns = {
+            table: {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+            for table in ("ac_projects", "agents")
+        }
+        for stmt in _split_pg_sql(sql):
+            if stmt in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
+                continue
+            added = re.match(r"ALTER TABLE (\w+) ADD COLUMN (\w+)\b", stmt)
+            if added is not None:
+                table, column = added.groups()
+                if column in columns[table]:
+                    continue
+                # A partial legacy schema can already contain the project FK.
+                # Put the pair check on the other newly added column in that case.
+                if column == "managed_by" and "managed_project_id" in columns["agents"]:
+                    stmt += (
+                        " CONSTRAINT agents_managed_project_pair CHECK ("
+                        "(managed_by IS NULL AND managed_project_id IS NULL) OR "
+                        "(managed_by IS NOT NULL AND managed_by = 'agentcomputer' "
+                        "AND managed_project_id IS NOT NULL))"
+                    )
+                columns[table].add(column)
+            conn.execute(stmt)
+
+
 def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
     """Clamp develop DBs that applied split 005–009 down to the consolidated max.
 
@@ -1718,6 +1789,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
                 _ensure_user_role_schema(db)
             if max_version >= 21:
                 _ensure_agentcomputer_core_schema(db)
+            if max_version >= 22:
+                _ensure_agentcomputer_projects_schema(db)
             with db.connect() as conn:
                 conn.execute("UPDATE _schema_version SET version = %s", (max_version,))
             return
@@ -1764,6 +1837,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
         _ensure_user_role_schema(db)
     if max_version >= 21:
         _ensure_agentcomputer_core_schema(db)
+    if max_version >= 22:
+        _ensure_agentcomputer_projects_schema(db)
     with db.connect() as conn:
         conn.execute("UPDATE _schema_version SET version = ?", (max_version,))
 
@@ -1927,6 +2002,9 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
     if version == 21:
         _ensure_agentcomputer_core_schema(db)
         return
+    if version == 22:
+        _ensure_agentcomputer_projects_schema(db)
+        return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
         conn.executescript(sql)
@@ -1947,6 +2025,9 @@ def run_migrations(db: DatabasePool) -> None:
                     conn.execute("UPDATE _schema_version SET version = %s", (version,))
                 else:
                     conn.execute("UPDATE _schema_version SET version = ?", (version,))
+            continue
+        if version == 22:
+            _ensure_agentcomputer_projects_schema(db)
             continue
         if db.dialect == "postgresql":
             sql = path.read_text(encoding="utf-8")
@@ -1987,14 +2068,13 @@ def run_migrations(db: DatabasePool) -> None:
     # A restored or pre-squash DB may already report v21 while omitting its DDL.
     # Avoid rewriting intact schemas (and their watermark) on every startup.
     if _max_discovered_version(db.dialect) >= 21 and any(
-        not _table_exists(db, table)
-        for table in (
-            "ac_projects",
-            "ac_tasks",
-            "ac_turns",
-            "ac_runs",
-            "ac_commands",
-            "ac_events",
-        )
+        not _table_exists(db, table) for table in _AGENTCOMPUTER_CORE_TABLES
     ):
         _ensure_agentcomputer_core_schema(db)
+    if _max_discovered_version(db.dialect) >= 22 and (
+        _current_version(db) < 22
+        or not _table_exists(db, "ac_project_preparations")
+        or "name" not in _table_columns(db, "ac_projects")
+        or not {"managed_by", "managed_project_id"} <= _table_columns(db, "agents")
+    ):
+        _ensure_agentcomputer_projects_schema(db)

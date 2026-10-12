@@ -8,6 +8,7 @@ from octop.config import OctopConfig
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos.ac_commands import AcCommandRepo
 from octop.infra.db.repos.ac_events import AcEventRepo
+from octop.infra.db.repos.ac_project_preparations import AcProjectPreparationRepo
 from octop.infra.db.repos.ac_projects import AcProjectRepo
 from octop.infra.db.repos.ac_runs import AcRunRepo
 from octop.infra.db.repos.ac_tasks import AcTaskRepo
@@ -45,6 +46,7 @@ class RepoBundle:
     db: DatabasePool
 
     ac_project_repo: AcProjectRepo
+    ac_project_preparation_repo: AcProjectPreparationRepo
     ac_task_repo: AcTaskRepo
     ac_turn_repo: AcTurnRepo
     ac_run_repo: AcRunRepo
@@ -82,6 +84,7 @@ class RepoBundle:
         return cls(
             db=db,
             ac_project_repo=AcProjectRepo(db),
+            ac_project_preparation_repo=AcProjectPreparationRepo(db),
             ac_task_repo=AcTaskRepo(db),
             ac_turn_repo=AcTurnRepo(db),
             ac_run_repo=AcRunRepo(db),
@@ -128,6 +131,10 @@ class SharedServices:
     @property
     def ac_project_repo(self) -> AcProjectRepo:
         return self.repos.ac_project_repo
+
+    @property
+    def ac_project_preparation_repo(self) -> AcProjectPreparationRepo:
+        return self.repos.ac_project_preparation_repo
 
     @property
     def ac_task_repo(self) -> AcTaskRepo:

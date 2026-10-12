@@ -21,6 +21,9 @@ from octop.api.agentcomputer import (
     octop_error_response,
     protocol_error_response,
 )
+from octop.api.middleware.agentcomputer_body_limit import (
+    install as install_agentcomputer_body_limit,
+)
 from octop.api.middleware.jwt_auth import install as install_jwt_auth
 from octop.api.middleware.setup_lockdown import install as install_setup_lockdown
 from octop.api.openapi_meta import API_DESCRIPTION, OPENAPI_TAGS, configure_openapi
@@ -168,6 +171,7 @@ def build_app(server: OctopServer) -> FastAPI:
     # Bridge proxy must sit inside JWT auth so ``request.state.octop_user`` is set
     # (Starlette runs the last-added middleware first).
     install_bridge_proxy(app, server)
+    install_agentcomputer_body_limit(app)
     install_jwt_auth(app, server)
     install_setup_lockdown(app, server)
 

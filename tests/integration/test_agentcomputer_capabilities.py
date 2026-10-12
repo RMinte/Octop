@@ -90,7 +90,7 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
     assert body["deviceID"] is None
     assert body["authenticationMode"] == "octopUserSession"
     assert body["restoreEpoch"] == 1
-    assert body["capabilityRevision"] == 2
+    assert body["capabilityRevision"] == 3
     assert body["supportedPermissionModes"] == []
     assert body["capabilities"]
     assert body["capabilities"]["commandReceipts"] == {
@@ -98,12 +98,18 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
         "available": True,
         "reasonCode": None,
     }
+    assert body["capabilities"]["projects"] == {
+        "supported": True,
+        "available": False,
+        "reasonCode": "executionUnavailable",
+    }
     assert all(
         item == {"supported": False, "available": False, "reasonCode": "notImplemented"}
         for name, item in body["capabilities"].items()
-        if name != "commandReceipts"
+        if name not in {"commandReceipts", "projects"}
     )
-    assert all(limit is None for limit in body["limits"].values())
+    assert body["limits"]["maxCommandBytes"] == 65536
+    assert all(limit is None for name, limit in body["limits"].items() if name != "maxCommandBytes")
     assert before <= datetime.fromisoformat(body["serverTime"].replace("Z", "+00:00")) <= after
     assert server.services is not None
     assert body["timezone"] == server.services.config.default_timezone
@@ -144,7 +150,7 @@ async def test_invalid_identity_stays_invalid_without_data_disclosure(env) -> No
 
 async def test_unimplemented_routes_are_explicit_errors(env) -> None:
     client, _server, auth = env
-    response = await client.get("/api/agentcomputer/v1/projects", headers=auth)
+    response = await client.get("/api/agentcomputer/v1/tasks", headers=auth)
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "resourceNotFound"
     response = await client.post(ENDPOINT, headers=auth, json={})
@@ -173,12 +179,18 @@ async def test_openapi_documents_typed_authenticated_discovery(tmp_path: Path) -
         example = operation["responses"]["200"]["content"]["application/json"]["example"]
         assert example["deviceID"] is None
         assert example["supportedPermissionModes"] == []
-        assert example["capabilityRevision"] == 2
+        assert example["capabilityRevision"] == 3
         assert example["capabilities"]["commandReceipts"] == {
             "supported": True,
             "available": True,
             "reasonCode": None,
         }
+        assert example["capabilities"]["projects"] == {
+            "supported": True,
+            "available": False,
+            "reasonCode": "executionUnavailable",
+        }
+        assert example["limits"]["maxCommandBytes"] == 65536
         assert all(
             not item["available"]
             for name, item in example["capabilities"].items()

@@ -11,7 +11,7 @@ import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from psycopg import Error as PostgresError
@@ -22,6 +22,7 @@ from octop.infra.agentcomputer.models import (
     CommandReceipt,
     NewMessageCommand,
     ProjectConfiguration,
+    ProjectCreateReceipt,
 )
 from octop.infra.db.services import SharedServices
 
@@ -35,6 +36,7 @@ AdmissionErrorCode = Literal[
     "reconciliationRequired",
     "capabilityUnsupported",
     "runtimeUnavailable",
+    "resourceConflict",
 ]
 
 
@@ -99,7 +101,7 @@ def _decode_receipt(raw: str, *, command_id: str, box_id: UUID, epoch: int) -> C
 
 def get_command_receipt(
     services: SharedServices, owner_id: int, command_id: UUID
-) -> CommandReceipt | None:
+) -> CommandReceipt | ProjectCreateReceipt | None:
     try:
         row = services.ac_command_repo.get(str(command_id), owner_id)
     except (sqlite3.DatabaseError, PostgresError) as exc:
@@ -109,6 +111,21 @@ def get_command_receipt(
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
     # A historic epoch is readable after a restore. The original result must
     # not be rewritten to the current epoch or treated as a fresh acceptance.
+    if row.operation == "project.create":
+        project_receipt = decode_project_receipt(
+            row.receipt_json,
+            command_id=row.command_id,
+            box_id=identity.boxID,
+            epoch=row.restore_epoch,
+        )
+        if (
+            row.schema_version != 1
+            or row.target_id != str(project_receipt.projectID)
+            or row.created_at != int(project_receipt.acceptedAt.timestamp() * 1000)
+        ):
+            raise StorageDataError("inconsistent project receipt metadata")
+        validate_project_receipt_binding(services, owner_id, project_receipt)
+        return project_receipt
     receipt = _decode_receipt(
         row.receipt_json, command_id=row.command_id, box_id=identity.boxID, epoch=row.restore_epoch
     )
@@ -120,6 +137,52 @@ def get_command_receipt(
     ):
         raise StorageDataError("inconsistent command metadata")
     return receipt
+
+
+def decode_project_receipt(
+    raw: str, *, command_id: str, box_id: UUID, epoch: int
+) -> ProjectCreateReceipt:
+    try:
+        receipt = ProjectCreateReceipt.model_validate_json(raw)
+    except ValidationError as exc:
+        raise StorageDataError("invalid project receipt") from exc
+    if (
+        receipt.model_fields_set != set(ProjectCreateReceipt.model_fields)
+        or str(receipt.commandID) != command_id
+        or receipt.boxID != box_id
+        or receipt.restoreEpoch != epoch
+        or receipt.replayed
+    ):
+        raise StorageDataError("inconsistent project receipt")
+    return receipt
+
+
+def validate_project_receipt_binding(
+    services: SharedServices, owner_id: int, receipt: ProjectCreateReceipt, *, conn: Any = None
+) -> None:
+    try:
+        if conn is None:
+            with services.db.connect() as connection:
+                validate_project_receipt_binding(services, owner_id, receipt, conn=connection)
+            return
+        project = services.ac_project_repo.get_in_transaction(
+            conn, str(receipt.projectID), owner_id
+        )
+        preparation = services.ac_project_preparation_repo.get_in_transaction(
+            conn, str(receipt.projectID), owner_id
+        )
+    except (sqlite3.DatabaseError, PostgresError) as exc:
+        raise StorageUnavailableError("project receipt storage unavailable") from exc
+    if (
+        project is None
+        or preparation is None
+        or project.box_id != str(receipt.boxID)
+        or project.workspace_id != str(receipt.workspaceID)
+        or preparation.preparation_id != str(receipt.preparationID)
+        or preparation.restore_epoch != receipt.restoreEpoch
+        or receipt.projectRevision != 1
+    ):
+        raise StorageDataError("project receipt binding mismatch")
 
 
 def admit_new_message(

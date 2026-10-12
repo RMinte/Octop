@@ -2,6 +2,8 @@
 
 本项目把 Octop 作为 AgentComputer 的盒子执行引擎。首轮已建立认证能力查询和稳定服务身份；第二轮继续建立持久数据层、内部原子接收与已有收据查询，详细规则见 [第二轮数据层说明](agentcomputer-core.md)。
 
+第三轮实现项目意图、停止的默认专家和受限工作区准备，详见 [项目准备说明](agentcomputer-projects.md)。当前完整项目执行能力仍未开放。
+
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
 ## 仓库与版本依据
@@ -153,3 +155,15 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 本地升级：停止并核对自有 8090 进程，完整备份忽略目录后启动新代码；schema20→21、原用户数量及 boxID 保持，六表为空、Agent/Provider 为 0。实际认证 capabilities 200、缺失收据 404、非法 ID 422、匿名/URL token 401，8088 健康仍 200。Scalar 的收据卡片、UUID、类型和示例已实际检查；200 收据由隔离 HTTP Fixture 验证，实验实例不人为填入已接受任务。
 - 本机证据：`/private/tmp/octop-iteration-02-make-all-final.log`、`/private/tmp/octop-local-02-evidence.json`；升级前完整目录位于忽略的 `.runtime/backups/iteration-02-before-schema-21-20261012T081646Z`。备份包含控制身份和本地凭据，保留原访问权限，不提交到 Git。
 - 完整 M1、生产设备绑定、模型工具续轮、恢复 fencing、Ubuntu/Linux/Windows 实机和 PostgreSQL 实测：尚未通过。
+
+## 第三轮交付状态
+
+- 基线：主目录 feature/agentcomputer-foundation @ d77b37f，继续同一 fork 功能分支。
+- 已实现：022 准备日志和托管标记、POST /projects 与 GET /projects/{projectID}、原 Project 收据、停止的默认专家及受限 BackendWorkspace；同键重试核实已有资源，创建/marker 写入确认丢失可续做。
+- 入口保护：托管专家的原启动/执行/配置/workspace/CLI/Cron/Channel/proactive 入口关闭，普通专家行为回归验证。Provider 缺失为 failed/providerUnavailable，不启动模型、harness 或后台 bootstrap。
+- 协议：adapter 0.3.0、能力 revision 3，projects supported/ unavailable，完整 Task/Run 仍不可用；已实施实际控制命令上限 65536 字节，其他执行限额未测。
+- 工程验证：最终 make all 的 Ruff、mypy 和全套非 live 测试通过，4573 passed / 23 skipped。首次全量发现旧 HITL 单元夹具缺普通专家记录、users-only 旧库缺基础表，两处修复后复验通过；迁移按 canonical 001 事务补缺表，保留已有用户、配置和水位后继续正常升级。必需提交 hook/testmon 与 Dashboard 构建随提交执行，交付仍使用用户 fork 的 feature/agentcomputer-foundation。
+- 关键复核：收据缺字段不能补默认事实，project/workspace/preparation 身份绑定均核对；PG 接收事务重放复用原连接。OS 锁不依赖 TTL，重复取消请求保持对资源准备的等待责任；旧入口的托管检查不因 enabled/state 改变被绕过。
+- 本地实操：核对并停止自有 8090 进程，完整备份后升级 schema21→22，原用户和 boxID 保持。合成项目 POST 201；原收据持续 pending，GET 为 failed/providerUnavailable，agent/workspace 步骤 verified。实际重启后同命令返回相同资源，只有一个 disabled/stopped 托管专家、一个项目/journal/命令；Provider、Task、Turn、Run、事件均为 0。旧启动入口 403、超限 413、匿名/URL token 401，Scalar 项目与收据卡片及类型已检查。8088 健康仍 200，没有模型请求。
+- 本机证据：/private/tmp/octop-iteration-03-make-all-final.log、/private/tmp/octop-local-03-evidence.json、/private/tmp/octop-local-03-evidence-restart.json；完整备份位于忽略的 .runtime/backups/iteration-03-before-schema-22-20261012T114129Z。凭据、控制身份和运行数据不提交到 Git。
+- 阶段边界：M1-03 的本地资源准备部分已验证，ready 放行和托管执行入口尚未实现。M1-04 Task/thread、M1-06 派发、真实模型与执行隔离、设备配对和恢复 fencing 继续按步骤推进；PostgreSQL 只有静态核对，Ubuntu/Linux/Windows 实机未验，skipped 不计通过。
