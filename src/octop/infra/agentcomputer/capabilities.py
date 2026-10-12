@@ -14,7 +14,7 @@ from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.db.services import SharedServices
 
-ADAPTER_VERSION = "0.4.0"
+ADAPTER_VERSION = "0.5.0"
 PROTOCOL_VERSION: Literal[1] = 1
 
 
@@ -48,7 +48,9 @@ class BusinessCapabilities(ProtocolModel):
     commandReceipts: CapabilityStatus = Field(
         description="Queries for existing immutable receipts; this flag never grants execution."
     )
-    runs: CapabilityStatus
+    runs: CapabilityStatus = Field(
+        description="Full Run execution admission; read-only state queries do not enable execution."
+    )
     cancellation: CapabilityStatus
     snapshots: CapabilityStatus
     events: CapabilityStatus
@@ -107,7 +109,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                     "serverTime": "2026-10-12T00:00:00Z",
                     "timezone": "Asia/Shanghai",
                     "executionPlatform": {"system": "Darwin", "architecture": "arm64"},
-                    "capabilityRevision": 4,
+                    "capabilityRevision": 5,
                     "restoreEpoch": 1,
                     "supportedPermissionModes": [],
                     "capabilities": {
@@ -119,7 +121,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                                 "available": False,
                                 "reasonCode": "executionUnavailable",
                             }
-                            if name in {"projects", "tasks"}
+                            if name in {"projects", "tasks", "runs"}
                             else {
                                 "supported": False,
                                 "available": False,
@@ -150,7 +152,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
     serverTime: datetime
     timezone: str
     executionPlatform: ExecutionPlatform
-    capabilityRevision: Literal[4] = 4
+    capabilityRevision: Literal[5] = 5
     restoreEpoch: Annotated[int, Field(strict=True, ge=1)] = Field(
         description="Persisted initial epoch; restore fencing remains unavailable."
     )
@@ -181,7 +183,9 @@ def get_capabilities(services: SharedServices) -> AgentComputerCapabilitiesRespo
                 supported=True, available=False, reasonCode="executionUnavailable"
             ),
             commandReceipts=CapabilityStatus(supported=True, available=True),
-            runs=unavailable,
+            runs=CapabilityStatus(
+                supported=True, available=False, reasonCode="executionUnavailable"
+            ),
             cancellation=unavailable,
             snapshots=unavailable,
             events=unavailable,

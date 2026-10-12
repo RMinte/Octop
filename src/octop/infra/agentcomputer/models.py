@@ -1,7 +1,7 @@
 """Typed command and immutable acceptance records for the control-plane kernel.
 
-Turn submission is internal only until project provisioning and engine ingress
-are implemented. Defining its types does not enable an HTTP execution route.
+Turn registration and execution availability are separate facts. The HTTP
+ingress remains gated until managed engine dispatch is implemented.
 """
 
 from __future__ import annotations
@@ -46,16 +46,51 @@ class ProjectConfiguration(ControlModel):
 
 
 class NewMessageCommand(ControlModel):
-    commandID: UUID
-    idempotencyKey: Annotated[StrictStr, Field(min_length=1)]
+    commandID: UUID = Field(description="Stable command identity for response-loss retries.")
+    idempotencyKey: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    expectedRestoreEpoch: PositiveRevision
+    contextMode: Literal["newMessage"]
+    userMessageID: UUID
+    expectedProjectRevision: PositiveRevision
+    prompt: Annotated[StrictStr, Field(min_length=1)] = Field(
+        description="Exact user text; the command body is limited to 65,536 UTF-8 bytes."
+    )
+    inputArtifactIDs: tuple[UUID, ...] = ()
+    selectedSkillIDs: tuple[StrictStr, ...] = ()
+    permissionMode: PermissionMode
+
+
+class NewMessageRequestSnapshot(ControlModel):
+    """All original business fields are required in a persisted snapshot."""
+
     expectedRestoreEpoch: PositiveRevision
     contextMode: Literal["newMessage"]
     userMessageID: UUID
     expectedProjectRevision: PositiveRevision
     prompt: Annotated[StrictStr, Field(min_length=1)]
-    inputArtifactIDs: tuple[UUID, ...] = ()
-    selectedSkillIDs: tuple[StrictStr, ...] = ()
+    inputArtifactIDs: tuple[UUID, ...]
+    selectedSkillIDs: tuple[StrictStr, ...]
     permissionMode: PermissionMode
+
+
+class TurnSnapshot(ControlModel):
+    """Original input/configuration facts, never filled from current state."""
+
+    schemaVersion: Literal[1]
+    projectID: UUID
+    projectRevision: PositiveRevision
+    workspaceID: UUID
+    agentID: StrictStr
+    octopThreadID: StrictStr
+    projectConfiguration: ProjectConfiguration
+    request: NewMessageRequestSnapshot
+
+    @field_validator("projectConfiguration")
+    @classmethod
+    def complete_configuration(cls, value: ProjectConfiguration) -> ProjectConfiguration:
+        if value.model_fields_set != set(ProjectConfiguration.model_fields):
+            raise ValueError("incomplete original configuration")
+        return value
 
 
 class CommandReceipt(ControlModel):
@@ -233,3 +268,38 @@ class TaskView(ControlModel):
     executionReady: Literal[False] = Field(
         default=False, description="Engine ingress remains unavailable."
     )
+
+
+class RunView(ControlModel):
+    """Current persisted Run state, separate from its immutable queued receipt."""
+
+    runID: UUID
+    turnID: UUID
+    taskID: UUID
+    projectID: UUID
+    state: Literal[
+        "queued",
+        "running",
+        "waitingApproval",
+        "waitingInput",
+        "succeeded",
+        "failed",
+        "stopped",
+        "interrupted",
+    ] = Field(description="Current persisted state; acceptance alone does not start execution.")
+    dispatchPhase: Literal["notDispatched", "claimed", "dispatching", "engineAccepted"] = Field(
+        description="Persisted dispatch fact; notDispatched means no engine handoff."
+    )
+    executionEpoch: Annotated[StrictInt, Field(ge=0)]
+    restoreEpoch: PositiveRevision
+    revision: PositiveRevision
+    reconciliationRequired: StrictBool
+    createdAt: datetime
+    updatedAt: datetime
+
+    @field_validator("createdAt", "updatedAt")
+    @classmethod
+    def utc_run_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("Run timestamps must be UTC")
+        return value

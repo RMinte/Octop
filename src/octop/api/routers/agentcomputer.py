@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Response
@@ -28,13 +29,17 @@ from octop.infra.agentcomputer.commands import (
 from octop.infra.agentcomputer.identity import IdentityError
 from octop.infra.agentcomputer.models import (
     CommandReceipt,
+    NewMessageCommand,
     ProjectCreateCommand,
     ProjectCreateReceipt,
     ProjectView,
+    RunView,
     TaskCreateReceipt,
     TaskView,
 )
 from octop.infra.agentcomputer.projects import create_project, get_project
+from octop.infra.agentcomputer.runs import get_run
+from octop.infra.agentcomputer.submission import submit_new_message
 from octop.infra.agentcomputer.tasks import get_task
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
@@ -51,7 +56,7 @@ logger = logging.getLogger(__name__)
         "Requires an Octop user Bearer token in the Authorization header. "
         "User-session authentication does not bind a client device. "
         "Local project intent registration, task metadata queries, and receipt queries are implemented. "
-        "Task creation and execution remain unavailable over HTTP. "
+        "Task creation remains unavailable; guarded message submission rejects unavailable execution. "
         "Unavailable capabilities must not enable task execution in the client."
     ),
     responses={
@@ -250,7 +255,7 @@ async def project_status(
         "missing and other users' tasks return the same 404, including for admins. "
         "The preparation state describes a stored session/thread mapping. "
         "Even ready metadata has executionReady=false. Internal registration and test fixtures "
-        "do not enable HTTP task creation, message submission, or model execution. "
+        "do not enable HTTP task creation or production model execution. "
         "Internal thread/agent IDs and host paths are omitted."
     ),
     responses={
@@ -286,3 +291,114 @@ async def task_metadata(
     if task is None:
         return protocol_error_response("resourceNotFound", 404)
     return task
+
+
+@router.post(
+    "/tasks/{taskID}/turns",
+    status_code=201,
+    response_model=CommandReceipt,
+    summary="Register a new-message Turn when execution admission is available",
+    description=(
+        "Requires a user Bearer token and an existing owned Task. "
+        "Production execution admission is unavailable: new commands return 503 "
+        "runtimeUnavailable/executionUnavailable without registering a Turn or Run. "
+        "Only newMessage is accepted by this schema; nonempty artifacts or selected skills "
+        "remain unsupported. A successful admission returns the original durable queued receipt "
+        "with status 201, including same-key replays. It does not create a Task, dispatch a model, "
+        "or prove execution. Replays preserve original facts after capability changes; "
+        "an old restore epoch is still rejected before replay."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No task owned by this user"},
+        409: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Command, message, revision, restore epoch, or active Run conflict",
+        },
+        413: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Actual command body exceeds 65536 bytes",
+        },
+        422: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Invalid or unsupported typed command",
+        },
+        503: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Execution admission or storage unavailable",
+        },
+    },
+)
+async def new_message_turn(
+    body: NewMessageCommand,
+    response: Response,
+    task_id: UUID = Path(alias="taskID", description="Existing public Task UUID."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> CommandReceipt | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        operation = partial(
+            submit_new_message, server.services, owner_id=user.id, task_id=task_id, command=body
+        )
+        return await asyncio.get_running_loop().run_in_executor(None, operation)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Turn admission")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Turn registration is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="submissionInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Turn admission storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+
+
+@router.get(
+    "/runs/{runID}",
+    response_model=RunView,
+    summary="Read an existing Run's current persisted registration state",
+    description=(
+        "Requires a user Bearer token. Returns only this user's Run; missing and other users' "
+        "Runs return the same 404, including for admins. This is a read-only current view, "
+        "separate from the original queued command receipt. queued/notDispatched means "
+        "durable registration, not model execution. Historical restore epochs remain readable. "
+        "This endpoint does not dispatch, cancel, repair storage, or expose model input, "
+        "internal thread/agent IDs, host paths, or an unimplemented event cursor."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No Run owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid Run identifier"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Run binding or storage unavailable"},
+    },
+)
+async def run_status(
+    response: Response,
+    run_id: UUID = Path(alias="runID", description="Public Run UUID."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> RunView | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        operation = partial(get_run, server.services, owner_id=user.id, run_id=run_id)
+        run = await asyncio.get_running_loop().run_in_executor(None, operation)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Run lookup")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Run binding is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="runInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Run storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if run is None:
+        return protocol_error_response("resourceNotFound", 404)
+    return run

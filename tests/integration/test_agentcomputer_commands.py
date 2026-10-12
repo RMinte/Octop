@@ -2,65 +2,48 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from octop.api.routers import agentcomputer
-from octop.infra.agentcomputer.identity import get_or_create_identity
-from octop.infra.agentcomputer.models import CommandReceipt
+from octop.infra.agentcomputer.commands import admit_new_message
+from octop.infra.agentcomputer.models import CommandReceipt, NewMessageCommand
 from octop.infra.server import OctopServer
+from tests.support.agentcomputer import register_ready_task
 from tests.support.app import octop_client, write_octop_config
 from tests.support.auth import auth_header, bootstrap_admin, create_user, resolve_user_id
 
 PREFIX = "/api/agentcomputer/v1"
 
 
-def seed_receipt(server: OctopServer, owner_id: int) -> CommandReceipt:
-    """Insert an isolated acceptance fixture; no project or engine is started."""
+async def seed_receipt(client, server: OctopServer, auth, owner_id: int) -> CommandReceipt:
+    """Register complete isolated facts through the kernel, without engine dispatch."""
     assert server.services is not None
-    identity = get_or_create_identity(server.paths.agentcomputer_identity)
-    receipt = CommandReceipt(
-        boxID=identity.boxID,
+    task = await register_ready_task(client, server, auth, owner_id)
+    command = NewMessageCommand(
         commandID=uuid4(),
-        acceptedAt=datetime(2026, 10, 12, tzinfo=UTC),
-        restoreEpoch=identity.restoreEpoch,
-        taskID=uuid4(),
-        turnID=uuid4(),
-        runID=uuid4(),
+        idempotencyKey=str(uuid4()),
+        expectedRestoreEpoch=1,
+        contextMode="newMessage",
         userMessageID=uuid4(),
-        assistantMessageID=uuid4(),
-        taskRevision=2,
-        acceptedSequence=1,
+        expectedProjectRevision=1,
+        prompt="Isolated receipt fixture",
+        permissionMode="askForApproval",
     )
-    with server.services.db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO ac_commands (command_id, owner_id, idempotency_key, operation, "
-            "target_id, payload_digest, restore_epoch, receipt_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                str(receipt.commandID),
-                owner_id,
-                str(uuid4()),
-                "turn.newMessage",
-                str(receipt.taskID),
-                "sha256:" + "0" * 64,
-                receipt.restoreEpoch,
-                receipt.model_dump_json(),
-                int(receipt.acceptedAt.timestamp() * 1000),
-            ),
-        )
-    return receipt
+    return await asyncio.to_thread(
+        admit_new_message, server.services, owner_id=owner_id, task_id=task.taskID, command=command
+    )
 
 
 async def test_own_receipt_is_original_durable_result(env) -> None:
     client, server, auth = env
     owner_id = await resolve_user_id(client, auth, "admin")
-    receipt = seed_receipt(server, owner_id)
+    receipt = await seed_receipt(client, server, auth, owner_id)
     assert server.services is not None
     original = server.services.ac_command_repo.get(str(receipt.commandID), owner_id)
     for _ in range(2):
@@ -73,8 +56,8 @@ async def test_own_receipt_is_original_durable_result(env) -> None:
         assert str(server.paths.root) not in response.text
     assert server.services.ac_command_repo.get(str(receipt.commandID), owner_id) == original
     with server.services.db.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM ac_runs").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM ac_turns").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM ac_runs").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM ac_turns").fetchone()[0] == 1
 
 
 async def test_other_owner_and_admin_cannot_read_receipt_or_identity(env) -> None:
@@ -82,7 +65,7 @@ async def test_other_owner_and_admin_cannot_read_receipt_or_identity(env) -> Non
     owner_auth = await create_user(client, admin_auth, username="receipt-owner")
     other_auth = await create_user(client, admin_auth, username="receipt-other")
     owner_id = await resolve_user_id(client, admin_auth, "receipt-owner")
-    receipt = seed_receipt(server, owner_id)
+    receipt = await seed_receipt(client, server, owner_auth, owner_id)
     own = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=owner_auth)
     assert own.status_code == 200
     # Lookup must not read identity unless an owned row exists.
@@ -134,7 +117,7 @@ async def test_receipt_survives_restart_and_keeps_acceptance_epoch(tmp_path: Pat
         await bootstrap_admin(client, home)
         auth = await auth_header(client)
         owner_id = await resolve_user_id(client, auth, "admin")
-        receipt = seed_receipt(server, owner_id)
+        receipt = await seed_receipt(client, server, auth, owner_id)
         first = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
         assert first.status_code == 200
         # Simulate only persisted metadata, not a working restore implementation.
@@ -158,7 +141,7 @@ async def test_invalid_stored_receipt_returns_safe_503_without_replacement(
 ) -> None:
     client, server, auth = env
     owner_id = await resolve_user_id(client, auth, "admin")
-    receipt = seed_receipt(server, owner_id)
+    receipt = await seed_receipt(client, server, auth, owner_id)
     assert server.services is not None
     with server.services.db.transaction() as conn:
         conn.execute(
@@ -181,7 +164,7 @@ async def test_invalid_stored_receipt_returns_safe_503_without_replacement(
 async def test_invalid_identity_returns_safe_503_for_owned_receipt(env) -> None:
     client, server, auth = env
     owner_id = await resolve_user_id(client, auth, "admin")
-    receipt = seed_receipt(server, owner_id)
+    receipt = await seed_receipt(client, server, auth, owner_id)
     invalid = b'{"private-marker":'
     path = server.paths.agentcomputer_identity
     path.write_bytes(invalid)
@@ -224,9 +207,9 @@ async def test_database_failure_returns_retryable_safe_503(env, monkeypatch) -> 
     assert "SELECT" not in response.text
 
 
-async def test_command_writes_remain_unavailable(env) -> None:
+async def test_command_collection_writes_remain_unavailable(env) -> None:
     client, server, auth = env
-    for path in (f"{PREFIX}/commands", f"{PREFIX}/tasks/{uuid4()}/turns"):
+    for path in (f"{PREFIX}/commands",):
         response = await client.post(path, headers=auth, json={})
         # An unmatched POST can be rejected by the dashboard's static mount.
         assert response.status_code in (404, 405)

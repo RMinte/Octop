@@ -2,73 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from octop.api.routers import agentcomputer
 from octop.infra.agentcomputer.commands import StorageDataError, StorageUnavailableError
-from octop.infra.agentcomputer.models import TaskCreateCommand, TaskCreateReceipt, TaskView
-from octop.infra.agentcomputer.tasks import register_task
-from octop.infra.server import OctopServer
+from octop.infra.agentcomputer.models import TaskView
+from tests.support.agentcomputer import register_ready_task as registered_task
 from tests.support.app import octop_client, write_octop_config
 from tests.support.auth import create_user, resolve_user_id
 
 PREFIX = "/api/agentcomputer/v1"
-
-
-async def registered_task(
-    client: httpx.AsyncClient,
-    server: OctopServer,
-    auth: dict[str, str],
-    owner_id: int,
-) -> TaskCreateReceipt:
-    """Prepare real stopped metadata; only this isolated fixture marks project ready."""
-    project_id = uuid4()
-    project = await client.post(
-        f"{PREFIX}/projects",
-        headers=auth,
-        json={
-            "commandID": str(uuid4()),
-            "idempotencyKey": str(uuid4()),
-            "expectedRestoreEpoch": 1,
-            "projectID": str(project_id),
-            "name": "Task mapping fixture",
-            "configuration": {
-                "schemaVersion": 1,
-                "modelRef": "not-configured/no-model",
-                "instructions": "Fixture only",
-            },
-        },
-    )
-    assert project.status_code == 201
-    assert server.services is not None
-    with server.services.db.transaction() as conn:
-        # This is not a production ready transition or HTTP Task submission.
-        conn.execute(
-            "UPDATE ac_projects SET preparation_state='ready' WHERE project_id=? AND owner_id=?",
-            (str(project_id), owner_id),
-        )
-        server.services.ac_project_preparation_repo.clear_reason(
-            conn, str(project_id), owner_id, updated_at=int(datetime.now(UTC).timestamp() * 1000)
-        )
-    command = TaskCreateCommand(
-        commandID=uuid4(),
-        idempotencyKey=str(uuid4()),
-        expectedRestoreEpoch=1,
-        projectID=project_id,
-        expectedProjectRevision=1,
-        taskID=uuid4(),
-        title="  Fixture task 中文  ",
-    )
-    return await asyncio.to_thread(
-        register_task, server.services, owner_id=owner_id, command=command
-    )
 
 
 async def test_task_query_reads_mapping_without_execution_or_internal_ids(env, monkeypatch) -> None:
@@ -222,14 +169,13 @@ async def test_ready_task_with_missing_thread_is_rejected_without_repair(env) ->
         )
 
 
-async def test_task_http_creation_and_turn_submission_remain_absent(env) -> None:
+async def test_task_http_creation_remains_absent(env) -> None:
     client, server, auth = env
     owner = await resolve_user_id(client, auth, "admin")
     receipt = await registered_task(client, server, auth, owner)
     for endpoint in (
         f"{PREFIX}/tasks",
         f"{PREFIX}/projects/{receipt.projectID}/tasks",
-        f"{PREFIX}/tasks/{receipt.taskID}/turns",
     ):
         response = await client.post(endpoint, headers=auth, json={})
         assert response.status_code in (404, 405)

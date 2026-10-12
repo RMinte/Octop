@@ -99,7 +99,12 @@ def admission_error_response(error: CommandAdmissionError) -> JSONResponse:
         "capabilityUnsupported": 422,
         "runtimeUnavailable": 503,
     }
-    safe_reasons = {"preparationIncomplete", "userMessageAlreadyRegistered"}
+    safe_reasons = {
+        "preparationIncomplete",
+        "userMessageAlreadyRegistered",
+        "executionUnavailable",
+        "permissionModeUnsupported",
+    }
     return protocol_error_response(
         error.code,
         statuses[error.code],

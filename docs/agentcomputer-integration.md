@@ -6,6 +6,8 @@
 
 第四轮建立内部 Task/thread/session 原子映射和本人只读 Task 查询，详见 [Task 映射说明](agentcomputer-tasks.md)。真实任务创建和执行仍等待后续门禁。
 
+第五轮增加受执行能力门禁保护的 `POST /tasks/{taskID}/turns`、本人 `GET /runs/{runID}` 和原 Turn 收据的完整快照/事件绑定校验，详见 [Turn 登记与 Run 查询](agentcomputer-turns.md)。当前 adapterVersion=0.5.0、capabilityRevision=5，继续复用 schema 22；真实新命令不能绕过关闭的执行门禁，Task HTTP 创建和引擎派发仍未开放。下方第 1–4 轮验收记录描述各轮当时的范围，不表示这些历史接口边界仍是最新状态。
+
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
 ## 仓库与版本依据
@@ -17,6 +19,7 @@
 | Octop 主目录基线 | `main` | `0c5a46ab5f82e5ad9d1a56fa09b00e542f042fda` |
 | AgentComputer 主目录基线 | `feature/0.0.2/all` | `81e7acb653865f5c31342e844f2e90a36116caa9` |
 | 本轮实施分支与提交 | `feature/agentcomputer-foundation`，从上述本地主目录 HEAD 创建；交付提交见 Git 历史 | 提交前重新核对主目录最新 HEAD |
+| 第五轮开工基线 | `feature/agentcomputer-foundation` | `bdff37f31340e9ceecf18aac7f848d6e51c93647`，开工时主目录干净 |
 
 Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写；仓库网址不等于已经推送。工作开始核对主目录 status、worktree、branch 和 HEAD，保留已有文档及代码改动。提交运行仓库 hooks，完成默认 `make all` 门禁后再交付；不跳过红测试。
 
@@ -27,7 +30,7 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 | 阶段 | 交付内容 | 当前边界 |
 |---|---|---|
 | M0 环境和协议验证 | 部署输入、模型协议、隔离与容量、最小身份及能力入口 | 本轮推进可本地完成的基础；真实盒子仍待验 |
-| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 021 数据层与内部接收基础推进中；项目准备、线程创建与派发尚未开放 |
+| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 22、本地项目准备、内部 Task 映射、受保护的 Turn 入站和本人 Run 查询；真实 ready、Task HTTP 创建、派发及恢复仍待验 |
 | M2 原生闭环 | 客户端远程会话、事件、审批、取消、正式成果及重连 | 不以实时连接成功代替可靠执行 |
 | M3 配置与恢复 | 指令/技能版本、资源、Outbox、多设备与异常对账 | 保留配置和执行快照，不盲重放 |
 | M4 调度与面板 | Schedule occurrence、Git/终端、受认证预览及资料库 | 工具隔离和项目写入规则先通过 |
@@ -127,15 +130,15 @@ Harness 普通 OpenAI 提供方默认采用 Chat Completions；已有 Swift Resp
 
 默认系统备份不含聊天，并排除 `.git` 等目录；`history_v2` 目前没有跨机器身份重绑定和多库自动协调恢复工具。因此本轮不开展迁移、清理、升级或恢复。参考 [版本化历史](versioned-history.md)。
 
-## 下一轮 M1 领域准备
+## 后续 M1 领域与派发
 
-本轮工程验收完成后，下一轮先冻结公共 ID、owner 归属、项目准备状态、Task/thread 映射、Run/Turn、命令幂等和 fixed input 的契约及失败 Fixture。
+公共 ID、owner 归属、项目准备、内部 Task/thread、原子 Turn/Run 登记、命令幂等和固定输入已有本地实现与失败 Fixture。第五轮只开放受门禁约束的入站和既有 Run 读取，不开放真实执行。
 
-随后按 Octop 配对 SQL 迁移和领域服务规范建立最小数据层；托管专家的 Dashboard、IM、Cron 和直接工作区写入口必须遵守同一 Run 登记与项目 writer lock，不能先开放原始写入口再补一致性。
+后续先完成真实项目 ready 条件和专用托管引擎入站，再实现 worker claim/派发及取消、审批、问答和恢复。托管专家的 Dashboard、IM、Cron 和直接工作区写入口继续受保护，不能把普通会话入口作为执行门禁的替代路径。
 
 M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M0 模型续轮及执行隔离门槛通过。生产配对、资料迁移、Schedule 切换和正式发布保留各自放行条件。
 
-## 本轮交付状态
+## 第一轮交付状态（历史）
 
 - 实施分支：`feature/agentcomputer-foundation`，基线 `0c5a46a`；当前迭代的交付版本以该分支 Git 提交为准。
 - 实际改动：`infra/agentcomputer` 身份/能力领域、PathLayout 控制路径、版本化薄路由、scoped 认证与错误、OpenAPI、离线单测/集成测试及文档导航。
@@ -181,3 +184,16 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 本地更新：核对并停止自有 8090 进程，完整备份后启动 0.4 适配；schema22 保持，原用户、停止专家、失败项目与收据字节、boxID 保持。真实数据库仍 0 Task/thread/session/Turn/Run/event；缺失 Task 404、非法 ID422、匿名/URLtoken401，Task 写路由不存在。Scalar Task 卡片、UUID、typed view 和不执行说明已检查；200 Task 由隔离 HTTP Fixture 验证。8088 健康仍 200，没有模型请求。
 - 本机证据：/private/tmp/octop-iteration-04-make-all-final.log、/private/tmp/octop-local-04-evidence.json；完整备份位于忽略的 .runtime/backups/iteration-04-before-adapter-04-20261012T122715Z，凭据和运行数据不推送。
 - 阶段边界：M1-04 的内部映射与只读查询部分已验证。真实项目 ready、受控 Task 创建/列表/状态管理、M1-05 入站/固定配置、M1-06 托管引擎派发和完整 M0/M1 仍待后续；PG 只有 SQL/约束静态核对，盒子和 Windows/Linux 实机未验，skipped 不计通过。
+
+## 第五轮交付状态
+
+- 基线：主目录 `feature/agentcomputer-foundation @ bdff37f`，继续同一用户 fork 功能分支；复用 schema 22，无新增 023。
+- 已实现：受执行能力门禁保护的 `POST /api/agentcomputer/v1/tasks/{taskID}/turns`、本人 `GET /api/agentcomputer/v1/runs/{runID}`，以及同连接共享的原子登记和原 Turn 收据图校验。输入仅接受 `newMessage`；Task HTTP 创建继续不存在。
+- 真实入口边界：新命令针对有效本人 Task 时，当前返回 `503 runtimeUnavailable/executionUnavailable`，不登记 Turn/Run、不取得执行许可、不派发模型；未知或跨 owner Task 统一 404。关闭门禁没有请求、配置或环境变量绕过入口。隔离测试只对可信能力函数打补丁，使用实际准备的托管 Task 验证 201/queued/notDispatched；这些 Fixture 不修改真实原型。
+- 重放和历史：已接收的同键同体命令在能力关闭后仍返回 201 原收据；先校验当前恢复代次、本人托管映射、命令身份和完整原接收图。原收据 queued、消息/Turn/Run 身份、时间、sequence 和字节保持；Run GET 读取当前 state/dispatch/epochs/revision/reconciliationRequired 和实际 UTC 时间，不把原 queued 当作当前运行状态。
+- 持久事实：严格原请求/配置快照与摘要、Turn/Run/Task/Project 归属、命令 payload digest、唯一 run.accepted 的 sequence/payload 均核对。缺失、重复或损坏拒绝，不补造事件、快照或输入；本轮未实现公开事件流、审批、问答、取消或 worker/engine dispatch。
+- 协议：adapterVersion=0.5.0、capabilityRevision=5；projects/tasks/runs 为 supported=true、available=false、executionUnavailable，commandReceipts 查询可用；权限模式仍为空。实际控制正文限额为 65536 UTF-8 字节，其他执行容量未测，deviceID 仍为 null。
+- 工程验证：最终 make all（Ruff、strict mypy、全套非 live 测试）通过，4757 passed / 23 skipped；skipped 不计通过。实际交付必须通过仓库提交 hook/testmon 与 Dashboard 构建，结果保存在本机提交日志。真实模型、live PG 和 Ubuntu/Linux/Windows 实机及完整 M0/M1 尚未验收。
+- 本地 8090 更新与证据：自有 8090 经 PID/命令/工作目录核对、完整备份后升级 adapter0.5/revision5；schema22、原用户、stopped 托管专家、failed/providerUnavailable 项目、boxID 与原 Project 收据字节保持。真实库仍 0 Task/thread/session/Turn/Run/event；新增有效格式指向未知 Task 的 POST404、未知 Run404、非法正文/ID422、匿名/URL token401、实际超限413。有效本人 Task 的关闭门禁503及可信登记201由隔离 HTTP Fixture 验证，未在原型写入 ready 或 Task。typed OpenAPI 与 Scalar Turn/Run 卡片可读，8088 健康200，无模型请求。升级前完整备份位于 /Users/fangyuan/Desktop/code/Octop/.runtime/backups/iteration-05-before-adapter-05-20261012T141944Z；运行数据与凭据均在忽略目录。
+- 本地原型边界：原失败项目保持 providerUnavailable，真实 Task/Turn/Run 数量为 0；没有为证明接口成功而把项目置 ready 或填入已接收命令。用户原 8088 服务继续作为独立实例核对；没有真实模型请求。
+- 下一步：先完成真实 ready 与托管引擎入站的独立门禁，再推进派发、取消、审批/问答和恢复；本轮不能代表完整 M1-05/M1-06、生产设备配对、PostgreSQL 实测或真实盒子验收已经通过。

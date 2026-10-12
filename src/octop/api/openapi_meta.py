@@ -70,7 +70,7 @@ OPENAPI_TAGS: list[dict[str, str]] = [
         "name": "agentcomputer",
         "description": (
             "Versioned AgentComputer discovery, local project intent registration, "
-            "task metadata, and existing command receipt queries. Requires a user Bearer token. "
+            "task/Run metadata, guarded Turn admission, and receipt queries. Requires a user Bearer token. "
             "Receipts preserve original admission facts; project preparation has a separate view. "
             "Device binding, full project readiness, and task execution remain unavailable."
         ),
@@ -284,6 +284,42 @@ def configure_openapi(app: FastAPI) -> None:
                 "taskRevision": 1,
                 "preparationState": "ready",
                 "executionReady": False,
+            }
+
+        turn = schema.get("paths", {}).get(f"{API_PREFIX}/tasks/{{taskID}}/turns", {}).get("post")
+        if turn is not None:
+            turn["requestBody"]["content"]["application/json"]["example"] = {
+                "commandID": "22222222-2222-4222-8222-222222222222",
+                "idempotencyKey": "new-message-example",
+                "expectedRestoreEpoch": 1,
+                "contextMode": "newMessage",
+                "userMessageID": "66666666-6666-4666-8666-666666666666",
+                "expectedProjectRevision": 1,
+                "prompt": "A new message; admission is unavailable in production.",
+                "inputArtifactIDs": [],
+                "selectedSkillIDs": [],
+                "permissionMode": "askForApproval",
+            }
+            if receipt is not None:
+                turn["responses"]["201"]["content"]["application/json"]["example"] = receipt[
+                    "responses"
+                ]["200"]["content"]["application/json"]["example"]
+
+        run = schema.get("paths", {}).get(f"{API_PREFIX}/runs/{{runID}}", {}).get("get")
+        if run is not None:
+            run["responses"]["200"]["content"]["application/json"]["example"] = {
+                "runID": "55555555-5555-4555-8555-555555555555",
+                "turnID": "44444444-4444-4444-8444-444444444444",
+                "taskID": "33333333-3333-4333-8333-333333333333",
+                "projectID": "88888888-8888-4888-8888-888888888888",
+                "state": "queued",
+                "dispatchPhase": "notDispatched",
+                "executionEpoch": 0,
+                "restoreEpoch": 1,
+                "revision": 1,
+                "reconciliationRequired": False,
+                "createdAt": "2026-10-12T00:00:00Z",
+                "updatedAt": "2026-10-12T00:00:00Z",
             }
 
         for path, path_item in schema.get("paths", {}).items():

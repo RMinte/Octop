@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow
+from octop.infra.db.repos._base import DbRow, map_rows
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,32 @@ class AcEventRow:
 class AcEventRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
+
+    @staticmethod
+    def get_by_sequence_in_transaction(
+        conn: Any, task_id: str, owner_id: int, sequence: int
+    ) -> AcEventRow | None:
+        row = conn.execute(
+            "SELECT e.* FROM ac_events e JOIN ac_tasks t "
+            "ON t.task_id = e.task_id AND t.owner_id = e.owner_id "
+            "WHERE e.task_id = ? AND e.owner_id = ? AND e.sequence = ?",
+            (task_id, owner_id, sequence),
+        ).fetchone()
+        return AcEventRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def list_for_run_in_transaction(
+        conn: Any, run_id: str, owner_id: int, *, event_type: str = "run.accepted"
+    ) -> list[AcEventRow]:
+        """Read every matching event for an owned Run; duplicate acceptance stays visible."""
+        rows = conn.execute(
+            "SELECT e.* FROM ac_events e JOIN ac_runs r "
+            "ON r.run_id = e.run_id AND r.owner_id = e.owner_id "
+            "WHERE r.run_id = ? AND r.owner_id = ? AND e.event_type = ? "
+            "ORDER BY e.sequence",
+            (run_id, owner_id, event_type),
+        ).fetchall()
+        return map_rows(rows, AcEventRow)
 
     @staticmethod
     def insert(

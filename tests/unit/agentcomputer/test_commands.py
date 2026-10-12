@@ -17,6 +17,7 @@ from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageDataError,
     admit_new_message,
+    admit_new_message_in_transaction,
     canonical_json,
     command_digest,
     content_digest,
@@ -223,6 +224,243 @@ def test_acceptance_commits_all_facts_and_immutable_snapshot(control) -> None:
     assert get_command_receipt(services, 1, receipt.commandID) == receipt
     assert get_command_receipt(services, 2, receipt.commandID) is None
     assert admit_new_message(services, owner_id=1, task_id=task, command=command).replayed
+
+
+def test_shared_kernel_uses_caller_connection_and_outer_commit(control, monkeypatch) -> None:
+    services, task = control
+    command = _request()
+    identity = get_or_create_identity(services.paths.agentcomputer_identity)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("shared kernel must not acquire another connection")
+
+    with pytest.raises(RuntimeError, match="outer rollback"), services.db.transaction() as conn:
+        assert services.ac_command_repo.lock_owner(conn, 1)
+        with monkeypatch.context() as patch:
+            patch.setattr(services.db, "transaction", forbidden)
+            patch.setattr(services.db, "connect", forbidden)
+            receipt = admit_new_message_in_transaction(
+                services, conn, owner_id=1, task_id=task, command=command, identity=identity
+            )
+            assert receipt.runState == "queued"
+        raise RuntimeError("outer rollback")
+    assert _counts(services) == {"commands": 0, "turns": 0, "runs": 0, "events": 0}
+    with services.db.connect() as conn:
+        row = conn.execute("SELECT revision,next_sequence,active_run_id FROM ac_tasks").fetchone()
+        assert tuple(row) == (1, 1, None)
+        assert conn.execute("SELECT active_run_id FROM ac_projects").fetchone()[0] is None
+
+
+def test_registration_rejects_defaulted_missing_config_schema(control) -> None:
+    services, task = control
+    config = {"instructions": "stored", "modelRef": "fixture/no-model"}
+    completed = {"schemaVersion": 1, **config}
+    with services.db.transaction() as conn:
+        conn.execute(
+            "UPDATE ac_projects SET config_json=?,config_digest=?",
+            (canonical_json(config), content_digest(completed)),
+        )
+    with pytest.raises(StorageDataError):
+        admit_new_message(services, owner_id=1, task_id=task, command=_request())
+    assert _counts(services) == {"commands": 0, "turns": 0, "runs": 0, "events": 0}
+
+
+@pytest.mark.parametrize("damage", ["threadOwner", "agentOwner", "taskSchema", "projectSchema"])
+def test_registration_rejects_wrong_scope_or_unsupported_stored_schema(control, damage) -> None:
+    services, task = control
+    with services.db.transaction() as conn:
+        if damage == "threadOwner":
+            conn.execute("UPDATE threads SET user_id=2")
+        elif damage == "agentOwner":
+            conn.execute("UPDATE agents SET user_id=2")
+        elif damage == "taskSchema":
+            conn.execute("UPDATE ac_tasks SET schema_version=2")
+        else:
+            conn.execute("UPDATE ac_projects SET schema_version=2")
+    with pytest.raises(StorageDataError):
+        admit_new_message(services, owner_id=1, task_id=task, command=_request())
+    assert _counts(services) == {"commands": 0, "turns": 0, "runs": 0, "events": 0}
+
+
+@pytest.mark.parametrize(
+    "field", ["turnID", "runID", "assistantMessageID", "acceptedSequence", "taskRevision"]
+)
+def test_valid_but_wrong_receipt_facts_rejected_on_query_and_replay(control, field) -> None:
+    services, task = control
+    command = _request()
+    receipt = admit_new_message(services, owner_id=1, task_id=task, command=command)
+    data = receipt.model_dump(mode="json")
+    data[field] = data[field] + 1 if isinstance(data[field], int) else str(uuid4())
+    raw = canonical_json(data)
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE ac_commands SET receipt_json=?", (raw,))
+    with pytest.raises(StorageDataError):
+        get_command_receipt(services, 1, receipt.commandID)
+    with pytest.raises(StorageDataError):
+        admit_new_message(services, owner_id=1, task_id=task, command=command)
+    assert services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json == raw
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "schemaVersion",
+        "projectConfiguration.schemaVersion",
+        "request.inputArtifactIDs",
+        "request.selectedSkillIDs",
+    ],
+)
+def test_snapshot_missing_fields_are_not_filled_or_repaired(control, missing) -> None:
+    services, task = control
+    command = _request()
+    receipt = admit_new_message(services, owner_id=1, task_id=task, command=command)
+    with services.db.transaction() as conn:
+        row = conn.execute("SELECT snapshot_json FROM ac_turns").fetchone()
+        data = json.loads(row[0])
+        target = data
+        path = missing.split(".")
+        if len(path) == 2:
+            target = data[path[0]]
+        del target[path[-1]]
+        raw = canonical_json(data)
+        conn.execute(
+            "UPDATE ac_turns SET snapshot_json=?,snapshot_digest=?", (raw, content_digest(data))
+        )
+    with pytest.raises(StorageDataError):
+        get_command_receipt(services, 1, receipt.commandID)
+    with pytest.raises(StorageDataError):
+        admit_new_message(services, owner_id=1, task_id=task, command=command)
+    with services.db.connect() as conn:
+        assert conn.execute("SELECT snapshot_json FROM ac_turns").fetchone()[0] == raw
+
+
+def test_recomputed_snapshot_digest_cannot_change_original_command_payload(control) -> None:
+    services, task = control
+    command = _request()
+    receipt = admit_new_message(services, owner_id=1, task_id=task, command=command)
+    with services.db.transaction() as conn:
+        snapshot = json.loads(conn.execute("SELECT snapshot_json FROM ac_turns").fetchone()[0])
+        snapshot["request"]["prompt"] = "different original text"
+        digest = content_digest(snapshot)
+        conn.execute(
+            "UPDATE ac_turns SET snapshot_json=?,snapshot_digest=?",
+            (canonical_json(snapshot), digest),
+        )
+        payload = json.loads(conn.execute("SELECT payload_json FROM ac_events").fetchone()[0])
+        payload["inputSnapshotDigest"] = digest
+        conn.execute("UPDATE ac_events SET payload_json=?", (canonical_json(payload),))
+    with pytest.raises(StorageDataError):
+        get_command_receipt(services, 1, receipt.commandID)
+
+
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "payloadType", "sequence"])
+def test_acceptance_event_must_be_unique_and_exact(control, damage) -> None:
+    services, task = control
+    command = _request()
+    receipt = admit_new_message(services, owner_id=1, task_id=task, command=command)
+    with services.db.transaction() as conn:
+        if damage == "missing":
+            conn.execute("DELETE FROM ac_events")
+        elif damage == "duplicate":
+            conn.execute(
+                "INSERT INTO ac_events(event_id,task_id,owner_id,sequence,run_id,turn_id,event_type,"
+                "payload_version,payload_json,created_at) SELECT ?,task_id,owner_id,sequence+1,run_id,"
+                "turn_id,event_type,payload_version,payload_json,created_at FROM ac_events",
+                (str(uuid4()),),
+            )
+        elif damage == "sequence":
+            conn.execute("UPDATE ac_events SET sequence=sequence+1")
+        else:
+            payload = json.loads(conn.execute("SELECT payload_json FROM ac_events").fetchone()[0])
+            payload["accepted"] = 1
+            conn.execute("UPDATE ac_events SET payload_json=?", (canonical_json(payload),))
+    with pytest.raises(StorageDataError):
+        get_command_receipt(services, 1, receipt.commandID)
+    with pytest.raises(StorageDataError):
+        admit_new_message(services, owner_id=1, task_id=task, command=command)
+
+
+def test_old_receipt_survives_run_progression_and_new_project_configuration(control) -> None:
+    services, task = control
+    command = _request()
+    receipt = admit_new_message(services, owner_id=1, task_id=task, command=command)
+    config = {"schemaVersion": 1, "instructions": "new revision", "modelRef": "fixture/new-model"}
+    with services.db.transaction() as conn:
+        conn.execute(
+            "UPDATE ac_runs SET state='succeeded',dispatch_phase='engineAccepted',execution_epoch=1,revision=4"
+        )
+        conn.execute(
+            "UPDATE ac_projects SET revision=2,config_json=?,config_digest=?",
+            (canonical_json(config), content_digest(config)),
+        )
+    assert get_command_receipt(services, 1, receipt.commandID) == receipt
+    assert admit_new_message(services, owner_id=1, task_id=task, command=command).replayed
+
+
+@pytest.mark.parametrize(
+    "table,column",
+    [
+        ("ac_commands", "created_at"),
+        ("ac_tasks", "revision"),
+        ("ac_projects", "revision"),
+        ("ac_turns", "schema_version"),
+        ("ac_runs", "execution_epoch"),
+        ("ac_events", "payload_version"),
+    ],
+)
+def test_malformed_persisted_numeric_values_fail_safely_on_query_and_replay(
+    control, table, column
+) -> None:
+    services, task = control
+    command = _request()
+    receipt = admit_new_message(services, owner_id=1, task_id=task, command=command)
+    with services.db.transaction() as conn:
+        conn.execute(f"UPDATE {table} SET {column}=?", ("bad",))
+        assert conn.execute(f"SELECT {column} FROM {table}").fetchone()[0] == "bad"
+    with pytest.raises(StorageDataError):
+        get_command_receipt(services, 1, receipt.commandID)
+    with pytest.raises(StorageDataError):
+        admit_new_message(services, owner_id=1, task_id=task, command=command)
+    identity = get_or_create_identity(services.paths.agentcomputer_identity)
+    with pytest.raises(StorageDataError), services.db.transaction() as conn:
+        assert services.ac_command_repo.lock_owner(conn, 1)
+        admit_new_message_in_transaction(
+            services, conn, owner_id=1, task_id=task, command=command, identity=identity
+        )
+    assert _counts(services) == {"commands": 1, "turns": 1, "runs": 1, "events": 1}
+    with services.db.connect() as conn:
+        assert conn.execute(f"SELECT {column} FROM {table}").fetchone()[0] == "bad"
+
+
+@pytest.mark.parametrize("table,column", [("ac_tasks", "revision"), ("ac_projects", "revision")])
+def test_new_registration_rejects_malformed_persisted_numeric_values(
+    control, table, column
+) -> None:
+    services, task = control
+    with services.db.transaction() as conn:
+        conn.execute(f"UPDATE {table} SET {column}=?", ("bad",))
+    identity = get_or_create_identity(services.paths.agentcomputer_identity)
+    with pytest.raises(StorageDataError), services.db.transaction() as conn:
+        assert services.ac_command_repo.lock_owner(conn, 1)
+        admit_new_message_in_transaction(
+            services, conn, owner_id=1, task_id=task, command=_request(), identity=identity
+        )
+    assert _counts(services) == {"commands": 0, "turns": 0, "runs": 0, "events": 0}
+
+
+def test_historical_long_transport_key_does_not_change_semantic_digest_or_receipt(control) -> None:
+    services, task = control
+    command = _request()
+    receipt = admit_new_message(services, owner_id=1, task_id=task, command=command)
+    before = services.ac_command_repo.get(str(receipt.commandID), 1)
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE ac_commands SET idempotency_key=?", ("historic-" + "x" * 1024,))
+    assert get_command_receipt(services, 1, receipt.commandID) == receipt
+    after = services.ac_command_repo.get(str(receipt.commandID), 1)
+    assert after.payload_digest == before.payload_digest
+    assert after.receipt_json == before.receipt_json
+    with pytest.raises(ValidationError):
+        _request(idempotencyKey=after.idempotency_key)
 
 
 def test_new_command_id_same_key_returns_original_without_alias(control) -> None:

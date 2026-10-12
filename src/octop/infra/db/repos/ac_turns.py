@@ -51,6 +51,14 @@ class AcTurnRepo:
         self._db = db
 
     @staticmethod
+    def get_in_transaction(conn: Any, turn_id: str, owner_id: int) -> AcTurnRow | None:
+        row = conn.execute(
+            "SELECT * FROM ac_turns WHERE turn_id = ? AND owner_id = ?",
+            (turn_id, owner_id),
+        ).fetchone()
+        return AcTurnRow.from_row(row) if row is not None else None
+
+    @staticmethod
     def has_user_message(conn: Any, task_id: str, owner_id: int, user_message_id: str) -> bool:
         row = conn.execute(
             "SELECT 1 FROM ac_turns WHERE task_id = ? AND owner_id = ? AND user_message_id = ?",
