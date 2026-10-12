@@ -12,6 +12,8 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from octop.api.agentcomputer import is_agentcomputer_path, protocol_error_response
+
 _OPEN_PREFIXES = (
     "/api/setup/",
     "/api/health/",
@@ -34,6 +36,8 @@ def install(app: Any, server: Any) -> None:
         if path in open_exact or any(path.startswith(p) for p in _OPEN_PREFIXES):
             return await call_next(request)
         if server.user_manager is None or server.user_manager.count() == 0:
+            if is_agentcomputer_path(path):
+                return protocol_error_response("runtimeUnavailable", 503, reason="setupRequired")
             return JSONResponse(
                 status_code=503,
                 content={"setup_required": True},

@@ -7,7 +7,9 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+from octop.api.agentcomputer import API_PREFIX
 from octop.api.deps import is_jwt_exempt_path
+from octop.infra.agentcomputer.capabilities import AgentComputerCapabilitiesResponse
 
 API_DESCRIPTION = """\
 **Octop** is a smarter, self-hosted AI assistant for multiple users and agents. All routes are served under `/api`.
@@ -64,6 +66,13 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     },
     {"name": "auth", "description": "Sign in, sign out, and manage the current user profile."},
     {"name": "health", "description": "Liveness probe for load balancers and monitoring."},
+    {
+        "name": "agentcomputer",
+        "description": (
+            "Versioned AgentComputer discovery. Requires a user Bearer token; "
+            "device binding and task execution are reported separately."
+        ),
+    },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},
     {
         "name": "agents",
@@ -196,6 +205,13 @@ def configure_openapi(app: FastAPI) -> None:
         )
         components = schema.setdefault("components", {})
         components.setdefault("securitySchemes", {})["BearerAuth"] = _BEARER_SCHEME
+
+        discovery = schema.get("paths", {}).get(f"{API_PREFIX}/capabilities", {}).get("get")
+        if discovery is not None:
+            # FastAPI's schema encoding excludes None recursively, including
+            # null values inside examples. Preserve this unavailable profile.
+            example = AgentComputerCapabilitiesResponse.model_json_schema()["examples"][0]
+            discovery["responses"]["200"]["content"]["application/json"]["example"] = example
 
         for path, path_item in schema.get("paths", {}).items():
             if not path.startswith("/api/") or is_jwt_exempt_path(path):

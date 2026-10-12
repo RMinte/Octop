@@ -7,12 +7,15 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
-posix_only = pytest.mark.skipif(os.name != "posix", reason="bash helpers")
+linux_only = pytest.mark.skipif(
+    sys.platform != "linux", reason="FnOS native process lifecycle requires Linux /proc"
+)
 
 REPO = Path(__file__).resolve().parents[2]
 COMMON_SH = REPO / "scripts" / "fnos" / "common.sh"
@@ -84,7 +87,7 @@ def test_native_manifest_does_not_block_start_on_stale_port() -> None:
     assert "ctl_stop=true" in text
 
 
-@posix_only
+@linux_only
 def test_free_octop_ports_kills_listener(tmp_path: Path) -> None:
     port = _free_tcp_port()
     proc = subprocess.Popen(["python3", "-c", _listen_script(port)])
@@ -106,7 +109,7 @@ free_octop_ports {port}
             proc.wait(timeout=3)
 
 
-@posix_only
+@linux_only
 def test_free_octop_ports_kills_orphan_child(tmp_path: Path) -> None:
     """Killing only the wrapper (old stop) leaves the listener; free_octop_ports must catch it."""
     port = _free_tcp_port()
@@ -131,7 +134,7 @@ free_octop_ports {port}
             wrapper.wait(timeout=3)
 
 
-@posix_only
+@linux_only
 def test_octop_kill_pid_tree_stops_child_listener() -> None:
     port = _free_tcp_port()
     wrapper = _start_wrapper_listener(port)
@@ -155,7 +158,7 @@ fi
             wrapper.wait(timeout=3)
 
 
-@posix_only
+@linux_only
 def test_native_main_stop_frees_port_after_wrapper_start(tmp_path: Path) -> None:
     if shutil.which("python3") is None:
         pytest.skip("python3 required")
@@ -253,7 +256,7 @@ def _copy_ctl(cmd: Path) -> None:
     (cmd / "main").chmod(0o755)
 
 
-@posix_only
+@linux_only
 def test_native_main_start_term_cleans_unready_child(tmp_path: Path) -> None:
     """飞牛若在端口就绪前杀掉 start，必须把已拉起的后台进程一起收掉。"""
     if shutil.which("python3") is None:
@@ -328,7 +331,7 @@ def _pid_file_alive(path: Path) -> bool:
     return True
 
 
-@posix_only
+@linux_only
 def test_octop_fpk_native_run_pids_and_sweep(tmp_path: Path) -> None:
     env = {**os.environ, "OCTOP_INSTALL_MODE": "fpk-native"}
     proc = subprocess.Popen(

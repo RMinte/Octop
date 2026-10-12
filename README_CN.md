@@ -464,6 +464,8 @@ OpenAI 兼容 API、DashScope（千问）、Ollama 等预设 — 在控制台或
 
 环境变量与 `config.json` 详见 [docs/configuration.md](docs/configuration.md)。
 
+本 fork 正在迭代 AgentComputer 集成。`/api/agentcomputer/v1/capabilities` 已提供认证后的协议探测，任务执行与设备绑定尚未开放。阶段进度和本地启动方式见 [集成文档](docs/agentcomputer-integration.md)。
+
 ## 🏗️ 架构
 
 ```

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.datastructures import Headers, UploadFile
@@ -122,6 +123,9 @@ async def test_enabling_reindexes_documents_when_model_changes(
         settings_set("knowledge_embedding_model", model)
 
     monkeypatch.setattr(knowledge_bases, "set_feature_enabled", set_feature)
+    monkeypatch.setattr(
+        knowledge_bases, "ensure_local_embedding_deps_async", AsyncMock(return_value="installed")
+    )
     monkeypatch.setattr(
         knowledge_bases,
         "reindex_all_documents",

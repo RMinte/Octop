@@ -92,6 +92,7 @@ src/octop/dashboard/assets/*
 # Logs / runtime
 *.log
 logs/
+.runtime/
 
 # Local monorepo dev helpers (not for upstream)
 scripts/dev-local-link.sh

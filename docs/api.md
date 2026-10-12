@@ -10,6 +10,13 @@ described in [Chat (WebSocket)](#chat-websocket).
 
 ## Authentication
 
+The fork's AgentComputer surface starts with `GET /api/agentcomputer/v1/capabilities`.
+It accepts a Bearer token in the `Authorization` header only; URL credentials
+are rejected. Its camelCase error envelope is scoped to that versioned surface.
+User-session authentication does not bind a device or enable task execution.
+See [AgentComputer integration](agentcomputer-integration.md) for fields, limits,
+current capabilities, and the local development profile.
+
 | Header | Value |
 |--------|-------|
 | `Authorization` | `Bearer <access_token>` from `POST /api/auth/login` |

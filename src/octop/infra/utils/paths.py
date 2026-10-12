@@ -48,6 +48,11 @@ class PathLayout:
         return self.root / "config.json"
 
     @property
+    def agentcomputer_identity(self) -> Path:
+        """Installation identity outside database backups and agent workspaces."""
+        return self.root / "agentcomputer-control" / "identity.json"
+
+    @property
     def users_dir(self) -> Path:
         return self.root / "users"
 

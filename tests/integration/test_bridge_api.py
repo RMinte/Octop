@@ -48,6 +48,10 @@ async def test_bridge_probe_returns_expert_list(env: Any) -> None:
             ),
         ),
         patch("octop.infra.bridge.manager.httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "octop.infra.bridge.peer_auth.socket.getaddrinfo",
+            return_value=[(2, 1, 6, "", ("203.0.113.1", 443))],
+        ),
     ):
         r = await client.post(
             "/api/bridge/probe",
