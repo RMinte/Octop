@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow
+from octop.infra.db.repos._base import DbRow, strict_int
 
 
 @dataclass(frozen=True)
@@ -34,9 +34,9 @@ class AcProjectRow:
     @classmethod
     def from_row(cls, r: DbRow) -> AcProjectRow:
         return cls(
-            pk=int(r["id"]),
+            pk=strict_int(r["id"]),
             project_id=str(r["project_id"]),
-            owner_id=int(r["owner_id"]),
+            owner_id=strict_int(r["owner_id"]),
             box_id=str(r["box_id"]),
             workspace_id=str(r["workspace_id"]),
             name=str(r["name"]),
@@ -44,13 +44,13 @@ class AcProjectRow:
             if r["default_agent_id"] is not None
             else None,
             preparation_state=str(r["preparation_state"]),
-            revision=int(r["revision"]),
-            schema_version=int(r["schema_version"]),
+            revision=strict_int(r["revision"]),
+            schema_version=strict_int(r["schema_version"]),
             config_json=str(r["config_json"]),
             config_digest=str(r["config_digest"]),
             active_run_id=str(r["active_run_id"]) if r["active_run_id"] is not None else None,
-            created_at=int(r["created_at"]),
-            updated_at=int(r["updated_at"]),
+            created_at=strict_int(r["created_at"]),
+            updated_at=strict_int(r["updated_at"]),
         )
 
 

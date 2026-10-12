@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow, map_rows
+from octop.infra.db.repos._base import DbRow, map_rows, strict_int
 
 
 @dataclass(frozen=True)
@@ -31,18 +31,18 @@ class AcEventRow:
     @classmethod
     def from_row(cls, r: DbRow) -> AcEventRow:
         return cls(
-            pk=int(r["id"]),
+            pk=strict_int(r["id"]),
             event_id=str(r["event_id"]),
             task_id=str(r["task_id"]),
-            owner_id=int(r["owner_id"]),
-            sequence=int(r["sequence"]),
+            owner_id=strict_int(r["owner_id"]),
+            sequence=strict_int(r["sequence"]),
             run_id=str(r["run_id"]),
             turn_id=str(r["turn_id"]),
             event_type=str(r["event_type"]),
-            payload_version=int(r["payload_version"]),
-            schema_version=int(r["schema_version"]),
+            payload_version=strict_int(r["payload_version"]),
+            schema_version=strict_int(r["schema_version"]),
             payload_json=str(r["payload_json"]),
-            created_at=int(r["created_at"]),
+            created_at=strict_int(r["created_at"]),
         )
 
 

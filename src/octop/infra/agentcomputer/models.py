@@ -303,3 +303,66 @@ class RunView(ControlModel):
         if value.utcoffset() != timedelta(0):
             raise ValueError("Run timestamps must be UTC")
         return value
+
+
+class DispatchIntent(ControlModel):
+    """Complete immutable input to the dedicated engine entry, never client configuration."""
+
+    schemaVersion: Literal[1]
+    boxID: UUID
+    ownerID: PositiveRevision
+    dispatchID: UUID
+    engineRequestID: UUID
+    runID: UUID
+    turnID: UUID
+    taskID: UUID
+    projectID: UUID
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    userMessageID: UUID
+    assistantMessageID: UUID
+    snapshotDigest: StrictStr
+    snapshot: TurnSnapshot
+
+
+class EngineEntryReceipt(ControlModel):
+    """The application entry accepted this fixed request; not a model-start fact."""
+
+    schemaVersion: Literal[1]
+    receiptID: UUID
+    dispatchID: UUID
+    engineRequestID: UUID
+    runID: UUID
+    turnID: UUID
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    intentDigest: StrictStr
+    acceptedAt: datetime
+
+    @field_validator("acceptedAt")
+    @classmethod
+    def utc_entry_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("Entry timestamp must be UTC")
+        return value
+
+
+class EngineEntryResult(ControlModel):
+    receipt: EngineEntryReceipt
+    replayed: StrictBool
+
+
+class RunClaim(ControlModel):
+    """Internal worker token; never accepted from HTTP or returned by RunView."""
+
+    intent: DispatchIntent
+    claimantID: UUID
+    runRevision: PositiveRevision
+    dispatchRevision: PositiveRevision
+    engineReceipt: EngineEntryReceipt | None
+
+
+class EngineInvocation(ControlModel):
+    intent: DispatchIntent
+    claimantID: UUID
+    expectedRunRevision: PositiveRevision

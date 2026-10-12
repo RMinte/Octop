@@ -14,7 +14,7 @@ from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.db.services import SharedServices
 
-ADAPTER_VERSION = "0.5.0"
+ADAPTER_VERSION = "0.6.0"
 PROTOCOL_VERSION: Literal[1] = 1
 
 
@@ -49,7 +49,7 @@ class BusinessCapabilities(ProtocolModel):
         description="Queries for existing immutable receipts; this flag never grants execution."
     )
     runs: CapabilityStatus = Field(
-        description="Full Run execution admission; read-only state queries do not enable execution."
+        description="Full Run execution; persisted dispatch facts and app intake receipts do not enable production execution."
     )
     cancellation: CapabilityStatus
     snapshots: CapabilityStatus
@@ -109,7 +109,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                     "serverTime": "2026-10-12T00:00:00Z",
                     "timezone": "Asia/Shanghai",
                     "executionPlatform": {"system": "Darwin", "architecture": "arm64"},
-                    "capabilityRevision": 5,
+                    "capabilityRevision": 6,
                     "restoreEpoch": 1,
                     "supportedPermissionModes": [],
                     "capabilities": {
@@ -152,7 +152,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
     serverTime: datetime
     timezone: str
     executionPlatform: ExecutionPlatform
-    capabilityRevision: Literal[5] = 5
+    capabilityRevision: Literal[6] = 6
     restoreEpoch: Annotated[int, Field(strict=True, ge=1)] = Field(
         description="Persisted initial epoch; restore fencing remains unavailable."
     )

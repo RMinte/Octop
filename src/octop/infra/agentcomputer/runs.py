@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from psycopg import Error as PostgresError
@@ -17,9 +19,83 @@ from octop.infra.agentcomputer.commands import (
     validate_turn_receipt_binding,
 )
 from octop.infra.agentcomputer.identity import get_or_create_identity
-from octop.infra.agentcomputer.models import RunView
+from octop.infra.agentcomputer.models import CommandReceipt, RunView, TurnSnapshot
 from octop.infra.agentcomputer.tasks import _get_task
 from octop.infra.db.services import SharedServices
+
+if TYPE_CHECKING:
+    from octop.infra.db.repos.ac_runs import AcRunRow
+
+
+@dataclass(frozen=True)
+class BoundRun:
+    run: AcRunRow
+    receipt: CommandReceipt
+    snapshot: TurnSnapshot
+
+
+def load_bound_run(
+    services: SharedServices, conn: Any, *, owner_id: int, run_id: UUID, box_id: UUID
+) -> BoundRun | None:
+    """One consistent connection for the original facts and managed Task mapping."""
+    run = services.ac_run_repo.get_in_transaction(conn, str(run_id), owner_id)
+    if run is None:
+        return None
+    events = services.ac_event_repo.list_for_run_in_transaction(
+        conn, str(run_id), owner_id, event_type="run.accepted"
+    )
+    if len(events) != 1:
+        raise StorageDataError("missing or duplicated run acceptance")
+    try:
+        payload = json.loads(events[0].payload_json)
+        if not isinstance(payload, dict) or type(payload.get("commandID")) is not str:
+            raise StorageDataError("invalid run acceptance identity")
+        command_id = UUID(payload["commandID"])
+    except (TypeError, ValueError, KeyError) as exc:
+        raise StorageDataError("invalid run acceptance identity") from exc
+    command = services.ac_command_repo.get_in_transaction(conn, str(command_id), owner_id)
+    if command is None:
+        raise StorageDataError("missing run receipt")
+    receipt = decode_turn_receipt(
+        command.receipt_json, command.command_id, box_id, command.restore_epoch
+    )
+    validate_turn_receipt_binding(services, receipt, command, owner_id, conn=conn)
+    if (
+        receipt.runID != run_id
+        or _get_task(services, conn, owner_id, receipt.taskID, box_id) is None
+    ):
+        raise StorageDataError("run task binding mismatch")
+    turn = services.ac_turn_repo.get_in_transaction(conn, str(receipt.turnID), owner_id)
+    if turn is None:
+        raise StorageDataError("missing original turn")
+    snapshot = TurnSnapshot.model_validate_json(turn.snapshot_json)
+    if run.schema_version != 1 or run.updated_at < run.created_at:
+        raise StorageDataError("invalid run schema or timestamps")
+    # Validate the complete public state too, before the worker acts on it.
+    run_view(run)
+    return BoundRun(run=run, receipt=receipt, snapshot=snapshot)
+
+
+def run_view(run: AcRunRow) -> RunView:
+    try:
+        return RunView.model_validate(
+            {
+                "runID": run.run_id,
+                "turnID": run.turn_id,
+                "taskID": run.task_id,
+                "projectID": run.project_id,
+                "state": run.state,
+                "dispatchPhase": run.dispatch_phase,
+                "executionEpoch": run.execution_epoch,
+                "restoreEpoch": run.restore_epoch,
+                "revision": run.revision,
+                "reconciliationRequired": run.reconciliation_required,
+                "createdAt": datetime.fromtimestamp(run.created_at / 1000, UTC),
+                "updatedAt": datetime.fromtimestamp(run.updated_at / 1000, UTC),
+            }
+        )
+    except (ValidationError, ValueError, OverflowError, OSError) as exc:
+        raise StorageDataError("invalid run projection") from exc
 
 
 def get_run(services: SharedServices, *, owner_id: int, run_id: UUID) -> RunView | None:
@@ -27,54 +103,15 @@ def get_run(services: SharedServices, *, owner_id: int, run_id: UUID) -> RunView
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
     try:
         with services.db.transaction() as conn:
-            run = services.ac_run_repo.get_in_transaction(conn, str(run_id), owner_id)
-            if run is None:
+            bound = load_bound_run(
+                services, conn, owner_id=owner_id, run_id=run_id, box_id=identity.boxID
+            )
+            if bound is None:
                 return None
-            events = services.ac_event_repo.list_for_run_in_transaction(
-                conn, str(run_id), owner_id, event_type="run.accepted"
-            )
-            if len(events) != 1:
-                raise StorageDataError("missing or duplicated run acceptance")
-            try:
-                payload = json.loads(events[0].payload_json)
-                if not isinstance(payload, dict) or type(payload.get("commandID")) is not str:
-                    raise StorageDataError("invalid run acceptance identity")
-                command_id = UUID(payload["commandID"])
-            except (TypeError, ValueError, KeyError) as exc:
-                raise StorageDataError("invalid run acceptance identity") from exc
-            command = services.ac_command_repo.get_in_transaction(conn, str(command_id), owner_id)
-            if command is None:
-                raise StorageDataError("missing run receipt")
-            receipt = decode_turn_receipt(
-                command.receipt_json, command.command_id, identity.boxID, command.restore_epoch
-            )
-            validate_turn_receipt_binding(services, receipt, command, owner_id, conn=conn)
-            if (
-                receipt.runID != run_id
-                or _get_task(services, conn, owner_id, receipt.taskID, identity.boxID) is None
-            ):
-                raise StorageDataError("run task binding mismatch")
-            if run.schema_version != 1 or run.updated_at < run.created_at:
-                raise StorageDataError("invalid run schema or timestamps")
-            try:
-                return RunView.model_validate(
-                    {
-                        "runID": run.run_id,
-                        "turnID": run.turn_id,
-                        "taskID": run.task_id,
-                        "projectID": run.project_id,
-                        "state": run.state,
-                        "dispatchPhase": run.dispatch_phase,
-                        "executionEpoch": run.execution_epoch,
-                        "restoreEpoch": run.restore_epoch,
-                        "revision": run.revision,
-                        "reconciliationRequired": run.reconciliation_required,
-                        "createdAt": datetime.fromtimestamp(run.created_at / 1000, UTC),
-                        "updatedAt": datetime.fromtimestamp(run.updated_at / 1000, UTC),
-                    }
-                )
-            except (ValidationError, ValueError, OverflowError, OSError) as exc:
-                raise StorageDataError("invalid run projection") from exc
+            from octop.infra.agentcomputer.dispatch import validate_dispatch_binding
+
+            validate_dispatch_binding(services, conn, bound)
+            return run_view(bound.run)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("run storage unavailable") from exc
     except StorageDataError:

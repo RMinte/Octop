@@ -22,7 +22,7 @@ from octop.infra.agentcomputer.commands import (
     content_digest,
     decode_task_receipt,
 )
-from octop.infra.agentcomputer.identity import get_or_create_identity
+from octop.infra.agentcomputer.identity import IdentityError, get_or_create_identity
 from octop.infra.agentcomputer.models import (
     ProjectConfiguration,
     TaskCreateCommand,
@@ -155,6 +155,10 @@ def get_task(services: SharedServices, owner_id: int, task_id: UUID) -> TaskView
             return _get_task(services, conn, owner_id, task_id, identity.boxID)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("task storage unavailable") from exc
+    except (IdentityError, StorageDataError):
+        raise
+    except (ValueError, TypeError) as exc:
+        raise StorageDataError("invalid stored task value") from exc
 
 
 def validate_task_receipt_binding(
@@ -168,6 +172,10 @@ def validate_task_receipt_binding(
         view = _get_task(services, conn, owner_id, receipt.taskID, receipt.boxID)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("task receipt storage unavailable") from exc
+    except (IdentityError, StorageDataError):
+        raise
+    except (ValueError, TypeError) as exc:
+        raise StorageDataError("invalid stored task receipt value") from exc
     if (
         view is None
         or view.projectID != receipt.projectID
@@ -189,6 +197,10 @@ def register_task(
         return _register_task(services, owner_id, command)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("task registration storage unavailable") from exc
+    except (IdentityError, StorageDataError):
+        raise
+    except (ValueError, TypeError) as exc:
+        raise StorageDataError("invalid stored task registration value") from exc
 
 
 def _register_task(

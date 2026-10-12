@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow
+from octop.infra.db.repos._base import DbRow, strict_int
 
 
 @dataclass(frozen=True)
@@ -30,17 +30,17 @@ class AcCommandRow:
     @classmethod
     def from_row(cls, r: DbRow) -> AcCommandRow:
         return cls(
-            pk=int(r["id"]),
+            pk=strict_int(r["id"]),
             command_id=str(r["command_id"]),
-            owner_id=int(r["owner_id"]),
+            owner_id=strict_int(r["owner_id"]),
             idempotency_key=str(r["idempotency_key"]),
             operation=str(r["operation"]),
             target_id=str(r["target_id"]),
             payload_digest=str(r["payload_digest"]),
-            restore_epoch=int(r["restore_epoch"]),
-            schema_version=int(r["schema_version"]),
+            restore_epoch=strict_int(r["restore_epoch"]),
+            schema_version=strict_int(r["schema_version"]),
             receipt_json=str(r["receipt_json"]),
-            created_at=int(r["created_at"]),
+            created_at=strict_int(r["created_at"]),
         )
 
 
@@ -81,6 +81,12 @@ class AcCommandRepo:
         row = conn.execute(
             "SELECT id FROM users WHERE id = ? AND disabled = 0" + suffix, (owner_id,)
         ).fetchone()
+        return row is not None
+
+    def lock_owner_for_recovery(self, conn: Any, owner_id: int) -> bool:
+        """Keep owner-before-Run lock order without authorizing new execution."""
+        suffix = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+        row = conn.execute("SELECT id FROM users WHERE id = ?" + suffix, (owner_id,)).fetchone()
         return row is not None
 
     @staticmethod

@@ -361,12 +361,17 @@ async def new_message_turn(
 @router.get(
     "/runs/{runID}",
     response_model=RunView,
-    summary="Read an existing Run's current persisted registration state",
+    summary="Read an existing Run's current persisted state and dispatch facts",
     description=(
         "Requires a user Bearer token. Returns only this user's Run; missing and other users' "
         "Runs return the same 404, including for admins. This is a read-only current view, "
         "separate from the original queued command receipt. queued/notDispatched means "
-        "durable registration, not model execution. Historical restore epochs remain readable. "
+        "durable registration, not model execution. claimed reserves a worker handoff; "
+        "dispatching means a handoff may have started. engineAccepted proves an application-owned "
+        "intake receipt before model execution, not running or completed execution. "
+        "An uncertain handoff becomes interrupted with reconciliationRequired=true and keeps its lane. "
+        "Dispatch phases do not prove native harness exactly-once execution or a reserved history Turn. "
+        "Historical restore epochs remain readable. "
         "This endpoint does not dispatch, cancel, repair storage, or expose model input, "
         "internal thread/agent IDs, host paths, or an unimplemented event cursor."
     ),

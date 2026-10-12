@@ -72,7 +72,8 @@ OPENAPI_TAGS: list[dict[str, str]] = [
             "Versioned AgentComputer discovery, local project intent registration, "
             "task/Run metadata, guarded Turn admission, and receipt queries. Requires a user Bearer token. "
             "Receipts preserve original admission facts; project preparation has a separate view. "
-            "Device binding, full project readiness, and task execution remain unavailable."
+            "Device binding, full project readiness, and production task execution remain unavailable. "
+            "Dispatch phases describe stored handoff facts; app intake acceptance does not prove model start."
         ),
     },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},
@@ -307,7 +308,7 @@ def configure_openapi(app: FastAPI) -> None:
 
         run = schema.get("paths", {}).get(f"{API_PREFIX}/runs/{{runID}}", {}).get("get")
         if run is not None:
-            run["responses"]["200"]["content"]["application/json"]["example"] = {
+            run_example = {
                 "runID": "55555555-5555-4555-8555-555555555555",
                 "turnID": "44444444-4444-4444-8444-444444444444",
                 "taskID": "33333333-3333-4333-8333-333333333333",
@@ -320,6 +321,50 @@ def configure_openapi(app: FastAPI) -> None:
                 "reconciliationRequired": False,
                 "createdAt": "2026-10-12T00:00:00Z",
                 "updatedAt": "2026-10-12T00:00:00Z",
+            }
+            run["responses"]["200"]["content"]["application/json"]["examples"] = {
+                "notDispatched": {
+                    "summary": "Durable registration; no engine handoff",
+                    "value": run_example,
+                },
+                "claimed": {
+                    "summary": "Worker reserved; no model start",
+                    "value": {
+                        **run_example,
+                        "dispatchPhase": "claimed",
+                        "executionEpoch": 1,
+                        "revision": 2,
+                    },
+                },
+                "dispatching": {
+                    "summary": "Handoff may have started; no intake confirmation",
+                    "value": {
+                        **run_example,
+                        "dispatchPhase": "dispatching",
+                        "executionEpoch": 1,
+                        "revision": 3,
+                    },
+                },
+                "engineAccepted": {
+                    "summary": "Application intake recorded; model start unproven",
+                    "value": {
+                        **run_example,
+                        "dispatchPhase": "engineAccepted",
+                        "executionEpoch": 1,
+                        "revision": 4,
+                    },
+                },
+                "interrupted": {
+                    "summary": "Uncertain handoff; Task and project lanes remain held",
+                    "value": {
+                        **run_example,
+                        "state": "interrupted",
+                        "dispatchPhase": "dispatching",
+                        "executionEpoch": 1,
+                        "revision": 4,
+                        "reconciliationRequired": True,
+                    },
+                },
             }
 
         for path, path_item in schema.get("paths", {}).items():

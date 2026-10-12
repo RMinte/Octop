@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow
+from octop.infra.db.repos._base import DbRow, strict_int
 
 
 @dataclass(frozen=True)
@@ -31,18 +31,18 @@ class AcTurnRow:
     @classmethod
     def from_row(cls, r: DbRow) -> AcTurnRow:
         return cls(
-            pk=int(r["id"]),
+            pk=strict_int(r["id"]),
             turn_id=str(r["turn_id"]),
             task_id=str(r["task_id"]),
             project_id=str(r["project_id"]),
-            owner_id=int(r["owner_id"]),
+            owner_id=strict_int(r["owner_id"]),
             user_message_id=str(r["user_message_id"]),
             assistant_message_id=str(r["assistant_message_id"]),
             context_mode=str(r["context_mode"]),
-            schema_version=int(r["schema_version"]),
+            schema_version=strict_int(r["schema_version"]),
             snapshot_json=str(r["snapshot_json"]),
             snapshot_digest=str(r["snapshot_digest"]),
-            created_at=int(r["created_at"]),
+            created_at=strict_int(r["created_at"]),
         )
 
 

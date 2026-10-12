@@ -511,7 +511,20 @@ async def test_openapi_documents_guarded_registration_and_current_run_view(tmp_p
         assert "202" not in turn["responses"]
         current = run["get"]["responses"]["200"]["content"]["application/json"]
         assert current["schema"]["$ref"].endswith("/RunView")
-        assert RunView.model_validate(current["example"]).executionEpoch == 0
+        assert "example" not in current
+        assert (
+            RunView.model_validate(current["examples"]["notDispatched"]["value"]).executionEpoch
+            == 0
+        )
+        assert set(current["examples"]) == {
+            "notDispatched",
+            "claimed",
+            "dispatching",
+            "engineAccepted",
+            "interrupted",
+        }
+        for example in current["examples"].values():
+            RunView.model_validate(example["value"])
         for status in ("401", "403", "404", "409", "413", "422", "503"):
             assert turn["responses"][status]["content"]["application/json"]["schema"][
                 "$ref"

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow
+from octop.infra.db.repos._base import DbRow, strict_bool_int, strict_int
 
 
 @dataclass(frozen=True)
@@ -35,22 +35,22 @@ class AcProjectPreparationRow:
     @classmethod
     def from_row(cls, r: DbRow) -> AcProjectPreparationRow:
         return cls(
-            pk=int(r["id"]),
+            pk=strict_int(r["id"]),
             preparation_id=str(r["preparation_id"]),
             project_id=str(r["project_id"]),
-            owner_id=int(r["owner_id"]),
+            owner_id=strict_int(r["owner_id"]),
             planned_agent_id=str(r["planned_agent_id"]),
             intent_json=str(r["intent_json"]),
             intent_digest=str(r["intent_digest"]),
-            restore_epoch=int(r["restore_epoch"]),
-            schema_version=int(r["schema_version"]),
-            revision=int(r["revision"]),
+            restore_epoch=strict_int(r["restore_epoch"]),
+            schema_version=strict_int(r["schema_version"]),
+            revision=strict_int(r["revision"]),
             agent_state=str(r["agent_state"]),
             workspace_state=str(r["workspace_state"]),
             reason_code=str(r["reason_code"]) if r["reason_code"] is not None else None,
-            retryable=bool(r["retryable"]),
-            created_at=int(r["created_at"]),
-            updated_at=int(r["updated_at"]),
+            retryable=strict_bool_int(r["retryable"]),
+            created_at=strict_int(r["created_at"]),
+            updated_at=strict_int(r["updated_at"]),
         )
 
 

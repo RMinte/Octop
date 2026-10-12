@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow
+from octop.infra.db.repos._base import DbRow, strict_int
 
 
 @dataclass(frozen=True)
@@ -33,20 +33,20 @@ class AcTaskRow:
     @classmethod
     def from_row(cls, r: DbRow) -> AcTaskRow:
         return cls(
-            pk=int(r["id"]),
+            pk=strict_int(r["id"]),
             task_id=str(r["task_id"]),
             project_id=str(r["project_id"]),
-            owner_id=int(r["owner_id"]),
+            owner_id=strict_int(r["owner_id"]),
             session_id=str(r["session_id"]),
             octop_thread_id=str(r["octop_thread_id"]) if r["octop_thread_id"] is not None else None,
             preparation_state=str(r["preparation_state"]),
-            revision=int(r["revision"]),
-            schema_version=int(r["schema_version"]),
-            next_sequence=int(r["next_sequence"]),
+            revision=strict_int(r["revision"]),
+            schema_version=strict_int(r["schema_version"]),
+            next_sequence=strict_int(r["next_sequence"]),
             active_run_id=str(r["active_run_id"]) if r["active_run_id"] is not None else None,
             title=str(r["title"]),
-            created_at=int(r["created_at"]),
-            updated_at=int(r["updated_at"]),
+            created_at=strict_int(r["created_at"]),
+            updated_at=strict_int(r["updated_at"]),
         )
 
 
@@ -122,3 +122,23 @@ class AcTaskRepo:
             (run_id, updated_at, task_id, owner_id),
         )
         return bool(cursor.rowcount == 1)
+
+    @staticmethod
+    def allocate_event_sequence(
+        conn: Any,
+        task_id: str,
+        owner_id: int,
+        run_id: str,
+        *,
+        expected_revision: int,
+        updated_at: int,
+    ) -> tuple[int, int] | None:
+        row = conn.execute(
+            "UPDATE ac_tasks SET next_sequence = next_sequence + 1, revision = revision + 1, "
+            "updated_at = ? WHERE task_id = ? AND owner_id = ? AND active_run_id = ? "
+            "AND revision = ? RETURNING next_sequence - 1 AS sequence, revision",
+            (updated_at, task_id, owner_id, run_id, expected_revision),
+        ).fetchone()
+        return (
+            (strict_int(row["sequence"]), strict_int(row["revision"])) if row is not None else None
+        )

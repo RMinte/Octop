@@ -24,7 +24,7 @@ from octop.infra.agentcomputer.commands import (
     decode_project_receipt,
     validate_project_receipt_binding,
 )
-from octop.infra.agentcomputer.identity import get_or_create_identity
+from octop.infra.agentcomputer.identity import IdentityError, get_or_create_identity
 from octop.infra.agentcomputer.models import (
     ProjectConfiguration,
     ProjectCreateCommand,
@@ -178,7 +178,10 @@ def _intent_for(
     except ValidationError as exc:
         raise StorageDataError("invalid saved project configuration") from exc
     if (
-        intent.model_fields_set != set(ProjectPreparationIntent.model_fields)
+        preparation.schema_version != 1
+        or preparation.restore_epoch < 1
+        or preparation.revision < 1
+        or intent.model_fields_set != set(ProjectPreparationIntent.model_fields)
         or content_digest(intent.model_dump(mode="json")) != preparation.intent_digest
         or intent.projectID != project_id
         or intent.ownerID != owner_id
@@ -203,6 +206,7 @@ def _get_project(services: SharedServices, owner_id: int, project_id: UUID) -> P
         )
         if preparation is None:
             raise StorageDataError("missing preparation journal")
+        _intent_for(services, project_id, owner_id, conn=conn)
         try:
             return ProjectView.model_validate(
                 {
@@ -231,6 +235,10 @@ def get_project(services: SharedServices, owner_id: int, project_id: UUID) -> Pr
         return _get_project(services, owner_id, project_id)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("project storage unavailable") from exc
+    except (IdentityError, StorageDataError):
+        raise
+    except (ValueError, TypeError) as exc:
+        raise StorageDataError("invalid stored project value") from exc
 
 
 def _read_claim(path: Path) -> str:
@@ -452,6 +460,10 @@ async def create_project(
         receipt = await asyncio.to_thread(_accept_project, services, owner_id, command)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("project registration unavailable") from exc
+    except (IdentityError, StorageDataError):
+        raise
+    except (ValueError, TypeError) as exc:
+        raise StorageDataError("invalid stored project registration value") from exc
     # Preparation belongs to this request; cancellation does not release its
     # cross-process lock while an owned resource operation is still finishing.
     task = asyncio.create_task(_prepare_project(services, registry, owner_id, command, receipt))
@@ -462,6 +474,10 @@ async def create_project(
             break
         except (sqlite3.DatabaseError, PostgresError) as exc:
             raise StorageUnavailableError("project preparation storage unavailable") from exc
+        except (IdentityError, StorageDataError):
+            raise
+        except (ValueError, TypeError) as exc:
+            raise StorageDataError("invalid stored project preparation value") from exc
         except asyncio.CancelledError:
             cancelled = True
             if task.cancelled():

@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 
 from octop.config import OctopConfig
-from octop.infra.agentcomputer import submission
+from octop.infra.agentcomputer import dispatch, submission
 from octop.infra.agentcomputer.capabilities import CapabilityStatus, get_capabilities
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
@@ -72,6 +72,7 @@ def allow_fixture(services, monkeypatch):
         }
     )
     monkeypatch.setattr(submission, "get_capabilities", lambda _: profile)
+    monkeypatch.setattr(dispatch, "get_capabilities", lambda _: profile)
 
 
 @pytest.fixture
@@ -217,12 +218,20 @@ def test_invalid_persisted_task_numeric_value_is_a_storage_error(control, monkey
     assert counts(services) == before
 
 
-def test_current_terminal_run_does_not_rewrite_queued_receipt(control, monkeypatch):
+async def test_current_terminal_run_does_not_rewrite_queued_receipt(control, monkeypatch):
     services, _, task_id = control
     allow_fixture(services, monkeypatch)
     command = request()
     receipt = submit_new_message(services, owner_id=1, task_id=task_id, command=command)
     raw = services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json
+    claim = dispatch.claim_run(
+        services, owner_id=1, run_id=receipt.runID, claimant_id=uuid4(), expected_revision=1
+    )
+
+    async def intake(invocation):
+        dispatch.accept_engine_entry(services, invocation)
+
+    await dispatch.dispatch_run(services, claim=claim, invoke=intake)
     with services.db.transaction() as conn:
         conn.execute(
             "UPDATE ac_runs SET state='succeeded',dispatch_phase='engineAccepted',execution_epoch=1,"
