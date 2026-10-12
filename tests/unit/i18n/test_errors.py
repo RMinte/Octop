@@ -29,6 +29,22 @@ def test_octop_error_localized_factory():
     assert err.message == "没有权限。"
 
 
+@pytest.mark.parametrize(
+    "locale,message",
+    [
+        ("zh", "此安装目录已有运行中的Octop服务"),
+        ("en", "An Octop server is already running for this installation."),
+    ],
+)
+def test_control_plane_busy_is_a_localized_conflict(locale, message):
+    err = OctopError.localized(ErrorCode.CONTROL_PLANE_BUSY, locale)
+    assert err.status == 409
+    assert err.message == message
+    assert err.to_envelope(locale=locale) == {
+        "error": {"code": "CONTROL_PLANE_BUSY", "message": message, "details": {}}
+    }
+
+
 def test_octop_error_to_envelope_with_locale():
     err = OctopError(ErrorCode.AGENT_NAME_TAKEN, "agent name 'x' already in use")
     envelope = err.to_envelope(locale="zh")

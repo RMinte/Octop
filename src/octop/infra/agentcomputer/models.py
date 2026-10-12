@@ -8,10 +8,19 @@ from __future__ import annotations
 
 import unicodedata
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 PositiveRevision = Annotated[StrictInt, Field(ge=1)]
 PermissionMode = Literal["askForApproval", "approveForMe", "fullAccess"]
@@ -366,3 +375,48 @@ class EngineInvocation(ControlModel):
     intent: DispatchIntent
     claimantID: UUID
     expectedRunRevision: PositiveRevision
+
+
+CheckpointUnknownReason = Literal[
+    "runtimeContextMismatch",
+    "checkpointerUnavailable",
+    "checkpointerNotInitialized",
+    "checkpointNotObserved",
+    "checkpointReadFailed",
+    "checkpointBindingMismatch",
+    "controlJournalUnavailable",
+    "controlJournalMismatch",
+]
+
+
+class EngineCheckpointObservation(ControlModel):
+    """Read-only request correlation; never a model-start or recovery authorization."""
+
+    schemaVersion: Literal[1]
+    engineRequestID: UUID
+    dispatchID: UUID
+    runID: UUID
+    turnID: UUID
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    status: Literal["requestObserved", "unknown"]
+    reasonCode: CheckpointUnknownReason | None
+    checkpointID: UUID | None
+    checkpointNamespace: Literal[""] | None
+
+    @model_validator(mode="after")
+    def observation_shape(self) -> Self:
+        if self.status == "requestObserved":
+            if (
+                self.reasonCode is not None
+                or self.checkpointID is None
+                or self.checkpointNamespace != ""
+            ):
+                raise ValueError("observed request requires an exact root checkpoint")
+        elif (
+            self.reasonCode is None
+            or self.checkpointID is not None
+            or self.checkpointNamespace is not None
+        ):
+            raise ValueError("unknown request cannot expose an unverified checkpoint")
+        return self

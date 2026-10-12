@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, bool_int, strict_bool_int, strict_int
@@ -52,6 +53,21 @@ class AcRunRow:
         )
 
 
+@dataclass(frozen=True)
+class AcRunRecoveryCandidate:
+    pk: int
+    run_id: str
+    owner_id: int
+
+    @classmethod
+    def from_row(cls, r: DbRow) -> AcRunRecoveryCandidate:
+        pk, owner_id = strict_int(r["id"]), strict_int(r["owner_id"])
+        run_id = r["run_id"]
+        if pk < 1 or owner_id < 1 or type(run_id) is not str or str(UUID(run_id)) != run_id:
+            raise ValueError("Invalid stored recovery candidate identity")
+        return cls(pk=pk, run_id=run_id, owner_id=owner_id)
+
+
 class AcRunRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
@@ -73,6 +89,36 @@ class AcRunRepo:
             "SELECT * FROM ac_runs WHERE run_id = ? AND owner_id = ?", (run_id, owner_id)
         ).fetchone()
         return AcRunRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def recovery_high_watermark(conn: Any) -> int:
+        row = conn.execute(
+            "SELECT MAX(id) AS through_pk FROM ac_runs "
+            "WHERE state IN ('queued', 'running', 'waitingApproval', 'waitingInput') "
+            "AND dispatch_phase IN ('claimed', 'dispatching', 'engineAccepted') "
+            "AND reconciliation_required = 0"
+        ).fetchone()
+        if row is None or row["through_pk"] is None:
+            return 0
+        value = strict_int(row["through_pk"])
+        if value < 1:
+            raise ValueError("Invalid stored recovery high watermark")
+        return value
+
+    @staticmethod
+    def list_recovery_candidates(
+        conn: Any, box_id: str, *, after_pk: int, through_pk: int
+    ) -> list[AcRunRecoveryCandidate]:
+        rows = conn.execute(
+            "SELECT r.id, r.run_id, r.owner_id FROM ac_runs r JOIN ac_projects p "
+            "ON p.project_id = r.project_id AND p.owner_id = r.owner_id "
+            "WHERE p.box_id = ? AND r.id > ? AND r.id <= ? "
+            "AND r.state IN ('queued', 'running', 'waitingApproval', 'waitingInput') "
+            "AND r.dispatch_phase IN ('claimed', 'dispatching', 'engineAccepted') "
+            "AND r.reconciliation_required = 0 ORDER BY r.id LIMIT 100",
+            (box_id, after_pk, through_pk),
+        ).fetchall()
+        return [AcRunRecoveryCandidate.from_row(row) for row in rows]
 
     @staticmethod
     def claim(

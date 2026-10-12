@@ -6,6 +6,7 @@ import click
 
 from octop.cli.support.errors import fail_octop
 from octop.config import env_bind_overrides
+from octop.infra.agentcomputer.bootstrap import DaemonBootstrap
 from octop.infra.errors import OctopError, corrupt_config_error
 from octop.infra.utils.json_file import (
     JsonFileCorruptError,
@@ -173,22 +174,24 @@ def run(
     flags > ``OCTOP_BIND_HOST``/``OCTOP_PORT`` env > ``~/.octop/config.json``
     > launch defaults. When ``--host`` or ``--port`` is passed on the CLI,
     that override is persisted to ``config.json`` immediately before uvicorn
-    starts.
+    starts, after acquiring this installation's daemon lifetime lock.
     """
     cli_host, cli_port = host, port
     try:
-        host, port = resolve_bind(host, port)
-        if cli_host is not None or cli_port is not None:
-            _save_configfile_overrides(cli_host, cli_port)
+        with DaemonBootstrap(PathLayout.from_env().agentcomputer_identity.parent) as guard:
+            host, port = resolve_bind(host, port)
+            if cli_host is not None or cli_port is not None:
+                _save_configfile_overrides(cli_host, cli_port)
+            certfile, keyfile = _maybe_generate_self_signed(ssl, ssl_certfile, ssl_keyfile)
+            _run_uvicorn(
+                host=host,
+                port=port,
+                reload=reload,
+                workers=workers,
+                log_level=log_level,
+                ssl_certfile=certfile,
+                ssl_keyfile=keyfile,
+                daemon_bootstrap=guard,
+            )
     except OctopError as exc:
         fail_octop(exc)
-    certfile, keyfile = _maybe_generate_self_signed(ssl, ssl_certfile, ssl_keyfile)
-    _run_uvicorn(
-        host=host,
-        port=port,
-        reload=reload,
-        workers=workers,
-        log_level=log_level,
-        ssl_certfile=certfile,
-        ssl_keyfile=keyfile,
-    )

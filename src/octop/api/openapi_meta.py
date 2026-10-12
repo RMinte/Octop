@@ -74,6 +74,8 @@ OPENAPI_TAGS: list[dict[str, str]] = [
             "Receipts preserve original admission facts; project preparation has a separate view. "
             "Device binding, full project readiness, and production task execution remain unavailable. "
             "Dispatch phases describe stored handoff facts; app intake acceptance does not prove model start."
+            " Daemon bootstrap can conservatively fence unresolved dispatch facts before runtime; "
+            "full recovery, user cancellation, and production execution remain unavailable."
         ),
     },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},

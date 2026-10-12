@@ -11,6 +11,8 @@ import pytest
 from click.testing import CliRunner
 
 from octop.cli.main import cli
+from octop.infra.agentcomputer.bootstrap import DaemonBootstrap
+from octop.infra.errors import ErrorCode, OctopError
 
 
 def test_run_help_lists_finnie_aligned_flags() -> None:
@@ -28,6 +30,20 @@ def test_run_help_lists_finnie_aligned_flags() -> None:
         "--ssl-keyfile",
     ):
         assert flag in result.output, f"missing {flag} in --help"
+
+
+def test_conflicting_daemon_options_and_ssl_do_not_write_config(monkeypatch, tmp_path):
+    _patch_home(monkeypatch, tmp_path)
+    config = tmp_path / "config.json"
+    original = b'{"bind_host":"127.0.0.1","port":8090,"preserved":"fixture"}\n'
+    config.write_bytes(original)
+    with DaemonBootstrap(tmp_path / "agentcomputer-control"):
+        result = CliRunner().invoke(cli, ["run", "--host", "0.0.0.0", "--port", "8091", "--ssl"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception.__cause__, OctopError)
+    assert result.exception.__cause__.code == ErrorCode.CONTROL_PLANE_BUSY
+    assert config.read_bytes() == original
+    assert not (tmp_path / "ssl").exists()
 
 
 def test_run_dispatches_to_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -51,6 +51,14 @@ def _read_identity(path: Path) -> ControlIdentity:
         raise IdentityError("invalid control identity") from exc
 
 
+def read_identity(path: Path) -> ControlIdentity:
+    """Read an existing identity; recovery never initializes a new installation."""
+    try:
+        return _read_identity(path)
+    except FileNotFoundError as exc:
+        raise IdentityError("control identity is missing") from exc
+
+
 def _sync_directory(directory: Path) -> None:
     if os.name != "posix":
         return

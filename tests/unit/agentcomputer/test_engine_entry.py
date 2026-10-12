@@ -74,6 +74,7 @@ class EngineFixture:
     invocation: EngineInvocation | None = None
     failure: Exception | None = None
     tools: list[Any] | None = None
+    checkpointer: Any = None
 
     async def prepare(self, invocation: EngineInvocation) -> HarnessAgent:
         self.invocation = invocation
@@ -82,6 +83,7 @@ class EngineFixture:
             row = await asyncio.to_thread(self.services.agent_repo.get, snapshot.agentID)
             assert row is not None and row.config_json is not None
             workspace_config = json.loads(row.config_json)
+            saver = self.checkpointer if self.checkpointer is not None else InMemorySaver()
             cfg = HarnessAgentConfig(
                 name="managed-engine-fixture",
                 workspace_dir=workspace_config["workspace_dir"],
@@ -89,7 +91,7 @@ class EngineFixture:
                 backend=workspace_config["backend"],
                 default_model=snapshot.projectConfiguration.modelRef,
                 system_prompt=snapshot.projectConfiguration.instructions,
-                checkpointer=InMemorySaver(),
+                checkpointer=saver,
                 middleware=[EngineEntryMiddleware(self.services, invocation)],
                 tools=self.tools or [],
                 bootstrap_enabled=False,
@@ -117,7 +119,7 @@ class EngineFixture:
             )
             assert self.agent.config.providers == []
             assert self.agent.model_factory.provider_configs() == []
-            assert isinstance(self.agent.checkpointer, InMemorySaver)
+            assert self.agent.checkpointer is saver
         return self.agent
 
     async def invoke(self, invocation: EngineInvocation) -> None:
@@ -387,6 +389,28 @@ async def test_runtime_workspace_config_must_match_registered_managed_metadata(e
             agent.config.system_files_path = ".other-system"
         try:
             await invoke_engine_entry(agent, invocation)
+        except Exception as exc:
+            entry.failure = exc
+            raise
+
+    with pytest.raises(CommandAdmissionError, match="accessDenied"):
+        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=altered)
+    assert entry.failure.reason == "engineContextMismatch"
+    assert entry.model.calls == 0
+    assert entry.current_claim().engineReceipt is None
+
+
+@pytest.mark.parametrize(
+    "field", ["ac_schema_version", "ac_owner_id", "ac_run_id", "ac_intent_digest"]
+)
+async def test_native_metadata_cannot_override_server_binding_before_acceptance(entry, field):
+    async def altered(invocation):
+        agent = await entry.prepare(invocation)
+        request = build_engine_request(invocation)
+        request.metadata[field] = True if field in {"ac_schema_version", "ac_owner_id"} else "wrong"
+        try:
+            async for _ in agent.stream(request, protocol="langgraph"):
+                pass
         except Exception as exc:
             entry.failure = exc
             raise

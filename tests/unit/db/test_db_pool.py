@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +26,88 @@ def test_db_pool_creates_file(tmp_path: Path):
     db_path = tmp_path / "octop.db"
     SqlitePool(db_path)
     assert db_path.exists()
+
+
+class _ObservedClose:
+    """Keep a broken close implementation from crashing while the assertion fails."""
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        entered: threading.Event,
+        allowed: threading.Event,
+    ) -> None:
+        self.connection = connection
+        self.entered = entered
+        self.allowed = allowed
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.connection, name)
+
+    def close(self) -> None:
+        self.entered.set()
+        assert self.allowed.wait(5)
+        self.connection.close()
+
+
+@pytest.mark.parametrize("scope", ["connect", "transaction"])
+def test_pool_close_waits_for_active_connection_or_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    pool = SqlitePool(tmp_path / "close-waits.db")
+    close_entered, close_allowed = threading.Event(), threading.Event()
+    started, finished = threading.Event(), threading.Event()
+    failures: list[BaseException] = []
+    connection = pool._conn
+    monkeypatch.setattr(pool, "_conn", _ObservedClose(connection, close_entered, close_allowed))
+
+    def close() -> None:
+        started.set()
+        try:
+            pool.close()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=close)
+    try:
+        with getattr(pool, scope)() as conn:
+            conn.execute("CREATE TABLE close_fixture(value INTEGER NOT NULL)")
+            conn.execute("INSERT INTO close_fixture VALUES(7)")
+            worker.start()
+            assert started.wait(5)
+            # Closing must not even reach the real connection while another
+            # thread owns connect()/transaction(), including its final COMMIT.
+            assert not close_entered.wait(0.1)
+            assert not finished.is_set()
+        assert close_entered.wait(5)
+    finally:
+        # The context has exited before letting sqlite3.Connection.close run,
+        # even if the negative assertion exposed a regression above.
+        close_allowed.set()
+        if worker.ident is not None:
+            worker.join(timeout=5)
+        pool.close()
+    assert not worker.is_alive() and finished.is_set()
+    assert failures == []
+    with sqlite3.connect(pool.path) as reopened:
+        assert reopened.execute("SELECT value FROM close_fixture").fetchone()[0] == 7
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"), pool.connect() as conn:
+        conn.execute("SELECT 1")
+
+
+def test_pool_close_is_idempotent_and_closed_operations_raise_programming_error(
+    tmp_path: Path,
+) -> None:
+    pool = SqlitePool(tmp_path / "closed.db")
+    pool.close()
+    pool.close()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"), pool.connect() as conn:
+        conn.execute("SELECT 1")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"), pool.transaction():
+        pass
+    pool.close()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX-only mode bits")

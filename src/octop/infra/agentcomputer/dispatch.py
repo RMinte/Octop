@@ -26,7 +26,12 @@ from octop.infra.agentcomputer.commands import (
     canonical_json,
     content_digest,
 )
-from octop.infra.agentcomputer.identity import ControlIdentity, get_or_create_identity
+from octop.infra.agentcomputer.identity import (
+    ControlIdentity,
+    IdentityError,
+    get_or_create_identity,
+    read_identity,
+)
 from octop.infra.agentcomputer.models import (
     DispatchIntent,
     EngineEntryReceipt,
@@ -244,7 +249,7 @@ def _payload(claim: RunClaim) -> dict[str, Any]:
 
 
 def get_claim(services: SharedServices, *, owner_id: int, run_id: UUID) -> RunClaim | None:
-    identity = get_or_create_identity(services.paths.agentcomputer_identity)
+    identity = _existing_recovery_identity(services)
     with _transaction(services) as conn:
         bound = load_bound_run(
             services, conn, owner_id=owner_id, run_id=run_id, box_id=identity.boxID
@@ -462,7 +467,7 @@ def validate_engine_execution(services: SharedServices, invocation: EngineInvoca
 def interrupt_uncertain_run(services: SharedServices, *, claim: RunClaim) -> RunClaim:
     # Recovery does not require current execution availability; it only tightens
     # the existing lane and never starts/requeues/releases anything.
-    identity = get_or_create_identity(services.paths.agentcomputer_identity)
+    identity = _existing_recovery_identity(services)
     if identity.boxID != claim.intent.boxID:
         raise StorageDataError("recovery installation mismatch")
     with _transaction(services) as conn:
@@ -487,31 +492,85 @@ def interrupt_uncertain_run(services: SharedServices, *, claim: RunClaim) -> Run
             return current
         if bound.run.dispatch_phase not in {"dispatching", "engineAccepted"}:
             raise CommandAdmissionError("revisionConflict")
-        now = int(datetime.now(UTC).timestamp() * 1000)
-        run = services.ac_run_repo.mark_interrupted(
-            conn,
-            bound.run.run_id,
-            bound.run.owner_id,
-            current.runRevision,
-            current.intent.executionEpoch,
-            updated_at=now,
-        )
-        if run is None:
-            raise CommandAdmissionError("revisionConflict")
-        updated = current.model_copy(update={"runRevision": run.revision})
-        _event(
-            services,
-            conn,
-            bound,
-            "run.interrupted",
-            {
-                **_payload(updated),
-                "reasonCode": "dispatchOutcomeUnknown",
-                "reconciliationRequired": True,
-            },
-            now,
-        )
-        return updated
+        return _tighten_dispatch(services, conn, bound, current, "dispatchOutcomeUnknown")
+
+
+def _existing_recovery_identity(services: SharedServices) -> ControlIdentity:
+    try:
+        return read_identity(services.paths.agentcomputer_identity)
+    except IdentityError as exc:
+        raise StorageDataError("invalid existing recovery identity") from exc
+    except OSError as exc:
+        raise StorageUnavailableError("recovery identity storage unavailable") from exc
+
+
+def _tighten_dispatch(
+    services: SharedServices,
+    conn: Any,
+    bound: BoundRun,
+    current: RunClaim,
+    reason_code: str,
+) -> RunClaim:
+    now = int(datetime.now(UTC).timestamp() * 1000)
+    run = services.ac_run_repo.mark_interrupted(
+        conn,
+        bound.run.run_id,
+        bound.run.owner_id,
+        current.runRevision,
+        current.intent.executionEpoch,
+        updated_at=now,
+    )
+    if run is None:
+        raise CommandAdmissionError("revisionConflict")
+    updated = current.model_copy(update={"runRevision": run.revision})
+    _event(
+        services,
+        conn,
+        bound,
+        "run.interrupted",
+        {
+            **_payload(updated),
+            "reasonCode": reason_code,
+            "reconciliationRequired": True,
+        },
+        now,
+    )
+    return updated
+
+
+def interrupt_startup_run(
+    services: SharedServices, *, owner_id: int, run_id: UUID, box_id: UUID
+) -> bool:
+    """Fence a persisted claim without asserting its old execution process died."""
+    identity = _existing_recovery_identity(services)
+    if identity.boxID != box_id:
+        raise StorageDataError("startup recovery installation mismatch")
+    with _transaction(services) as conn:
+        if not services.ac_command_repo.lock_owner_for_recovery(conn, owner_id):
+            raise StorageDataError("missing recovery owner")
+        if not services.ac_run_repo.lock_for_update(conn, str(run_id), owner_id):
+            raise StorageDataError("missing recovery run")
+        bound = _bound(services, conn, owner_id, run_id, box_id)
+        current = validate_dispatch_binding(services, conn, bound)
+        if current is None:
+            raise StorageDataError("missing startup dispatch journal")
+        if bound.run.state in {"succeeded", "failed", "stopped"} or (
+            bound.run.state == "interrupted" and bound.run.reconciliation_required
+        ):
+            return False
+        if bound.run.dispatch_phase not in {"claimed", "dispatching", "engineAccepted"}:
+            raise StorageDataError("invalid startup dispatch phase")
+        task = services.ac_task_repo.get_in_transaction(conn, bound.run.task_id, owner_id)
+        project = services.ac_project_repo.get_in_transaction(conn, bound.run.project_id, owner_id)
+        if (
+            task is None
+            or project is None
+            or task.active_run_id != bound.run.run_id
+            or project.active_run_id != bound.run.run_id
+        ):
+            raise StorageDataError("invalid startup recovery lane")
+        _tighten_dispatch(services, conn, bound, current, "restartExecutionOwnerUnknown")
+        return True
 
 
 async def dispatch_run(

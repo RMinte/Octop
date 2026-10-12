@@ -8,13 +8,14 @@ import logging
 import os
 import shutil
 import time
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from octop.config import OctopConfig, load_config
+from octop.infra.agentcomputer.bootstrap import DaemonBootstrap, settle_task
 from octop.infra.agents.experts.catalog import ExpertCatalog, default_library_root
 from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.plugins.manager import PluginManager
@@ -245,7 +246,9 @@ class AppRuntime:
 
 
 class OctopServer:
-    def __init__(self, home: Path | None = None) -> None:
+    def __init__(
+        self, home: Path | None = None, *, daemon_bootstrap: DaemonBootstrap | None = None
+    ) -> None:
         self._home = home or PathLayout.from_env().root
         self.paths = PathLayout(self._home)
         self.config: OctopConfig | None = None
@@ -261,6 +264,7 @@ class OctopServer:
         self._ldap_service: LdapAuthService | None = None
         self._ldap_bind_throttle: LdapBindThrottle | None = None
         self._ldap_bind_throttle_services: SharedServices | None = None
+        self._agentcomputer_bootstrap = daemon_bootstrap
 
     # Backward compat: expose user_manager directly
     @property
@@ -326,6 +330,15 @@ class OctopServer:
     async def start(self) -> None:
         if self._started:
             return
+        if self._agentcomputer_bootstrap is not None:
+            await self._agentcomputer_bootstrap.acquire()
+        try:
+            await self._start()
+        except BaseException:
+            await self.stop()
+            raise
+
+    async def _start(self) -> None:
         self.paths.ensure_root()
         # fnOS/容器内非 root 用户场景：把用户级 npm 全局 bin 目录（~/.npm-global）
         # 纳入进程 PATH，保证连接器 CLI（wecom-cli / lark-cli）可被检测与调用。
@@ -409,6 +422,28 @@ class OctopServer:
         assert self.expert_catalog is not None
         assert self.plugin_manager is not None
 
+        cleanup = AsyncExitStack()
+        try:
+            if self._agentcomputer_bootstrap is not None:
+                await self._agentcomputer_bootstrap.recover(self.services)
+            await self._construct_runtime(config, cleanup)
+        except BaseException:
+            try:
+                await settle_task(asyncio.create_task(cleanup.aclose()))
+            finally:
+                self.app_runtime = None
+                await self._close_database()
+            raise
+        else:
+            # Completed AppRuntime is now owned by stop(); the stack exists only
+            # to close components created before a partially failed boot.
+            cleanup.pop_all()
+
+    async def _construct_runtime(self, config: OctopConfig, cleanup: AsyncExitStack) -> None:
+        assert self.services is not None
+        assert self.expert_catalog is not None
+        assert self.plugin_manager is not None
+
         from octop.infra.utils.browser_media import (  # noqa: PLC0415
             configure_browser_idle_timeout,
         )
@@ -422,6 +457,7 @@ class OctopServer:
             expert_catalog=self.expert_catalog,
             plugin_manager=self.plugin_manager,
         )
+        cleanup.push_async_callback(registry.shutdown)
 
         from octop.infra.history.trajectory.live import TrajectoryLiveBus  # noqa: PLC0415
         from octop.infra.history.trajectory.service import TrajectoryService  # noqa: PLC0415
@@ -450,6 +486,11 @@ class OctopServer:
                 self.services.trajectory_event_repo,
                 enabled=config.history_v2_enabled,
             )
+
+            async def close_history() -> None:
+                await asyncio.to_thread(history_archive.store.close)
+
+            cleanup.push_async_callback(close_history)
             trajectory_store = ArchiveTrajectoryStore(history_archive)
         trajectory_service = TrajectoryService(
             trajectory_store,
@@ -462,6 +503,7 @@ class OctopServer:
             trajectory_service=trajectory_service,
             history_archive=history_archive,
         )
+        cleanup.push_async_callback(gateway.shutdown)
         await gateway.boot()
 
         from octop import __version__  # noqa: PLC0415
@@ -487,6 +529,7 @@ class OctopServer:
             repos=self.services.repos,
             timezone=config.default_timezone,
         )
+        cleanup.push_async_callback(cron_mgr.shutdown)
         await cron_mgr.boot()
 
         from octop.infra.setup.tls.renewal import install_auto_renewal_job
@@ -517,12 +560,14 @@ class OctopServer:
             user_repo=self.services.repos.user_repo,
             default_timezone=config.default_timezone,
         )
+        cleanup.push_async_callback(proactive_scheduler.shutdown)
         registry.set_proactive_scheduler(proactive_scheduler)
 
         await registry.boot()
         await gateway.refresh_media_backends()
 
         user_mgr = UserManager(self.services)
+        cleanup.push_async_callback(user_mgr.shutdown_all)
         await user_mgr.boot()
         await proactive_scheduler.start_all()
 
@@ -606,8 +651,25 @@ class OctopServer:
                 wizard_home / WIZARD_FILE_NAME,
             )
 
+    async def _close_database(self) -> None:
+        services = self.services
+        if services is not None:
+            _, cancelled = await settle_task(
+                asyncio.create_task(asyncio.to_thread(services.db.close))
+            )
+            self.services = None
+            if cancelled:
+                raise asyncio.CancelledError
+
     async def stop(self) -> None:
-        if not self._started:
+        _, cancelled = await settle_task(asyncio.create_task(self._stop()))
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _stop(self) -> None:
+        if not self._started and self.services is None and self.app_runtime is None:
+            if self._agentcomputer_bootstrap is not None:
+                await self._agentcomputer_bootstrap.close()
             return
         try:
             from octop.infra.connectors.gateway import agently_auth
@@ -621,16 +683,18 @@ class OctopServer:
                 await rt.agent_registry.shutdown()
                 await rt.user_manager.shutdown_all()
                 if rt.history_archive is not None:
-                    rt.history_archive.store.close()
+                    await asyncio.to_thread(rt.history_archive.store.close)
             from octop.infra.backend.browse import dispose_all_browse_sessions
 
             dispose_all_browse_sessions()
         finally:
-            if self.services is not None:
-                self.services.db.close()
-            self.services = None
-            self.app_runtime = None
-            self._started = False
+            try:
+                await self._close_database()
+            finally:
+                self.app_runtime = None
+                self._started = False
+                if self._agentcomputer_bootstrap is not None:
+                    await self._agentcomputer_bootstrap.close()
             logger.info("octop server stopped")
 
     # ----- helpers -----
