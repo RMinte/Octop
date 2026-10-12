@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, bool_int, map_rows, now_ts
@@ -164,31 +165,67 @@ class ThreadRepo:
     ) -> None:
         ts = now_ts()
         with self._db.transaction() as conn:
-            conn.execute(
-                "INSERT INTO threads(thread_id, agent_id, user_id, channel_type, "
-                "session_key, title, last_active, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    thread_id,
-                    agent_id,
-                    user_id,
-                    channel_type,
-                    session_key,
-                    clip_thread_title(title) if title else None,
-                    ts if last_active is None else last_active,
-                    ts,
-                ),
+            self.insert_in_transaction(
+                conn,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                user_id=user_id,
+                channel_type=channel_type,
+                session_key=session_key,
+                title=title,
+                last_active=ts if last_active is None else last_active,
+                created_at=ts,
             )
-            conn.execute(
-                "INSERT INTO thread_history_projection(thread_id, status, updated_at, error) "
-                "VALUES (?, 'ready', ?, NULL) ON CONFLICT(thread_id) DO NOTHING",
-                (thread_id, ts),
-            )
+
+    @staticmethod
+    def insert_in_transaction(
+        conn: Any,
+        *,
+        thread_id: str,
+        agent_id: str,
+        user_id: int,
+        channel_type: str,
+        session_key: str,
+        title: str | None = None,
+        last_active: int,
+        created_at: int,
+    ) -> None:
+        """Strict insert plus empty history projection; timestamps are Unix seconds."""
+        conn.execute(
+            "INSERT INTO threads(thread_id, agent_id, user_id, channel_type, "
+            "session_key, title, last_active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                thread_id,
+                agent_id,
+                user_id,
+                channel_type,
+                session_key,
+                clip_thread_title(title) if title else None,
+                last_active,
+                created_at,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO thread_history_projection(thread_id, status, updated_at, error) "
+            "VALUES (?, 'ready', ?, NULL) ON CONFLICT(thread_id) DO NOTHING",
+            (thread_id, created_at),
+        )
 
     def get(self, thread_id: str) -> ThreadRow | None:
         with self._db.connect() as conn:
-            r = conn.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            return self.get_in_transaction(conn, thread_id)
+
+    @staticmethod
+    def get_in_transaction(conn: Any, thread_id: str) -> ThreadRow | None:
+        r = conn.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
         return ThreadRow.from_row(r) if r else None
+
+    def is_task_thread(self, thread_id: str) -> bool:
+        with self._db.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM ac_tasks WHERE octop_thread_id = ? LIMIT 1", (thread_id,)
+            ).fetchone()
+        return row is not None
 
     def list_by_agent(self, *, agent_id: str, limit: int = 50) -> list[ThreadRow]:
         # last_active=0 is "no turns yet" (has_messages sentinel). Fall back to

@@ -258,6 +258,7 @@ async def test_openapi_documents_receipt_as_immutable_acceptance(tmp_path: Path)
         assert {item["$ref"].rsplit("/", 1)[1] for item in response["schema"]["anyOf"]} == {
             "CommandReceipt",
             "ProjectCreateReceipt",
+            "TaskCreateReceipt",
         }
         example = response["example"]
         assert CommandReceipt.model_validate(example).runState == "queued"

@@ -7,6 +7,7 @@ from typing import Any
 
 from octop.infra.db.repos.sessions import SessionRepo, SessionRow
 from octop.infra.db.repos.threads import ThreadRepo, ThreadRow
+from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.utils.ulid import new_ulid
 
 
@@ -15,6 +16,7 @@ class ThreadRegistry:
 
     CHANNEL_DASHBOARD = "dashboard"
     CHANNEL_CLI = "cli"
+    CHANNEL_AGENTCOMPUTER = "agentcomputer"
     CHAT_TYPE_DM = "dm"
     CHAT_TYPE_GROUP = "group"
 
@@ -96,6 +98,15 @@ class ThreadRegistry:
             channel_chat_type=ThreadRegistry.CHAT_TYPE_DM,
         )
 
+    @classmethod
+    def task_key(cls, *, agent_id: str, task_id: str) -> str:
+        return cls.make_key(
+            agent_id=agent_id,
+            channel_type=cls.CHANNEL_AGENTCOMPUTER,
+            channel_subject_id=task_id,
+            channel_chat_type=cls.CHAT_TYPE_DM,
+        )
+
     def __init__(self, *, session_repo: SessionRepo, thread_repo: ThreadRepo) -> None:
         self._sessions = session_repo
         self._threads = thread_repo
@@ -106,6 +117,88 @@ class ThreadRegistry:
         self._sessions = session_repo
         self._threads = thread_repo
 
+    @classmethod
+    def _reserved_key(cls, session_key: str) -> bool:
+        parts = session_key.split(":", 3)
+        return len(parts) >= 2 and parts[1] == cls.CHANNEL_AGENTCOMPUTER
+
+    @staticmethod
+    def _reject_task_binding() -> None:
+        raise OctopError.localized(ErrorCode.FORBIDDEN, details={"reason": "managedTaskBinding"})
+
+    def _assert_legacy_channel(self, channel_type: str) -> None:
+        if channel_type == self.CHANNEL_AGENTCOMPUTER:
+            self._reject_task_binding()
+
+    def _assert_legacy_thread(self, thread_id: str) -> None:
+        row = self._threads.get(thread_id)
+        if self._threads.is_task_thread(thread_id) or (
+            row is not None
+            and (
+                row.channel_type == self.CHANNEL_AGENTCOMPUTER
+                or self._reserved_key(row.session_key)
+            )
+        ):
+            self._reject_task_binding()
+
+    def _assert_legacy_session(self, session_key: str) -> None:
+        if self._reserved_key(session_key):
+            self._reject_task_binding()
+        row = self._sessions.get(session_key)
+        if row is not None:
+            self._assert_legacy_channel(row.channel_type)
+            self._assert_legacy_thread(row.thread_id)
+
+    def require_legacy_binding(self, session_key: str, *, thread_id: str | None = None) -> None:
+        """Validate routing before a legacy ingress performs slash or history mutations."""
+        self._assert_legacy_session(session_key)
+        if thread_id:
+            self._assert_legacy_thread(thread_id)
+
+    def register_task_binding_in_transaction(
+        self,
+        conn: Any,
+        *,
+        agent_id: str,
+        user_id: int,
+        task_id: str,
+        thread_id: str,
+        title: str,
+        created_at: int,
+    ) -> str:
+        """Register a fixed Task binding using only the caller's connection (timestamps in seconds)."""
+        key = self.task_key(agent_id=agent_id, task_id=task_id)
+        self._threads.insert_in_transaction(
+            conn,
+            thread_id=thread_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            channel_type=self.CHANNEL_AGENTCOMPUTER,
+            session_key=key,
+            title=title,
+            last_active=0,
+            created_at=created_at,
+        )
+        self._sessions.insert_in_transaction(
+            conn,
+            session_key=key,
+            agent_id=agent_id,
+            user_id=user_id,
+            channel_type=self.CHANNEL_AGENTCOMPUTER,
+            chat_type=self.CHAT_TYPE_DM,
+            thread_id=thread_id,
+            updated_at=created_at,
+            channel_subject_id=task_id,
+            channel_chat_type=self.CHAT_TYPE_DM,
+            channel_metadata={
+                "channel_type": self.CHANNEL_AGENTCOMPUTER,
+                "user_id": user_id,
+                "task_id": task_id,
+            },
+            channel_id=None,
+        )
+        return key
+
     def _refresh_session_if_needed(
         self,
         row: SessionRow,
@@ -114,6 +207,7 @@ class ThreadRegistry:
         channel_metadata: dict[str, Any] | None,
     ) -> None:
         """Update a live session when inbound channel id or routing metadata changed."""
+        self._assert_legacy_session(row.session_key)
         merged_meta = dict(row.channel_metadata or {})
         if channel_metadata:
             merged_meta.update(channel_metadata)
@@ -154,6 +248,8 @@ class ThreadRegistry:
             channel_subject_id=channel_subject_id,
             channel_chat_type=channel_chat_type,
         )
+        self._assert_legacy_channel(channel_type)
+        self._assert_legacy_session(session_key)
         row = self._sessions.get(session_key)
         if row is not None and self._threads.get(row.thread_id) is not None:
             self._refresh_session_if_needed(
@@ -206,6 +302,8 @@ class ThreadRegistry:
         channel_metadata: dict[str, Any] | None = None,
         channel_channel_id: str | None = None,
     ) -> str:
+        self._assert_legacy_channel(channel_type)
+        self._assert_legacy_session(session_key)
         row = self._sessions.get(session_key)
         if row is not None:
             if row.agent_id != agent_id:
@@ -236,6 +334,7 @@ class ThreadRegistry:
         A session whose thread was deleted reads as unbound so callers fall
         back to the create path instead of writing turns to a dead thread.
         """
+        self._assert_legacy_session(session_key)
         row = self._sessions.get(session_key)
         if row is None or self._threads.get(row.thread_id) is None:
             return None
@@ -256,6 +355,8 @@ class ThreadRegistry:
         return [row for row in self.sessions_for_thread(thread_id) if self.is_im_session(row)]
 
     async def rebind(self, *, session_key: str, thread_id: str, agent_id: str) -> None:
+        self._assert_legacy_session(session_key)
+        self._assert_legacy_thread(thread_id)
         row = self._threads.get(thread_id)
         if row is None:
             msg = f"thread {thread_id!r} not found"
@@ -315,6 +416,8 @@ class ThreadRegistry:
             channel_subject_id=channel_subject_id,
             channel_chat_type=channel_chat_type,
         )
+        self._assert_legacy_channel(channel_type)
+        self._assert_legacy_session(session_key)
         meta = dict(channel_metadata or {})
         meta.setdefault("channel_type", channel_type)
         meta.setdefault("user_id", user_id)
@@ -345,6 +448,7 @@ class ThreadRegistry:
             return tid
 
     async def reset_by_session_key(self, session_key: str) -> str:
+        self._assert_legacy_session(session_key)
         session = self._sessions.get(session_key)
         if session is None:
             msg = f"session {session_key!r} not found"
@@ -374,12 +478,15 @@ class ThreadRegistry:
             return tid
 
     def set_title_if_null(self, thread_id: str, title: str) -> None:
+        self._assert_legacy_thread(thread_id)
         self._threads.set_title_if_null(thread_id, title)
 
     def update_title(self, thread_id: str, title: str) -> None:
+        self._assert_legacy_thread(thread_id)
         self._threads.update_title(thread_id, title)
 
     def set_pinned(self, thread_id: str, pinned: bool) -> None:
+        self._assert_legacy_thread(thread_id)
         self._threads.set_pinned(thread_id, pinned)
 
     def update_composer(
@@ -393,6 +500,7 @@ class ThreadRegistry:
         pending_plan_path: str | None | object = ...,
         hitl_policy: str | None | object = ...,
     ) -> None:
+        self._assert_legacy_thread(thread_id)
         self._threads.update_composer(
             thread_id,
             model_ref=model_ref,
@@ -404,6 +512,7 @@ class ThreadRegistry:
         )
 
     def touch_last_active(self, thread_id: str) -> None:
+        self._assert_legacy_thread(thread_id)
         self._threads.touch_last_active(thread_id)
 
     def append_artifacts(
@@ -413,6 +522,7 @@ class ThreadRegistry:
         *,
         agent_id: str = "",
     ) -> None:
+        self._assert_legacy_thread(thread_id)
         self._threads.append_artifacts(thread_id, paths, agent_id=agent_id)
 
     def get_thread(self, thread_id: str) -> ThreadRow | None:
@@ -436,6 +546,10 @@ class ThreadRegistry:
         thread_id: str | None = None,
     ) -> str:
         """Insert a thread row without rebinding the active session."""
+        self._assert_legacy_channel(channel_type)
+        self._assert_legacy_session(session_key)
+        if thread_id is not None:
+            self._assert_legacy_thread(thread_id)
         tid = thread_id or _new_thread_id()
         self._threads.insert(
             thread_id=tid,
@@ -458,6 +572,9 @@ class ThreadRegistry:
         session_key: str,
     ) -> str:
         """Insert *thread_id* if missing. Does not rebind the active session."""
+        self._assert_legacy_channel(channel_type)
+        self._assert_legacy_session(session_key)
+        self._assert_legacy_thread(thread_id)
         existing = self.get_thread(thread_id)
         if existing is not None:
             return existing.thread_id
@@ -471,16 +588,21 @@ class ThreadRegistry:
         )
 
     def delete_thread(self, thread_id: str) -> None:
+        self._assert_legacy_thread(thread_id)
         self._threads.delete(thread_id)
         self._sessions.delete_for_thread(thread_id)
 
     def increment_unread(self, session_key: str, *, delta: int = 1) -> None:
+        self._assert_legacy_session(session_key)
         self._sessions.increment_unread(session_key, delta=delta)
 
     def mark_thread_read(self, thread_id: str) -> None:
+        self._assert_legacy_thread(thread_id)
         self._sessions.clear_unread_for_thread(thread_id)
 
     def mark_agent_read(self, agent_id: str, user_id: int) -> None:
+        if self._sessions.has_task_bindings_for_agent_user(agent_id, user_id):
+            self._reject_task_binding()
         self._sessions.clear_unread_for_agent(agent_id, user_id)
 
     def unread_totals_by_agent(self, user_id: int, agent_ids: list[str]) -> dict[str, int]:

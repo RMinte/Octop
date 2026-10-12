@@ -54,6 +54,10 @@ class AcTaskRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
 
+    def get(self, task_id: str, owner_id: int) -> AcTaskRow | None:
+        with self._db.connect() as conn:
+            return self.get_in_transaction(conn, task_id, owner_id)
+
     @staticmethod
     def get_in_transaction(conn: Any, task_id: str, owner_id: int) -> AcTaskRow | None:
         row = conn.execute(
@@ -61,6 +65,50 @@ class AcTaskRepo:
             (task_id, owner_id),
         ).fetchone()
         return AcTaskRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def insert(
+        conn: Any,
+        *,
+        task_id: str,
+        project_id: str,
+        owner_id: int,
+        session_id: str,
+        octop_thread_id: str | None,
+        title: str,
+        created_at: int,
+        updated_at: int,
+        preparation_state: str = "ready",
+    ) -> AcTaskRow | None:
+        row = conn.execute(
+            "INSERT INTO ac_tasks (task_id, project_id, owner_id, session_id, "
+            "octop_thread_id, title, preparation_state, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING *",
+            (
+                task_id,
+                project_id,
+                owner_id,
+                session_id,
+                octop_thread_id,
+                title,
+                preparation_state,
+                created_at,
+                updated_at,
+            ),
+        ).fetchone()
+        return AcTaskRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def bind_thread(
+        conn: Any, task_id: str, owner_id: int, thread_id: str, *, updated_at: int
+    ) -> bool:
+        cursor = conn.execute(
+            "UPDATE ac_tasks SET octop_thread_id = ?, preparation_state = 'ready', "
+            "updated_at = ? WHERE task_id = ? AND owner_id = ? "
+            "AND preparation_state = 'pending' AND octop_thread_id IS NULL",
+            (thread_id, updated_at, task_id, owner_id),
+        )
+        return bool(cursor.rowcount == 1)
 
     @staticmethod
     def acquire_run(

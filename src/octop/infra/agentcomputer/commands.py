@@ -23,6 +23,7 @@ from octop.infra.agentcomputer.models import (
     NewMessageCommand,
     ProjectConfiguration,
     ProjectCreateReceipt,
+    TaskCreateReceipt,
 )
 from octop.infra.db.services import SharedServices
 
@@ -101,7 +102,7 @@ def _decode_receipt(raw: str, *, command_id: str, box_id: UUID, epoch: int) -> C
 
 def get_command_receipt(
     services: SharedServices, owner_id: int, command_id: UUID
-) -> CommandReceipt | ProjectCreateReceipt | None:
+) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | None:
     try:
         row = services.ac_command_repo.get(str(command_id), owner_id)
     except (sqlite3.DatabaseError, PostgresError) as exc:
@@ -111,6 +112,23 @@ def get_command_receipt(
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
     # A historic epoch is readable after a restore. The original result must
     # not be rewritten to the current epoch or treated as a fresh acceptance.
+    if row.operation == "task.create":
+        from octop.infra.agentcomputer.tasks import validate_task_receipt_binding
+
+        task_receipt = decode_task_receipt(
+            row.receipt_json,
+            command_id=row.command_id,
+            box_id=identity.boxID,
+            epoch=row.restore_epoch,
+        )
+        if (
+            row.schema_version != 1
+            or row.target_id != str(task_receipt.taskID)
+            or row.created_at != int(task_receipt.acceptedAt.timestamp() * 1000)
+        ):
+            raise StorageDataError("inconsistent task receipt metadata")
+        validate_task_receipt_binding(services, owner_id, task_receipt)
+        return task_receipt
     if row.operation == "project.create":
         project_receipt = decode_project_receipt(
             row.receipt_json,
@@ -136,6 +154,25 @@ def get_command_receipt(
         or row.created_at != int(receipt.acceptedAt.timestamp() * 1000)
     ):
         raise StorageDataError("inconsistent command metadata")
+    return receipt
+
+
+def decode_task_receipt(
+    raw: str, *, command_id: str, box_id: UUID, epoch: int
+) -> TaskCreateReceipt:
+    try:
+        receipt = TaskCreateReceipt.model_validate_json(raw)
+    except ValidationError as exc:
+        raise StorageDataError("invalid task receipt") from exc
+    if (
+        receipt.model_fields_set != set(TaskCreateReceipt.model_fields)
+        or str(receipt.commandID) != command_id
+        or receipt.boxID != box_id
+        or receipt.restoreEpoch != epoch
+        or receipt.replayed
+        or receipt.taskRevision != 1
+    ):
+        raise StorageDataError("inconsistent task receipt")
     return receipt
 
 

@@ -90,7 +90,7 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
     assert body["deviceID"] is None
     assert body["authenticationMode"] == "octopUserSession"
     assert body["restoreEpoch"] == 1
-    assert body["capabilityRevision"] == 3
+    assert body["capabilityRevision"] == 4
     assert body["supportedPermissionModes"] == []
     assert body["capabilities"]
     assert body["capabilities"]["commandReceipts"] == {
@@ -103,10 +103,15 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
         "available": False,
         "reasonCode": "executionUnavailable",
     }
+    assert body["capabilities"]["tasks"] == {
+        "supported": True,
+        "available": False,
+        "reasonCode": "executionUnavailable",
+    }
     assert all(
         item == {"supported": False, "available": False, "reasonCode": "notImplemented"}
         for name, item in body["capabilities"].items()
-        if name not in {"commandReceipts", "projects"}
+        if name not in {"commandReceipts", "projects", "tasks"}
     )
     assert body["limits"]["maxCommandBytes"] == 65536
     assert all(limit is None for name, limit in body["limits"].items() if name != "maxCommandBytes")
@@ -179,13 +184,18 @@ async def test_openapi_documents_typed_authenticated_discovery(tmp_path: Path) -
         example = operation["responses"]["200"]["content"]["application/json"]["example"]
         assert example["deviceID"] is None
         assert example["supportedPermissionModes"] == []
-        assert example["capabilityRevision"] == 3
+        assert example["capabilityRevision"] == 4
         assert example["capabilities"]["commandReceipts"] == {
             "supported": True,
             "available": True,
             "reasonCode": None,
         }
         assert example["capabilities"]["projects"] == {
+            "supported": True,
+            "available": False,
+            "reasonCode": "executionUnavailable",
+        }
+        assert example["capabilities"]["tasks"] == {
             "supported": True,
             "available": False,
             "reasonCode": "executionUnavailable",

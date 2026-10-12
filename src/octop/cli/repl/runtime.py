@@ -9,6 +9,7 @@ from typing import Any
 
 from octop.cli.repl.embedded_session import embedded_runtime
 from octop.cli.repl.turn import ChatTurnResult
+from octop.infra.agents.managed import assert_legacy_agent_access
 from octop.infra.gateway.cli import CLI_CHANNEL_ID
 from octop.infra.gateway.cli.turn import build_cli_inbound, prepare_cli_turn
 from octop.infra.server import OctopServer
@@ -72,6 +73,8 @@ class CliChatSession:
         channel_manager = self._gateway.channel_manager
         if channel_manager is None:
             raise RuntimeError("gateway not ready")
+        assert self._server.services is not None
+        assert_legacy_agent_access(self._server.services.agent_repo.get(agent_id))
 
         user_row = (
             self._server.services.user_repo.get(self._user_id) if self._server.services else None

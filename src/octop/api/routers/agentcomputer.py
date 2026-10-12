@@ -31,8 +31,11 @@ from octop.infra.agentcomputer.models import (
     ProjectCreateCommand,
     ProjectCreateReceipt,
     ProjectView,
+    TaskCreateReceipt,
+    TaskView,
 )
 from octop.infra.agentcomputer.projects import create_project, get_project
+from octop.infra.agentcomputer.tasks import get_task
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
 
@@ -47,8 +50,8 @@ logger = logging.getLogger(__name__)
     description=(
         "Requires an Octop user Bearer token in the Authorization header. "
         "User-session authentication does not bind a client device. "
-        "Local project intent registration and existing receipt queries are implemented. "
-        "Full project readiness and task execution remain unavailable. "
+        "Local project intent registration, task metadata queries, and receipt queries are implemented. "
+        "Task creation and execution remain unavailable over HTTP. "
         "Unavailable capabilities must not enable task execution in the client."
     ),
     responses={
@@ -83,7 +86,7 @@ async def capabilities(
 
 @router.get(
     "/commands/{commandID}",
-    response_model=CommandReceipt | ProjectCreateReceipt,
+    response_model=CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt,
     summary="Read an existing AgentComputer command receipt",
     description=(
         "Requires an Octop user Bearer token in the Authorization header. "
@@ -108,7 +111,7 @@ async def command_receipt(
     command_id: UUID = Path(alias="commandID", description="Public command UUID."),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_bearer_user),
-) -> CommandReceipt | ProjectCreateReceipt | JSONResponse:
+) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | JSONResponse:
     require_database(server)
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"
@@ -236,3 +239,50 @@ async def project_status(
     if project is None:
         return protocol_error_response("resourceNotFound", 404)
     return project
+
+
+@router.get(
+    "/tasks/{taskID}",
+    response_model=TaskView,
+    summary="Read an existing task's metadata and mapping state",
+    description=(
+        "Requires a user Bearer token. Returns only the authenticated user's task; "
+        "missing and other users' tasks return the same 404, including for admins. "
+        "The preparation state describes a stored session/thread mapping. "
+        "Even ready metadata has executionReady=false. Internal registration and test fixtures "
+        "do not enable HTTP task creation, message submission, or model execution. "
+        "Internal thread/agent IDs and host paths are omitted."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No task owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid task identifier"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Task mapping or storage unavailable"},
+    },
+)
+async def task_metadata(
+    response: Response,
+    task_id: UUID = Path(alias="taskID", description="Public task UUID."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> TaskView | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        task = await asyncio.get_running_loop().run_in_executor(
+            None, get_task, server.services, user.id, task_id
+        )
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during task lookup")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored task mapping is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="taskInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer task storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if task is None:
+        return protocol_error_response("resourceNotFound", 404)
+    return task

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import UNSET, DbRow, bool_int, map_rows, now_ts, optional_updates
@@ -168,7 +169,11 @@ class AgentRepo:
 
     def get(self, agent_id: str) -> AgentRow | None:
         with self._db.connect() as conn:
-            r = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
+            return self.get_in_transaction(conn, agent_id)
+
+    @staticmethod
+    def get_in_transaction(conn: Any, agent_id: str) -> AgentRow | None:
+        r = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
         return AgentRow.from_row(r) if r else None
 
     def list_by_user(self, user_id: int, *, include_disabled: bool = True) -> list[AgentRow]:

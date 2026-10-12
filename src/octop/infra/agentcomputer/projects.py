@@ -9,6 +9,7 @@ import stat
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 from psycopg import Error as PostgresError
@@ -157,10 +158,15 @@ def _accept_project(
 
 
 def _intent_for(
-    services: SharedServices, project_id: UUID, owner_id: int
+    services: SharedServices, project_id: UUID, owner_id: int, *, conn: Any = None
 ) -> ProjectPreparationIntent:
-    project = services.ac_project_repo.get(str(project_id), owner_id)
-    preparation = services.ac_project_preparation_repo.get(str(project_id), owner_id)
+    if conn is None:
+        with services.db.connect() as connection:
+            return _intent_for(services, project_id, owner_id, conn=connection)
+    project = services.ac_project_repo.get_in_transaction(conn, str(project_id), owner_id)
+    preparation = services.ac_project_preparation_repo.get_in_transaction(
+        conn, str(project_id), owner_id
+    )
     if project is None or preparation is None:
         raise StorageDataError("missing project preparation")
     try:

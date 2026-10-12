@@ -70,7 +70,7 @@ OPENAPI_TAGS: list[dict[str, str]] = [
         "name": "agentcomputer",
         "description": (
             "Versioned AgentComputer discovery, local project intent registration, "
-            "and existing command receipt queries. Requires a user Bearer token. "
+            "task metadata, and existing command receipt queries. Requires a user Bearer token. "
             "Receipts preserve original admission facts; project preparation has a separate view. "
             "Device binding, full project readiness, and task execution remain unavailable."
         ),
@@ -271,6 +271,18 @@ def configure_openapi(app: FastAPI) -> None:
                 "steps": {"agent": "verified", "workspace": "verified"},
                 "reasonCode": "providerUnavailable",
                 "retryable": True,
+                "executionReady": False,
+            }
+
+        task = schema.get("paths", {}).get(f"{API_PREFIX}/tasks/{{taskID}}", {}).get("get")
+        if task is not None:
+            task["responses"]["200"]["content"]["application/json"]["example"] = {
+                "taskID": "66666666-6666-4666-8666-666666666666",
+                "projectID": project_receipt["projectID"],
+                "sessionID": "77777777-7777-4777-8777-777777777777",
+                "title": "Registered metadata",
+                "taskRevision": 1,
+                "preparationState": "ready",
                 "executionReady": False,
             }
 

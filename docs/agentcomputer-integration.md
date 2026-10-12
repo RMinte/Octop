@@ -4,6 +4,8 @@
 
 第三轮实现项目意图、停止的默认专家和受限工作区准备，详见 [项目准备说明](agentcomputer-projects.md)。当前完整项目执行能力仍未开放。
 
+第四轮建立内部 Task/thread/session 原子映射和本人只读 Task 查询，详见 [Task 映射说明](agentcomputer-tasks.md)。真实任务创建和执行仍等待后续门禁。
+
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
 ## 仓库与版本依据
@@ -167,3 +169,15 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 本地实操：核对并停止自有 8090 进程，完整备份后升级 schema21→22，原用户和 boxID 保持。合成项目 POST 201；原收据持续 pending，GET 为 failed/providerUnavailable，agent/workspace 步骤 verified。实际重启后同命令返回相同资源，只有一个 disabled/stopped 托管专家、一个项目/journal/命令；Provider、Task、Turn、Run、事件均为 0。旧启动入口 403、超限 413、匿名/URL token 401，Scalar 项目与收据卡片及类型已检查。8088 健康仍 200，没有模型请求。
 - 本机证据：/private/tmp/octop-iteration-03-make-all-final.log、/private/tmp/octop-local-03-evidence.json、/private/tmp/octop-local-03-evidence-restart.json；完整备份位于忽略的 .runtime/backups/iteration-03-before-schema-22-20261012T114129Z。凭据、控制身份和运行数据不提交到 Git。
 - 阶段边界：M1-03 的本地资源准备部分已验证，ready 放行和托管执行入口尚未实现。M1-04 Task/thread、M1-06 派发、真实模型与执行隔离、设备配对和恢复 fencing 继续按步骤推进；PostgreSQL 只有静态核对，Ubuntu/Linux/Windows 实机未验，skipped 不计通过。
+
+## 第四轮交付状态
+
+- 基线：主目录 feature/agentcomputer-foundation @ ab454c54，继续同一 fork 功能分支。
+- 已实现：schema22 的同 conn Task 预留/绑定、严格 thread/session/历史投影写入及 TaskCreateReceipt，一次事务提交；无新增迁移，资源不随 Dashboard 当前线程切换。同命令重试、竞争和各写入点回滚均有确定性 Fixture。
+- API：新增本人 GET /tasks/{taskID}，commands 查询兼容三种原始收据；adapter0.4.0/revision4，tasks supported/unavailable，项目 ready、Task/Turn 创建 HTTP 和引擎执行仍未开放。
+- 入口保护：CLI/GlobalProcessor 在会话副作用前核对专家与路由；ThreadRegistry 保护保留 key/channel 和实际 Task 关联，普通专家不能用任意 session key/thread hint 重绑或改变 Task 线程。
+- 工程验证：最终 make all 的 Ruff、mypy 和全套非 live 测试通过，4671 passed / 23 skipped。初次多进程收集发现两个新测试参数使用随机 UUID，改为固定值后复验通过；必需提交 hook/testmon 与 Dashboard 构建随提交执行，交付仍为用户 fork 功能分支。
+- 关键复核：Task/thread/session/投影/收据全程同 conn；预留和任意后续失败整事务回滚，原收据保留 ready 映射事实与 executionReady=false。原始 session 缺字段、坏 JSON 或关联错配拒绝，不用兼容回填补造。当前 Task revision/状态不覆盖原 ACK。
+- 本地更新：核对并停止自有 8090 进程，完整备份后启动 0.4 适配；schema22 保持，原用户、停止专家、失败项目与收据字节、boxID 保持。真实数据库仍 0 Task/thread/session/Turn/Run/event；缺失 Task 404、非法 ID422、匿名/URLtoken401，Task 写路由不存在。Scalar Task 卡片、UUID、typed view 和不执行说明已检查；200 Task 由隔离 HTTP Fixture 验证。8088 健康仍 200，没有模型请求。
+- 本机证据：/private/tmp/octop-iteration-04-make-all-final.log、/private/tmp/octop-local-04-evidence.json；完整备份位于忽略的 .runtime/backups/iteration-04-before-adapter-04-20261012T122715Z，凭据和运行数据不推送。
+- 阶段边界：M1-04 的内部映射与只读查询部分已验证。真实项目 ready、受控 Task 创建/列表/状态管理、M1-05 入站/固定配置、M1-06 托管引擎派发和完整 M0/M1 仍待后续；PG 只有 SQL/约束静态核对，盒子和 Windows/Linux 实机未验，skipped 不计通过。

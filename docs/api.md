@@ -24,6 +24,11 @@ preparation progress. Full execution readiness remains unavailable. See
 [project preparation](agentcomputer-projects.md) for request fields, retry rules,
 resource ownership, and the enforced 65536-byte command limit.
 
+`GET /api/agentcomputer/v1/tasks/{taskID}` reads only the caller's existing Task
+mapping. Task creation and execution routes remain unavailable. See
+[Task mapping](agentcomputer-tasks.md) for the internal atomic registration,
+immutable receipt, and current view distinction.
+
 | Header | Value |
 |--------|-------|
 | `Authorization` | `Bearer <access_token>` from `POST /api/auth/login` |

@@ -29,7 +29,7 @@ class ControlModel(BaseModel):
             raise ValueError("version must be an integer")
         return value
 
-    @field_validator("accepted", mode="before", check_fields=False)
+    @field_validator("accepted", "executionReady", mode="before", check_fields=False)
     @classmethod
     def boolean_acceptance(cls, value: object) -> object:
         if type(value) is not bool:
@@ -170,4 +170,66 @@ class ProjectView(ControlModel):
     retryable: StrictBool
     executionReady: Literal[False] = Field(
         default=False, description="Engine ingress and execution validation remain unavailable."
+    )
+
+
+class TaskCreateCommand(ControlModel):
+    """Internal mapping registration; no HTTP creation or engine ingress yet."""
+
+    commandID: UUID
+    idempotencyKey: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    expectedRestoreEpoch: PositiveRevision
+    expectedProjectRevision: PositiveRevision
+    projectID: UUID
+    taskID: UUID
+    title: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+
+    @field_validator("title")
+    @classmethod
+    def plain_title(cls, value: str) -> str:
+        if not value.strip() or any(unicodedata.category(char) == "Cc" for char in value):
+            raise ValueError("title must contain printable text")
+        return value
+
+
+class TaskCreateReceipt(ControlModel):
+    """Immutable completed database mapping, without a model execution claim."""
+
+    protocolVersion: Literal[1] = 1
+    operation: Literal["task.create"] = "task.create"
+    boxID: UUID
+    commandID: UUID
+    receiptRevision: Literal[1] = 1
+    accepted: Literal[True] = True
+    replayed: StrictBool = False
+    acceptedAt: datetime
+    restoreEpoch: PositiveRevision
+    projectID: UUID
+    taskID: UUID
+    sessionID: UUID = Field(description="Server-assigned public session UUID; never a file path.")
+    taskRevision: PositiveRevision
+    preparationStateAtAcceptance: Literal["ready"] = Field(
+        default="ready", description="Task/thread/session mapping was committed atomically."
+    )
+    executionReady: Literal[False] = Field(
+        default=False, description="A ready mapping does not enable engine execution."
+    )
+
+    @field_validator("acceptedAt")
+    @classmethod
+    def utc_acceptance_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("acceptedAt must be UTC")
+        return value
+
+
+class TaskView(ControlModel):
+    taskID: UUID
+    projectID: UUID
+    sessionID: UUID
+    title: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    taskRevision: PositiveRevision
+    preparationState: Literal["pending", "preparing", "ready", "failed"]
+    executionReady: Literal[False] = Field(
+        default=False, description="Engine ingress remains unavailable."
     )
