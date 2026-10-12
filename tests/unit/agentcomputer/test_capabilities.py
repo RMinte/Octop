@@ -34,10 +34,10 @@ def test_capabilities_are_truthful_authenticated_discovery_data(tmp_path: Path) 
     assert response.deviceID is None
     assert response.authenticationMode == "octopUserSession"
     assert response.protocolVersion == response.minimumClientProtocolVersion == 1
-    assert response.capabilityRevision == 1
+    assert response.capabilityRevision == 2
     assert response.restoreEpoch == 1
     assert response.serverBuild.octopVersion == __version__
-    assert response.serverBuild.adapterVersion == "0.1.0"
+    assert response.serverBuild.adapterVersion == "0.2.0"
     assert response.serverBuild.imageDigest is None
     assert before <= response.serverTime <= after
     assert response.serverTime.tzinfo == UTC
@@ -67,9 +67,15 @@ def test_capabilities_are_truthful_authenticated_discovery_data(tmp_path: Path) 
         "deviceBinding",
         "recovery",
     }
+    assert data["capabilities"]["commandReceipts"] == {
+        "supported": True,
+        "available": True,
+        "reasonCode": None,
+    }
     assert all(
         value == {"supported": False, "available": False, "reasonCode": "notImplemented"}
-        for value in data["capabilities"].values()
+        for name, value in data["capabilities"].items()
+        if name != "commandReceipts"
     )
     assert all(value is None for value in data["limits"].values())
     assert pool.mock_calls == []

@@ -1,6 +1,6 @@
 # AgentComputer 与 Octop 集成
 
-本项目把 Octop 作为 AgentComputer 的盒子执行引擎。本轮先建立经过认证的能力查询和稳定服务身份，为后续项目、Task、Run 和事件协议提供入口。
+本项目把 Octop 作为 AgentComputer 的盒子执行引擎。首轮已建立认证能力查询和稳定服务身份；第二轮继续建立持久数据层、内部原子接收与已有收据查询，详细规则见 [第二轮数据层说明](agentcomputer-core.md)。
 
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
@@ -23,7 +23,7 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 | 阶段 | 交付内容 | 当前边界 |
 |---|---|---|
 | M0 环境和协议验证 | 部署输入、模型协议、隔离与容量、最小身份及能力入口 | 本轮推进可本地完成的基础；真实盒子仍待验 |
-| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 下一轮先冻结契约与数据迁移，再实现领域 |
+| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 021 数据层与内部接收基础推进中；项目准备、线程创建与派发尚未开放 |
 | M2 原生闭环 | 客户端远程会话、事件、审批、取消、正式成果及重连 | 不以实时连接成功代替可靠执行 |
 | M3 配置与恢复 | 指令/技能版本、资源、Outbox、多设备与异常对账 | 保留配置和执行快照，不盲重放 |
 | M4 调度与面板 | Schedule occurrence、Git/终端、受认证预览及资料库 | 工具隔离和项目写入规则先通过 |
@@ -32,6 +32,8 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 阶段不代表固定工期。M0 本地检查通过不能宣称模型工具续轮、Linux Shell 沙箱、真实盒子恢复或生产配对已经完成。
 
 ## 第一轮具体范围
+
+以下为首轮历史交付范围；第二轮能力和表变化见文末记录。
 
 新增 `GET /api/agentcomputer/v1/capabilities`，复用 Octop 当前登录用户认证。只有认证及系统初始化条件满足后才能查询，未认证请求不得取得服务身份信息。
 
@@ -140,3 +142,14 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 真实模型、盒子部署、数据迁移及生产发布：未执行。
 
 离线门禁复核补齐了既有 Bridge DNS 和 ONNX/Knowledge 依赖替身；FnOS 进程生命周期用例依赖 Linux /proc，改为仅在 Linux 执行。macOS 跳过明确披露，Linux CI 仍执行这些测试。测试修正不改变业务行为。
+
+## 第二轮交付状态
+
+- 基线：主目录当前 `feature/agentcomputer-foundation @ a6015dd`，保留首轮提交；仍推送同一用户 fork 功能分支。
+- 数据层：成对 021 迁移、六张控制表、RepoBundle/SharedServices 装配及同连接 repo；原子内核固定配置/请求快照、登记 Turn/Run、取得 Task/project 许可、追加事件并保存收据。
+- API：新增本人 `GET /api/agentcomputer/v1/commands/{commandID}`；adapter 0.2.0、能力 revision 2，仅 commandReceipts 查询可用。HTTP 写入与模型/工具派发仍未接入。
+- 工程验证：最终 `make all RUN='uv run --offline --no-sync' PYTEST_JOBS=4` 的 Ruff、mypy 与全套非 live 测试通过，4432 passed / 23 skipped；必需提交 hook 另运行 testmon 与 Dashboard 构建。首次全套发现 9 个旧断言仍期望 schema20，已按语义改为 21，保留原低 watermark 和未来备份版本输入。
+- 关键评审修复：持久收据必须显式包含全部字段，缺失字段不使用模型默认值补造事实；重放还校验消息与 epoch 绑定。故障/竞争 Fixture 验证一次提交全部登记，响应丢失可查原收据；真实 PG 并发尚未测试。
+- 本地升级：停止并核对自有 8090 进程，完整备份忽略目录后启动新代码；schema20→21、原用户数量及 boxID 保持，六表为空、Agent/Provider 为 0。实际认证 capabilities 200、缺失收据 404、非法 ID 422、匿名/URL token 401，8088 健康仍 200。Scalar 的收据卡片、UUID、类型和示例已实际检查；200 收据由隔离 HTTP Fixture 验证，实验实例不人为填入已接受任务。
+- 本机证据：`/private/tmp/octop-iteration-02-make-all-final.log`、`/private/tmp/octop-local-02-evidence.json`；升级前完整目录位于忽略的 `.runtime/backups/iteration-02-before-schema-21-20261012T081646Z`。备份包含控制身份和本地凭据，保留原访问权限，不提交到 Git。
+- 完整 M1、生产设备绑定、模型工具续轮、恢复 fencing、Ubuntu/Linux/Windows 实机和 PostgreSQL 实测：尚未通过。

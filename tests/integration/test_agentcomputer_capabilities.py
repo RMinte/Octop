@@ -90,11 +90,18 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
     assert body["deviceID"] is None
     assert body["authenticationMode"] == "octopUserSession"
     assert body["restoreEpoch"] == 1
+    assert body["capabilityRevision"] == 2
     assert body["supportedPermissionModes"] == []
     assert body["capabilities"]
+    assert body["capabilities"]["commandReceipts"] == {
+        "supported": True,
+        "available": True,
+        "reasonCode": None,
+    }
     assert all(
         item == {"supported": False, "available": False, "reasonCode": "notImplemented"}
-        for item in body["capabilities"].values()
+        for name, item in body["capabilities"].items()
+        if name != "commandReceipts"
     )
     assert all(limit is None for limit in body["limits"].values())
     assert before <= datetime.fromisoformat(body["serverTime"].replace("Z", "+00:00")) <= after
@@ -166,7 +173,17 @@ async def test_openapi_documents_typed_authenticated_discovery(tmp_path: Path) -
         example = operation["responses"]["200"]["content"]["application/json"]["example"]
         assert example["deviceID"] is None
         assert example["supportedPermissionModes"] == []
-        assert all(not item["available"] for item in example["capabilities"].values())
+        assert example["capabilityRevision"] == 2
+        assert example["capabilities"]["commandReceipts"] == {
+            "supported": True,
+            "available": True,
+            "reasonCode": None,
+        }
+        assert all(
+            not item["available"]
+            for name, item in example["capabilities"].items()
+            if name != "commandReceipts"
+        )
         for status in ("401", "403", "503"):
             error_schema = operation["responses"][status]["content"]["application/json"]["schema"]
             assert error_schema["$ref"].endswith("/ProtocolErrorEnvelope")

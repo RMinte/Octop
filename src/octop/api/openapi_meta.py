@@ -69,8 +69,10 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {
         "name": "agentcomputer",
         "description": (
-            "Versioned AgentComputer discovery. Requires a user Bearer token; "
-            "device binding and task execution are reported separately."
+            "Versioned AgentComputer discovery and existing command receipt queries. "
+            "Requires a user Bearer token. Receipts preserve original admission facts, "
+            "not current Run state; HTTP submission, device binding, and execution "
+            "remain unavailable."
         ),
     },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},
@@ -209,9 +211,30 @@ def configure_openapi(app: FastAPI) -> None:
         discovery = schema.get("paths", {}).get(f"{API_PREFIX}/capabilities", {}).get("get")
         if discovery is not None:
             # FastAPI's schema encoding excludes None recursively, including
-            # null values inside examples. Preserve this unavailable profile.
+            # null values inside examples. Preserve explicit unknown/unbound fields.
             example = AgentComputerCapabilitiesResponse.model_json_schema()["examples"][0]
             discovery["responses"]["200"]["content"]["application/json"]["example"] = example
+
+        receipt = schema.get("paths", {}).get(f"{API_PREFIX}/commands/{{commandID}}", {}).get("get")
+        if receipt is not None:
+            receipt["responses"]["200"]["content"]["application/json"]["example"] = {
+                "protocolVersion": 1,
+                "boxID": "11111111-1111-4111-8111-111111111111",
+                "commandID": "22222222-2222-4222-8222-222222222222",
+                "receiptRevision": 1,
+                "accepted": True,
+                "replayed": False,
+                "acceptedAt": "2026-10-12T00:00:00Z",
+                "restoreEpoch": 1,
+                "taskID": "33333333-3333-4333-8333-333333333333",
+                "turnID": "44444444-4444-4444-8444-444444444444",
+                "runID": "55555555-5555-4555-8555-555555555555",
+                "userMessageID": "66666666-6666-4666-8666-666666666666",
+                "assistantMessageID": "77777777-7777-4777-8777-777777777777",
+                "runState": "queued",
+                "taskRevision": 2,
+                "acceptedSequence": 1,
+            }
 
         for path, path_item in schema.get("paths", {}).items():
             if not path.startswith("/api/") or is_jwt_exempt_path(path):

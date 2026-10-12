@@ -42,6 +42,12 @@ def test_run_migrations_creates_tables(db: SqlitePool):
         ).fetchall()
     names = {r["name"] for r in rows}
     expected = {
+        "ac_projects",
+        "ac_tasks",
+        "ac_turns",
+        "ac_runs",
+        "ac_commands",
+        "ac_events",
         "users",
         "user_policies",
         "agents",
@@ -73,6 +79,69 @@ def test_run_migrations_creates_tables(db: SqlitePool):
     assert "knowledge_base_members" not in names
 
 
+def test_v20_database_receives_agentcomputer_core_tables(tmp_path: Path, monkeypatch) -> None:
+    """An already applied v20 must not skip the new command-admission DDL."""
+    import shutil
+
+    from octop.infra.db import migrate
+
+    old_migrations = tmp_path / "v20-migrations"
+    old_migrations.mkdir()
+    for version, source in migrate._discover("sqlite"):
+        if version <= 20:
+            shutil.copy2(source, old_migrations / source.name)
+    pool = SqlitePool(tmp_path / "upgrade.db")
+    with monkeypatch.context() as patch:
+        patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
+        run_migrations(pool)
+    with pool.connect() as conn:
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 20
+        conn.execute(
+            "INSERT INTO users(username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+            ("preserved-user", "fixture-hash", "user", 1),
+        )
+    run_migrations(pool)
+    run_migrations(pool)
+    with pool.connect() as conn:
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 21
+        assert conn.execute("SELECT username FROM users").fetchone()[0] == "preserved-user"
+        names = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert {"ac_projects", "ac_tasks", "ac_turns", "ac_runs", "ac_commands", "ac_events"} <= names
+    pool.close()
+
+
+def test_high_watermark_repairs_missing_agentcomputer_tables(tmp_path: Path, monkeypatch) -> None:
+    """Legacy version clamping must materialize v21 before reporting that version."""
+    import shutil
+
+    from octop.infra.db import migrate
+
+    old_migrations = tmp_path / "v20-migrations"
+    old_migrations.mkdir()
+    for version, source in migrate._discover("sqlite"):
+        if version <= 20:
+            shutil.copy2(source, old_migrations / source.name)
+    pool = SqlitePool(tmp_path / "clamp.db")
+    with monkeypatch.context() as patch:
+        patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
+        run_migrations(pool)
+    with pool.connect() as conn:
+        conn.execute("UPDATE _schema_version SET version = 99")
+    run_migrations(pool)
+    run_migrations(pool)
+    with pool.connect() as conn:
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 21
+        names = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert {"ac_projects", "ac_tasks", "ac_turns", "ac_runs", "ac_commands", "ac_events"} <= names
+    pool.close()
+
+
 def test_run_migrations_idempotent(db: SqlitePool):
     run_migrations(db)
     with db.connect() as conn:
@@ -99,7 +168,7 @@ def test_run_migrations_idempotent(db: SqlitePool):
         sso_indexes = {
             r["name"] for r in conn.execute("PRAGMA index_list(sso_providers)").fetchall()
         }
-    assert v == 20
+    assert v == 21
     assert "login_failed_count" in cols
     assert "login_locked_until" in cols
     assert "preferences_json" in cols
@@ -181,7 +250,7 @@ def test_migration_002_idempotent_when_column_already_present(tmp_path: Path) ->
     with pool.connect() as conn:
         v = conn.execute("SELECT version FROM _schema_version").fetchone()[0]
         cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)").fetchall()}
-    assert v == 20
+    assert v == 21
     assert "mcp_servers" in cron_cols
     assert "skill_packages" in {
         r["name"]
@@ -320,7 +389,7 @@ def test_stuck_version_6_without_permissions_column_is_repaired(tmp_path: Path) 
     with pool.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         version = conn.execute("SELECT version FROM _schema_version").fetchone()[0]
-    assert version == 20
+    assert version == 21
     assert "permissions" in cols
 
 
@@ -345,7 +414,7 @@ def test_schema_v10_without_projection_tables_is_repaired(tmp_path: Path) -> Non
         }
         kb_cols = {r["name"] for r in conn.execute("PRAGMA table_info(knowledge_bases)").fetchall()}
         cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)").fetchall()}
-    assert version == 20
+    assert version == 21
     assert {"thread_messages", "thread_history_projection", "trajectory_events"}.issubset(
         table_names
     )
@@ -380,7 +449,7 @@ def test_ahead_of_max_schema_version_clamps_to_max(tmp_path: Path) -> None:
             r["name"]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-    assert version == 20
+    assert version == 21
     assert "skill_package_id" in pkg_cols
     assert "published_expert_id" in pub_cols
     assert "user_invites" in invite_tables
@@ -463,7 +532,7 @@ def test_pre_squash_schema_version_clamped_and_knowledge_tables_filled(
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-    assert version == 20
+    assert version == 21
     assert "permissions" in user_cols
     assert {
         "published_experts",
@@ -669,7 +738,7 @@ def test_v14_to_v15_adds_sso_provider_kind_without_rebuilding(tmp_path: Path) ->
         bound = conn.execute(
             "SELECT sso_provider_id FROM users WHERE username = 'sso-admin'"
         ).fetchone()[0]
-    assert version == 20
+    assert version == 21
     assert int(row["id"]) == int(provider_id)
     assert row["kind"] == "oidc"
     assert row["extra"] == "{}"

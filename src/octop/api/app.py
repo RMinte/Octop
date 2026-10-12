@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from scalar_fastapi import get_scalar_api_reference
@@ -82,6 +83,15 @@ def _mount_routers(app: FastAPI, mounts: Sequence[_RouterMount]) -> None:
 
 
 def _install_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(RequestValidationError)
+    async def _validation(request: Request, exc: RequestValidationError) -> Response:
+        if is_agentcomputer_path(request.url.path):
+            return protocol_error_response("invalidRequest", 422)
+        # Keep legacy API validation details; protocol errors never echo input.
+        from fastapi.exception_handlers import request_validation_exception_handler
+
+        return await request_validation_exception_handler(request, exc)
+
     @app.exception_handler(OctopError)
     async def _octop(request: Request, exc: OctopError) -> JSONResponse:
         # Client responses are locale-localized; log the original English message

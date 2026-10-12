@@ -1655,6 +1655,23 @@ def _max_discovered_version(dialect: str) -> int:
     return max(versions) if versions else 0
 
 
+def _ensure_agentcomputer_core_schema(db: DatabasePool) -> None:
+    """Apply the canonical idempotent v21 DDL to normal and watermark repair paths."""
+    path = next(path for version, path in _discover(db.dialect) if version == 21)
+    sql = path.read_text(encoding="utf-8")
+    if db.dialect == "postgresql":
+        with db.transaction() as conn:
+            _apply_postgresql_migration(conn, sql)
+        return
+    with db.connect() as conn:
+        try:
+            conn.executescript(sql)
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+
+
 def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
     """Clamp develop DBs that applied split 005–009 down to the consolidated max.
 
@@ -1699,6 +1716,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
                 _ensure_thread_conversation_mode_schema(db)
             if max_version >= 18:
                 _ensure_user_role_schema(db)
+            if max_version >= 21:
+                _ensure_agentcomputer_core_schema(db)
             with db.connect() as conn:
                 conn.execute("UPDATE _schema_version SET version = %s", (max_version,))
             return
@@ -1743,6 +1762,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
         _ensure_thread_conversation_mode_schema(db)
     if max_version >= 18:
         _ensure_user_role_schema(db)
+    if max_version >= 21:
+        _ensure_agentcomputer_core_schema(db)
     with db.connect() as conn:
         conn.execute("UPDATE _schema_version SET version = ?", (max_version,))
 
@@ -1903,6 +1924,9 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
         with db.connect() as conn:
             conn.execute("UPDATE _schema_version SET version = ?", (version,))
         return
+    if version == 21:
+        _ensure_agentcomputer_core_schema(db)
+        return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
         conn.executescript(sql)
@@ -1960,3 +1984,17 @@ def run_migrations(db: DatabasePool) -> None:
     _ensure_sso_provider_kind_schema(db)
     _ensure_user_role_schema(db)
     _ensure_bridge_connections_schema(db)
+    # A restored or pre-squash DB may already report v21 while omitting its DDL.
+    # Avoid rewriting intact schemas (and their watermark) on every startup.
+    if _max_discovered_version(db.dialect) >= 21 and any(
+        not _table_exists(db, table)
+        for table in (
+            "ac_projects",
+            "ac_tasks",
+            "ac_turns",
+            "ac_runs",
+            "ac_commands",
+            "ac_events",
+        )
+    ):
+        _ensure_agentcomputer_core_schema(db)

@@ -13,7 +13,7 @@ from octop import __version__
 from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.db.services import SharedServices
 
-ADAPTER_VERSION = "0.1.0"
+ADAPTER_VERSION = "0.2.0"
 PROTOCOL_VERSION: Literal[1] = 1
 
 
@@ -40,7 +40,9 @@ class CapabilityStatus(ProtocolModel):
 class BusinessCapabilities(ProtocolModel):
     projects: CapabilityStatus
     tasks: CapabilityStatus
-    commandReceipts: CapabilityStatus
+    commandReceipts: CapabilityStatus = Field(
+        description="Queries for existing immutable receipts; submission is not enabled."
+    )
     runs: CapabilityStatus
     cancellation: CapabilityStatus
     snapshots: CapabilityStatus
@@ -100,15 +102,19 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                     "serverTime": "2026-10-12T00:00:00Z",
                     "timezone": "Asia/Shanghai",
                     "executionPlatform": {"system": "Darwin", "architecture": "arm64"},
-                    "capabilityRevision": 1,
+                    "capabilityRevision": 2,
                     "restoreEpoch": 1,
                     "supportedPermissionModes": [],
                     "capabilities": {
-                        name: {
-                            "supported": False,
-                            "available": False,
-                            "reasonCode": "notImplemented",
-                        }
+                        name: (
+                            {"supported": True, "available": True, "reasonCode": None}
+                            if name == "commandReceipts"
+                            else {
+                                "supported": False,
+                                "available": False,
+                                "reasonCode": "notImplemented",
+                            }
+                        )
                         for name in BusinessCapabilities.model_fields
                     },
                     "limits": dict.fromkeys(ServiceLimits.model_fields),
@@ -130,7 +136,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
     serverTime: datetime
     timezone: str
     executionPlatform: ExecutionPlatform
-    capabilityRevision: Literal[1] = 1
+    capabilityRevision: Literal[2] = 2
     restoreEpoch: Annotated[int, Field(strict=True, ge=1)] = Field(
         description="Persisted initial epoch; restore fencing remains unavailable."
     )
@@ -156,7 +162,7 @@ def get_capabilities(services: SharedServices) -> AgentComputerCapabilitiesRespo
         capabilities=BusinessCapabilities(
             projects=unavailable,
             tasks=unavailable,
-            commandReceipts=unavailable,
+            commandReceipts=CapabilityStatus(supported=True, available=True),
             runs=unavailable,
             cancellation=unavailable,
             snapshots=unavailable,

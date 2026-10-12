@@ -6,6 +6,12 @@ from dataclasses import dataclass
 
 from octop.config import OctopConfig
 from octop.infra.db.pool import DatabasePool
+from octop.infra.db.repos.ac_commands import AcCommandRepo
+from octop.infra.db.repos.ac_events import AcEventRepo
+from octop.infra.db.repos.ac_projects import AcProjectRepo
+from octop.infra.db.repos.ac_runs import AcRunRepo
+from octop.infra.db.repos.ac_tasks import AcTaskRepo
+from octop.infra.db.repos.ac_turns import AcTurnRepo
 from octop.infra.db.repos.agents import AgentRepo
 from octop.infra.db.repos.audit import AuditRepo
 from octop.infra.db.repos.backends import BackendRepo
@@ -38,6 +44,13 @@ from octop.infra.utils.paths import PathLayout
 class RepoBundle:
     db: DatabasePool
 
+    ac_project_repo: AcProjectRepo
+    ac_task_repo: AcTaskRepo
+    ac_turn_repo: AcTurnRepo
+    ac_run_repo: AcRunRepo
+    ac_command_repo: AcCommandRepo
+    ac_event_repo: AcEventRepo
+
     user_repo: UserRepo
     user_policy_repo: UserPolicyRepo
     invite_repo: InviteRepo
@@ -68,6 +81,12 @@ class RepoBundle:
     def from_pool(cls, db: DatabasePool) -> RepoBundle:
         return cls(
             db=db,
+            ac_project_repo=AcProjectRepo(db),
+            ac_task_repo=AcTaskRepo(db),
+            ac_turn_repo=AcTurnRepo(db),
+            ac_run_repo=AcRunRepo(db),
+            ac_command_repo=AcCommandRepo(db),
+            ac_event_repo=AcEventRepo(db),
             user_repo=UserRepo(db),
             user_policy_repo=UserPolicyRepo(db),
             invite_repo=InviteRepo(db),
@@ -105,6 +124,30 @@ class SharedServices:
     @property
     def db(self) -> DatabasePool:
         return self.repos.db
+
+    @property
+    def ac_project_repo(self) -> AcProjectRepo:
+        return self.repos.ac_project_repo
+
+    @property
+    def ac_task_repo(self) -> AcTaskRepo:
+        return self.repos.ac_task_repo
+
+    @property
+    def ac_turn_repo(self) -> AcTurnRepo:
+        return self.repos.ac_turn_repo
+
+    @property
+    def ac_run_repo(self) -> AcRunRepo:
+        return self.repos.ac_run_repo
+
+    @property
+    def ac_command_repo(self) -> AcCommandRepo:
+        return self.repos.ac_command_repo
+
+    @property
+    def ac_event_repo(self) -> AcEventRepo:
+        return self.repos.ac_event_repo
 
     @property
     def user_repo(self) -> UserRepo:
