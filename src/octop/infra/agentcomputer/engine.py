@@ -26,6 +26,7 @@ from octop_harness.agent import HarnessAgent
 from octop_harness.request import ChatRequest
 
 from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
+from octop.infra.agentcomputer.bootstrap import settled_to_thread
 from octop.infra.agentcomputer.commands import CommandAdmissionError, canonical_json, content_digest
 from octop.infra.agentcomputer.models import (
     CheckpointUnknownReason,
@@ -152,7 +153,7 @@ class EngineEntryMiddleware(AgentMiddleware[Any, Any]):
         from octop.infra.agentcomputer.dispatch import accept_engine_entry
 
         self._validate_context(state)
-        result = await asyncio.to_thread(accept_engine_entry, self._services, self.invocation)
+        result = await settled_to_thread(accept_engine_entry, self._services, self.invocation)
         if result.replayed:
             raise EngineEntryReplayed(result.receipt)
 
@@ -160,7 +161,7 @@ class EngineEntryMiddleware(AgentMiddleware[Any, Any]):
         from octop.infra.agentcomputer.dispatch import validate_engine_execution
 
         self._validate_context(state)
-        await asyncio.to_thread(validate_engine_execution, self._services, self.invocation)
+        await settled_to_thread(validate_engine_execution, self._services, self.invocation)
 
     async def awrap_tool_call(
         self,
@@ -227,12 +228,13 @@ async def invoke_engine_entry(
         or middleware is None
     ):
         raise CommandAdmissionError("accessDenied", reason="engineContextMismatch")
-    await asyncio.to_thread(_validate_registered_workspace, agent, middleware)
     if active_runs is None:
+        await settled_to_thread(_validate_registered_workspace, agent, middleware)
         async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
             pass
     else:
         async with active_runs.track(invocation):
+            await settled_to_thread(_validate_registered_workspace, agent, middleware)
             async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
                 pass
 

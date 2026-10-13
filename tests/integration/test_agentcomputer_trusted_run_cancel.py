@@ -208,7 +208,11 @@ async def test_exact_http_cancel_closes_trusted_run_stream_after_durable_request
                 )
             raise
 
-    handoff = asyncio.create_task(dispatch.dispatch_run(services, claim=claim, invoke=invoke))
+    handoff = asyncio.create_task(
+        dispatch.dispatch_run(
+            services, claim=claim, invoke=invoke, active_runs=server.agentcomputer_active_runs
+        )
+    )
     try:
         await asyncio.wait_for(blocked.wait(), timeout=10)
         running = await client.get(f"{PREFIX}/runs/{original.runID}", headers=auth)

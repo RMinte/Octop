@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -164,3 +165,99 @@ def test_completed_registration_releases_loop_affinity(prepared):
 
     asyncio.run(once())
     asyncio.run(once())
+
+
+async def test_drain_closes_admission_and_waits_for_dispatch_scope(prepared):
+    services, invocation = prepared
+    claim = dispatch.get_claim(services, owner_id=1, run_id=invocation.intent.runID)
+    assert claim is not None
+    registry = ActiveRunRegistry()
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def running_dispatch():
+        async with registry.track_dispatch(claim):
+            entered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+                raise
+
+    task = asyncio.create_task(running_dispatch())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    draining = asyncio.create_task(registry.drain())
+    try:
+        await asyncio.wait_for(cancelled.wait(), timeout=5)
+        assert not draining.done() and not task.done()
+        # An unrelated Run cannot enter the registry after shutdown starts.
+        another = claim.model_copy(
+            update={"intent": claim.intent.model_copy(update={"runID": uuid4()})}
+        )
+        with pytest.raises(CommandAdmissionError):
+            async with registry.track_dispatch(another):
+                pytest.fail("shutdown admitted a new dispatch")
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(draining, timeout=5)
+    await registry.drain()
+    with pytest.raises(CommandAdmissionError):
+        async with registry.track_dispatch(claim):
+            pytest.fail("completed shutdown admitted a new dispatch")
+
+
+async def test_drain_waits_for_workspace_validation_thread_before_stream(prepared, monkeypatch):
+    services, invocation = prepared
+    registry = ActiveRunRegistry()
+    started, release, finished = Event(), Event(), Event()
+    streamed = []
+
+    def delayed_validation(_agent, _middleware):
+        started.set()
+        try:
+            assert release.wait(timeout=10)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(engine, "_validate_registered_workspace", delayed_validation)
+    snapshot = invocation.intent.snapshot
+
+    class Agent:
+        agent_id = snapshot.agentID
+        config = SimpleNamespace(
+            default_model=snapshot.projectConfiguration.modelRef,
+            system_prompt=snapshot.projectConfiguration.instructions,
+            middleware=[engine.EngineEntryMiddleware(services, invocation)],
+        )
+
+        async def stream(self, request, *, protocol):
+            streamed.append((request, protocol))
+            yield None
+
+    task = asyncio.create_task(
+        engine.invoke_engine_entry(Agent(), invocation, active_runs=registry)
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 10)
+        draining = asyncio.create_task(registry.drain())
+
+        async def wait_for_closing():
+            while not registry.closing:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_closing(), timeout=5)
+        assert not draining.done() and not task.done()
+        assert not finished.is_set() and not streamed
+        with pytest.raises(CommandAdmissionError):
+            async with registry.track(invocation):
+                pytest.fail("shutdown admitted another engine entry")
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(draining, timeout=5)
+    assert finished.is_set() and not streamed

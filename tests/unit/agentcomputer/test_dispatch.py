@@ -15,6 +15,7 @@ from tests.unit.agentcomputer.test_submission_runs import request
 
 from octop.config import OctopConfig
 from octop.infra.agentcomputer import dispatch
+from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.capabilities import CapabilityStatus, get_capabilities
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
@@ -22,6 +23,7 @@ from octop.infra.agentcomputer.commands import (
     admit_new_message,
     get_command_receipt,
 )
+from octop.infra.agentcomputer.engine import EngineEntryMiddleware
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import build_shared_services
@@ -259,6 +261,162 @@ async def test_cancel_at_dispatch_commit_waits_and_marks_uncertain(
     task_row = services.ac_task_repo.get(str(receipt.taskID), 1)
     assert task_row.active_run_id == str(receipt.runID)
     assert services.ac_project_repo.get(task_row.project_id, 1).active_run_id == str(receipt.runID)
+
+
+async def test_drain_waits_for_predispatch_thread_and_persists_uncertainty(control, monkeypatch):
+    services, receipt, claim = seed(control, monkeypatch)
+    registry = ActiveRunRegistry()
+    committed, release, finished = Event(), Event(), Event()
+    begin = dispatch._begin_dispatch
+    invoke = Mock(side_effect=AssertionError("drained handoff must not start an engine"))
+
+    def delayed(services, claim):
+        prepared = begin(services, claim)
+        committed.set()
+        try:
+            assert release.wait(timeout=10)
+            return prepared
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(dispatch, "_begin_dispatch", delayed)
+    task = asyncio.create_task(
+        dispatch.dispatch_run(services, claim=claim, invoke=invoke, active_runs=registry)
+    )
+    try:
+        assert await asyncio.to_thread(committed.wait, 10)
+        draining = asyncio.create_task(registry.drain())
+        await asyncio.sleep(0)
+        assert not draining.done() and not finished.is_set()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(draining, timeout=5)
+    finally:
+        release.set()
+    invoke.assert_not_called()
+    view = get_run(services, owner_id=1, run_id=receipt.runID)
+    assert view.state == "interrupted" and view.reconciliationRequired
+    assert view.dispatchPhase == "dispatching"
+    assert dispatch.get_claim(services, owner_id=1, run_id=receipt.runID).engineReceipt is None
+    task_row = services.ac_task_repo.get(str(receipt.taskID), 1)
+    assert task_row.active_run_id == str(receipt.runID)
+    assert services.ac_project_repo.get(task_row.project_id, 1).active_run_id == str(receipt.runID)
+
+
+async def test_drain_waits_for_postdispatch_fence_before_return(control, monkeypatch):
+    services, receipt, claim = seed(control, monkeypatch)
+    registry = ActiveRunRegistry()
+    entered = asyncio.Event()
+    fencing, release = Event(), Event()
+    original = dispatch.interrupt_uncertain_run
+
+    def delayed(services, *, claim):
+        fencing.set()
+        assert release.wait(timeout=10)
+        return original(services, claim=claim)
+
+    async def invoke(_invocation):
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(dispatch, "interrupt_uncertain_run", delayed)
+    task = asyncio.create_task(
+        dispatch.dispatch_run(services, claim=claim, invoke=invoke, active_runs=registry)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    draining = asyncio.create_task(registry.drain())
+    try:
+        assert await asyncio.to_thread(fencing.wait, 10)
+        assert not draining.done() and not task.done()
+        assert get_run(services, owner_id=1, run_id=receipt.runID).state == "queued"
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(draining, timeout=5)
+    view = get_run(services, owner_id=1, run_id=receipt.runID)
+    assert view.state == "interrupted" and view.reconciliationRequired
+    assert view.dispatchPhase == "dispatching"
+    task_row = services.ac_task_repo.get(str(receipt.taskID), 1)
+    assert task_row.active_run_id == str(receipt.runID)
+    assert services.ac_project_repo.get(task_row.project_id, 1).active_run_id == str(receipt.runID)
+
+
+async def test_drain_waits_for_late_engine_acceptance_and_preserves_receipt(control, monkeypatch):
+    services, receipt, claim = seed(control, monkeypatch)
+    registry = ActiveRunRegistry()
+    original_command = services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json
+    accepting, release, finished = Event(), Event(), Event()
+    saved = {}
+    record_acceptance = services.ac_run_dispatch_repo.record_acceptance
+
+    def delayed_acceptance(*args, **kwargs):
+        result = record_acceptance(*args, **kwargs)
+        assert result
+        saved["receipt_json"] = kwargs["engine_receipt_json"]
+        accepting.set()
+        try:
+            assert release.wait(timeout=10)
+        finally:
+            finished.set()
+        return result
+
+    monkeypatch.setattr(services.ac_run_dispatch_repo, "record_acceptance", delayed_acceptance)
+    monkeypatch.setattr(EngineEntryMiddleware, "_validate_context", lambda _self, _state: None)
+
+    async def invoke(invocation):
+        middleware = EngineEntryMiddleware(services, invocation)
+        async with registry.track(invocation):
+            await middleware.abefore_agent({}, None)
+
+    task = asyncio.create_task(
+        dispatch.dispatch_run(services, claim=claim, invoke=invoke, active_runs=registry)
+    )
+    try:
+        assert await asyncio.to_thread(accepting.wait, 10)
+        draining = asyncio.create_task(registry.drain())
+
+        async def wait_for_closing():
+            while not registry.closing:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_closing(), timeout=5)
+        assert not draining.done() and not task.done() and not finished.is_set()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(draining, timeout=5)
+    assert finished.is_set()
+    current = dispatch.get_claim(services, owner_id=1, run_id=receipt.runID)
+    view = get_run(services, owner_id=1, run_id=receipt.runID)
+    assert view.state == "interrupted" and view.reconciliationRequired
+    assert view.dispatchPhase == "engineAccepted"
+    assert current is not None and current.engineReceipt is not None
+    dispatch_row = services.ac_run_dispatch_repo.get(str(receipt.runID), 1)
+    assert dispatch_row is not None
+    assert dispatch_row.engine_receipt_json == saved["receipt_json"]
+    assert str(current.engineReceipt.receiptID) == dispatch_row.engine_receipt_id
+    assert services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json == original_command
+    task_row = services.ac_task_repo.get(str(receipt.taskID), 1)
+    assert task_row.active_run_id == str(receipt.runID)
+    assert services.ac_project_repo.get(task_row.project_id, 1).active_run_id == str(receipt.runID)
+    with services.db.connect() as conn:
+        events = [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM ac_events WHERE run_id=? ORDER BY sequence",
+                (str(receipt.runID),),
+            )
+        ]
+    assert events == [
+        "run.accepted",
+        "run.claimed",
+        "run.dispatching",
+        "run.engineAccepted",
+        "run.interrupted",
+    ]
 
 
 async def test_late_acceptance_during_fence_preserves_receipt_and_marks_uncertain(

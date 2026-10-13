@@ -301,7 +301,11 @@ async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes
                     )
                 raise
 
-    handoff = asyncio.create_task(dispatch.dispatch_run(services, claim=claim, invoke=hold_entry))
+    handoff = asyncio.create_task(
+        dispatch.dispatch_run(
+            services, claim=claim, invoke=hold_entry, active_runs=server.agentcomputer_active_runs
+        )
+    )
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
         running = await client.get(f"{PREFIX}/runs/{accepted.runID}", headers=auth)

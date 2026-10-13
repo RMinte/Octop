@@ -8,9 +8,11 @@ Embedded servers do not construct this bootstrap.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 from octop.infra.agentcomputer.commands import StorageDataError
 from octop.infra.agentcomputer.preparation_lock import preparation_lock
@@ -27,6 +29,16 @@ async def settle_task[T](task: asyncio.Task[T]) -> tuple[T, bool]:
         except asyncio.CancelledError:
             cancelled = True
     return task.result(), cancelled
+
+
+async def settled_to_thread[T](func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Let a DB thread finish before propagating cancellation to its owner."""
+    result, cancelled = await settle_task(
+        asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    )
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 class DaemonBootstrap:

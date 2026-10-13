@@ -267,6 +267,7 @@ class OctopServer:
         self._ldap_bind_throttle_services: SharedServices | None = None
         self._agentcomputer_bootstrap = daemon_bootstrap
         self.agentcomputer_active_runs = ActiveRunRegistry()
+        self._stop_task: asyncio.Task[None] | None = None
 
     # Backward compat: expose user_manager directly
     @property
@@ -330,8 +331,14 @@ class OctopServer:
         return self.services is not None and self.app_runtime is not None
 
     async def start(self) -> None:
+        if self._stop_task is not None and not self._stop_task.done():
+            raise RuntimeError("server shutdown is still in progress")
         if self._started:
             return
+        if self.agentcomputer_active_runs.closing:
+            if self.services is not None or self.app_runtime is not None:
+                raise RuntimeError("agentcomputer Run drain is still in progress")
+            self.agentcomputer_active_runs = ActiveRunRegistry()
         if self._agentcomputer_bootstrap is not None:
             await self._agentcomputer_bootstrap.acquire()
         try:
@@ -664,11 +671,22 @@ class OctopServer:
                 raise asyncio.CancelledError
 
     async def stop(self) -> None:
-        _, cancelled = await settle_task(asyncio.create_task(self._stop()))
+        stop_task = self._stop_task
+        if stop_task is None:
+            stop_task = asyncio.create_task(self._stop())
+            self._stop_task = stop_task
+        try:
+            _, cancelled = await settle_task(stop_task)
+        finally:
+            if stop_task.done() and self._stop_task is stop_task:
+                self._stop_task = None
         if cancelled:
             raise asyncio.CancelledError
 
     async def _stop(self) -> None:
+        # The daemon guard and DB must outlive every registered dispatch task,
+        # including its shielded uncertainty fence and DB thread work.
+        await self.agentcomputer_active_runs.drain()
         if not self._started and self.services is None and self.app_runtime is None:
             if self._agentcomputer_bootstrap is not None:
                 await self._agentcomputer_bootstrap.close()

@@ -12,12 +12,13 @@ import sqlite3
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from psycopg import Error as PostgresError
 from pydantic import ValidationError
 
+from octop.infra.agentcomputer.bootstrap import settled_to_thread
 from octop.infra.agentcomputer.capabilities import get_capabilities
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
@@ -41,6 +42,9 @@ from octop.infra.agentcomputer.models import (
 )
 from octop.infra.agentcomputer.runs import BoundRun, load_bound_run
 from octop.infra.db.services import SharedServices
+
+if TYPE_CHECKING:
+    from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 
 
 @contextmanager
@@ -583,6 +587,20 @@ async def dispatch_run(
     *,
     claim: RunClaim,
     invoke: Callable[[EngineInvocation], Awaitable[None]],
+    active_runs: ActiveRunRegistry | None = None,
+) -> EngineEntryReceipt:
+    """Keep an optional server-owned task registered through the durable fence."""
+    if active_runs is not None:
+        async with active_runs.track_dispatch(claim):
+            return await _dispatch_run(services, claim=claim, invoke=invoke)
+    return await _dispatch_run(services, claim=claim, invoke=invoke)
+
+
+async def _dispatch_run(
+    services: SharedServices,
+    *,
+    claim: RunClaim,
+    invoke: Callable[[EngineInvocation], Awaitable[None]],
 ) -> EngineEntryReceipt:
     # Cancelling to_thread does not stop its transaction. Observe the committed
     # result before deciding whether recovery is required, and never hand off a
@@ -603,7 +621,7 @@ async def dispatch_run(
         if cancelled:
             raise asyncio.CancelledError
         await invoke(prepared)
-        current = await asyncio.to_thread(
+        current = await settled_to_thread(
             get_claim, services, owner_id=claim.intent.ownerID, run_id=claim.intent.runID
         )
         if current is None or current.engineReceipt is None:
