@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from functools import partial
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Response
@@ -44,7 +45,7 @@ from octop.infra.agentcomputer.models import (
     TaskCreateReceipt,
     TaskView,
 )
-from octop.infra.agentcomputer.pauses import get_run_pause_status
+from octop.infra.agentcomputer.pauses import get_pause_status, get_run_pause_status
 from octop.infra.agentcomputer.projects import create_project, get_project
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.agentcomputer.submission import submit_new_message
@@ -482,6 +483,95 @@ async def run_pause_status(
     if not found:
         return protocol_error_response("resourceNotFound", 404)
     return pause
+
+
+async def _pause_status_by_id(
+    response: Response,
+    server: OctopServer,
+    user: User,
+    pause_id: UUID,
+    kind: Literal["approval", "question"],
+) -> RunPauseStatus | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        operation = partial(
+            get_pause_status, server.services, owner_id=user.id, pause_id=pause_id, kind=kind
+        )
+        pause = await asyncio.get_running_loop().run_in_executor(None, operation)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during pause lookup")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored pause graph is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="pauseInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer pause storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if pause is None:
+        return protocol_error_response("resourceNotFound", 404)
+    return pause
+
+
+@router.get(
+    "/approvals/{approvalID}",
+    response_model=RunPauseStatus,
+    summary="Read one owned approval's persisted status",
+    description=(
+        "Requires a user Bearer token. Returns only the authenticated owner's persisted approval "
+        "status; unknown IDs, questions, and other users' approvals all return the same 404, "
+        "including for admins. The original Run and its dispatch, tool-effect, pause, event, and "
+        "cancellation journals are validated in one transaction. The response omits the action "
+        "payload and internal engine identities. A decided status records adjudication only; it "
+        "does not authorize a tool, resume an engine, or prove execution. This endpoint does not "
+        "submit a decision or change persisted facts."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No approval owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid approval identifier"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Pause graph or storage unavailable"},
+    },
+)
+async def approval_status(
+    response: Response,
+    approval_id: UUID = Path(alias="approvalID", description="Public approval UUID."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> RunPauseStatus | JSONResponse:
+    return await _pause_status_by_id(response, server, user, approval_id, "approval")
+
+
+@router.get(
+    "/questions/{questionID}",
+    response_model=RunPauseStatus,
+    summary="Read one owned question's persisted status",
+    description=(
+        "Requires a user Bearer token. Returns only the authenticated owner's persisted question "
+        "status; unknown IDs, approvals, and other users' questions all return the same 404, "
+        "including for admins. The original Run and its dispatch, tool-effect, pause, event, and "
+        "cancellation journals are validated in one transaction. The response omits the question "
+        "payload and internal engine identities. A decided status records adjudication only; it "
+        "does not answer the engine, resume a Run, or prove execution. This endpoint does not "
+        "submit an answer or change persisted facts."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No question owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid question identifier"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Pause graph or storage unavailable"},
+    },
+)
+async def question_status(
+    response: Response,
+    question_id: UUID = Path(alias="questionID", description="Public question UUID."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> RunPauseStatus | JSONResponse:
+    return await _pause_status_by_id(response, server, user, question_id, "question")
 
 
 @router.post(

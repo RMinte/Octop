@@ -41,6 +41,14 @@ persisted pause metadata or JSON `null` when no pause exists. It does not expose
 opaque action content, submit a decision, or resume execution; see
 [Run pause lookup](agentcomputer-run-pause-read.md).
 
+`GET /api/agentcomputer/v1/approvals/{approvalID}` and
+`GET /api/agentcomputer/v1/questions/{questionID}` read one owned pause by its
+public UUID. They return only validated status metadata, allowing a client
+with a known ID to recover its state after a lost response or reconnect.
+Unknown, wrong-kind, and other users' IDs share a 404. These reads do not
+expose the action or question, submit a decision, or resume execution; see
+[approval and question lookup](agentcomputer-pause-identity-read.md).
+
 | Header | Value |
 |--------|-------|
 | `Authorization` | `Bearer <access_token>` from `POST /api/auth/login` |

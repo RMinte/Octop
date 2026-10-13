@@ -533,6 +533,38 @@ def get_pause(services: SharedServices, *, owner_id: int, pause_id: UUID) -> Run
         )
 
 
+def _pause_status(record: RunPauseRecord) -> RunPauseStatus:
+    return RunPauseStatus(
+        pauseID=record.intent.pauseID,
+        kind=record.intent.kind,
+        runID=record.intent.runID,
+        turnID=record.intent.turnID,
+        phase=record.phase,
+        revision=record.revision,
+        restoreEpoch=record.intent.restoreEpoch,
+        executionEpoch=record.intent.executionEpoch,
+        expiresAt=record.intent.expiresAt,
+        createdAt=record.createdAt,
+        updatedAt=record.updatedAt,
+        decisionCommandID=(record.receipt.commandID if record.receipt is not None else None),
+    )
+
+
+def get_pause_status(
+    services: SharedServices, *, owner_id: int, pause_id: UUID, kind: PauseKind
+) -> RunPauseStatus | None:
+    """Read one owned pause's validated, content-free status by its public ID."""
+    with _transaction(services) as conn:
+        row = services.ac_run_pause_repo.get_in_transaction(conn, str(pause_id), owner_id)
+        if row is None or row.kind != kind:
+            return None
+        identity = _existing_recovery_identity(services)
+        record = validate_pause_read_binding(
+            services, conn, owner_id=owner_id, row=row, box_id=identity.boxID
+        )
+        return _pause_status(record)
+
+
 def get_run_pause_status(
     services: SharedServices, *, owner_id: int, run_id: UUID
 ) -> tuple[bool, RunPauseStatus | None]:
@@ -558,21 +590,7 @@ def get_run_pause_status(
             raise StorageDataError("multiple Run pauses")
         if not records:
             return True, None
-        record = records[0]
-        return True, RunPauseStatus(
-            pauseID=record.intent.pauseID,
-            kind=record.intent.kind,
-            runID=record.intent.runID,
-            turnID=record.intent.turnID,
-            phase=record.phase,
-            revision=record.revision,
-            restoreEpoch=record.intent.restoreEpoch,
-            executionEpoch=record.intent.executionEpoch,
-            expiresAt=record.intent.expiresAt,
-            createdAt=record.createdAt,
-            updatedAt=record.updatedAt,
-            decisionCommandID=(record.receipt.commandID if record.receipt is not None else None),
-        )
+        return True, _pause_status(records[0])
 
 
 def _decision(

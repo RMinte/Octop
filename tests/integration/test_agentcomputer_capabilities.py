@@ -90,7 +90,8 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
     assert body["deviceID"] is None
     assert body["authenticationMode"] == "octopUserSession"
     assert body["restoreEpoch"] == 1
-    assert body["capabilityRevision"] == 12
+    assert body["capabilityRevision"] == 13
+    assert body["serverBuild"]["adapterVersion"] == "0.13.0"
     assert body["supportedPermissionModes"] == []
     assert body["capabilities"]
     assert body["capabilities"]["commandReceipts"] == {
@@ -118,10 +119,25 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
         "available": False,
         "reasonCode": "executionUnavailable",
     }
+    for name in ("approvals", "questions"):
+        assert body["capabilities"][name] == {
+            "supported": True,
+            "available": False,
+            "reasonCode": "executionUnavailable",
+        }
     assert all(
         item == {"supported": False, "available": False, "reasonCode": "notImplemented"}
         for name, item in body["capabilities"].items()
-        if name not in {"commandReceipts", "projects", "tasks", "runs", "cancellation"}
+        if name
+        not in {
+            "commandReceipts",
+            "projects",
+            "tasks",
+            "runs",
+            "cancellation",
+            "approvals",
+            "questions",
+        }
     )
     assert body["limits"]["maxCommandBytes"] == 65536
     assert all(limit is None for name, limit in body["limits"].items() if name != "maxCommandBytes")
@@ -194,7 +210,8 @@ async def test_openapi_documents_typed_authenticated_discovery(tmp_path: Path) -
         example = operation["responses"]["200"]["content"]["application/json"]["example"]
         assert example["deviceID"] is None
         assert example["supportedPermissionModes"] == []
-        assert example["capabilityRevision"] == 12
+        assert example["capabilityRevision"] == 13
+        assert example["serverBuild"]["adapterVersion"] == "0.13.0"
         assert example["capabilities"]["commandReceipts"] == {
             "supported": True,
             "available": True,
@@ -220,6 +237,12 @@ async def test_openapi_documents_typed_authenticated_discovery(tmp_path: Path) -
             "available": False,
             "reasonCode": "executionUnavailable",
         }
+        for name in ("approvals", "questions"):
+            assert example["capabilities"][name] == {
+                "supported": True,
+                "available": False,
+                "reasonCode": "executionUnavailable",
+            }
         assert example["limits"]["maxCommandBytes"] == 65536
         assert all(
             not item["available"]

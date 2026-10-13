@@ -34,10 +34,10 @@ def test_capabilities_are_truthful_authenticated_discovery_data(tmp_path: Path) 
     assert response.deviceID is None
     assert response.authenticationMode == "octopUserSession"
     assert response.protocolVersion == response.minimumClientProtocolVersion == 1
-    assert response.capabilityRevision == 12
+    assert response.capabilityRevision == 13
     assert response.restoreEpoch == 1
     assert response.serverBuild.octopVersion == __version__
-    assert response.serverBuild.adapterVersion == "0.12.0"
+    assert response.serverBuild.adapterVersion == "0.13.0"
     assert response.serverBuild.imageDigest is None
     assert before <= response.serverTime <= after
     assert response.serverTime.tzinfo == UTC
@@ -92,10 +92,29 @@ def test_capabilities_are_truthful_authenticated_discovery_data(tmp_path: Path) 
         "available": False,
         "reasonCode": "executionUnavailable",
     }
+    assert data["capabilities"]["approvals"] == {
+        "supported": True,
+        "available": False,
+        "reasonCode": "executionUnavailable",
+    }
+    assert data["capabilities"]["questions"] == {
+        "supported": True,
+        "available": False,
+        "reasonCode": "executionUnavailable",
+    }
     assert all(
         value == {"supported": False, "available": False, "reasonCode": "notImplemented"}
         for name, value in data["capabilities"].items()
-        if name not in {"commandReceipts", "projects", "tasks", "runs", "cancellation"}
+        if name
+        not in {
+            "commandReceipts",
+            "projects",
+            "tasks",
+            "runs",
+            "cancellation",
+            "approvals",
+            "questions",
+        }
     )
     assert data["limits"]["maxCommandBytes"] == 65536
     assert all(value is None for name, value in data["limits"].items() if name != "maxCommandBytes")

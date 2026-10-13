@@ -291,6 +291,11 @@ def expected_pause_status(record: RunPauseRecord) -> dict[str, object]:
     }
 
 
+def pause_id_path(kind: str, pause_id: object) -> str:
+    collection = "approvals" if kind == "approval" else "questions"
+    return f"{PREFIX}/{collection}/{pause_id}"
+
+
 async def test_run_pause_query_returns_null_without_creating_facts(env) -> None:
     client, server, auth = env
     owner_id = await resolve_user_id(client, auth, "admin")
@@ -430,6 +435,168 @@ async def test_run_pause_query_returns_safe_503_for_damaged_graph_without_writes
     assert "private-marker" not in response.text
     assert str(server.paths.root) not in response.text
     assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+@pytest.mark.parametrize("phase", ["pending", "decided", "expired"])
+async def test_pause_id_query_returns_only_owned_safe_status(
+    env, monkeypatch, kind: str, phase: str
+) -> None:
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    assert server.services is not None
+    if phase == "pending":
+        record = await seed_pending_pause(client, server, auth, owner_id, monkeypatch, kind)
+    else:
+        receipt = await seed_pause_receipt(client, server, auth, owner_id, monkeypatch, kind)
+        if phase == "expired":
+            assert await asyncio.to_thread(
+                pauses.expire_pause,
+                server.services,
+                owner_id=owner_id,
+                pause_id=receipt.pauseID,
+            )
+        record = await asyncio.to_thread(
+            pauses.get_pause, server.services, owner_id=owner_id, pause_id=receipt.pauseID
+        )
+        assert record is not None
+    before = pause_facts(server)
+    endpoint = pause_id_path(kind, record.intent.pauseID)
+    for _ in range(2):
+        response = await client.get(endpoint, headers=auth)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json() == expected_pause_status(record)
+        assert "trusted approval" not in response.text
+        assert "trusted question" not in response.text
+        assert "fixture-policy-v1" not in response.text
+        assert "fixture-capability-v1" not in response.text
+        assert str(server.paths.root) not in response.text
+    assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_pause_id_query_hides_unknown_wrong_kind_and_other_owner_even_with_invalid_identity(
+    env, monkeypatch, kind: str
+) -> None:
+    client, server, admin_auth = env
+    owner_auth = await create_user(client, admin_auth, username=f"{kind}-status-owner")
+    other_auth = await create_user(client, admin_auth, username=f"{kind}-status-other")
+    owner_id = await resolve_user_id(client, admin_auth, f"{kind}-status-owner")
+    record = await seed_pending_pause(client, server, owner_auth, owner_id, monkeypatch, kind)
+    endpoint = pause_id_path(kind, record.intent.pauseID)
+    opposite = pause_id_path(
+        "question" if kind == "approval" else "approval", record.intent.pauseID
+    )
+    own = await client.get(endpoint, headers=owner_auth)
+    assert own.status_code == 200 and own.json() == expected_pause_status(record)
+    before = pause_facts(server)
+
+    server.paths.agentcomputer_identity.write_text('{"private-marker":', encoding="utf-8")
+    missing = await client.get(pause_id_path(kind, uuid4()), headers=owner_auth)
+    wrong_kind = await client.get(opposite, headers=owner_auth)
+    foreign = await client.get(endpoint, headers=other_auth)
+    admin = await client.get(endpoint, headers=admin_auth)
+    for response in (missing, wrong_kind, foreign, admin):
+        assert response.status_code == 404
+        assert response.json() == {"error": {"code": "resourceNotFound", "retryable": False}}
+        assert response.headers["cache-control"] == "no-store"
+        assert "private-marker" not in response.text
+    assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_pause_id_query_requires_bearer_header_and_uuid(env, monkeypatch, kind: str) -> None:
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    record = await seed_pending_pause(client, server, auth, owner_id, monkeypatch, kind)
+    endpoint = pause_id_path(kind, record.intent.pauseID)
+    token = auth["Authorization"].split(" ", 1)[1]
+    before = pause_facts(server)
+    for response in (
+        await client.get(endpoint),
+        await client.get(endpoint, params={"access_token": token}),
+        await client.get(endpoint, params={"access_token": token}, headers=auth),
+    ):
+        assert response.status_code == 401
+        assert response.json() == {"error": {"code": "authenticationRequired", "retryable": False}}
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert response.headers["cache-control"] == "no-store"
+    invalid = await client.get(pause_id_path(kind, "private-input-marker"), headers=auth)
+    assert invalid.status_code == 422
+    assert invalid.json() == {"error": {"code": "invalidRequest", "retryable": False}}
+    assert invalid.headers["cache-control"] == "no-store"
+    assert "private-input-marker" not in invalid.text
+    assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+@pytest.mark.parametrize("damage", ["intent", "decisionReceipt", "decisionEvent"])
+async def test_pause_id_query_rejects_damaged_graph_without_writes(
+    env, monkeypatch, kind: str, damage: str
+) -> None:
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    receipt = await seed_pause_receipt(client, server, auth, owner_id, monkeypatch, kind)
+    assert server.services is not None
+    with server.services.db.transaction() as conn:
+        if damage == "intent":
+            conn.execute(
+                "UPDATE ac_run_pauses SET intent_json=? WHERE pause_id=?",
+                ('{"private-marker":', str(receipt.pauseID)),
+            )
+        elif damage == "decisionReceipt":
+            conn.execute(
+                "UPDATE ac_run_pauses SET decision_receipt_json=? WHERE pause_id=?",
+                ('{"private-marker":', str(receipt.pauseID)),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM ac_events WHERE run_id=? AND event_type=?",
+                (
+                    str(receipt.runID),
+                    "approval.decided" if kind == "approval" else "question.answered",
+                ),
+            )
+    before = pause_facts(server)
+    response = await client.get(pause_id_path(kind, receipt.pauseID), headers=auth)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "error": {"code": "storageUnavailable", "retryable": False, "reasonCode": "pauseInvalid"}
+    }
+    assert "private-marker" not in response.text
+    assert str(server.paths.root) not in response.text
+    assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_pause_id_query_survives_expiry_epoch_and_restart(
+    tmp_path: Path, monkeypatch, kind: str
+) -> None:
+    home = tmp_path / "control"
+    async with octop_client(home) as (client, server):
+        await bootstrap_admin(client, home)
+        auth = await auth_header(client)
+        owner_id = await resolve_user_id(client, auth, "admin")
+        receipt = await seed_pause_receipt(client, server, auth, owner_id, monkeypatch, kind)
+        assert server.services is not None
+        assert await asyncio.to_thread(
+            pauses.expire_pause, server.services, owner_id=owner_id, pause_id=receipt.pauseID
+        )
+        identity_path = server.paths.agentcomputer_identity
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        identity["restoreEpoch"] = 2
+        identity_path.write_text(json.dumps(identity), encoding="utf-8")
+        first = await client.get(pause_id_path(kind, receipt.pauseID), headers=auth)
+        assert first.status_code == 200 and first.json()["phase"] == "expired"
+        assert first.json()["restoreEpoch"] == 1
+    async with octop_client(home) as (client, server):
+        auth = await auth_header(client)
+        before = pause_facts(server)
+        second = await client.get(pause_id_path(kind, receipt.pauseID), headers=auth)
+        assert second.status_code == 200 and second.json() == first.json()
+        assert pause_facts(server) == before
 
 
 @pytest.mark.parametrize("kind", ["approval", "question"])
@@ -665,4 +832,23 @@ async def test_openapi_documents_receipt_as_immutable_acceptance(tmp_path: Path)
             "updatedAt",
             "decisionCommandID",
         }
+        for collection, parameter_name in (
+            ("approvals", "approvalID"),
+            ("questions", "questionID"),
+        ):
+            path = f"{PREFIX}/{collection}/{{{parameter_name}}}"
+            operation = schema["paths"][path]["get"]
+            assert operation["summary"] and operation["tags"] == ["agentcomputer"]
+            assert operation["security"] == [{"BearerAuth": []}]
+            parameter = next(item for item in operation["parameters"] if item["in"] == "path")
+            assert parameter["name"] == parameter_name
+            assert parameter["schema"]["format"] == "uuid"
+            status_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+            assert status_schema["$ref"].endswith("/RunPauseStatus")
+            for status in ("401", "403", "404", "422", "503"):
+                error_schema = operation["responses"][status]["content"]["application/json"][
+                    "schema"
+                ]
+                assert error_schema["$ref"].endswith("/ProtocolErrorEnvelope")
+            assert "post" not in schema["paths"][path]
         assert (await client.get("/api/docs")).status_code == 200

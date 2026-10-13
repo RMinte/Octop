@@ -69,6 +69,44 @@ def approval_command(record, *, decision="approveOnce", command_id=None, key=Non
     )
 
 
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_pause_status_by_id_is_owned_typed_and_redacted(effect, monkeypatch, kind):
+    content = ready(effect, monkeypatch)
+    record = (
+        approvals.request_approval(
+            effect.services, effect.invocation, action=content, expires_at=expiry()
+        )
+        if kind == "approval"
+        else questions.ask_question(
+            effect.services, effect.invocation, question=content, expires_at=expiry()
+        )
+    )
+    found, run_status = pauses.get_run_pause_status(
+        effect.services, owner_id=1, run_id=record.intent.runID
+    )
+    status = pauses.get_pause_status(
+        effect.services, owner_id=1, pause_id=record.intent.pauseID, kind=kind
+    )
+    assert found and status == run_status
+    assert status is not None and "payloadJSON" not in status.model_dump_json()
+
+    def identity_must_not_be_read(_services):
+        pytest.fail("missing, foreign, and wrong-kind pauses must not read identity")
+
+    monkeypatch.setattr(pauses, "_existing_recovery_identity", identity_must_not_be_read)
+    for owner_id, pause_id, requested_kind in (
+        (2, record.intent.pauseID, kind),
+        (1, uuid4(), kind),
+        (1, record.intent.pauseID, "question" if kind == "approval" else "approval"),
+    ):
+        assert (
+            pauses.get_pause_status(
+                effect.services, owner_id=owner_id, pause_id=pause_id, kind=requested_kind
+            )
+            is None
+        )
+
+
 async def test_approval_wait_event_decision_replay_and_restart_fence(effect, monkeypatch):
     action = ready(effect, monkeypatch)
     record = approvals.request_approval(

@@ -14,7 +14,7 @@ from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.db.services import SharedServices
 
-ADAPTER_VERSION = "0.12.0"
+ADAPTER_VERSION = "0.13.0"
 PROTOCOL_VERSION: Literal[1] = 1
 
 
@@ -55,8 +55,12 @@ class BusinessCapabilities(ProtocolModel):
     snapshots: CapabilityStatus
     events: CapabilityStatus
     files: CapabilityStatus
-    approvals: CapabilityStatus
-    questions: CapabilityStatus
+    approvals: CapabilityStatus = Field(
+        description="Full approval decision and engine resume workflow; persisted status reads alone do not enable it."
+    )
+    questions: CapabilityStatus = Field(
+        description="Full question-answer and engine resume workflow; persisted status reads alone do not enable it."
+    )
     artifacts: CapabilityStatus
     terminal: CapabilityStatus
     git: CapabilityStatus
@@ -109,7 +113,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                     "serverTime": "2026-10-12T00:00:00Z",
                     "timezone": "Asia/Shanghai",
                     "executionPlatform": {"system": "Darwin", "architecture": "arm64"},
-                    "capabilityRevision": 12,
+                    "capabilityRevision": 13,
                     "restoreEpoch": 1,
                     "supportedPermissionModes": [],
                     "capabilities": {
@@ -121,7 +125,15 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                                 "available": False,
                                 "reasonCode": "executionUnavailable",
                             }
-                            if name in {"projects", "tasks", "runs", "cancellation"}
+                            if name
+                            in {
+                                "projects",
+                                "tasks",
+                                "runs",
+                                "cancellation",
+                                "approvals",
+                                "questions",
+                            }
                             else {
                                 "supported": False,
                                 "available": False,
@@ -152,7 +164,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
     serverTime: datetime
     timezone: str
     executionPlatform: ExecutionPlatform
-    capabilityRevision: Literal[12] = 12
+    capabilityRevision: Literal[13] = 13
     restoreEpoch: Annotated[int, Field(strict=True, ge=1)] = Field(
         description="Persisted initial epoch; restore fencing remains unavailable."
     )
@@ -192,8 +204,12 @@ def get_capabilities(services: SharedServices) -> AgentComputerCapabilitiesRespo
             snapshots=unavailable,
             events=unavailable,
             files=unavailable,
-            approvals=unavailable,
-            questions=unavailable,
+            approvals=CapabilityStatus(
+                supported=True, available=False, reasonCode="executionUnavailable"
+            ),
+            questions=CapabilityStatus(
+                supported=True, available=False, reasonCode="executionUnavailable"
+            ),
             artifacts=unavailable,
             terminal=unavailable,
             git=unavailable,
