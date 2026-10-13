@@ -78,11 +78,11 @@ def _bound(
     return bound
 
 
-def _active(services: SharedServices, conn: Any, bound: BoundRun) -> None:
+def _active(services: SharedServices, conn: Any, bound: BoundRun, claim: RunClaim | None) -> None:
     run = bound.run
     from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
 
-    if validate_cancellation_binding(services, conn, bound) is not None:
+    if validate_cancellation_binding(services, conn, bound, claim) is not None:
         raise CommandAdmissionError("revisionConflict")
     task = services.ac_task_repo.get_in_transaction(conn, run.task_id, run.owner_id)
     project = services.ac_project_repo.get_in_transaction(conn, run.project_id, run.owner_id)
@@ -276,8 +276,9 @@ def claim_run(
         bound = _bound(services, conn, owner_id, run_id, identity.boxID)
         if bound.run.restore_epoch != identity.restoreEpoch:
             raise CommandAdmissionError("restoreEpochConflict")
-        _active(services, conn, bound)
-        if validate_dispatch_binding(services, conn, bound) is not None:
+        current = validate_dispatch_binding(services, conn, bound)
+        _active(services, conn, bound, current)
+        if current is not None:
             raise CommandAdmissionError("revisionConflict")
         now = int(datetime.now(UTC).timestamp() * 1000)
         run = services.ac_run_repo.claim(
@@ -345,7 +346,7 @@ def _begin_dispatch(
         _match(claim, current)
         if current.engineReceipt is not None:
             return current.engineReceipt
-        _active(services, conn, bound)
+        _active(services, conn, bound, current)
         if (
             bound.run.dispatch_phase != "claimed"
             or current.runRevision != claim.runRevision
@@ -393,7 +394,7 @@ def accept_engine_entry(
             raise CommandAdmissionError("revisionConflict")
         if current.engineReceipt is not None:
             return EngineEntryResult(receipt=current.engineReceipt, replayed=True)
-        _active(services, conn, bound)
+        _active(services, conn, bound, current)
         if (
             bound.run.dispatch_phase != "dispatching"
             or current.runRevision != invocation.expectedRunRevision
@@ -463,7 +464,7 @@ def validate_engine_execution(services: SharedServices, invocation: EngineInvoca
             or claim.claimantID != invocation.claimantID
         ):
             raise CommandAdmissionError("revisionConflict")
-        _active(services, conn, bound)
+        _active(services, conn, bound, claim)
         if claim.engineReceipt is None or bound.run.dispatch_phase != "engineAccepted":
             raise CommandAdmissionError("revisionConflict")
 

@@ -582,8 +582,9 @@ async def question_status(
     description=(
         "Requires a user Bearer token and an explicit owned Run ID. The command fixes the "
         "current restore epoch and expected Run revision; same-key retries return the original "
-        "durable receipt with replayed=true and status 201. A queued Run proven never dispatched "
-        "can be stopped atomically. For a claimed or started Run, status=cancelRequested only "
+        "durable receipt with replayed=true and status 201. A queued Run proven never to have "
+        "begun dispatch, including an unstarted claim, can be stopped atomically. For a Run "
+        "whose dispatch has started, status=cancelRequested only "
         "proves that the request was recorded and new execution handoffs are fenced; it does "
         "not prove that an engine or child process stopped. Read the Run for current state and "
         "the original command receipt for response-loss recovery. This endpoint never invokes "

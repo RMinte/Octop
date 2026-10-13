@@ -1,8 +1,8 @@
 """Durable Run-scoped cancellation, without a thread-scoped stop shortcut.
 
-Only a Run that has never been dispatched can be stopped here. A request for a
-claimed or started Run remains requested until a separately verified, Run-bound
-engine and process stop exists. This module never invokes a harness or a tool.
+Only a Run that has never begun dispatch can be stopped here. A request for a
+started Run remains requested until a separately verified, Run-bound engine and
+process stop exists. This module never invokes a harness or a tool.
 """
 
 from __future__ import annotations
@@ -284,10 +284,17 @@ def validate_cancellation_binding(
         or receipt.resultRunRevision != row.run_revision_at_request + 1
         or run.state != "stopped"
         or run.revision < receipt.resultRunRevision
-        or run.dispatch_phase != "notDispatched"
-        or run.execution_epoch != 0
+        or not (
+            (run.dispatch_phase == "notDispatched" and run.execution_epoch == 0 and claim is None)
+            or (
+                run.dispatch_phase == "claimed"
+                and run.execution_epoch > 0
+                and claim is not None
+                and claim.dispatchRevision == 1
+                and claim.engineReceipt is None
+            )
+        )
         or run.reconciliation_required
-        or claim is not None
         or len(cancel_finished) != 1
     ):
         raise StorageDataError("invalid stopped cancellation")
@@ -349,7 +356,7 @@ def cancel_run(
     run_id: UUID,
     command: CancelRunCommand,
 ) -> CancelRunReceipt:
-    """Accept one explicit Run cancellation and stop only a never-dispatched Run."""
+    """Accept one explicit Run cancellation and stop only before dispatch starts."""
     try:
         identity = read_identity(services.paths.agentcomputer_identity)
     except IdentityError as exc:
@@ -440,14 +447,22 @@ def cancel_run(
             )
             if requested is None:
                 raise CommandAdmissionError("revisionConflict")
-            unstarted = (
-                run.state == "queued"
-                and run.dispatch_phase == "notDispatched"
-                and run.execution_epoch == 0
-                and claim is None
+            before_dispatch = run.state == "queued" and (
+                (
+                    run.dispatch_phase == "notDispatched"
+                    and run.execution_epoch == 0
+                    and claim is None
+                )
+                or (
+                    run.dispatch_phase == "claimed"
+                    and run.execution_epoch > 0
+                    and claim is not None
+                    and claim.dispatchRevision == 1
+                    and claim.engineReceipt is None
+                )
             )
             result = requested
-            if unstarted:
+            if before_dispatch:
                 stopped = services.ac_run_repo.mark_stopped_unstarted(
                     conn,
                     run.run_id,
@@ -472,7 +487,7 @@ def cancel_run(
                 expectedRevision=command.expectedRevision,
                 requestRunRevision=requested.revision,
                 resultRunRevision=result.revision,
-                status="stopped" if unstarted else "cancelRequested",
+                status="stopped" if before_dispatch else "cancelRequested",
                 acceptedAt=now,
                 replayed=False,
             )
@@ -500,14 +515,14 @@ def cancel_run(
                 restore_epoch=run.restore_epoch,
                 execution_epoch=run.execution_epoch,
                 run_revision_at_request=requested.revision,
-                phase="stopped" if unstarted else "requested",
+                phase="stopped" if before_dispatch else "requested",
                 requested_at=timestamp,
-                stopped_at=timestamp if unstarted else None,
+                stopped_at=timestamp if before_dispatch else None,
             )
             if cancellation is None:
                 raise CommandAdmissionError("idempotencyConflict")
             _event(services, conn, bound, "run.cancelRequested", _event_payload(receipt), timestamp)
-            if unstarted:
+            if before_dispatch:
                 _event(services, conn, bound, "run.finished", _finished_payload(receipt), timestamp)
                 if not services.ac_task_repo.release_run(
                     conn, run.task_id, owner_id, run.run_id, updated_at=timestamp

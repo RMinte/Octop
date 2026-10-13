@@ -265,12 +265,22 @@ class AcRunRepo:
         *,
         updated_at: int,
     ) -> AcRunRow | None:
-        """Only a Run with no handoff can be proven stopped by this transaction."""
+        """Stop only before dispatch starts, including a validated unstarted claim."""
         row = conn.execute(
             "UPDATE ac_runs SET state='stopped',revision=revision+1,updated_at=? "
             "WHERE run_id=? AND owner_id=? AND revision=? AND restore_epoch=? "
-            "AND state='queued' AND dispatch_phase='notDispatched' "
-            "AND execution_epoch=0 AND reconciliation_required=0 RETURNING *",
+            "AND state='queued' AND reconciliation_required=0 AND ("
+            "(dispatch_phase='notDispatched' AND execution_epoch=0 "
+            "AND NOT EXISTS (SELECT 1 FROM ac_run_dispatches d "
+            "WHERE d.run_id=ac_runs.run_id AND d.owner_id=ac_runs.owner_id)) "
+            "OR (dispatch_phase='claimed' AND execution_epoch>0 "
+            "AND EXISTS (SELECT 1 FROM ac_run_dispatches d "
+            "WHERE d.run_id=ac_runs.run_id AND d.owner_id=ac_runs.owner_id "
+            "AND d.restore_epoch=ac_runs.restore_epoch "
+            "AND d.execution_epoch=ac_runs.execution_epoch AND d.revision=1 "
+            "AND d.dispatch_started_at IS NULL AND d.engine_receipt_id IS NULL "
+            "AND d.engine_receipt_json IS NULL AND d.engine_receipt_digest IS NULL "
+            "AND d.engine_accepted_at IS NULL))) RETURNING *",
             (updated_at, run_id, owner_id, expected_revision, restore_epoch),
         ).fetchone()
         return AcRunRow.from_row(row) if row is not None else None

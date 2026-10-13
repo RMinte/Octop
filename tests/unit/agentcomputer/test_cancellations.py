@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
@@ -21,6 +21,7 @@ from octop.infra.agentcomputer.commands import (
     admit_new_message,
     get_command_receipt,
 )
+from octop.infra.agentcomputer.identity import read_identity
 from octop.infra.agentcomputer.recovery import recover_dispatches
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.db.pool import SqlitePool
@@ -102,33 +103,165 @@ def test_exact_cancel_replay_preserves_original_bytes_and_sequence(control):
     assert _counts(services) == before
 
 
-def test_claimed_cancel_is_only_a_durable_request(control, monkeypatch):
+def test_claimed_unstarted_cancel_stops_without_dispatch_and_releases_both_lanes(
+    control, monkeypatch
+):
+    services, _, task_id = control
+    allow_fixture(services, monkeypatch)
+    accepted = admit_new_message(services, owner_id=1, task_id=task_id, command=request())
+    original = services.ac_command_repo.get(str(accepted.commandID), 1).receipt_json
+    claim = dispatch.claim_run(
+        services, owner_id=1, run_id=accepted.runID, claimant_id=uuid4(), expected_revision=1
+    )
+    claim_row = services.ac_run_dispatch_repo.get(str(accepted.runID), 1)
+    assert claim_row is not None
+    assert claim_row.revision == 1 and claim_row.dispatch_started_at is None
+    assert claim_row.engine_receipt_json is None
+    command = _command(2)
+    receipt = cancellations.cancel_run(services, owner_id=1, run_id=accepted.runID, command=command)
+    assert receipt.status == "stopped" and receipt.requestRunRevision == 3
+    assert receipt.resultRunRevision == 4 and receipt.executionEpoch == 1
+    view = get_run(services, owner_id=1, run_id=accepted.runID)
+    assert view.state == "stopped" and view.dispatchPhase == "claimed"
+    assert view.executionEpoch == 1 and not view.reconciliationRequired
+    assert view.cancelRequested is True
+    task = services.ac_task_repo.get(str(task_id), 1)
+    project = services.ac_project_repo.get(task.project_id, 1)
+    assert task.active_run_id is None and project.active_run_id is None
+    assert _events(services) == [
+        "run.accepted",
+        "run.claimed",
+        "run.cancelRequested",
+        "run.finished",
+    ]
+    assert services.ac_run_dispatch_repo.get(str(accepted.runID), 1) == claim_row
+    assert services.ac_command_repo.get(str(accepted.commandID), 1).receipt_json == original
+    assert get_command_receipt(services, 1, accepted.commandID) == accepted
+    assert get_command_receipt(services, 1, receipt.commandID) == receipt
+    with pytest.raises(CommandAdmissionError, match="revisionConflict"):
+        dispatch._begin_dispatch(services, claim)
+    assert _events(services)[-1] == "run.finished"
+    assert recover_dispatches(services).scanned == 0
+    next_run = admit_new_message(services, owner_id=1, task_id=task_id, command=request())
+    assert next_run.runID != accepted.runID
+    assert services.ac_task_repo.get(str(task_id), 1).active_run_id == str(next_run.runID)
+    assert services.ac_project_repo.get(task.project_id, 1).active_run_id == str(next_run.runID)
+
+
+def test_claimed_stop_replay_and_historic_receipt_keep_original_bytes(control, monkeypatch):
+    services, _, task_id = control
+    allow_fixture(services, monkeypatch)
+    accepted = admit_new_message(services, owner_id=1, task_id=task_id, command=request())
+    dispatch.claim_run(
+        services, owner_id=1, run_id=accepted.runID, claimant_id=uuid4(), expected_revision=1
+    )
+    command = _command(2)
+    receipt = cancellations.cancel_run(services, owner_id=1, run_id=accepted.runID, command=command)
+    original = services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json
+    before = _counts(services)
+    replay = cancellations.cancel_run(
+        services,
+        owner_id=1,
+        run_id=accepted.runID,
+        command=command.model_copy(update={"commandID": uuid4()}),
+    )
+    assert replay == receipt.model_copy(update={"replayed": True})
+    assert services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json == original
+    assert _counts(services) == before
+
+    identity = read_identity(services.paths.agentcomputer_identity)
+    services.paths.agentcomputer_identity.write_text(
+        identity.model_copy(update={"restoreEpoch": 2}).model_dump_json(), encoding="utf-8"
+    )
+    with pytest.raises(CommandAdmissionError, match="restoreEpochConflict"):
+        cancellations.cancel_run(services, owner_id=1, run_id=accepted.runID, command=command)
+    assert get_command_receipt(services, 1, receipt.commandID) == receipt
+    assert services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json == original
+    assert _counts(services) == before
+
+
+@pytest.mark.parametrize("winner", ["cancel", "dispatch"])
+def test_claimed_cancel_and_dispatch_commit_have_one_ordered_winner(control, monkeypatch, winner):
     services, _, task_id = control
     allow_fixture(services, monkeypatch)
     accepted = admit_new_message(services, owner_id=1, task_id=task_id, command=request())
     claim = dispatch.claim_run(
         services, owner_id=1, run_id=accepted.runID, claimant_id=uuid4(), expected_revision=1
     )
-    receipt = cancellations.cancel_run(
-        services, owner_id=1, run_id=accepted.runID, command=_command(2)
-    )
-    assert receipt.status == "cancelRequested" and receipt.requestRunRevision == 3
-    assert receipt.resultRunRevision == 3
+    other_pool = SqlitePool(services.paths.db)
+    other = build_shared_services(db=other_pool, paths=services.paths, config=OctopConfig())
+    entered, attempted, release = Event(), Event(), Event()
+    method = "mark_cancel_requested" if winner == "cancel" else "mark_dispatching"
+    original = getattr(services.ac_run_repo, method)
+
+    def hold_winner(*args, **kwargs):
+        row = original(*args, **kwargs)
+        assert row is not None
+        entered.set()
+        assert release.wait(timeout=10)
+        return row
+
+    monkeypatch.setattr(services.ac_run_repo, method, hold_winner)
+
+    def begin_on_other():
+        attempted.set()
+        try:
+            return dispatch._begin_dispatch(other, claim)
+        except CommandAdmissionError as exc:
+            return exc.code
+
+    def cancel_on_other():
+        attempted.set()
+        return cancellations.cancel_run(
+            other, owner_id=1, run_id=accepted.runID, command=_command(3)
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            if winner == "cancel":
+                first = executor.submit(
+                    cancellations.cancel_run,
+                    services,
+                    owner_id=1,
+                    run_id=accepted.runID,
+                    command=_command(2),
+                )
+                second_action = begin_on_other
+            else:
+                first = executor.submit(dispatch._begin_dispatch, services, claim)
+                second_action = cancel_on_other
+            try:
+                assert entered.wait(timeout=10)
+                second = executor.submit(second_action)
+                assert attempted.wait(timeout=10)
+            finally:
+                release.set()
+            first_result = first.result(timeout=10)
+            second_result = second.result(timeout=10)
+    finally:
+        release.set()
+        other_pool.close()
+
+    events = _events(services)
     view = get_run(services, owner_id=1, run_id=accepted.runID)
-    assert view.state == "queued" and view.dispatchPhase == "claimed"
     task = services.ac_task_repo.get(str(task_id), 1)
     project = services.ac_project_repo.get(task.project_id, 1)
-    assert task.active_run_id == str(accepted.runID)
-    assert project.active_run_id == str(accepted.runID)
-    assert _events(services)[-1] == "run.cancelRequested"
-    with pytest.raises(CommandAdmissionError, match="revisionConflict"):
-        dispatch._begin_dispatch(services, claim)
-    assert get_run(services, owner_id=1, run_id=accepted.runID).dispatchPhase == "claimed"
-    report = recover_dispatches(services)
-    assert report.tightened == 1
-    after = get_run(services, owner_id=1, run_id=accepted.runID)
-    assert after.state == "interrupted" and after.reconciliationRequired
-    assert services.ac_task_repo.get(str(task_id), 1).active_run_id == str(accepted.runID)
+    dispatch_row = services.ac_run_dispatch_repo.get(str(accepted.runID), 1)
+    assert dispatch_row is not None and dispatch_row.engine_receipt_json is None
+    if winner == "cancel":
+        assert first_result.status == "stopped" and second_result == "revisionConflict"
+        assert view.state == "stopped" and view.dispatchPhase == "claimed"
+        assert dispatch_row.dispatch_started_at is None
+        assert task.active_run_id is None and project.active_run_id is None
+        assert events == ["run.accepted", "run.claimed", "run.cancelRequested", "run.finished"]
+    else:
+        assert isinstance(first_result, dispatch.EngineInvocation)
+        assert second_result.status == "cancelRequested"
+        assert view.state == "queued" and view.dispatchPhase == "dispatching"
+        assert dispatch_row.dispatch_started_at is not None
+        assert task.active_run_id == str(accepted.runID)
+        assert project.active_run_id == str(accepted.runID)
+        assert events == ["run.accepted", "run.claimed", "run.dispatching", "run.cancelRequested"]
 
 
 def test_cancel_after_engine_ack_blocks_new_model_step_without_stop_claim(control, monkeypatch):
@@ -276,24 +409,62 @@ def test_lost_cancellation_fact_is_not_recreated(control, lost):
         get_run(services, owner_id=1, run_id=accepted.runID)
 
 
-def test_failed_event_commit_rolls_back_request_and_stopped_state(control, monkeypatch):
+@pytest.mark.parametrize("claimed", [False, True], ids=["queued", "claimed"])
+@pytest.mark.parametrize("failure", ["finished_event", "task_release", "project_release"])
+def test_failed_stop_commit_rolls_back_request_and_both_lanes(
+    control, monkeypatch, claimed, failure
+):
     services, _, task_id = control
+    if claimed:
+        allow_fixture(services, monkeypatch)
     accepted = admit_new_message(services, owner_id=1, task_id=task_id, command=request())
+    claim = (
+        dispatch.claim_run(
+            services, owner_id=1, run_id=accepted.runID, claimant_id=uuid4(), expected_revision=1
+        )
+        if claimed
+        else None
+    )
     before = _counts(services)
-    insert = services.ac_event_repo.insert
+    before_events = _events(services)
+    before_view = get_run(services, owner_id=1, run_id=accepted.runID)
+    before_dispatch = services.ac_run_dispatch_repo.get(str(accepted.runID), 1)
+    before_task = services.ac_task_repo.get(str(task_id), 1)
+    before_project = services.ac_project_repo.get(before_task.project_id, 1)
+    if failure == "finished_event":
+        insert = services.ac_event_repo.insert
 
-    def fail(*args, **kwargs):
-        if kwargs.get("event_type") == "run.finished":
-            raise RuntimeError("injected finish event failure")
-        return insert(*args, **kwargs)
+        def fail_event(*args, **kwargs):
+            result = insert(*args, **kwargs)
+            if kwargs.get("event_type") == "run.finished":
+                raise RuntimeError("injected finish event failure")
+            return result
 
-    monkeypatch.setattr(services.ac_event_repo, "insert", fail)
-    with pytest.raises(RuntimeError, match="finish event"):
-        cancellations.cancel_run(services, owner_id=1, run_id=accepted.runID, command=_command())
+        monkeypatch.setattr(services.ac_event_repo, "insert", fail_event)
+        expected = pytest.raises(RuntimeError, match="finish event")
+    else:
+        repo = services.ac_task_repo if failure == "task_release" else services.ac_project_repo
+        release = repo.release_run
+
+        def fail_release(*args, **kwargs):
+            assert release(*args, **kwargs)
+            return False
+
+        monkeypatch.setattr(repo, "release_run", fail_release)
+        expected = pytest.raises(CommandAdmissionError, match="activeRunConflict")
+
+    with expected:
+        cancellations.cancel_run(
+            services, owner_id=1, run_id=accepted.runID, command=_command(before_view.revision)
+        )
     assert _counts(services) == before
-    view = get_run(services, owner_id=1, run_id=accepted.runID)
-    assert view.state == "queued" and view.revision == 1
-    assert services.ac_task_repo.get(str(task_id), 1).active_run_id == str(accepted.runID)
+    assert _events(services) == before_events
+    assert get_run(services, owner_id=1, run_id=accepted.runID) == before_view
+    assert services.ac_run_dispatch_repo.get(str(accepted.runID), 1) == before_dispatch
+    assert services.ac_task_repo.get(str(task_id), 1) == before_task
+    assert services.ac_project_repo.get(before_task.project_id, 1) == before_project
+    if claim is not None:
+        assert isinstance(dispatch._begin_dispatch(services, claim), dispatch.EngineInvocation)
 
 
 def test_two_connections_accept_one_cancel_and_release_once(control):

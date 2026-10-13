@@ -121,7 +121,7 @@ def _authorize_current(
         or claim.intent.snapshot.request.permissionMode not in profile.supportedPermissionModes
     ):
         raise CommandAdmissionError("runtimeUnavailable", reason="toolExecutionUnavailable")
-    _active(services, conn, bound)
+    _active(services, conn, bound, claim)
 
 
 def _record(row: Any, invocation: EngineInvocation) -> ToolEffectRecord:

@@ -12,7 +12,7 @@
 
 ## 执行边界
 
-只有 `queued/notDispatched`、`executionEpoch=0` 且无领取/派发事实的 Run，才能在一笔事务中记录请求和 `run.finished/stopped`，并释放 Task/Project 双活动占用。`claimed`、`dispatching`、`engineAccepted` 以及运行或等待中的 Run 只记录 `cancelRequested`，保留双占用并拒绝该 Run 的新领取、模型步骤和工具交接；已经交接的工具仍可写入真实迟到结果。响应丢失时，客户端用原命令 ID 查询收据，再读当前 Run；不得根据 HTTP 201 推断引擎或子进程已停。
+第十轮实现时，只有 `queued/notDispatched`、`executionEpoch=0` 且无领取/派发事实的 Run，才能在一笔事务中记录请求和 `run.finished/stopped`，并释放 Task/Project 双活动占用。第二十轮将同一安全终态扩展至[已领取但未开始派发](agentcomputer-claimed-cancel-stop.md)的 Run。`dispatching`、`engineAccepted` 以及运行或等待中的 Run 仍只记录 `cancelRequested`，保留双占用并拒绝该 Run 的新模型步骤和工具交接；已经交接的工具仍可写入真实迟到结果。响应丢失时，客户端用原命令 ID 查询收据，再读当前 Run；不得根据 HTTP 201 推断引擎或子进程已停。
 
 当前本机 8090 的持久项目仍是 `providerUnavailable`，没有可由客户端生产创建的 Task/Run；成功取消路径只能由隔离夹具验证。公开路由的存在不解除 `capabilities` 的执行门禁，不开启审批、提问提交或模型执行。完整 M1-08 仍需可信生产 Run 生命周期、HITL/问题触发、引擎安全续跑、Run 专属停止句柄与进程停止核验；M0 的真实模型和盒子部署条件另行验收。
 

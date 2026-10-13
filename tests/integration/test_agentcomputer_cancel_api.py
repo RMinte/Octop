@@ -14,7 +14,7 @@ from octop.api.routers import agentcomputer
 from octop.infra.agentcomputer import dispatch
 from octop.infra.agentcomputer.cancellations import CancelRunReceipt
 from octop.infra.agentcomputer.capabilities import CapabilityStatus, get_capabilities
-from octop.infra.agentcomputer.commands import admit_new_message
+from octop.infra.agentcomputer.commands import CommandAdmissionError, admit_new_message
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.agentcomputer.models import CommandReceipt, NewMessageCommand
 from tests.support.agentcomputer import register_ready_task
@@ -185,7 +185,7 @@ async def test_stale_revision_or_restore_epoch_does_not_record_cancel(env):
     assert current.json()["cancelRequested"] is False
 
 
-async def test_claimed_cancel_only_records_request_and_retains_both_lanes(env, monkeypatch):
+async def test_claimed_unstarted_cancel_stops_without_thread_cancel(env, monkeypatch):
     client, server, auth = env
     owner_id = await resolve_user_id(client, auth, "admin")
     accepted = await seed_run(client, server, auth, owner_id)
@@ -200,7 +200,7 @@ async def test_claimed_cancel_only_records_request_and_retains_both_lanes(env, m
         }
     )
     monkeypatch.setattr(dispatch, "get_capabilities", lambda _: worker_profile)
-    await asyncio.to_thread(
+    claim = await asyncio.to_thread(
         dispatch.claim_run,
         server.services,
         owner_id=owner_id,
@@ -217,17 +217,24 @@ async def test_claimed_cancel_only_records_request_and_retains_both_lanes(env, m
 
     assert response.status_code == 201
     receipt = CancelRunReceipt.model_validate(response.json())
-    assert receipt.status == "cancelRequested" and receipt.resultRunRevision == 3
+    assert receipt.status == "stopped" and receipt.requestRunRevision == 3
+    assert receipt.resultRunRevision == 4 and receipt.executionEpoch == 1
     thread_cancel.assert_not_called()
     current = await client.get(f"{PREFIX}/runs/{accepted.runID}", headers=auth)
     assert current.status_code == 200
-    assert current.json()["state"] == "queued"
+    assert current.json()["state"] == "stopped"
     assert current.json()["dispatchPhase"] == "claimed"
     assert current.json()["cancelRequested"] is True
     task = server.services.ac_task_repo.get(str(accepted.taskID), owner_id)
-    assert task is not None and task.active_run_id == str(accepted.runID)
+    assert task is not None and task.active_run_id is None
     project = server.services.ac_project_repo.get(task.project_id, owner_id)
-    assert project is not None and project.active_run_id == str(accepted.runID)
+    assert project is not None and project.active_run_id is None
+    queried = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
+    assert queried.status_code == 200 and queried.json() == receipt.model_dump(mode="json")
+    original = await client.get(f"{PREFIX}/commands/{accepted.commandID}", headers=auth)
+    assert original.status_code == 200 and original.json() == accepted.model_dump(mode="json")
+    with pytest.raises(CommandAdmissionError, match="revisionConflict"):
+        await asyncio.to_thread(dispatch._begin_dispatch, server.services, claim)
 
 
 @pytest.mark.parametrize("interrupt_request", [False, True], ids=["response", "request-cancelled"])

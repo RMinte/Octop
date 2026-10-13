@@ -20,7 +20,7 @@
 
 `ac_run_cancellations` 对一个 Run 最多保存一个取消请求，并通过 `ac_commands` 固定原命令、归属、幂等键、载荷摘要和不可变收据。`run.cancelRequested` 与记录、Run 修订同事务提交。只允许对明确的 `runID` 请求取消；不能把当前 thread 的最新运行当成目标。
 
-若 Run 仍为 `queued/notDispatched`、执行代次为零且不存在派发，数据库事务可以证明它未交给引擎：它随后写 `run.finished/stopped`，再清除 Task 与 Project 指向该 Run 的活动占用，整体失败则回滚。对 `claimed`、`dispatching`、`engineAccepted` 或运行/等待中的 Run，只记录 `cancelRequested`，保留双活动占用。现阶段没有 Run 专属引擎/子进程停止证明，因此这类请求不能写 `stopped`，也不能调用按 thread 取消的旧接口去影响下一回合。
+第九轮实现时，若 Run 仍为 `queued/notDispatched`、执行代次为零且不存在派发，数据库事务可以证明它未交给引擎：它随后写 `run.finished/stopped`，再清除 Task 与 Project 指向该 Run 的活动占用，整体失败则回滚。第二十轮把这条规则扩展至[已领取但未开始派发](agentcomputer-claimed-cancel-stop.md)的 Run。对 `dispatching`、`engineAccepted` 或运行/等待中的 Run，仍只记录 `cancelRequested`，保留双活动占用。现阶段没有已交接 Run 专属引擎/子进程停止证明，因此这类请求不能写 `stopped`，也不能调用按 thread 取消的旧接口去影响下一回合。
 
 取消记录会阻止同一 Run 后续领取、模型步骤和新工具交接；已经交接的工具若晚到真实结果，仍可记入原效果 journal。恢复扫描只按既有未知执行规则收紧，不能把“进程重启”解释为“用户取消已完成”。原命令收据可经已有本人 `GET /commands/{commandID}` 查询；`GET /runs/{runID}` 在同一事务核验取消命令、journal 和事件，删除任一原事实不能静默重新取消。
 
