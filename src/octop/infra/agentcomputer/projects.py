@@ -29,11 +29,13 @@ from octop.infra.agentcomputer.models import (
     ProjectConfiguration,
     ProjectCreateCommand,
     ProjectCreateReceipt,
+    ProjectListResponse,
     ProjectPreparationIntent,
     ProjectView,
 )
 from octop.infra.agentcomputer.preparation_lock import preparation_lock
 from octop.infra.agents.manager import AgentCreateSpec, AgentManager
+from octop.infra.db.repos.ac_projects import AcProjectRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import OctopError
 
@@ -196,43 +198,68 @@ def _intent_for(
     return intent
 
 
+def _project_view(
+    services: SharedServices, conn: Any, owner_id: int, project: AcProjectRow
+) -> ProjectView:
+    project_id = UUID(project.project_id)
+    preparation = services.ac_project_preparation_repo.get_in_transaction(
+        conn, str(project_id), owner_id
+    )
+    if preparation is None:
+        raise StorageDataError("missing preparation journal")
+    _intent_for(services, project_id, owner_id, conn=conn)
+    try:
+        return ProjectView.model_validate(
+            {
+                "projectID": project_id,
+                "workspaceID": project.workspace_id,
+                "preparationID": preparation.preparation_id,
+                "name": project.name,
+                "projectRevision": project.revision,
+                "configDigest": project.config_digest,
+                "preparationRevision": preparation.revision,
+                "preparationState": project.preparation_state,
+                "steps": {
+                    "agent": preparation.agent_state,
+                    "workspace": preparation.workspace_state,
+                },
+                "reasonCode": preparation.reason_code,
+                "retryable": preparation.retryable,
+            }
+        )
+    except (ValueError, ValidationError) as exc:
+        raise StorageDataError("invalid project projection") from exc
+
+
 def _get_project(services: SharedServices, owner_id: int, project_id: UUID) -> ProjectView | None:
     with services.db.transaction() as conn:
         project = services.ac_project_repo.get_in_transaction(conn, str(project_id), owner_id)
-        if project is None:
-            return None
-        preparation = services.ac_project_preparation_repo.get_in_transaction(
-            conn, str(project_id), owner_id
-        )
-        if preparation is None:
-            raise StorageDataError("missing preparation journal")
-        _intent_for(services, project_id, owner_id, conn=conn)
-        try:
-            return ProjectView.model_validate(
-                {
-                    "projectID": project_id,
-                    "workspaceID": project.workspace_id,
-                    "preparationID": preparation.preparation_id,
-                    "name": project.name,
-                    "projectRevision": project.revision,
-                    "configDigest": project.config_digest,
-                    "preparationRevision": preparation.revision,
-                    "preparationState": project.preparation_state,
-                    "steps": {
-                        "agent": preparation.agent_state,
-                        "workspace": preparation.workspace_state,
-                    },
-                    "reasonCode": preparation.reason_code,
-                    "retryable": preparation.retryable,
-                }
-            )
-        except (ValueError, ValidationError) as exc:
-            raise StorageDataError("invalid project projection") from exc
+        return _project_view(services, conn, owner_id, project) if project is not None else None
 
 
 def get_project(services: SharedServices, owner_id: int, project_id: UUID) -> ProjectView | None:
     try:
         return _get_project(services, owner_id, project_id)
+    except (sqlite3.DatabaseError, PostgresError) as exc:
+        raise StorageUnavailableError("project storage unavailable") from exc
+    except (IdentityError, StorageDataError):
+        raise
+    except (ValueError, TypeError) as exc:
+        raise StorageDataError("invalid stored project value") from exc
+
+
+def list_projects(
+    services: SharedServices, owner_id: int, limit: int, cursor: UUID | None
+) -> ProjectListResponse:
+    try:
+        with services.db.transaction() as conn:
+            rows = services.ac_project_repo.list_page_in_transaction(
+                conn, owner_id, str(cursor) if cursor is not None else None, limit + 1
+            )
+            items = [_project_view(services, conn, owner_id, row) for row in rows[:limit]]
+            return ProjectListResponse(
+                items=items, nextCursor=items[-1].projectID if len(rows) > limit else None
+            )
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("project storage unavailable") from exc
     except (IdentityError, StorageDataError):

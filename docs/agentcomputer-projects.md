@@ -40,7 +40,16 @@ GET /api/agentcomputer/v1/projects/{projectID}
 GET /api/agentcomputer/v1/commands/{commandID}
 ```
 
-前者返回当前状态、步骤、独立 preparationRevision 和稳定原因；后者返回原始收据。名称、资源 UUID、摘要和状态对外可见；宿主路径、内部配置和凭据不返回。本轮尚未开放项目列表、配置修改、单独重新准备命令或删除。
+前者返回当前状态、步骤、独立 preparationRevision 和稳定原因；后者返回原始收据。名称、资源 UUID、摘要和状态对外可见；宿主路径、内部配置和凭据不返回。配置修改、单独重新准备命令和删除尚未开放。
+
+只读项目列表使用同一登录用户作用域和当前状态投影：
+
+```http
+GET /api/agentcomputer/v1/projects?limit=50
+GET /api/agentcomputer/v1/projects?limit=50&cursor=<上一页的 nextCursor>
+```
+
+`limit` 默认为 50，允许 1–100；响应为 `{ "items": [ProjectView], "nextCursor": UUID | null }`。项目按公开 `projectID` 字符串升序分页，`nextCursor` 是本页最后一项的 ID，空值表示没有下一页。分页期间新增项目若排序在已读取区间，需从第一页重新扫描才能纳入缓存。列表逐项核对项目、准备日志和原始意图；损坏的关联数据返回 503，不静默省略。列表可见不表示项目 `ready` 或可运行，`projects.available` 仍为 `false`。
 
 ## 2. 同命令重试与准备顺序
 

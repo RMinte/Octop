@@ -217,6 +217,13 @@ class ProjectView(ControlModel):
     )
 
 
+class ProjectListResponse(ControlModel):
+    items: list[ProjectView]
+    nextCursor: UUID | None = Field(
+        description="Last returned public project UUID when another page is available."
+    )
+
+
 class TaskCreateCommand(ControlModel):
     """Internal mapping registration; no HTTP creation or engine ingress yet."""
 

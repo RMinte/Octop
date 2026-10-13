@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -14,7 +14,7 @@ from octop.api.routers import agentcomputer
 from octop.infra.agentcomputer.commands import CommandAdmissionError, StorageDataError
 from octop.infra.agentcomputer.identity import IdentityError
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
-from octop.infra.agentcomputer.models import ProjectCreateReceipt, ProjectView
+from octop.infra.agentcomputer.models import ProjectCreateReceipt, ProjectListResponse, ProjectView
 from tests.support.app import octop_client, write_octop_config
 from tests.support.auth import auth_header, bootstrap_admin, create_user, resolve_user_id
 
@@ -110,6 +110,73 @@ async def test_project_replay_keeps_original_ack_and_resources(env) -> None:
         assert conn.execute("SELECT COUNT(*) FROM ac_commands").fetchone()[0] == 1
 
 
+async def test_project_list_is_owner_scoped_and_paginates_by_public_id(env) -> None:
+    client, _server, admin = env
+    alice = await create_user(client, admin, username="list-alice")
+    identifiers = [UUID(int=value) for value in (3, 1, 2)]
+    for project_id in identifiers:
+        created = await client.post(
+            ENDPOINT, headers=alice, json=command(projectID=str(project_id))
+        )
+        assert created.status_code == 201
+
+    empty = await client.get(ENDPOINT, headers=admin)
+    assert empty.status_code == 200
+    assert empty.headers["cache-control"] == "no-store"
+    assert ProjectListResponse.model_validate(empty.json()).items == []
+    assert empty.json()["nextCursor"] is None
+
+    first = await client.get(ENDPOINT, headers=alice, params={"limit": 2})
+    assert first.status_code == 200
+    assert first.headers["cache-control"] == "no-store"
+    page = ProjectListResponse.model_validate(first.json())
+    assert [item.projectID for item in page.items] == [UUID(int=1), UUID(int=2)]
+    assert page.nextCursor == UUID(int=2)
+    assert all(not item.executionReady for item in page.items)
+    assert not {"defaultAgentID", "plannedAgentID", "serverRoot", "backend"} & set(
+        first.json()["items"][0]
+    )
+
+    second = await client.get(
+        ENDPOINT, headers=alice, params={"limit": 2, "cursor": str(page.nextCursor)}
+    )
+    assert second.status_code == 200
+    last = ProjectListResponse.model_validate(second.json())
+    assert [item.projectID for item in last.items] == [UUID(int=3)]
+    assert last.nextCursor is None
+
+    default_page = await client.get(ENDPOINT, headers=alice)
+    assert default_page.status_code == 200
+    assert len(default_page.json()["items"]) == 3
+    assert default_page.json()["nextCursor"] is None
+
+
+@pytest.mark.parametrize("query", [{"limit": 0}, {"limit": 101}, {"cursor": "not-a-uuid"}])
+async def test_project_list_rejects_invalid_page_arguments(env, query) -> None:
+    client, _server, auth = env
+    response = await client.get(ENDPOINT, headers=auth, params=query)
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "invalidRequest", "retryable": False}}
+
+
+async def test_project_list_fails_closed_on_invalid_preparation(env) -> None:
+    client, server, auth = env
+    body = command()
+    assert (await client.post(ENDPOINT, headers=auth, json=body)).status_code == 201
+    assert server.services is not None
+    with server.services.db.transaction() as conn:
+        conn.execute(
+            "UPDATE ac_project_preparations SET intent_digest = ? WHERE project_id = ?",
+            ("private-broken-digest", body["projectID"]),
+        )
+    response = await client.get(ENDPOINT, headers=auth)
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {"code": "storageUnavailable", "retryable": False, "reasonCode": "projectInvalid"}
+    }
+    assert "private-broken-digest" not in response.text
+
+
 @pytest.mark.parametrize("collision", ["key", "command", "project"])
 async def test_project_conflicts_do_not_register_second_intent(env, collision: str) -> None:
     client, server, auth = env
@@ -148,11 +215,18 @@ async def test_project_owner_isolation_includes_admin_and_shared_keys(env) -> No
             == {"error": {"code": "resourceNotFound", "retryable": False}}
         )
         assert denied.headers["cache-control"] == "no-store"
+        listed = await client.get(ENDPOINT, headers=auth)
+        assert listed.status_code == 200
+        assert listed.json() == {"items": [], "nextCursor": None}
     second = await client.post(
         ENDPOINT, headers=bob, json=command(idempotencyKey="shared-project-key")
     )
     assert second.status_code == 201
     assert second.json()["projectID"] != first.json()["projectID"]
+    alice_list = await client.get(ENDPOINT, headers=alice)
+    bob_list = await client.get(ENDPOINT, headers=bob)
+    assert [item["projectID"] for item in alice_list.json()["items"]] == [first.json()["projectID"]]
+    assert [item["projectID"] for item in bob_list.json()["items"]] == [second.json()["projectID"]]
 
 
 async def test_project_epoch_refused_before_replay_but_old_receipt_readable(env) -> None:
@@ -343,8 +417,9 @@ async def test_openapi_distinguishes_project_ack_from_current_status(tmp_path: P
     async with octop_client(home) as (client, _server):
         schema = (await client.get("/api/openapi.json")).json()
         post = schema["paths"][ENDPOINT]["post"]
+        listing = schema["paths"][ENDPOINT]["get"]
         get = schema["paths"][f"{ENDPOINT}/{{projectID}}"]["get"]
-        assert post["security"] == get["security"] == [{"BearerAuth": []}]
+        assert post["security"] == listing["security"] == get["security"] == [{"BearerAuth": []}]
         request = post["requestBody"]["content"]["application/json"]["schema"]
         assert request["$ref"].endswith("/ProjectCreateCommand")
         receipt = post["responses"]["201"]["content"]["application/json"]
@@ -356,8 +431,14 @@ async def test_openapi_distinguishes_project_ack_from_current_status(tmp_path: P
         current = get["responses"]["200"]["content"]["application/json"]
         assert current["schema"]["$ref"].endswith("/ProjectView")
         assert ProjectView.model_validate(current["example"]).executionReady is False
+        list_schema = listing["responses"]["200"]["content"]["application/json"]["schema"]
+        assert list_schema["$ref"].endswith("/ProjectListResponse")
+        parameters = {parameter["name"]: parameter["schema"] for parameter in listing["parameters"]}
+        assert parameters["limit"]["default"] == 50
+        assert parameters["limit"]["minimum"] == 1
+        assert parameters["limit"]["maximum"] == 100
+        assert "cursor" in parameters
         for status in ("401", "403", "409", "413", "422", "503"):
             error = post["responses"][status]["content"]["application/json"]["schema"]
             assert error["$ref"].endswith("/ProtocolErrorEnvelope")
-        assert "get" not in schema["paths"][ENDPOINT]
         assert (await client.get("/api/docs")).status_code == 200

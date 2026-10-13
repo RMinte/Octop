@@ -71,6 +71,17 @@ class AcProjectRepo:
         return AcProjectRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def list_page_in_transaction(
+        conn: Any, owner_id: int, cursor: str | None, limit: int
+    ) -> list[AcProjectRow]:
+        rows = conn.execute(
+            "SELECT * FROM ac_projects WHERE owner_id = ? AND project_id > ? "
+            "ORDER BY project_id ASC LIMIT ?",
+            (owner_id, cursor or "", limit),
+        ).fetchall()
+        return [AcProjectRow.from_row(row) for row in rows]
+
+    @staticmethod
     def insert(
         conn: Any,
         *,

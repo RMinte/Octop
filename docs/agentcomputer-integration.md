@@ -42,6 +42,8 @@
 
 第二十二轮增加[AgentComputer HTTP 操作的服务关闭等待](agentcomputer-http-shutdown-drain.md)：请求取消后，项目准备、命令事务和只读查询仍由服务器登记并结算；关闭先封闭 HTTP 操作及认证入口、等待持久事务和精确 Run 信号，然后排空可信派发，最后关库并释放 daemon 锁。同实例重启建立新登记表。生产 worker、已交接 Run 的远端停止证明和能力开关仍关闭；adapterVersion、capabilityRevision 和 schema 均不变。
 
+第二十三轮补齐[本人项目只读列表](agentcomputer-projects.md)：`GET /api/agentcomputer/v1/projects` 按公开项目 UUID 升序分页，逐项复用准备日志与固定意图核对；管理员也只读取本人项目。AgentComputer 原生客户端可据此显示盒子连接与项目准备状态，但项目、Task 和 Run 的执行能力仍关闭。adapterVersion、capabilityRevision 和 schema 均不变。
+
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
 ## 仓库与版本依据
@@ -71,6 +73,7 @@
 | 第二十轮开工基线 | `feature/agentcomputer-foundation` | `2e98bfbf77340c7c509052c3f6b73e9bad3fa30a`，开工时主目录干净 |
 | 第二十一轮开工基线 | `feature/agentcomputer-foundation` | `b8783f0f42ec5bd4c4bcfb55b42e0e0be85c750a`，开工时主目录干净 |
 | 第二十二轮开工基线 | `feature/agentcomputer-foundation` | `f12a34fba72f2fdd3ac228b624fdd7fb425d17f3`，开工时主目录干净 |
+| 第二十三轮开工基线 | `feature/agentcomputer-foundation` | `fe39d2d2e8b70822fd20eb3fc1ac23d148cbb4d1`，开工时主目录干净；AgentComputer 主目录 `feature/0.0.2/all @ 67d203b` 的既有文档改动保留 |
 
 Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写；仓库网址不等于已经推送。工作开始核对主目录 status、worktree、branch 和 HEAD，保留已有文档及代码改动。提交运行仓库 hooks，完成默认 `make all` 门禁后再交付；不跳过红测试。
 

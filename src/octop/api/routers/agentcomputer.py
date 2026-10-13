@@ -8,7 +8,7 @@ from functools import partial
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Response
+from fastapi import APIRouter, Depends, Path, Query, Response
 from fastapi.responses import JSONResponse
 
 from octop.api.agentcomputer import (
@@ -38,6 +38,7 @@ from octop.infra.agentcomputer.models import (
     NewMessageCommand,
     ProjectCreateCommand,
     ProjectCreateReceipt,
+    ProjectListResponse,
     ProjectView,
     RunPauseDecisionReceipt,
     RunPauseStatus,
@@ -46,7 +47,7 @@ from octop.infra.agentcomputer.models import (
     TaskView,
 )
 from octop.infra.agentcomputer.pauses import get_pause_status, get_run_pause_status
-from octop.infra.agentcomputer.projects import create_project, get_project
+from octop.infra.agentcomputer.projects import create_project, get_project, list_projects
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.agentcomputer.submission import submit_new_message
 from octop.infra.agentcomputer.tasks import get_task
@@ -222,6 +223,52 @@ async def register_project(
         return admission_error_response(exc)
     except IdentityError:
         logger.error("AgentComputer identity is invalid during project registration")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored project data is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="projectInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer project storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+
+
+@router.get(
+    "/projects",
+    response_model=ProjectListResponse,
+    summary="List the authenticated user's local project statuses",
+    description=(
+        "Requires a user Bearer token. Returns only this user's projects, including for admins, "
+        "in stable public project UUID order. Use nextCursor as the next request's cursor; "
+        "null means no further page. Each item is a current preparation view, not execution readiness. "
+        "Host paths, credentials, and internal agent IDs are omitted."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid limit or cursor"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Project storage unavailable"},
+    },
+)
+async def project_list(
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=100, description="Page size, from 1 to 100."),
+    cursor: UUID | None = Query(
+        default=None, description="Last public project UUID from the previous page."
+    ),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> ProjectListResponse | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await server.agentcomputer_http_operations.run_thread(
+            list_projects, server.services, user.id, limit, cursor
+        )
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during project listing")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
     except StorageDataError:
         logger.error("AgentComputer stored project data is invalid")
