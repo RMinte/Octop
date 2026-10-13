@@ -359,3 +359,131 @@ async def test_harness_stream_cancel_preempts_blocked_model_without_running_tool
 
     assert len(requests) == 1
     assert tool_inputs == []
+
+
+@pytest.mark.parametrize("fault_type", [httpx.ReadTimeout, httpx.ReadError])
+async def test_harness_partial_tool_stream_transport_fault_does_not_run_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_type: type[httpx.TransportError],
+) -> None:
+    """An incomplete tool call stays inert if its SSE stream fails mid-response."""
+    paths = PathLayout(tmp_path / "octop")
+    pool = SqlitePool(paths.db)
+    run_migrations(pool)
+    providers = ProviderRepo(pool)
+    providers.create(
+        name="local",
+        kind="openai",
+        base_url="https://wire.invalid/v1",
+        api_key="fixture-local-key",
+        models_json=json.dumps([{"id": "fixture-model", "enabled": True}]),
+    )
+    configs = ProviderStore(providers).build_harness_configs()
+    closed = asyncio.Event()
+    requests: list[httpx.Request] = []
+    tool_inputs: list[str] = []
+    observed: list[dict[str, Any]] = []
+
+    class FaultingCompletion(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            partial_tool_call = {
+                "id": "chatcmpl-fault-fixture",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "fixture-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-fault-fixture",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "synthetic_echo",
+                                        "arguments": '{"value":"pin',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(partial_tool_call)}\n\n".encode()
+            raise fault_type("synthetic stream fault")
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url == "https://wire.invalid/v1/chat/completions"
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        assert any(item["function"]["name"] == "synthetic_echo" for item in body["tools"])
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=FaultingCompletion(),
+        )
+
+    sync_http = httpx.Client(transport=httpx.MockTransport(answer))
+    async_http = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    original_get_class = harness_factory._get_reasoning_aware_chat_openai
+
+    def transport_class(base_class):
+        actual_class = original_get_class(base_class)
+
+        def construct(**kwargs):
+            return actual_class(http_client=sync_http, http_async_client=async_http, **kwargs)
+
+        return construct
+
+    monkeypatch.setattr(harness_factory, "_get_reasoning_aware_chat_openai", transport_class)
+
+    @tool
+    def synthetic_echo(value: str) -> str:
+        """Record any execution after a truncated tool-call delta."""
+        tool_inputs.append(value)
+        return "pong"
+
+    config = HarnessAgentConfig(
+        workspace_dir=tmp_path / "workspace",
+        backend="filesystem",
+        providers=configs,
+        default_model="local/fixture-model",
+        tools=[synthetic_echo],
+        checkpointer=False,
+        session_log_enabled=False,
+        todos_enabled=False,
+        ask_user_enabled=False,
+        team_enabled=False,
+        web_search_tools=False,
+        pii_enabled=False,
+        media_offload_enabled=False,
+        model_retry_enabled=False,
+    )
+    agent = await asyncio.to_thread(HarnessAgent, config)
+    try:
+        with pytest.raises(fault_type, match="synthetic stream fault"):
+            async for chunk in agent.stream("请调用 synthetic_echo，参数 value=ping。"):
+                observed.append(chunk)
+        await asyncio.wait_for(closed.wait(), timeout=5)
+    finally:
+        await agent.aclose()
+        await async_http.aclose()
+        sync_http.close()
+        pool.close()
+
+    assert len(requests) == 1
+    assert tool_inputs == []
+    assert observed[-1]["type"] == "tool_call_chunk"
+    assert observed[-1]["args"] == '{"value":"pin'
+    assert not any(
+        chunk.get("type") == "state_update" and chunk.get("node") == "model" for chunk in observed
+    )
+    assert not any(chunk.get("type") == "token" and chunk.get("content") for chunk in observed)

@@ -28,12 +28,14 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--provider-db", required=True, type=Path)
 parser.add_argument("--provider", required=True)
 parser.add_argument("--model", required=True)
-parser.add_argument("--mode", choices=("tool", "stream"), default="tool")
+parser.add_argument("--mode", choices=("tool", "stream", "stream-zh"), default="tool")
 args = parser.parse_args()
 DB: Path = args.provider_db
 PROVIDER: str = args.provider
 MODEL: str = args.model
-STREAM_MODE: bool = args.mode == "stream"
+STREAM_MODE: bool = args.mode in ("stream", "stream-zh")
+CHINESE_STREAM_MODE: bool = args.mode == "stream-zh"
+STREAM_MARKER = "章鱼流式验证成功" if CHINESE_STREAM_MODE else "OCTOP_STREAM_OK"
 MAX_REQUESTS = 1 if STREAM_MODE else 3
 MAX_TOKENS = 256 if STREAM_MODE else 512
 TOTAL_TIMEOUT = 45.0 if STREAM_MODE else 50.0
@@ -194,24 +196,31 @@ async def main() -> None:
         stream_token_count = 0
         stream_snapshot_count = 0
         stream_usage_count = 0
+        stream_has_chinese_token = False
         last_snapshot: dict[str, Any] | None = None
         stream_completed = False
         try:
             if STREAM_MODE:
                 request = ChatRequest(
-                    messages="请只输出 OCTOP_STREAM_OK，除此之外不要输出任何内容。",
+                    messages=f"请只输出 {STREAM_MARKER}，除此之外不要输出任何内容。",
                     configurable={"model_settings": {"max_tokens": MAX_TOKENS}},
                     recursion_limit=20,
                 )
 
                 async def consume_stream() -> None:
                     nonlocal stream_token_count, stream_snapshot_count, stream_usage_count
+                    nonlocal stream_has_chinese_token
                     nonlocal last_snapshot, stream_completed
                     async for chunk in agent.stream(request, protocol="langgraph"):
                         if not isinstance(chunk, dict):
                             continue
-                        if chunk.get("type") == "token" and str(chunk.get("content") or "").strip():
-                            stream_token_count += 1
+                        if chunk.get("type") == "token":
+                            token = str(chunk.get("content") or "")
+                            if token.strip():
+                                stream_token_count += 1
+                                stream_has_chinese_token |= any(
+                                    "\u4e00" <= char <= "\u9fff" for char in token
+                                )
                         elif chunk.get("type") == "state_snapshot":
                             stream_snapshot_count += 1
                             if isinstance(chunk.get("data"), dict):
@@ -237,7 +246,7 @@ async def main() -> None:
         if STREAM_MODE:
             messages = last_snapshot.get("messages", []) if last_snapshot else []
             final = messages[-1] if isinstance(messages, list) and messages else None
-            final_contains_marker = "OCTOP_STREAM_OK" in str(getattr(final, "content", ""))
+            final_contains_marker = STREAM_MARKER in str(getattr(final, "content", ""))
             passed = (
                 failure is None
                 and stream_completed
@@ -248,13 +257,14 @@ async def main() -> None:
                 and stream_snapshot_count > 0
                 and getattr(final, "type", None) == "ai"
                 and final_contains_marker
+                and (not CHINESE_STREAM_MODE or stream_has_chinese_token)
                 and not called
             )
             print(
                 json.dumps(
                     {
                         "success": passed,
-                        "mode": "stream",
+                        "mode": args.mode,
                         "provider": PROVIDER,
                         "model": MODEL,
                         "protocol_path": wire[0]["path"] if wire else None,
@@ -266,6 +276,7 @@ async def main() -> None:
                         "state_snapshot_events": stream_snapshot_count,
                         "stream_completed": stream_completed,
                         "final_contains_marker": final_contains_marker,
+                        "chinese_token_seen": stream_has_chinese_token,
                         "usage_event_count": stream_usage_count,
                         "usage": "unknown",
                         "elapsed_seconds": round(time.monotonic() - started, 2),
