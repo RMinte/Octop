@@ -655,3 +655,31 @@ class RunPauseRecord(ControlModel):
         if value.utcoffset() != timedelta(0):
             raise ValueError("Pause time must be UTC")
         return value
+
+
+class RunPauseStatus(ControlModel):
+    """Owned pause status without trusted action content or worker identities."""
+
+    pauseID: UUID
+    kind: Literal["approval", "question"]
+    runID: UUID
+    turnID: UUID
+    phase: Literal["pending", "decided", "expired"] = Field(
+        description="Decided records input adjudication only; it does not prove engine resume."
+    )
+    revision: PositiveRevision
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    expiresAt: datetime
+    createdAt: datetime
+    updatedAt: datetime
+    decisionCommandID: UUID | None = Field(
+        description="Original decision receipt command ID, or null before adjudication."
+    )
+
+    @field_validator("expiresAt", "createdAt", "updatedAt")
+    @classmethod
+    def utc_status_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("Pause status timestamps must be UTC")
+        return value

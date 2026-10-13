@@ -26,6 +26,7 @@ from octop.infra.agentcomputer.models import (
     QuestionAnswerCommand,
     RunPauseContent,
     RunPauseDecisionReceipt,
+    RunPauseRecord,
 )
 from octop.infra.server import OctopServer
 from tests.support.agentcomputer import register_ready_task
@@ -54,9 +55,9 @@ async def seed_receipt(client, server: OctopServer, auth, owner_id: int) -> Comm
     )
 
 
-async def seed_pause_receipt(
+async def seed_pending_pause(
     client, server: OctopServer, auth, owner_id: int, monkeypatch, kind: str
-) -> RunPauseDecisionReceipt:
+) -> RunPauseRecord:
     """Exercise trusted internal pause facts in a temporary DB, with no model call."""
     assert server.services is not None
     accepted = await seed_receipt(client, server, auth, owner_id)
@@ -106,13 +107,29 @@ async def seed_pause_receipt(
     )
     expires_at = datetime.now(UTC) + timedelta(minutes=10)
     if kind == "approval":
-        record = await asyncio.to_thread(
+        return await asyncio.to_thread(
             approvals.request_approval,
             services,
             invocation,
             action=content,
             expires_at=expires_at,
         )
+    return await asyncio.to_thread(
+        questions.ask_question,
+        services,
+        invocation,
+        question=content,
+        expires_at=expires_at,
+    )
+
+
+async def seed_pause_receipt(
+    client, server: OctopServer, auth, owner_id: int, monkeypatch, kind: str
+) -> RunPauseDecisionReceipt:
+    record = await seed_pending_pause(client, server, auth, owner_id, monkeypatch, kind)
+    assert server.services is not None
+    services = server.services
+    if kind == "approval":
         command = ApprovalDecisionCommand(
             commandID=uuid4(),
             idempotencyKey=str(uuid4()),
@@ -127,16 +144,9 @@ async def seed_pause_receipt(
             services,
             owner_id=owner_id,
             command=command,
-            current_action=content,
+            current_action=record.intent.content,
             authorize=lambda _: True,
         )
-    record = await asyncio.to_thread(
-        questions.ask_question,
-        services,
-        invocation,
-        question=content,
-        expires_at=expires_at,
-    )
     command = QuestionAnswerCommand(
         commandID=uuid4(),
         idempotencyKey=str(uuid4()),
@@ -151,7 +161,7 @@ async def seed_pause_receipt(
         services,
         owner_id=owner_id,
         command=command,
-        current_question=content,
+        current_question=record.intent.content,
         authorize=lambda _: True,
     )
 
@@ -260,6 +270,168 @@ def pause_facts(server: OctopServer) -> dict[str, list[tuple[object, ...]]]:
         }
 
 
+def expected_pause_status(record: RunPauseRecord) -> dict[str, object]:
+    intent = record.intent.model_dump(mode="json")
+    stored = record.model_dump(mode="json")
+    return {
+        "pauseID": intent["pauseID"],
+        "kind": intent["kind"],
+        "runID": intent["runID"],
+        "turnID": intent["turnID"],
+        "phase": stored["phase"],
+        "revision": stored["revision"],
+        "restoreEpoch": intent["restoreEpoch"],
+        "executionEpoch": intent["executionEpoch"],
+        "expiresAt": intent["expiresAt"],
+        "createdAt": stored["createdAt"],
+        "updatedAt": stored["updatedAt"],
+        "decisionCommandID": (
+            str(record.receipt.commandID) if record.receipt is not None else None
+        ),
+    }
+
+
+async def test_run_pause_query_returns_null_without_creating_facts(env) -> None:
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    receipt = await seed_receipt(client, server, auth, owner_id)
+    before = pause_facts(server)
+
+    for _ in range(2):
+        response = await client.get(f"{PREFIX}/runs/{receipt.runID}/pause", headers=auth)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json() is None
+    assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+@pytest.mark.parametrize("phase", ["pending", "decided", "expired"])
+async def test_run_pause_query_returns_only_safe_status(
+    env, monkeypatch, kind: str, phase: str
+) -> None:
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    assert server.services is not None
+    if phase == "pending":
+        record = await seed_pending_pause(client, server, auth, owner_id, monkeypatch, kind)
+    else:
+        receipt = await seed_pause_receipt(client, server, auth, owner_id, monkeypatch, kind)
+        if phase == "expired":
+            assert await asyncio.to_thread(
+                pauses.expire_pause,
+                server.services,
+                owner_id=owner_id,
+                pause_id=receipt.pauseID,
+            )
+        record = await asyncio.to_thread(
+            pauses.get_pause, server.services, owner_id=owner_id, pause_id=receipt.pauseID
+        )
+        assert record is not None
+    assert record.phase == phase
+    before = pause_facts(server)
+
+    for _ in range(2):
+        response = await client.get(f"{PREFIX}/runs/{record.intent.runID}/pause", headers=auth)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json() == expected_pause_status(record)
+        assert "trusted approval" not in response.text
+        assert "trusted question" not in response.text
+        assert "fixture-policy-v1" not in response.text
+        assert "fixture-capability-v1" not in response.text
+        assert str(server.paths.root) not in response.text
+    assert pause_facts(server) == before
+
+
+async def test_run_pause_query_is_owner_scoped_even_with_invalid_identity(env, monkeypatch) -> None:
+    client, server, admin_auth = env
+    owner_auth = await create_user(client, admin_auth, username="run-pause-owner")
+    other_auth = await create_user(client, admin_auth, username="run-pause-other")
+    owner_id = await resolve_user_id(client, admin_auth, "run-pause-owner")
+    record = await seed_pending_pause(client, server, owner_auth, owner_id, monkeypatch, "approval")
+    endpoint = f"{PREFIX}/runs/{record.intent.runID}/pause"
+    own = await client.get(endpoint, headers=owner_auth)
+    assert own.status_code == 200
+    assert own.json() == expected_pause_status(record)
+    before = pause_facts(server)
+
+    server.paths.agentcomputer_identity.write_text('{"private-marker":', encoding="utf-8")
+    for auth in (other_auth, admin_auth):
+        missing = await client.get(f"{PREFIX}/runs/{uuid4()}/pause", headers=auth)
+        denied = await client.get(endpoint, headers=auth)
+        assert missing.status_code == denied.status_code == 404
+        assert (
+            missing.json()
+            == denied.json()
+            == {"error": {"code": "resourceNotFound", "retryable": False}}
+        )
+        assert denied.headers["cache-control"] == "no-store"
+        assert "private-marker" not in denied.text
+    assert pause_facts(server) == before
+
+
+async def test_run_pause_query_requires_header_auth_and_valid_run_uuid(env) -> None:
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    receipt = await seed_receipt(client, server, auth, owner_id)
+    endpoint = f"{PREFIX}/runs/{receipt.runID}/pause"
+    token = auth["Authorization"].split(" ", 1)[1]
+    before = pause_facts(server)
+
+    for response in (
+        await client.get(endpoint),
+        await client.get(endpoint, params={"access_token": token}),
+        await client.get(endpoint, params={"access_token": token}, headers=auth),
+    ):
+        assert response.status_code == 401
+        assert response.json() == {"error": {"code": "authenticationRequired", "retryable": False}}
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert response.headers["cache-control"] == "no-store"
+    invalid = await client.get(f"{PREFIX}/runs/private-input-marker/pause", headers=auth)
+    assert invalid.status_code == 422
+    assert invalid.json() == {"error": {"code": "invalidRequest", "retryable": False}}
+    assert invalid.headers["cache-control"] == "no-store"
+    assert "private-input-marker" not in invalid.text
+    assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("damage", ["intent", "decisionReceipt", "decisionEvent"])
+async def test_run_pause_query_returns_safe_503_for_damaged_graph_without_writes(
+    env, monkeypatch, damage: str
+) -> None:
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    receipt = await seed_pause_receipt(client, server, auth, owner_id, monkeypatch, "question")
+    assert server.services is not None
+    with server.services.db.transaction() as conn:
+        if damage == "intent":
+            conn.execute(
+                "UPDATE ac_run_pauses SET intent_json=? WHERE pause_id=?",
+                ('{"private-marker":', str(receipt.pauseID)),
+            )
+        elif damage == "decisionReceipt":
+            conn.execute(
+                "UPDATE ac_run_pauses SET decision_receipt_json=? WHERE pause_id=?",
+                ('{"private-marker":', str(receipt.pauseID)),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM ac_events WHERE run_id=? AND event_type='question.answered'",
+                (str(receipt.runID),),
+            )
+    before = pause_facts(server)
+
+    response = await client.get(f"{PREFIX}/runs/{receipt.runID}/pause", headers=auth)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["error"]["code"] == "storageUnavailable"
+    assert response.json()["error"]["retryable"] is False
+    assert "private-marker" not in response.text
+    assert str(server.paths.root) not in response.text
+    assert pause_facts(server) == before
+
+
 @pytest.mark.parametrize("kind", ["approval", "question"])
 async def test_pause_decision_receipt_http_is_original_and_owner_scoped(env, monkeypatch, kind):
     client, server, admin_auth = env
@@ -310,12 +482,16 @@ async def test_pause_decision_receipt_http_survives_expiry_epoch_and_restart(
         path.write_text(json.dumps(identity), encoding="utf-8")
         first = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
         assert first.status_code == 200 and first.json() == receipt.model_dump(mode="json")
+        first_pause = await client.get(f"{PREFIX}/runs/{receipt.runID}/pause", headers=auth)
+        assert first_pause.status_code == 200 and first_pause.json()["phase"] == "expired"
     async with octop_client(home) as (client, server):
         auth = await auth_header(client)
         before = pause_facts(server)
         second = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
         assert second.status_code == 200 and second.json() == receipt.model_dump(mode="json")
         assert second.json()["restoreEpoch"] == 1
+        second_pause = await client.get(f"{PREFIX}/runs/{receipt.runID}/pause", headers=auth)
+        assert second_pause.status_code == 200 and second_pause.json() == first_pause.json()
         assert pause_facts(server) == before
 
 
@@ -467,4 +643,26 @@ async def test_openapi_documents_receipt_as_immutable_acceptance(tmp_path: Path)
             error = operation["responses"][status]["content"]["application/json"]["schema"]
             assert error["$ref"].endswith("/ProtocolErrorEnvelope")
         assert "post" not in schema["paths"][f"{PREFIX}/commands/{{commandID}}"]
+        pause = schema["paths"][f"{PREFIX}/runs/{{runID}}/pause"]["get"]
+        assert pause["summary"] and pause["tags"] == ["agentcomputer"]
+        assert pause["security"] == [{"BearerAuth": []}]
+        assert pause["parameters"][0]["schema"]["format"] == "uuid"
+        pause_response = pause["responses"]["200"]["content"]["application/json"]["schema"]
+        assert any(
+            item.get("$ref", "").endswith("/RunPauseStatus") for item in pause_response["anyOf"]
+        )
+        assert set(schema["components"]["schemas"]["RunPauseStatus"]["properties"]) == {
+            "pauseID",
+            "kind",
+            "runID",
+            "turnID",
+            "phase",
+            "revision",
+            "restoreEpoch",
+            "executionEpoch",
+            "expiresAt",
+            "createdAt",
+            "updatedAt",
+            "decisionCommandID",
+        }
         assert (await client.get("/api/docs")).status_code == 200

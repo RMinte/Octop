@@ -77,6 +77,7 @@ OPENAPI_TAGS: list[dict[str, str]] = [
             " Daemon bootstrap can conservatively fence unresolved dispatch facts before runtime; "
             "full recovery and production execution remain unavailable. "
             "Exact-Run cancellation records durable requests but lacks a production stop proof."
+            " Run pause lookup exposes only validated status metadata; it does not submit a decision or resume execution."
         ),
     },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},

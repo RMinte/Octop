@@ -37,6 +37,7 @@ from octop.infra.agentcomputer.models import (
     RunPauseDecisionReceipt,
     RunPauseIntent,
     RunPauseRecord,
+    RunPauseStatus,
 )
 from octop.infra.agentcomputer.runs import BoundRun, load_bound_run
 from octop.infra.db.repos.ac_run_pauses import AcRunPauseRow
@@ -529,6 +530,48 @@ def get_pause(services: SharedServices, *, owner_id: int, pause_id: UUID) -> Run
             return None
         return validate_pause_read_binding(
             services, conn, owner_id=owner_id, row=row, box_id=identity.boxID
+        )
+
+
+def get_run_pause_status(
+    services: SharedServices, *, owner_id: int, run_id: UUID
+) -> tuple[bool, RunPauseStatus | None]:
+    """Read one owned Run's validated pause status without exposing its private intent."""
+    with _transaction(services) as conn:
+        # A missing or foreign Run is indistinguishable even if installation
+        # identity is damaged; read it only after the owned row is found.
+        if services.ac_run_repo.get_in_transaction(conn, str(run_id), owner_id) is None:
+            return False, None
+        identity = _existing_recovery_identity(services)
+        bound = load_bound_run(
+            services, conn, owner_id=owner_id, run_id=run_id, box_id=identity.boxID
+        )
+        if bound is None:
+            raise StorageDataError("owned Run disappeared during pause lookup")
+        claim = validate_dispatch_binding(services, conn, bound)
+        validate_effect_bindings(services, conn, bound, claim)
+        records = validate_pause_bindings(services, conn, bound, claim)
+        from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
+
+        validate_cancellation_binding(services, conn, bound, claim)
+        if len(records) > 1:
+            raise StorageDataError("multiple Run pauses")
+        if not records:
+            return True, None
+        record = records[0]
+        return True, RunPauseStatus(
+            pauseID=record.intent.pauseID,
+            kind=record.intent.kind,
+            runID=record.intent.runID,
+            turnID=record.intent.turnID,
+            phase=record.phase,
+            revision=record.revision,
+            restoreEpoch=record.intent.restoreEpoch,
+            executionEpoch=record.intent.executionEpoch,
+            expiresAt=record.intent.expiresAt,
+            createdAt=record.createdAt,
+            updatedAt=record.updatedAt,
+            decisionCommandID=(record.receipt.commandID if record.receipt is not None else None),
         )
 
 

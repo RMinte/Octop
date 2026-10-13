@@ -36,6 +36,11 @@ the original cancellation receipt. A recorded request does not prove an active
 engine stopped. Production Run creation and cancellation availability remain
 closed; see [Run cancellation](agentcomputer-cancellation-http.md).
 
+`GET /api/agentcomputer/v1/runs/{runID}/pause` returns the owned Run's
+persisted pause metadata or JSON `null` when no pause exists. It does not expose
+opaque action content, submit a decision, or resume execution; see
+[Run pause lookup](agentcomputer-run-pause-read.md).
+
 | Header | Value |
 |--------|-------|
 | `Authorization` | `Bearer <access_token>` from `POST /api/auth/login` |

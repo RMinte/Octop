@@ -39,10 +39,12 @@ from octop.infra.agentcomputer.models import (
     ProjectCreateReceipt,
     ProjectView,
     RunPauseDecisionReceipt,
+    RunPauseStatus,
     RunView,
     TaskCreateReceipt,
     TaskView,
 )
+from octop.infra.agentcomputer.pauses import get_run_pause_status
 from octop.infra.agentcomputer.projects import create_project, get_project
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.agentcomputer.submission import submit_new_message
@@ -432,6 +434,54 @@ async def run_status(
     if run is None:
         return protocol_error_response("resourceNotFound", 404)
     return run
+
+
+@router.get(
+    "/runs/{runID}/pause",
+    response_model=RunPauseStatus | None,
+    summary="Read the persisted pause status for one owned Run",
+    description=(
+        "Requires a user Bearer token. Returns null when the owned Run has no pause; "
+        "missing and other users' Runs return the same 404, including for admins. "
+        "Pending, adjudicated, and expired facts are validated with the original Run, "
+        "dispatch, tool-effect, event, and cancellation journals in one transaction. "
+        "A decision command ID identifies an immutable receipt; adjudicated does not "
+        "authorize a tool, resume an engine, or prove execution. The response omits "
+        "opaque action or question content and internal engine identities. "
+        "This read-only endpoint does not dispatch, decide, repair, or resume anything."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No Run owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid Run identifier"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Pause graph or storage unavailable"},
+    },
+)
+async def run_pause_status(
+    response: Response,
+    run_id: UUID = Path(alias="runID", description="Public Run UUID."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> RunPauseStatus | JSONResponse | None:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        operation = partial(get_run_pause_status, server.services, owner_id=user.id, run_id=run_id)
+        found, pause = await asyncio.get_running_loop().run_in_executor(None, operation)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Run pause lookup")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Run pause graph is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="pauseInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Run pause storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if not found:
+        return protocol_error_response("resourceNotFound", 404)
+    return pause
 
 
 @router.post(
