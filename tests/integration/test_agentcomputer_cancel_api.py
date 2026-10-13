@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import suppress
 from unittest.mock import Mock
 from uuid import UUID, uuid4
@@ -229,7 +230,10 @@ async def test_claimed_cancel_only_records_request_and_retains_both_lanes(env, m
     assert project is not None and project.active_run_id == str(accepted.runID)
 
 
-async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes(env, monkeypatch):
+@pytest.mark.parametrize("interrupt_request", [False, True], ids=["response", "request-cancelled"])
+async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes(
+    env, monkeypatch, interrupt_request
+):
     client, server, auth = env
     owner_id = await resolve_user_id(client, auth, "admin")
     accepted = await seed_run(client, server, auth, owner_id)
@@ -255,6 +259,20 @@ async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes
     )
     entered = asyncio.Event()
     durable_at_signal: list[bool] = []
+    committed = threading.Event()
+    release = threading.Event()
+    if interrupt_request:
+        original_cancel_run = agentcomputer.cancel_run
+
+        def commit_then_wait(services, *, owner_id, run_id, command):
+            receipt = original_cancel_run(
+                services, owner_id=owner_id, run_id=run_id, command=command
+            )
+            committed.set()
+            assert release.wait(timeout=5)
+            return receipt
+
+        monkeypatch.setattr(agentcomputer, "cancel_run", commit_then_wait)
     thread_cancel = Mock(side_effect=AssertionError("thread-wide cancel must not run"))
     monkeypatch.setattr(server.app_runtime.agent_registry, "cancel_stream", thread_cancel)
 
@@ -282,17 +300,31 @@ async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes
         running = await client.get(f"{PREFIX}/runs/{accepted.runID}", headers=auth)
         assert running.status_code == 200
         assert running.json()["dispatchPhase"] == "engineAccepted"
-        response = await client.post(
-            f"{PREFIX}/runs/{accepted.runID}/cancel",
-            headers=auth,
-            json=cancel_body(revision=running.json()["revision"]),
-        )
-        assert response.status_code == 201
-        receipt = CancelRunReceipt.model_validate(response.json())
+        body = cancel_body(revision=running.json()["revision"])
+        if interrupt_request:
+            request = asyncio.create_task(
+                client.post(f"{PREFIX}/runs/{accepted.runID}/cancel", headers=auth, json=body)
+            )
+            assert await asyncio.to_thread(committed.wait, 5)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert not handoff.done()
+            release.set()
+            stored = await client.get(f"{PREFIX}/commands/{body['commandID']}", headers=auth)
+            assert stored.status_code == 200
+            receipt = CancelRunReceipt.model_validate(stored.json())
+        else:
+            response = await client.post(
+                f"{PREFIX}/runs/{accepted.runID}/cancel", headers=auth, json=body
+            )
+            assert response.status_code == 201
+            receipt = CancelRunReceipt.model_validate(response.json())
         assert receipt.status == "cancelRequested"
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(handoff), timeout=5)
     finally:
+        release.set()
         if not handoff.done():
             handoff.cancel()
             with suppress(asyncio.CancelledError):

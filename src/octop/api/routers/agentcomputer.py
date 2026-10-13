@@ -618,12 +618,23 @@ async def request_run_cancellation(
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"
     try:
-        operation = partial(
-            cancel_run, server.services, owner_id=user.id, run_id=run_id, command=body
-        )
-        receipt = await asyncio.get_running_loop().run_in_executor(None, operation)
-        server.agentcomputer_active_runs.signal_cancel(owner_id=user.id, receipt=receipt)
-        return receipt
+        loop = asyncio.get_running_loop()
+        services = server.services
+        active_runs = server.agentcomputer_active_runs
+        owner_id = user.id
+
+        def operation() -> CancelRunReceipt:
+            receipt = cancel_run(services, owner_id=owner_id, run_id=run_id, command=body)
+            try:
+                loop.call_soon_threadsafe(
+                    partial(active_runs.signal_cancel, owner_id=owner_id, receipt=receipt)
+                )
+            except RuntimeError:
+                # The request may be gone and the event loop may close after the commit.
+                logger.warning("AgentComputer Run cancellation signal loop closed after commit")
+            return receipt
+
+        return await loop.run_in_executor(None, operation)
     except CommandAdmissionError as exc:
         return admission_error_response(exc)
     except IdentityError:
