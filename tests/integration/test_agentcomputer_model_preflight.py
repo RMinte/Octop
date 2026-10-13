@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -221,3 +222,140 @@ async def test_configured_provider_real_harness_offline_wire_preflight(
         )
         == "流式完成"
     )
+
+
+async def test_harness_stream_cancel_preempts_blocked_model_without_running_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A thread-scoped harness cancel closes a blocked local stream, not a remote Run."""
+    paths = PathLayout(tmp_path / "octop")
+    pool = SqlitePool(paths.db)
+    run_migrations(pool)
+    providers = ProviderRepo(pool)
+    providers.create(
+        name="local",
+        kind="openai",
+        base_url="https://wire.invalid/v1",
+        api_key="fixture-local-key",
+        models_json=json.dumps([{"id": "fixture-model", "enabled": True}]),
+    )
+    configs = ProviderStore(providers).build_harness_configs()
+    blocked = asyncio.Event()
+    released = asyncio.Event()
+    closed = asyncio.Event()
+    tool_inputs: list[str] = []
+    requests: list[httpx.Request] = []
+
+    class BlockedCompletion(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            partial_tool_call = {
+                "id": "chatcmpl-cancel-fixture",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "fixture-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-cancel-fixture",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "synthetic_echo",
+                                        "arguments": '{"value":"ping"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(partial_tool_call)}\n\n".encode()
+            blocked.set()
+            await released.wait()
+            yield b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url == "https://wire.invalid/v1/chat/completions"
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        assert any(item["function"]["name"] == "synthetic_echo" for item in body["tools"])
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=BlockedCompletion(),
+        )
+
+    sync_http = httpx.Client(transport=httpx.MockTransport(answer))
+    async_http = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    original_get_class = harness_factory._get_reasoning_aware_chat_openai
+
+    def transport_class(base_class):
+        actual_class = original_get_class(base_class)
+
+        def construct(**kwargs):
+            return actual_class(http_client=sync_http, http_async_client=async_http, **kwargs)
+
+        return construct
+
+    monkeypatch.setattr(harness_factory, "_get_reasoning_aware_chat_openai", transport_class)
+
+    @tool
+    def synthetic_echo(value: str) -> str:
+        """Record whether a cancelled stream executes the proposed tool call."""
+        tool_inputs.append(value)
+        return "pong"
+
+    config = HarnessAgentConfig(
+        workspace_dir=tmp_path / "workspace",
+        backend="filesystem",
+        providers=configs,
+        default_model="local/fixture-model",
+        tools=[synthetic_echo],
+        checkpointer=False,
+        session_log_enabled=False,
+        todos_enabled=False,
+        ask_user_enabled=False,
+        team_enabled=False,
+        web_search_tools=False,
+        pii_enabled=False,
+        media_offload_enabled=False,
+        model_retry_enabled=False,
+    )
+    agent = await asyncio.to_thread(HarnessAgent, config)
+    thread_id = "cancel-fixture-thread"
+
+    async def consume() -> None:
+        async for _ in agent.stream(
+            {"messages": "请调用 synthetic_echo，参数 value=ping。", "thread_id": thread_id}
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=10)
+        agent.cancel(thread_id)
+        await asyncio.wait_for(task, timeout=5)
+        await asyncio.wait_for(closed.wait(), timeout=5)
+    finally:
+        released.set()
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await agent.aclose()
+        await async_http.aclose()
+        sync_http.close()
+        pool.close()
+
+    assert len(requests) == 1
+    assert tool_inputs == []

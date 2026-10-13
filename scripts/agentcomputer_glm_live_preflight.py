@@ -1,4 +1,4 @@
-"""Opt-in GLM ProviderStore → harness wire probe with a harmless tool.
+"""Opt-in GLM ProviderStore → harness wire probe with a tool or text stream.
 
 Reads an existing Octop provider database in read-only mode. Never prints
 credentials, request headers, prompts, or the model's full response.
@@ -28,10 +28,15 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--provider-db", required=True, type=Path)
 parser.add_argument("--provider", required=True)
 parser.add_argument("--model", required=True)
+parser.add_argument("--mode", choices=("tool", "stream"), default="tool")
 args = parser.parse_args()
 DB: Path = args.provider_db
 PROVIDER: str = args.provider
 MODEL: str = args.model
+STREAM_MODE: bool = args.mode == "stream"
+MAX_REQUESTS = 1 if STREAM_MODE else 3
+MAX_TOKENS = 256 if STREAM_MODE else 512
+TOTAL_TIMEOUT = 45.0 if STREAM_MODE else 50.0
 
 
 class ProviderRow:
@@ -77,6 +82,7 @@ if len(configs) != 1:
 
 wire: list[dict[str, Any]] = []
 called: list[str] = []
+sse_responses: list[bool] = []
 
 
 def capture(request: httpx.Request) -> None:
@@ -86,6 +92,7 @@ def capture(request: httpx.Request) -> None:
             "path": request.url.path,
             "model": body.get("model"),
             "max_tokens": body.get("max_tokens", body.get("max_completion_tokens")),
+            "stream": body.get("stream") is True,
             "roles": [m.get("role") for m in body.get("messages", [])],
             "tool_result_ids": [
                 m.get("tool_call_id") for m in body.get("messages", []) if m.get("role") == "tool"
@@ -98,22 +105,41 @@ def capture(request: httpx.Request) -> None:
             ],
         }
     )
-    if len(wire) > 3:
+    if len(wire) > MAX_REQUESTS:
         raise RuntimeError("request_limit_exceeded")
     if wire[-1]["model"] != MODEL:
         raise RuntimeError("wrong_model")
-    if wire[-1]["max_tokens"] != 512:
+    if wire[-1]["max_tokens"] != MAX_TOKENS:
         raise RuntimeError("missing_or_wrong_max_tokens")
+    if STREAM_MODE and not wire[-1]["stream"]:
+        raise RuntimeError("stream_not_requested")
 
 
-sync_http = httpx.Client(timeout=20.0, event_hooks={"request": [capture]})
+def capture_response(response: httpx.Response) -> None:
+    sse_responses.append(
+        response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        == "text/event-stream"
+    )
+
+
+async def capture_response_async(response: httpx.Response) -> None:
+    capture_response(response)
+
+
+sync_hooks: dict[str, list[Any]] = {"request": [capture]}
+if STREAM_MODE:
+    sync_hooks["response"] = [capture_response]
+sync_http = httpx.Client(timeout=20.0, event_hooks=sync_hooks)
 
 
 async def capture_async(request: httpx.Request) -> None:
     capture(request)
 
 
-async_http = httpx.AsyncClient(timeout=20.0, event_hooks={"request": [capture_async]})
+async_hooks: dict[str, list[Any]] = {"request": [capture_async]}
+if STREAM_MODE:
+    async_hooks["response"] = [capture_response_async]
+async_http = httpx.AsyncClient(timeout=20.0, event_hooks=async_hooks)
 original_get_class = harness_factory._get_reasoning_aware_chat_openai
 
 
@@ -149,7 +175,7 @@ async def main() -> None:
             backend="filesystem",
             providers=configs,
             default_model=f"{PROVIDER}/{MODEL}",
-            tools=[synthetic_echo],
+            tools=[] if STREAM_MODE else [synthetic_echo],
             checkpointer=False,
             session_log_enabled=False,
             todos_enabled=False,
@@ -165,19 +191,93 @@ async def main() -> None:
         started = time.monotonic()
         result: dict[str, Any] | None = None
         failure: str | None = None
+        stream_token_count = 0
+        stream_snapshot_count = 0
+        stream_usage_count = 0
+        last_snapshot: dict[str, Any] | None = None
+        stream_completed = False
         try:
-            request = ChatRequest(
-                messages='请只调用 synthetic_echo 一次，参数 value="ping"，获得工具结果后用一句中文确认结果。不要使用其他工具。',
-                configurable={"model_settings": {"max_tokens": 512}},
-                recursion_limit=20,
-            )
-            result = await asyncio.wait_for(agent.call(request), timeout=50.0)
+            if STREAM_MODE:
+                request = ChatRequest(
+                    messages="请只输出 OCTOP_STREAM_OK，除此之外不要输出任何内容。",
+                    configurable={"model_settings": {"max_tokens": MAX_TOKENS}},
+                    recursion_limit=20,
+                )
+
+                async def consume_stream() -> None:
+                    nonlocal stream_token_count, stream_snapshot_count, stream_usage_count
+                    nonlocal last_snapshot, stream_completed
+                    async for chunk in agent.stream(request, protocol="langgraph"):
+                        if not isinstance(chunk, dict):
+                            continue
+                        if chunk.get("type") == "token" and str(chunk.get("content") or "").strip():
+                            stream_token_count += 1
+                        elif chunk.get("type") == "state_snapshot":
+                            stream_snapshot_count += 1
+                            if isinstance(chunk.get("data"), dict):
+                                last_snapshot = chunk["data"]
+                        elif chunk.get("type") == "usage":
+                            stream_usage_count += 1
+                    stream_completed = True
+
+                await asyncio.wait_for(consume_stream(), timeout=TOTAL_TIMEOUT)
+            else:
+                request = ChatRequest(
+                    messages='请只调用 synthetic_echo 一次，参数 value="ping"，获得工具结果后用一句中文确认结果。不要使用其他工具。',
+                    configurable={"model_settings": {"max_tokens": MAX_TOKENS}},
+                    recursion_limit=20,
+                )
+                result = await asyncio.wait_for(agent.call(request), timeout=TOTAL_TIMEOUT)
         except Exception as exc:
             failure = type(exc).__name__
         finally:
             await agent.aclose()
             await async_http.aclose()
             sync_http.close()
+        if STREAM_MODE:
+            messages = last_snapshot.get("messages", []) if last_snapshot else []
+            final = messages[-1] if isinstance(messages, list) and messages else None
+            final_contains_marker = "OCTOP_STREAM_OK" in str(getattr(final, "content", ""))
+            passed = (
+                failure is None
+                and stream_completed
+                and len(wire) == 1
+                and wire[0]["stream"]
+                and sse_responses == [True]
+                and stream_token_count > 0
+                and stream_snapshot_count > 0
+                and getattr(final, "type", None) == "ai"
+                and final_contains_marker
+                and not called
+            )
+            print(
+                json.dumps(
+                    {
+                        "success": passed,
+                        "mode": "stream",
+                        "provider": PROVIDER,
+                        "model": MODEL,
+                        "protocol_path": wire[0]["path"] if wire else None,
+                        "request_count": len(wire),
+                        "stream_requested": len(wire) == 1 and wire[0]["stream"],
+                        "sse_response": sse_responses == [True],
+                        "max_tokens_per_request": [w["max_tokens"] for w in wire],
+                        "nonempty_token_events": stream_token_count,
+                        "state_snapshot_events": stream_snapshot_count,
+                        "stream_completed": stream_completed,
+                        "final_contains_marker": final_contains_marker,
+                        "usage_event_count": stream_usage_count,
+                        "usage": "unknown",
+                        "elapsed_seconds": round(time.monotonic() - started, 2),
+                        "failure_class": failure,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            if not passed:
+                raise SystemExit(1)
+            return
+
         messages = result.get("messages", []) if result else []
         final = messages[-1] if messages else None
         usage = getattr(final, "usage_metadata", None)
