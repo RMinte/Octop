@@ -77,6 +77,52 @@ _AGENTCOMPUTER_TOOL_EFFECT_COLUMNS = {
     "terminal_digest",
     "terminal_at",
 }
+_AGENTCOMPUTER_PAUSE_COLUMNS = {
+    "id",
+    "pause_id",
+    "kind",
+    "run_id",
+    "turn_id",
+    "task_id",
+    "project_id",
+    "owner_id",
+    "dispatch_id",
+    "engine_request_id",
+    "claimant_id",
+    "restore_epoch",
+    "execution_epoch",
+    "phase",
+    "intent_json",
+    "intent_digest",
+    "schema_version",
+    "revision",
+    "created_at",
+    "updated_at",
+    "expires_at",
+    "decision_command_id",
+    "decision_idempotency_key",
+    "decision_request_json",
+    "decision_request_digest",
+    "decision_receipt_json",
+    "decision_receipt_digest",
+    "decided_at",
+}
+_AGENTCOMPUTER_CANCELLATION_COLUMNS = {
+    "id",
+    "run_id",
+    "turn_id",
+    "task_id",
+    "project_id",
+    "owner_id",
+    "command_id",
+    "restore_epoch",
+    "execution_epoch",
+    "run_revision_at_request",
+    "phase",
+    "revision",
+    "requested_at",
+    "stopped_at",
+}
 
 
 def _split_pg_sql(sql: str) -> list[str]:
@@ -1860,6 +1906,47 @@ def _ensure_agentcomputer_tool_effects_schema(db: DatabasePool) -> None:
                 conn.execute(stmt)
 
 
+def _agentcomputer_pause_indexes_present(db: DatabasePool) -> bool:
+    names = ("idx_ac_run_pauses_one_active_per_run", "idx_ac_run_pauses_decision_key")
+    with db.connect() as conn:
+        if db.dialect == "postgresql":
+            rows = conn.execute(
+                "SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() "
+                "AND indexname IN (?, ?)",
+                names,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
+                names,
+            ).fetchall()
+    return {str(row["name"]) for row in rows} == set(names)
+
+
+def _ensure_agentcomputer_pause_schema(db: DatabasePool) -> None:
+    """Repair absent v25 tables/indexes, never reconstruct their lost facts."""
+    for table, columns in (
+        ("ac_run_pauses", _AGENTCOMPUTER_PAUSE_COLUMNS),
+        ("ac_run_cancellations", _AGENTCOMPUTER_CANCELLATION_COLUMNS),
+    ):
+        if _table_exists(db, table) and not _table_columns(db, table) >= columns:
+            raise RuntimeError(f"Incomplete AgentComputer {table} journal schema")
+    if (
+        not _table_exists(db, "ac_run_dispatches")
+        or not _table_columns(db, "ac_run_dispatches") >= _AGENTCOMPUTER_DISPATCH_COLUMNS
+    ):
+        _ensure_agentcomputer_dispatch_schema(db)
+    path = next(path for version, path in _discover(db.dialect) if version == 25)
+    sql = path.read_text(encoding="utf-8")
+    with db.transaction() as conn:
+        if db.dialect == "postgresql":
+            _apply_postgresql_migration(conn, sql)
+            return
+        for stmt in _split_pg_sql(sql):
+            if stmt not in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
+                conn.execute(stmt)
+
+
 def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
     """Clamp develop DBs that applied split 005–009 down to the consolidated max.
 
@@ -1912,6 +1999,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
                 _ensure_agentcomputer_dispatch_schema(db)
             if max_version >= 24:
                 _ensure_agentcomputer_tool_effects_schema(db)
+            if max_version >= 25:
+                _ensure_agentcomputer_pause_schema(db)
             with db.connect() as conn:
                 conn.execute("UPDATE _schema_version SET version = %s", (max_version,))
             return
@@ -1964,6 +2053,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
         _ensure_agentcomputer_dispatch_schema(db)
     if max_version >= 24:
         _ensure_agentcomputer_tool_effects_schema(db)
+    if max_version >= 25:
+        _ensure_agentcomputer_pause_schema(db)
     with db.connect() as conn:
         conn.execute("UPDATE _schema_version SET version = ?", (max_version,))
 
@@ -2136,6 +2227,9 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
     if version == 24:
         _ensure_agentcomputer_tool_effects_schema(db)
         return
+    if version == 25:
+        _ensure_agentcomputer_pause_schema(db)
+        return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
         conn.executescript(sql)
@@ -2165,6 +2259,9 @@ def run_migrations(db: DatabasePool) -> None:
             continue
         if version == 24:
             _ensure_agentcomputer_tool_effects_schema(db)
+            continue
+        if version == 25:
+            _ensure_agentcomputer_pause_schema(db)
             continue
         if db.dialect == "postgresql":
             sql = path.read_text(encoding="utf-8")
@@ -2228,3 +2325,12 @@ def run_migrations(db: DatabasePool) -> None:
         or not _agentcomputer_tool_effect_indexes_present(db)
     ):
         _ensure_agentcomputer_tool_effects_schema(db)
+    if _max_discovered_version(db.dialect) >= 25 and (
+        _current_version(db) < 25
+        or not _table_exists(db, "ac_run_pauses")
+        or not _table_columns(db, "ac_run_pauses") >= _AGENTCOMPUTER_PAUSE_COLUMNS
+        or not _table_exists(db, "ac_run_cancellations")
+        or not _table_columns(db, "ac_run_cancellations") >= _AGENTCOMPUTER_CANCELLATION_COLUMNS
+        or not _agentcomputer_pause_indexes_present(db)
+    ):
+        _ensure_agentcomputer_pause_schema(db)

@@ -16,6 +16,7 @@ from octop.api.agentcomputer import (
     protocol_error_response,
 )
 from octop.api.deps import current_bearer_user, get_server, require_database
+from octop.infra.agentcomputer.cancellations import CancelRunReceipt
 from octop.infra.agentcomputer.capabilities import (
     AgentComputerCapabilitiesResponse,
     get_capabilities,
@@ -91,11 +92,11 @@ async def capabilities(
 
 @router.get(
     "/commands/{commandID}",
-    response_model=CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt,
+    response_model=CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | CancelRunReceipt,
     summary="Read an existing AgentComputer command receipt",
     description=(
         "Requires an Octop user Bearer token in the Authorization header. "
-        "Returns only the authenticated user's immutable admission receipt. "
+        "Returns only the authenticated user's immutable admission or cancellation receipt. "
         "An accepted receipt proves original durable registration, not current Run state or project preparation "
         "or task execution. Missing and other users' commands return the same 404. "
         "This read-only endpoint does not submit, replay, or dispatch commands."
@@ -116,7 +117,7 @@ async def command_receipt(
     command_id: UUID = Path(alias="commandID", description="Public command UUID."),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_bearer_user),
-) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | JSONResponse:
+) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | CancelRunReceipt | JSONResponse:
     require_database(server)
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"

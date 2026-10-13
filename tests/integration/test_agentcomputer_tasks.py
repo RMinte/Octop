@@ -212,5 +212,6 @@ async def test_openapi_documents_read_only_task_and_three_receipt_shapes(tmp_pat
             "CommandReceipt",
             "ProjectCreateReceipt",
             "TaskCreateReceipt",
+            "CancelRunReceipt",
         }
         assert (await client.get("/api/docs")).status_code == 200

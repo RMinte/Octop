@@ -206,6 +206,76 @@ class AcRunRepo:
         return AcRunRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def mark_waiting(
+        conn: Any,
+        run_id: str,
+        owner_id: int,
+        expected_revision: int,
+        execution_epoch: int,
+        *,
+        state: str,
+        updated_at: int,
+    ) -> AcRunRow | None:
+        if state not in ("waitingApproval", "waitingInput"):
+            raise ValueError("invalid Run waiting state")
+        row = conn.execute(
+            "UPDATE ac_runs SET state=?,revision=revision+1,updated_at=? "
+            "WHERE run_id=? AND owner_id=? AND revision=? AND execution_epoch=? "
+            "AND execution_epoch>0 AND state='running' AND dispatch_phase='engineAccepted' "
+            "AND reconciliation_required=0 RETURNING *",
+            (state, updated_at, run_id, owner_id, expected_revision, execution_epoch),
+        ).fetchone()
+        return AcRunRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def mark_cancel_requested(
+        conn: Any,
+        run_id: str,
+        owner_id: int,
+        expected_revision: int,
+        restore_epoch: int,
+        execution_epoch: int,
+        *,
+        updated_at: int,
+    ) -> AcRunRow | None:
+        """Advance the Run revision; the separate cancel journal is the request fact."""
+        row = conn.execute(
+            "UPDATE ac_runs SET revision=revision+1,updated_at=? "
+            "WHERE run_id=? AND owner_id=? AND revision=? AND restore_epoch=? "
+            "AND execution_epoch=? AND reconciliation_required=0 "
+            "AND state IN ('queued','running','waitingApproval','waitingInput') RETURNING *",
+            (
+                updated_at,
+                run_id,
+                owner_id,
+                expected_revision,
+                restore_epoch,
+                execution_epoch,
+            ),
+        ).fetchone()
+        return AcRunRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def mark_stopped_unstarted(
+        conn: Any,
+        run_id: str,
+        owner_id: int,
+        expected_revision: int,
+        restore_epoch: int,
+        *,
+        updated_at: int,
+    ) -> AcRunRow | None:
+        """Only a Run with no handoff can be proven stopped by this transaction."""
+        row = conn.execute(
+            "UPDATE ac_runs SET state='stopped',revision=revision+1,updated_at=? "
+            "WHERE run_id=? AND owner_id=? AND revision=? AND restore_epoch=? "
+            "AND state='queued' AND dispatch_phase='notDispatched' "
+            "AND execution_epoch=0 AND reconciliation_required=0 RETURNING *",
+            (updated_at, run_id, owner_id, expected_revision, restore_epoch),
+        ).fetchone()
+        return AcRunRow.from_row(row) if row is not None else None
+
+    @staticmethod
     def insert(
         conn: Any,
         *,

@@ -80,6 +80,10 @@ def _bound(
 
 def _active(services: SharedServices, conn: Any, bound: BoundRun) -> None:
     run = bound.run
+    from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
+
+    if validate_cancellation_binding(services, conn, bound) is not None:
+        raise CommandAdmissionError("revisionConflict")
     task = services.ac_task_repo.get_in_transaction(conn, run.task_id, run.owner_id)
     project = services.ac_project_repo.get_in_transaction(conn, run.project_id, run.owner_id)
     if task is None or project is None:

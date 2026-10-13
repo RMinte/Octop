@@ -10,7 +10,9 @@ from octop.infra.db.repos.ac_commands import AcCommandRepo
 from octop.infra.db.repos.ac_events import AcEventRepo
 from octop.infra.db.repos.ac_project_preparations import AcProjectPreparationRepo
 from octop.infra.db.repos.ac_projects import AcProjectRepo
+from octop.infra.db.repos.ac_run_cancellations import AcRunCancellationRepo
 from octop.infra.db.repos.ac_run_dispatches import AcRunDispatchRepo
+from octop.infra.db.repos.ac_run_pauses import AcRunPauseRepo
 from octop.infra.db.repos.ac_runs import AcRunRepo
 from octop.infra.db.repos.ac_tasks import AcTaskRepo
 from octop.infra.db.repos.ac_tool_effects import AcToolEffectRepo
@@ -52,6 +54,8 @@ class RepoBundle:
     ac_task_repo: AcTaskRepo
     ac_turn_repo: AcTurnRepo
     ac_run_repo: AcRunRepo
+    ac_run_pause_repo: AcRunPauseRepo
+    ac_run_cancellation_repo: AcRunCancellationRepo
     ac_run_dispatch_repo: AcRunDispatchRepo
     ac_tool_effect_repo: AcToolEffectRepo
     ac_command_repo: AcCommandRepo
@@ -92,6 +96,8 @@ class RepoBundle:
             ac_task_repo=AcTaskRepo(db),
             ac_turn_repo=AcTurnRepo(db),
             ac_run_repo=AcRunRepo(db),
+            ac_run_pause_repo=AcRunPauseRepo(db),
+            ac_run_cancellation_repo=AcRunCancellationRepo(db),
             ac_run_dispatch_repo=AcRunDispatchRepo(db),
             ac_tool_effect_repo=AcToolEffectRepo(db),
             ac_command_repo=AcCommandRepo(db),
@@ -153,6 +159,14 @@ class SharedServices:
     @property
     def ac_run_repo(self) -> AcRunRepo:
         return self.repos.ac_run_repo
+
+    @property
+    def ac_run_pause_repo(self) -> AcRunPauseRepo:
+        return self.repos.ac_run_pause_repo
+
+    @property
+    def ac_run_cancellation_repo(self) -> AcRunCancellationRepo:
+        return self.repos.ac_run_cancellation_repo
 
     @property
     def ac_run_dispatch_repo(self) -> AcRunDispatchRepo:

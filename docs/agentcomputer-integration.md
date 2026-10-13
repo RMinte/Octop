@@ -12,7 +12,9 @@
 
 第七轮增加 daemon runtime 前的保守恢复扫描、当前安装目录的生命周期互斥和既有公开 saver 的检查点关联元数据探测，详见 [保守启动恢复](agentcomputer-recovery.md)。当轮 adapterVersion=0.7.0、capabilityRevision=7，复用 schema23；embedded 默认跳过扫描，未新增公开 HTTP。互斥不证明旧0.6进程或模型已停止，应用 ACK/checkpoint 不原子，原生 History Turn 仍未绑定。
 
-第八轮增加内部工具效果意图、交接标记和结果 Journal，详见 [工具效果边界](agentcomputer-effects.md)。当前 adapterVersion=0.8.0、capabilityRevision=8，024 配对迁移保存单一工具效果表；同 Run 的未收敛工具互斥、failed/unknown 保留对账与双 lane。默认引擎工具入口继续拒绝，可信隔离 callback 不代替生产授权目录、实际文件 before/after 或成果发布。真实执行、用户取消和完整恢复继续关闭；下方第1–7轮历史保留当时范围。
+第八轮增加内部工具效果意图、交接标记和结果 Journal，详见 [工具效果边界](agentcomputer-effects.md)。当轮 adapterVersion=0.8.0、capabilityRevision=8，024 配对迁移保存单一工具效果表；同 Run 的未收敛工具互斥、failed/unknown 保留对账与双 lane。默认引擎工具入口继续拒绝，可信隔离 callback 不代替生产授权目录、实际文件 before/after 或成果发布。真实执行、用户取消和完整恢复继续关闭；下方第1–7轮历史保留当时范围。
+
+第九轮增加内部持久审批、提问和精确 Run 取消，详见 [持久暂停与取消边界](agentcomputer-pauses-and-cancellation.md)。当前 adapterVersion=0.9.0、capabilityRevision=9、schema25；未派发 Run 可原子停止，已交接 Run 只记录取消请求，暂停裁决只保留输入事实。真实引擎继续与专属停止证明未接线，公开审批、问题和取消写入口及对应能力仍关闭。
 
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 

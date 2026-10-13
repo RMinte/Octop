@@ -124,6 +124,17 @@ class AcTaskRepo:
         return bool(cursor.rowcount == 1)
 
     @staticmethod
+    def release_run(
+        conn: Any, task_id: str, owner_id: int, run_id: str, *, updated_at: int
+    ) -> bool:
+        cursor = conn.execute(
+            "UPDATE ac_tasks SET active_run_id = NULL, revision = revision + 1, "
+            "updated_at = ? WHERE task_id = ? AND owner_id = ? AND active_run_id = ?",
+            (updated_at, task_id, owner_id, run_id),
+        )
+        return bool(cursor.rowcount == 1)
+
+    @staticmethod
     def allocate_event_sequence(
         conn: Any,
         task_id: str,

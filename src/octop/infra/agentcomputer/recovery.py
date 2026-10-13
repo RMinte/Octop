@@ -31,6 +31,9 @@ class RecoveryReport:
     effects_scanned: int = 0
     effects_tightened: int = 0
     effects_unchanged: int = 0
+    pauses_scanned: int = 0
+    pauses_expired: int = 0
+    pauses_unchanged: int = 0
 
 
 def recover_dispatches(services: SharedServices) -> RecoveryReport:
@@ -44,7 +47,8 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
         with services.db.connect() as conn:
             through_pk = services.ac_run_repo.recovery_high_watermark(conn)
             effects_through_pk = services.ac_tool_effect_repo.recovery_high_watermark(conn)
-        if through_pk == 0 and effects_through_pk == 0:
+            pauses_through_pk = services.ac_run_pause_repo.recovery_high_watermark(conn)
+        if through_pk == 0 and effects_through_pk == 0 and pauses_through_pk == 0:
             return RecoveryReport()
         identity = read_identity(services.paths.agentcomputer_identity)
         after_pk = scanned = tightened = unchanged = 0
@@ -92,6 +96,30 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
                     effects_unchanged += 1
                 effects_scanned += 1
                 effects_after_pk = effect.pk
+        from octop.infra.agentcomputer.pauses import expire_pause
+
+        pauses_after_pk = pauses_scanned = pauses_expired = pauses_unchanged = 0
+        while True:
+            with services.db.connect() as conn:
+                pauses = services.ac_run_pause_repo.list_recovery_candidates(
+                    conn,
+                    str(identity.boxID),
+                    after_pk=pauses_after_pk,
+                    through_pk=pauses_through_pk,
+                )
+            if not pauses:
+                break
+            for pause in pauses:
+                if expire_pause(
+                    services,
+                    owner_id=pause.owner_id,
+                    pause_id=UUID(pause.pause_id),
+                ):
+                    pauses_expired += 1
+                else:
+                    pauses_unchanged += 1
+                pauses_scanned += 1
+                pauses_after_pk = pause.pk
         return RecoveryReport(
             scanned=scanned,
             tightened=tightened,
@@ -99,6 +127,9 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
             effects_scanned=effects_scanned,
             effects_tightened=effects_tightened,
             effects_unchanged=effects_unchanged,
+            pauses_scanned=pauses_scanned,
+            pauses_expired=pauses_expired,
+            pauses_unchanged=pauses_unchanged,
         )
     except StorageDataError:
         raise

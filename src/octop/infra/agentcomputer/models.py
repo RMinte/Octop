@@ -546,3 +546,106 @@ class ToolEffectRecord(ControlModel):
 class ToolEffectPreparation(ControlModel):
     record: ToolEffectRecord
     replayed: StrictBool
+
+
+class RunPauseContent(ControlModel):
+    """Fixed trusted action or question; opaque JSON is canonical and bounded."""
+
+    schemaVersion: Literal[1]
+    payloadJSON: Annotated[StrictStr, Field(min_length=2, max_length=65536)]
+    payloadDigest: EffectDigest
+    workspaceDigest: EffectDigest
+    policyVersion: EffectText
+    capabilityVersion: EffectText
+
+
+class RunPauseIntent(ControlModel):
+    """One specific Run pause; IDs and action cannot follow a later thread Turn."""
+
+    schemaVersion: Literal[1]
+    pauseID: UUID
+    kind: Literal["approval", "question"]
+    boxID: UUID
+    ownerID: PositiveRevision
+    runID: UUID
+    turnID: UUID
+    taskID: UUID
+    projectID: UUID
+    workspaceID: UUID
+    dispatchID: UUID
+    engineRequestID: UUID
+    claimantID: UUID
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    dispatchIntentDigest: EffectDigest
+    content: RunPauseContent
+    expiresAt: datetime
+
+    @field_validator("expiresAt")
+    @classmethod
+    def utc_expiry(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("Pause expiry must be UTC")
+        return value
+
+
+class ApprovalDecisionCommand(ControlModel):
+    commandID: UUID
+    idempotencyKey: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    expectedRestoreEpoch: PositiveRevision
+    approvalID: UUID
+    runID: UUID
+    expectedRevision: PositiveRevision
+    decision: Literal["approveOnce", "deny"]
+
+
+class QuestionAnswerCommand(ControlModel):
+    commandID: UUID
+    idempotencyKey: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    expectedRestoreEpoch: PositiveRevision
+    questionID: UUID
+    runID: UUID
+    expectedRevision: PositiveRevision
+    answer: Annotated[StrictStr, Field(min_length=1, max_length=8192)]
+
+
+class RunPauseDecisionReceipt(ControlModel):
+    """Only a durable adjudication; no engine delivery or authorization claim."""
+
+    schemaVersion: Literal[1]
+    receiptID: UUID
+    commandID: UUID
+    pauseID: UUID
+    kind: Literal["approval", "question"]
+    runID: UUID
+    turnID: UUID
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    intentDigest: EffectDigest
+    requestDigest: EffectDigest
+    pauseRevision: PositiveRevision
+    state: Literal["adjudicatedOnly"]
+    decidedAt: datetime
+
+    @field_validator("decidedAt")
+    @classmethod
+    def utc_decision(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("Decision time must be UTC")
+        return value
+
+
+class RunPauseRecord(ControlModel):
+    intent: RunPauseIntent
+    phase: Literal["pending", "decided", "expired"]
+    revision: PositiveRevision
+    receipt: RunPauseDecisionReceipt | None
+    createdAt: datetime
+    updatedAt: datetime
+
+    @field_validator("createdAt", "updatedAt")
+    @classmethod
+    def utc_pause_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("Pause time must be UTC")
+        return value

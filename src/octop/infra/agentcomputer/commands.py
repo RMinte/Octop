@@ -29,6 +29,7 @@ from octop.infra.agentcomputer.models import (
 from octop.infra.db.services import SharedServices
 
 if TYPE_CHECKING:
+    from octop.infra.agentcomputer.cancellations import CancelRunReceipt
     from octop.infra.db.repos.ac_commands import AcCommandRow
 
 
@@ -258,7 +259,7 @@ def validate_turn_receipt_binding(
 
 def get_command_receipt(
     services: SharedServices, owner_id: int, command_id: UUID
-) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | None:
+) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | CancelRunReceipt | None:
     try:
         row = services.ac_command_repo.get(str(command_id), owner_id)
     except (sqlite3.DatabaseError, PostgresError) as exc:
@@ -309,6 +310,20 @@ def get_command_receipt(
                     raise StorageDataError("inconsistent project receipt metadata")
                 validate_project_receipt_binding(services, owner_id, project_receipt, conn=conn)
                 return project_receipt
+            if row.operation == "run.cancel":
+                from octop.infra.agentcomputer.cancellations import (
+                    decode_cancel_receipt,
+                    validate_cancel_command_binding,
+                )
+
+                cancel_receipt = decode_cancel_receipt(
+                    row.receipt_json,
+                    command_id=row.command_id,
+                    box_id=identity.boxID,
+                    epoch=row.restore_epoch,
+                )
+                validate_cancel_command_binding(services, conn, owner_id, row, cancel_receipt)
+                return cancel_receipt
             receipt = _decode_receipt(
                 row.receipt_json,
                 command_id=row.command_id,

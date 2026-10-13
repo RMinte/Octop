@@ -141,3 +141,14 @@ class AcProjectRepo:
             (run_id, updated_at, project_id, owner_id, expected_revision),
         )
         return bool(cursor.rowcount == 1)
+
+    @staticmethod
+    def release_run(
+        conn: Any, project_id: str, owner_id: int, run_id: str, *, updated_at: int
+    ) -> bool:
+        cursor = conn.execute(
+            "UPDATE ac_projects SET active_run_id = NULL, updated_at = ? "
+            "WHERE project_id = ? AND owner_id = ? AND active_run_id = ?",
+            (updated_at, project_id, owner_id, run_id),
+        )
+        return bool(cursor.rowcount == 1)

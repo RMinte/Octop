@@ -14,7 +14,7 @@ from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.db.services import SharedServices
 
-ADAPTER_VERSION = "0.8.0"
+ADAPTER_VERSION = "0.9.0"
 PROTOCOL_VERSION: Literal[1] = 1
 
 
@@ -109,7 +109,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                     "serverTime": "2026-10-12T00:00:00Z",
                     "timezone": "Asia/Shanghai",
                     "executionPlatform": {"system": "Darwin", "architecture": "arm64"},
-                    "capabilityRevision": 8,
+                    "capabilityRevision": 9,
                     "restoreEpoch": 1,
                     "supportedPermissionModes": [],
                     "capabilities": {
@@ -152,7 +152,7 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
     serverTime: datetime
     timezone: str
     executionPlatform: ExecutionPlatform
-    capabilityRevision: Literal[8] = 8
+    capabilityRevision: Literal[9] = 9
     restoreEpoch: Annotated[int, Field(strict=True, ge=1)] = Field(
         description="Persisted initial epoch; restore fencing remains unavailable."
     )
