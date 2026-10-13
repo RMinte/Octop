@@ -14,7 +14,9 @@
 
 第八轮增加内部工具效果意图、交接标记和结果 Journal，详见 [工具效果边界](agentcomputer-effects.md)。当轮 adapterVersion=0.8.0、capabilityRevision=8，024 配对迁移保存单一工具效果表；同 Run 的未收敛工具互斥、failed/unknown 保留对账与双 lane。默认引擎工具入口继续拒绝，可信隔离 callback 不代替生产授权目录、实际文件 before/after 或成果发布。真实执行、用户取消和完整恢复继续关闭；下方第1–7轮历史保留当时范围。
 
-第九轮增加内部持久审批、提问和精确 Run 取消，详见 [持久暂停与取消边界](agentcomputer-pauses-and-cancellation.md)。当前 adapterVersion=0.9.0、capabilityRevision=9、schema25；未派发 Run 可原子停止，已交接 Run 只记录取消请求，暂停裁决只保留输入事实。真实引擎继续与专属停止证明未接线，公开审批、问题和取消写入口及对应能力仍关闭。
+第九轮增加内部持久审批、提问和精确 Run 取消，详见 [持久暂停与取消边界](agentcomputer-pauses-and-cancellation.md)。当轮 adapterVersion=0.9.0、capabilityRevision=9、schema25；未派发 Run 可原子停止，已交接 Run 只记录取消请求，暂停裁决只保留输入事实。真实引擎继续与专属停止证明未接线，公开审批、问题和取消写入口及对应能力仍关闭。
+
+第十轮将精确 Run 取消接入认证 HTTP，并在 Run 当前视图中呈现持久取消请求，详见 [取消命令与状态查询](agentcomputer-cancellation-http.md)。当前 adapterVersion=0.10.0、capabilityRevision=10，沿用 schema25；取消接口只按明确 Run ID 操作，已派发运行仍不能宣称已停止。生产 Run 创建和 Run 专属引擎停止证明未接通，客户端可用性继续关闭。
 
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
@@ -31,6 +33,8 @@
 | 第六轮开工基线 | `feature/agentcomputer-foundation` | `ce3f0b5830cf79c497fb98f31973c581034d8111`，开工时主目录干净 |
 | 第七轮开工基线 | `feature/agentcomputer-foundation` | `ca904ae0f629fbbf49c1747b365a1277eb5a18bf`，开工时主目录干净 |
 | 第八轮开工基线 | `feature/agentcomputer-foundation` | `ab0f0391eaa5f88d236b646862832efa63f71b23`，开工时主目录干净 |
+| 第九轮开工基线 | `feature/agentcomputer-foundation` | `37bcca34f1d12063ab844d64995b1eea679913ff`，开工时主目录干净 |
+| 第十轮开工基线 | `feature/agentcomputer-foundation` | `5247cd2fb78e588eba827086f1183353a114e374`，开工时主目录干净 |
 
 Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写；仓库网址不等于已经推送。工作开始核对主目录 status、worktree、branch 和 HEAD，保留已有文档及代码改动。提交运行仓库 hooks，完成默认 `make all` 门禁后再交付；不跳过红测试。
 
@@ -41,7 +45,7 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 | 阶段 | 交付内容 | 当前边界 |
 |---|---|---|
 | M0 环境和协议验证 | 部署输入、模型协议、隔离与容量、最小身份及能力入口 | 本轮推进可本地完成的基础；真实盒子仍待验 |
-| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 24、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、应用入站收据、daemon保守扫描与 Run 查询；生产 ready、真实模型/工具和完整恢复仍待验 |
+| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 25、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、持久暂停、精确取消、应用入站收据、daemon 保守扫描与 Run 查询；生产 ready、真实模型/工具和完整恢复仍待验 |
 | M2 原生闭环 | 客户端远程会话、事件、审批、取消、正式成果及重连 | 不以实时连接成功代替可靠执行 |
 | M3 配置与恢复 | 指令/技能版本、资源、Outbox、多设备与异常对账 | 保留配置和执行快照，不盲重放 |
 | M4 调度与面板 | Schedule occurrence、Git/终端、受认证预览及资料库 | 工具隔离和项目写入规则先通过 |

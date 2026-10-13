@@ -321,6 +321,7 @@ def configure_openapi(app: FastAPI) -> None:
                 "restoreEpoch": 1,
                 "revision": 1,
                 "reconciliationRequired": False,
+                "cancelRequested": False,
                 "createdAt": "2026-10-12T00:00:00Z",
                 "updatedAt": "2026-10-12T00:00:00Z",
             }
@@ -354,6 +355,16 @@ def configure_openapi(app: FastAPI) -> None:
                         "dispatchPhase": "engineAccepted",
                         "executionEpoch": 1,
                         "revision": 4,
+                    },
+                },
+                "cancelRequested": {
+                    "summary": "Cancellation accepted for a claimed Run; engine stop unproven",
+                    "value": {
+                        **run_example,
+                        "dispatchPhase": "claimed",
+                        "executionEpoch": 1,
+                        "revision": 3,
+                        "cancelRequested": True,
                     },
                 },
                 "interrupted": {

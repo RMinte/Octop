@@ -303,6 +303,12 @@ class RunView(ControlModel):
     restoreEpoch: PositiveRevision
     revision: PositiveRevision
     reconciliationRequired: StrictBool
+    cancelRequested: StrictBool = Field(
+        description=(
+            "Whether an explicit Run cancellation was durably accepted. "
+            "This does not prove that an engine or child process stopped."
+        )
+    )
     createdAt: datetime
     updatedAt: datetime
 

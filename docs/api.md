@@ -29,6 +29,13 @@ mapping. Task creation and execution routes remain unavailable. See
 [Task mapping](agentcomputer-tasks.md) for the internal atomic registration,
 immutable receipt, and current view distinction.
 
+`POST /api/agentcomputer/v1/runs/{runID}/cancel` accepts an exact, owned Run
+cancellation command. `GET /api/agentcomputer/v1/runs/{runID}` reports the current
+`cancelRequested` fact; `GET /api/agentcomputer/v1/commands/{commandID}` retains
+the original cancellation receipt. A recorded request does not prove an active
+engine stopped. Production Run creation and cancellation availability remain
+closed; see [Run cancellation](agentcomputer-cancellation-http.md).
+
 | Header | Value |
 |--------|-------|
 | `Authorization` | `Bearer <access_token>` from `POST /api/auth/login` |

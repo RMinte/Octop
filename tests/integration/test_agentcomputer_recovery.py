@@ -85,8 +85,8 @@ async def test_recovery_projects_original_phase_lane_and_receipt_without_user_ca
     assert view.dispatchPhase == phase and view.executionEpoch == before.json()["executionEpoch"]
     assert view.restoreEpoch == before.json()["restoreEpoch"]
     assert view.revision > before.json()["revision"]
-    assert len(current.json()) == 12 and set(current.json()) == set(RunView.model_fields)
-    assert "cancelRequested" not in current.json() and "historyTurnID" not in current.json()
+    assert len(current.json()) == 13 and set(current.json()) == set(RunView.model_fields)
+    assert view.cancelRequested is False and "historyTurnID" not in current.json()
     assert str(server.paths.root) not in current.text
     queried = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
     assert queried.status_code == 200 and queried.json() == receipt.model_dump(mode="json")
@@ -122,16 +122,19 @@ async def test_recovery_projects_original_phase_lane_and_receipt_without_user_ca
             ).fetchall()
         ] == events
     profile = (await client.get(f"{PREFIX}/capabilities", headers=auth)).json()
-    assert profile["capabilityRevision"] == 9 and profile["supportedPermissionModes"] == []
+    assert profile["capabilityRevision"] == 10 and profile["supportedPermissionModes"] == []
     assert profile["capabilities"]["recovery"] == {
         "supported": False,
         "available": False,
         "reasonCode": "notImplemented",
     }
-    for action in ("recover", "cancel", "claim"):
+    for action in ("recover", "claim"):
         assert (
             await client.post(f"{PREFIX}/runs/{receipt.runID}/{action}", headers=auth, json={})
         ).status_code in (404, 405)
+    assert (
+        await client.post(f"{PREFIX}/runs/{receipt.runID}/cancel", headers=auth, json={})
+    ).status_code == 422
 
 
 async def test_recovered_run_preserves_owner_and_admin_isolation(env, monkeypatch) -> None:

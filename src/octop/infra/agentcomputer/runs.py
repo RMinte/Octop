@@ -71,12 +71,12 @@ def load_bound_run(
     snapshot = TurnSnapshot.model_validate_json(turn.snapshot_json)
     if run.schema_version != 1 or run.updated_at < run.created_at:
         raise StorageDataError("invalid run schema or timestamps")
-    # Validate the complete public state too, before the worker acts on it.
-    run_view(run)
+    # Validate row fields before the worker acts; get_run supplies the journal-derived flag.
+    run_view(run, cancel_requested=False)
     return BoundRun(run=run, receipt=receipt, snapshot=snapshot)
 
 
-def run_view(run: AcRunRow) -> RunView:
+def run_view(run: AcRunRow, *, cancel_requested: bool) -> RunView:
     try:
         return RunView.model_validate(
             {
@@ -90,6 +90,7 @@ def run_view(run: AcRunRow) -> RunView:
                 "restoreEpoch": run.restore_epoch,
                 "revision": run.revision,
                 "reconciliationRequired": run.reconciliation_required,
+                "cancelRequested": cancel_requested,
                 "createdAt": datetime.fromtimestamp(run.created_at / 1000, UTC),
                 "updatedAt": datetime.fromtimestamp(run.updated_at / 1000, UTC),
             }
@@ -119,8 +120,8 @@ def get_run(services: SharedServices, *, owner_id: int, run_id: UUID) -> RunView
             validate_pause_bindings(services, conn, bound, claim)
             from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
 
-            validate_cancellation_binding(services, conn, bound, claim)
-            return run_view(bound.run)
+            cancellation = validate_cancellation_binding(services, conn, bound, claim)
+            return run_view(bound.run, cancel_requested=cancellation is not None)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("run storage unavailable") from exc
     except StorageDataError:

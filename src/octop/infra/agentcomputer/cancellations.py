@@ -36,30 +36,49 @@ from octop.infra.db.services import SharedServices
 class CancelRunCommand(ControlModel):
     """A user decision scoped to one path Run and one restore epoch."""
 
-    commandID: UUID
-    idempotencyKey: StrictStr = Field(min_length=1, max_length=256)
-    expectedRestoreEpoch: PositiveRevision
-    expectedRevision: PositiveRevision
+    commandID: UUID = Field(description="Command UUID for querying the original receipt.")
+    idempotencyKey: StrictStr = Field(
+        min_length=1, max_length=256, description="Caller retry key scoped to the owner."
+    )
+    expectedRestoreEpoch: PositiveRevision = Field(
+        description="Current box restore epoch; stale requests are rejected before replay."
+    )
+    expectedRevision: PositiveRevision = Field(
+        description="Current Run revision, required to fence cancellation against concurrent changes."
+    )
 
 
 class CancelRunReceipt(ControlModel):
     """Immutable acceptance result; requested never claims that an engine stopped."""
 
     schemaVersion: Literal[1]
-    commandID: UUID
+    commandID: UUID = Field(description="Stable UUID of the accepted cancellation command.")
     boxID: UUID
-    runID: UUID
+    runID: UUID = Field(description="Exact Run targeted by this cancellation.")
     turnID: UUID
     taskID: UUID
     projectID: UUID
     restoreEpoch: PositiveRevision
-    executionEpoch: int = Field(strict=True, ge=0)
-    expectedRevision: PositiveRevision
-    requestRunRevision: PositiveRevision
-    resultRunRevision: PositiveRevision
-    status: Literal["cancelRequested", "stopped"]
+    executionEpoch: int = Field(
+        strict=True, ge=0, description="Execution epoch observed when cancellation was accepted."
+    )
+    expectedRevision: PositiveRevision = Field(description="Run revision supplied by the caller.")
+    requestRunRevision: PositiveRevision = Field(
+        description="Run revision after the cancellation request was durably recorded."
+    )
+    resultRunRevision: PositiveRevision = Field(
+        description="Final Run revision in this receipt; may equal requestRunRevision."
+    )
+    status: Literal["cancelRequested", "stopped"] = Field(
+        description=(
+            "stopped is proven only for a Run that never entered engine handoff; "
+            "cancelRequested does not prove the engine or a child process stopped."
+        )
+    )
     acceptedAt: datetime
-    replayed: StrictBool
+    replayed: StrictBool = Field(
+        description="True when the original command receipt was returned for a retry."
+    )
 
     @field_validator("acceptedAt")
     @classmethod

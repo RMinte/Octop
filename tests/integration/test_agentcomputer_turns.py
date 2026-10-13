@@ -521,6 +521,7 @@ async def test_openapi_documents_guarded_registration_and_current_run_view(tmp_p
             "claimed",
             "dispatching",
             "engineAccepted",
+            "cancelRequested",
             "interrupted",
         }
         for example in current["examples"].values():

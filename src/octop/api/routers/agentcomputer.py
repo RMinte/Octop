@@ -16,7 +16,11 @@ from octop.api.agentcomputer import (
     protocol_error_response,
 )
 from octop.api.deps import current_bearer_user, get_server, require_database
-from octop.infra.agentcomputer.cancellations import CancelRunReceipt
+from octop.infra.agentcomputer.cancellations import (
+    CancelRunCommand,
+    CancelRunReceipt,
+    cancel_run,
+)
 from octop.infra.agentcomputer.capabilities import (
     AgentComputerCapabilitiesResponse,
     get_capabilities,
@@ -374,6 +378,8 @@ async def new_message_turn(
         "facts to interrupted with reconciliationRequired=true and keeps both lanes. "
         "Embedded startup skips this scan by default. Tightening does not request user cancellation, "
         "prove an older process or model stopped, or authorize re-execution. "
+        "cancelRequested reports a validated durable request, not a proven engine stop; "
+        "read state for the current outcome. "
         "Dispatch phases do not prove native harness exactly-once execution or a reserved history Turn. "
         "Historical restore epochs remain readable. "
         "This endpoint does not dispatch, cancel, repair storage, or expose model input, "
@@ -411,3 +417,62 @@ async def run_status(
     if run is None:
         return protocol_error_response("resourceNotFound", 404)
     return run
+
+
+@router.post(
+    "/runs/{runID}/cancel",
+    status_code=201,
+    response_model=CancelRunReceipt,
+    summary="Record cancellation for one owned Run",
+    description=(
+        "Requires a user Bearer token and an explicit owned Run ID. The command fixes the "
+        "current restore epoch and expected Run revision; same-key retries return the original "
+        "durable receipt with replayed=true and status 201. A queued Run proven never dispatched "
+        "can be stopped atomically. For a claimed or started Run, status=cancelRequested only "
+        "proves that the request was recorded and new execution handoffs are fenced; it does "
+        "not prove that an engine or child process stopped. Read the Run for current state and "
+        "the original command receipt for response-loss recovery. This endpoint never invokes "
+        "a thread-wide stop or cancels another Run."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No Run owned by this user"},
+        409: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Command identity, restore epoch, Run revision, or reconciliation conflict",
+        },
+        413: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Actual command body exceeds 65536 bytes",
+        },
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid typed command or Run ID"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Run graph or storage unavailable"},
+    },
+)
+async def request_run_cancellation(
+    body: CancelRunCommand,
+    response: Response,
+    run_id: UUID = Path(alias="runID", description="Exact public Run UUID to cancel."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> CancelRunReceipt | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        operation = partial(
+            cancel_run, server.services, owner_id=user.id, run_id=run_id, command=body
+        )
+        return await asyncio.get_running_loop().run_in_executor(None, operation)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Run cancellation")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Run cancellation graph is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="cancellationInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Run cancellation storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
