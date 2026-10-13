@@ -110,7 +110,10 @@ def get_run(services: SharedServices, *, owner_id: int, run_id: UUID) -> RunView
                 return None
             from octop.infra.agentcomputer.dispatch import validate_dispatch_binding
 
-            validate_dispatch_binding(services, conn, bound)
+            claim = validate_dispatch_binding(services, conn, bound)
+            from octop.infra.agentcomputer.effects import validate_effect_bindings
+
+            validate_effect_bindings(services, conn, bound, claim)
             return run_view(bound.run)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("run storage unavailable") from exc

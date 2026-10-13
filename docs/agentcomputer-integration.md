@@ -10,7 +10,9 @@
 
 第六轮增加内部 claim/dispatching/应用入站收据和未知交接阻塞，详见 [内部派发与接收证据](agentcomputer-dispatch.md)。当轮配对 023 保存每个 Run 唯一派发 journal，尚未装配启动扫描。
 
-第七轮增加 daemon runtime 前的保守恢复扫描、当前安装目录的生命周期互斥和既有公开 saver 的检查点关联元数据探测，详见 [保守启动恢复](agentcomputer-recovery.md)。当前 adapterVersion=0.7.0、capabilityRevision=7，复用 schema23；embedded 默认跳过扫描，未新增公开 HTTP。互斥不证明旧0.6进程或模型已停止，应用 ACK/checkpoint 不原子，原生 History Turn 仍未绑定。真实执行、用户取消和完整恢复继续关闭；下方第1–6轮历史保留当时范围。
+第七轮增加 daemon runtime 前的保守恢复扫描、当前安装目录的生命周期互斥和既有公开 saver 的检查点关联元数据探测，详见 [保守启动恢复](agentcomputer-recovery.md)。当轮 adapterVersion=0.7.0、capabilityRevision=7，复用 schema23；embedded 默认跳过扫描，未新增公开 HTTP。互斥不证明旧0.6进程或模型已停止，应用 ACK/checkpoint 不原子，原生 History Turn 仍未绑定。
+
+第八轮增加内部工具效果意图、交接标记和结果 Journal，详见 [工具效果边界](agentcomputer-effects.md)。当前 adapterVersion=0.8.0、capabilityRevision=8，024 配对迁移保存单一工具效果表；同 Run 的未收敛工具互斥、failed/unknown 保留对账与双 lane。默认引擎工具入口继续拒绝，可信隔离 callback 不代替生产授权目录、实际文件 before/after 或成果发布。真实执行、用户取消和完整恢复继续关闭；下方第1–7轮历史保留当时范围。
 
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
@@ -26,6 +28,7 @@
 | 第五轮开工基线 | `feature/agentcomputer-foundation` | `bdff37f31340e9ceecf18aac7f848d6e51c93647`，开工时主目录干净 |
 | 第六轮开工基线 | `feature/agentcomputer-foundation` | `ce3f0b5830cf79c497fb98f31973c581034d8111`，开工时主目录干净 |
 | 第七轮开工基线 | `feature/agentcomputer-foundation` | `ca904ae0f629fbbf49c1747b365a1277eb5a18bf`，开工时主目录干净 |
+| 第八轮开工基线 | `feature/agentcomputer-foundation` | `ab0f0391eaa5f88d236b646862832efa63f71b23`，开工时主目录干净 |
 
 Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写；仓库网址不等于已经推送。工作开始核对主目录 status、worktree、branch 和 HEAD，保留已有文档及代码改动。提交运行仓库 hooks，完成默认 `make all` 门禁后再交付；不跳过红测试。
 
@@ -36,7 +39,7 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 | 阶段 | 交付内容 | 当前边界 |
 |---|---|---|
 | M0 环境和协议验证 | 部署输入、模型协议、隔离与容量、最小身份及能力入口 | 本轮推进可本地完成的基础；真实盒子仍待验 |
-| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 23、本地项目准备、内部 Task/Turn 登记、内部派发 journal/应用入站收据、daemon保守扫描与 Run 查询；生产 ready、真实模型/工具和完整恢复仍待验 |
+| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 24、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、应用入站收据、daemon保守扫描与 Run 查询；生产 ready、真实模型/工具和完整恢复仍待验 |
 | M2 原生闭环 | 客户端远程会话、事件、审批、取消、正式成果及重连 | 不以实时连接成功代替可靠执行 |
 | M3 配置与恢复 | 指令/技能版本、资源、Outbox、多设备与异常对账 | 保留配置和执行快照，不盲重放 |
 | M4 调度与面板 | Schedule occurrence、Git/终端、受认证预览及资料库 | 工具隔离和项目写入规则先通过 |
@@ -138,7 +141,7 @@ Harness 普通 OpenAI 提供方默认采用 Chat Completions；已有 Swift Resp
 
 ## 后续 M1 领域与派发
 
-公共 ID、owner 归属、项目准备、内部 Task/thread、原子 Turn/Run 登记、命令幂等和固定输入已有本地实现与失败 Fixture。第七轮在内部派发证据之上增加保守启动扫描；已有 API 只读取持久事实，不开放真实执行、用户取消或恢复运行。
+公共 ID、owner 归属、项目准备、内部 Task/thread、原子 Turn/Run 登记、命令幂等和固定输入已有本地实现与失败 Fixture。第七轮在内部派发证据之上增加保守启动扫描，第八轮补充工具效果 Journal 的内部持久边界；既有查询读取持久事实，受控 Turn 写入仍受关闭门禁约束，不开放真实执行、用户取消或恢复运行。
 
 后续核实真实项目 ready、原生 harness 历史/幂等及引擎开始/停止证据，再装配生产 worker 并实现取消、审批、问答和完整恢复。当前应用收据不替代这些证明；托管专家的 Dashboard、IM、Cron 和直接工作区写入口继续受保护，不能把普通会话入口作为执行门禁的替代路径。
 
@@ -225,6 +228,20 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 保守扫描：当前box、内部高水位和100条keyset分页，逐Run owner→Run锁内核对原接受图与journal，将未收敛claimed/dispatching/engineAccepted收紧为interrupted/reconciliationRequired，保留phase/epoch/双lane；吸收晚到确认，保留终态，重复扫描不重写原事件或ACK。没有重领、排队、模型resume、用户cancelRequested、停止/杀进程或许可释放。
 - 检查点边界：只经既有agent公开saver保存/探测固定关联元数据，不冷开文件、不恢复模型循环。匹配仅是保存过关联的证据，不证明started/completed/停止或无效果；应用ACK和checkpoint不原子，原生History Turn仍无映射或假预留身份。
 - 协议：adapter0.7.0/revision7，现有capability availability保持：projects/tasks/runs不可用、commandReceipts查询可用、recovery仍unsupported/notImplemented。权限模式空、deviceID=null、maxCommandBytes65536；Run GET保持12字段与五个phase样例，Project/Task executionReady=false，不新增HTTP恢复/取消流程。
-- 工程验证：最终 make all 通过：Ruff、strict mypy（589 个源文件），5038 passed / 23 skipped；跳过不计通过。提交还须通过仓库实际 pre-commit/testmon 与 Dashboard 构建。真实模型、live PostgreSQL、Ubuntu/Linux/Windows 实机及完整 M0/M1 尚未验证。确定性Fixture覆盖合法派发后扫描、幂等/分页/归属/并发、双lane与原JSON保留、startup次序/mutex冲突和embedded跳过；原生metadata仅离线公开saver检查，skipped/deselected不计通过。
+- 工程验证：最终 make all 通过：Ruff、strict mypy（592 个源文件），5190 passed / 23 skipped；跳过不计通过。提交还须通过仓库实际 pre-commit/testmon 与 Dashboard 构建。真实模型、live PostgreSQL、Ubuntu/Linux/Windows 实机及完整 M0/M1 尚未验证。确定性Fixture覆盖合法派发后扫描、幂等/分页/归属/并发、双lane与原JSON保留、startup次序/mutex冲突和embedded跳过；原生metadata仅离线公开saver检查，skipped/deselected不计通过。
 - 本地：完整备份后升级自有 8090 至 adapter0.7/revision7，schema23不变；原用户、stopped 托管专家、failed/providerUnavailable 项目、box身份和原 Project 收据字节保持。真实库0 Task/thread/session/Turn/Run/event，dispatch journal0条、usage/model calls0。第二个同home CLI显式指定host/port/SSL时返回 CONTROL_PLANE_BUSY，配置字节与锁inode不变，首个8090进程保持；原8088健康200。未知Task/Run404、非法正文/ID422、匿名/URLtoken401、body超限413，typed OpenAPI与Scalar五阶段示例可读，无HTTP claim/dispatch/recover/cancel或Task创建/执行入口。备份在 /Users/fangyuan/Desktop/code/Octop/.runtime/backups/iteration-07-before-adapter-07-20261012T163009Z。原型不写ready/Task/Turn/Run/journal或真实模型配置；failed/providerUnavailable项目、stopped专家、原收据与身份保持。完整备份、运行数据库和凭据仅在忽略目录，旧8088独立实例另行核对。
 - 剩余边界：扫描是安全收紧，不代表完整恢复或用户取消授权。真实模型/工具、原生历史/检查点恢复、进程停止证明、claimed安全重领、效果journal/审批/取消、事件/快照、备份防重放、设备配对、livePG与盒子实机及完整M0/M1仍待验收。
+
+
+## 第八轮交付状态
+
+- 基线：主目录 `feature/agentcomputer-foundation @ ab0f0391eaa5f88d236b646862832efa63f71b23`，继续同一用户 fork 功能分支；024 SQLite/PostgreSQL 配对迁移新增单一工具效果表，无客户端 Swift/UI、公开 HTTP 或生产运行开关。
+- 内部事实：固定 effect/toolCall 身份、Run/Turn/消息/项目工作区、派发主体与双 epoch，prepared 意图及事件同事务；dispatching 先提交再调用受控 callback，executionAttempt 只能为1，同 Run 未收敛效果由部分唯一索引约束。terminal receipt 与事件同事务，原接受收据格式与字节不变。
+- 结果与阻塞：prepared/dispatching 可收敛为 terminal 或 outcomeUnknown；dispatchStartedAt 的有无保留之前是否交接，不宣称 phase 完全不变。failed 可含部分效果，outcomeUnknown 缺可信耐久结果；输出 effects=unknown 即使报告 succeeded 也需对账。这些记录保持 Run reconciliationRequired 与 Task/project 双 active lane，不自动重放、递增 attempt、重建意图或释放许可。
+- 授权与生命周期：派发前通过可信 caller bool callback 重检授权，撤销且确定未交接才能 notDispatched；本轮没有验收生产 catalog/文件 before-after。请求取消等待数据库操作结算，不能伪造用户取消或 stopped；精确重复调用读取原 receipt，不重新进入 handler。结果中的文件/成果 UUID 只是 adapter reported 关联，不是正式发布或已核实文件效果。
+- 生产边界：默认 EngineEntryMiddleware.awrap_tool_call 始终拒绝，Fixture 内核不装配真实 Provider/工具或普通 Octop 旁路。原生检查点关联不证明工具效果，Swift 参数字符串与 Python 适配层 canonical 对象摘要互通、原生助手/历史身份映射仍未验收。
+- 启动恢复：先扫描 Run，再扫描本box工具效果，两类分别固定高水位/100条分页；工具扫描覆盖 interrupted Run、停用 owner和旧epoch，不重放。内部report增加三项effects计数，默认0；无候选不读或创建控制身份。完整原接受图与effects校验，坏关联安全503不补建，公开字段不增加。
+- 协议：adapter0.8.0/revision8；现有 capability availability 保持，projects/tasks/runs 不可用、commandReceipts 已有查询可用、recovery/文件/成果/审批/取消仍未实现。权限模式空、deviceID=null、maxCommandBytes65536；Run GET保持12字段，Project/Task executionReady=false，无新HTTP工具/恢复入口。
+- 工程验证：最终 make all 通过：Ruff、strict mypy（592 个源文件），5175 passed / 23 skipped；跳过不计通过。提交还须通过仓库实际 pre-commit/testmon 与 Dashboard 构建。真实模型、live PostgreSQL、Ubuntu/Linux/Windows 实机及完整 M0/M1 尚未验证。隔离 Fixture 覆盖固定意图、精确重放、同 Run 竞争、派发前撤销、部分效果错误、取消/确认丢失、terminal与事件失败回滚、未知不重放及双 lane 保留；skipped/deselected不计通过。
+- 本地：完整备份后升级自有8090至adapter0.8/revision8及schema24；原用户、stopped托管专家、failed/providerUnavailable项目、box身份和原Project收据字节保持。真实库0 Task/thread/session/Turn/Run/event、原派发journal0条、新tool effects0条、usage/model calls0。未知Task/Run404、非法正文/ID422、匿名/URLtoken401、body超限413；原typed OpenAPI和Scalar五阶段卡片可读，无HTTP工具/claim/dispatch/recover/cancel或Task创建/执行入口。同home第二CLI显式host/port/SSL返回CONTROL_PLANE_BUSY、config字节与锁inode保持，首8090进程及原8088健康200。备份：/Users/fangyuan/Desktop/code/Octop/.runtime/backups/iteration-08-before-adapter-08-20261013T021821Z。原型不写 ready/Task/Turn/Run/effect Fixture 或真实模型工具配置；failed/providerUnavailable项目、stopped专家、原收据与身份保持，备份、运行数据库和凭据仅保留忽略目录。
+- 阶段边界：M1-07 部分通过，完整 M0/M1 未通过。生产 catalog/授权、实际文件 before/after、正式成果发布、工具隔离、原生历史/恢复、进程停止证明、持久取消/审批、公开事件/快照、恢复 fencing、设备配对、livePG与盒子实机继续逐项验收。

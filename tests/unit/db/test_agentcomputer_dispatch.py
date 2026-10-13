@@ -254,7 +254,7 @@ def test_v22_upgrade_preserves_original_rows_receipt_and_epoch(tmp_path: Path) -
             before = _facts(conn)
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 23
+        assert _version(pool) == 24
         with pool.connect() as conn:
             assert _facts(conn) == before
             assert conn.execute("SELECT COUNT(*) FROM ac_run_dispatches").fetchone()[0] == 0
@@ -274,7 +274,7 @@ def test_watermark_repair_creates_journal_without_claiming_runs(
             before = _facts(conn)
             conn.execute("UPDATE _schema_version SET version = ?", (watermark,))
         migrate.run_migrations(pool)
-        assert _version(pool) == 23
+        assert _version(pool) == 24
         with pool.connect() as conn:
             assert _facts(conn) == before
             assert conn.execute("SELECT COUNT(*) FROM ac_run_dispatches").fetchone()[0] == 0
@@ -288,7 +288,7 @@ def test_v23_missing_v22_journal_finishes_at_23_without_data_changes(db: SqliteP
         before = _facts(conn)
         conn.execute("DROP TABLE ac_project_preparations")
     migrate.run_migrations(db)
-    assert _version(db) == 23
+    assert _version(db) == 24
     with db.connect() as conn:
         assert _facts(conn) == before
         assert conn.execute("SELECT COUNT(*) FROM ac_project_preparations").fetchone()[0] == 0
@@ -341,7 +341,7 @@ def test_v23_ddl_failure_rolls_back_journal_and_watermark(
                 is None
             )
         migrate.run_migrations(pool)
-        assert _version(pool) == 23
+        assert _version(pool) == 24
     finally:
         pool.close()
 

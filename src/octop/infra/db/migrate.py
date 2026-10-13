@@ -50,6 +50,33 @@ _AGENTCOMPUTER_DISPATCH_COLUMNS = {
     "engine_receipt_digest",
     "engine_accepted_at",
 }
+_AGENTCOMPUTER_TOOL_EFFECT_COLUMNS = {
+    "id",
+    "effect_id",
+    "run_id",
+    "turn_id",
+    "task_id",
+    "project_id",
+    "owner_id",
+    "dispatch_id",
+    "engine_request_id",
+    "claimant_id",
+    "restore_epoch",
+    "execution_epoch",
+    "tool_call_id",
+    "execution_attempt",
+    "phase",
+    "intent_json",
+    "intent_digest",
+    "schema_version",
+    "revision",
+    "created_at",
+    "updated_at",
+    "dispatch_started_at",
+    "terminal_json",
+    "terminal_digest",
+    "terminal_at",
+}
 
 
 def _split_pg_sql(sql: str) -> list[str]:
@@ -1793,6 +1820,46 @@ def _ensure_agentcomputer_dispatch_schema(db: DatabasePool) -> None:
                 conn.execute(stmt)
 
 
+def _agentcomputer_tool_effect_indexes_present(db: DatabasePool) -> bool:
+    names = ("idx_ac_run_dispatches_effect_binding", "idx_ac_tool_effects_one_pending_per_run")
+    with db.connect() as conn:
+        if db.dialect == "postgresql":
+            rows = conn.execute(
+                "SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() "
+                "AND indexname IN (?, ?)",
+                names,
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
+                names,
+            ).fetchall()
+    return {str(row["name"]) for row in rows} == set(names)
+
+
+def _ensure_agentcomputer_tool_effects_schema(db: DatabasePool) -> None:
+    """Apply canonical v24 without reconstructing partial effect execution facts."""
+    if (
+        _table_exists(db, "ac_tool_effects")
+        and not _table_columns(db, "ac_tool_effects") >= _AGENTCOMPUTER_TOOL_EFFECT_COLUMNS
+    ):
+        raise RuntimeError("Incomplete AgentComputer tool-effect journal schema")
+    if (
+        not _table_exists(db, "ac_run_dispatches")
+        or not _table_columns(db, "ac_run_dispatches") >= _AGENTCOMPUTER_DISPATCH_COLUMNS
+    ):
+        _ensure_agentcomputer_dispatch_schema(db)
+    path = next(path for version, path in _discover(db.dialect) if version == 24)
+    sql = path.read_text(encoding="utf-8")
+    with db.transaction() as conn:
+        if db.dialect == "postgresql":
+            _apply_postgresql_migration(conn, sql)
+            return
+        for stmt in _split_pg_sql(sql):
+            if stmt not in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
+                conn.execute(stmt)
+
+
 def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
     """Clamp develop DBs that applied split 005–009 down to the consolidated max.
 
@@ -1843,6 +1910,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
                 _ensure_agentcomputer_projects_schema(db)
             if max_version >= 23:
                 _ensure_agentcomputer_dispatch_schema(db)
+            if max_version >= 24:
+                _ensure_agentcomputer_tool_effects_schema(db)
             with db.connect() as conn:
                 conn.execute("UPDATE _schema_version SET version = %s", (max_version,))
             return
@@ -1893,6 +1962,8 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
         _ensure_agentcomputer_projects_schema(db)
     if max_version >= 23:
         _ensure_agentcomputer_dispatch_schema(db)
+    if max_version >= 24:
+        _ensure_agentcomputer_tool_effects_schema(db)
     with db.connect() as conn:
         conn.execute("UPDATE _schema_version SET version = ?", (max_version,))
 
@@ -2062,6 +2133,9 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
     if version == 23:
         _ensure_agentcomputer_dispatch_schema(db)
         return
+    if version == 24:
+        _ensure_agentcomputer_tool_effects_schema(db)
+        return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
         conn.executescript(sql)
@@ -2088,6 +2162,9 @@ def run_migrations(db: DatabasePool) -> None:
             continue
         if version == 23:
             _ensure_agentcomputer_dispatch_schema(db)
+            continue
+        if version == 24:
+            _ensure_agentcomputer_tool_effects_schema(db)
             continue
         if db.dialect == "postgresql":
             sql = path.read_text(encoding="utf-8")
@@ -2144,3 +2221,10 @@ def run_migrations(db: DatabasePool) -> None:
         or not _table_columns(db, "ac_run_dispatches") >= _AGENTCOMPUTER_DISPATCH_COLUMNS
     ):
         _ensure_agentcomputer_dispatch_schema(db)
+    if _max_discovered_version(db.dialect) >= 24 and (
+        _current_version(db) < 24
+        or not _table_exists(db, "ac_tool_effects")
+        or not _table_columns(db, "ac_tool_effects") >= _AGENTCOMPUTER_TOOL_EFFECT_COLUMNS
+        or not _agentcomputer_tool_effect_indexes_present(db)
+    ):
+        _ensure_agentcomputer_tool_effects_schema(db)

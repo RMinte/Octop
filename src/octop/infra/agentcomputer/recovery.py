@@ -28,6 +28,9 @@ class RecoveryReport:
     scanned: int = 0
     tightened: int = 0
     unchanged: int = 0
+    effects_scanned: int = 0
+    effects_tightened: int = 0
+    effects_unchanged: int = 0
 
 
 def recover_dispatches(services: SharedServices) -> RecoveryReport:
@@ -40,7 +43,8 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
     try:
         with services.db.connect() as conn:
             through_pk = services.ac_run_repo.recovery_high_watermark(conn)
-        if through_pk == 0:
+            effects_through_pk = services.ac_tool_effect_repo.recovery_high_watermark(conn)
+        if through_pk == 0 and effects_through_pk == 0:
             return RecoveryReport()
         identity = read_identity(services.paths.agentcomputer_identity)
         after_pk = scanned = tightened = unchanged = 0
@@ -63,7 +67,39 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
                     unchanged += 1
                 scanned += 1
                 after_pk = candidate.pk
-        return RecoveryReport(scanned=scanned, tightened=tightened, unchanged=unchanged)
+        from octop.infra.agentcomputer.effects import recover_effect
+
+        effects_after_pk = effects_scanned = effects_tightened = effects_unchanged = 0
+        while True:
+            with services.db.connect() as conn:
+                effects = services.ac_tool_effect_repo.list_recovery_candidates(
+                    conn,
+                    str(identity.boxID),
+                    after_pk=effects_after_pk,
+                    through_pk=effects_through_pk,
+                )
+            if not effects:
+                break
+            for effect in effects:
+                if recover_effect(
+                    services,
+                    owner_id=effect.owner_id,
+                    effect_id=UUID(effect.effect_id),
+                    box_id=identity.boxID,
+                ):
+                    effects_tightened += 1
+                else:
+                    effects_unchanged += 1
+                effects_scanned += 1
+                effects_after_pk = effect.pk
+        return RecoveryReport(
+            scanned=scanned,
+            tightened=tightened,
+            unchanged=unchanged,
+            effects_scanned=effects_scanned,
+            effects_tightened=effects_tightened,
+            effects_unchanged=effects_unchanged,
+        )
     except StorageDataError:
         raise
     except (IdentityError, ValueError, TypeError, CommandAdmissionError) as exc:

@@ -13,6 +13,7 @@ from octop.infra.db.repos.ac_projects import AcProjectRepo
 from octop.infra.db.repos.ac_run_dispatches import AcRunDispatchRepo
 from octop.infra.db.repos.ac_runs import AcRunRepo
 from octop.infra.db.repos.ac_tasks import AcTaskRepo
+from octop.infra.db.repos.ac_tool_effects import AcToolEffectRepo
 from octop.infra.db.repos.ac_turns import AcTurnRepo
 from octop.infra.db.repos.agents import AgentRepo
 from octop.infra.db.repos.audit import AuditRepo
@@ -52,6 +53,7 @@ class RepoBundle:
     ac_turn_repo: AcTurnRepo
     ac_run_repo: AcRunRepo
     ac_run_dispatch_repo: AcRunDispatchRepo
+    ac_tool_effect_repo: AcToolEffectRepo
     ac_command_repo: AcCommandRepo
     ac_event_repo: AcEventRepo
 
@@ -91,6 +93,7 @@ class RepoBundle:
             ac_turn_repo=AcTurnRepo(db),
             ac_run_repo=AcRunRepo(db),
             ac_run_dispatch_repo=AcRunDispatchRepo(db),
+            ac_tool_effect_repo=AcToolEffectRepo(db),
             ac_command_repo=AcCommandRepo(db),
             ac_event_repo=AcEventRepo(db),
             user_repo=UserRepo(db),
@@ -154,6 +157,10 @@ class SharedServices:
     @property
     def ac_run_dispatch_repo(self) -> AcRunDispatchRepo:
         return self.repos.ac_run_dispatch_repo
+
+    @property
+    def ac_tool_effect_repo(self) -> AcToolEffectRepo:
+        return self.repos.ac_tool_effect_repo
 
     @property
     def ac_command_repo(self) -> AcCommandRepo:

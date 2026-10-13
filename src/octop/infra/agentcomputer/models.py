@@ -420,3 +420,129 @@ class EngineCheckpointObservation(ControlModel):
         ):
             raise ValueError("unknown request cannot expose an unverified checkpoint")
         return self
+
+
+EffectDigest = Annotated[StrictStr, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+EffectText = Annotated[StrictStr, Field(min_length=1, max_length=256)]
+
+
+class ToolEffectAction(ControlModel):
+    """Trusted adapter input; canonical JSON v1 is not a native tool permission."""
+
+    schemaVersion: Literal[1]
+    executionAttempt: Literal[1]
+    toolCallID: EffectText
+    toolName: EffectText
+    argumentsJSON: Annotated[StrictStr, Field(min_length=2, max_length=65536)]
+    argumentsDigest: EffectDigest
+    capabilityVersion: EffectText
+    policyVersion: EffectText
+    workspaceDigest: EffectDigest
+
+    @field_validator("executionAttempt", mode="before")
+    @classmethod
+    def integer_attempt(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("executionAttempt must be an integer")
+        return value
+
+
+class ToolEffectIntent(ControlModel):
+    """Fixed private journal identity; assistant ID is a business reservation."""
+
+    schemaVersion: Literal[1]
+    effectID: UUID
+    boxID: UUID
+    ownerID: PositiveRevision
+    projectID: UUID
+    taskID: UUID
+    turnID: UUID
+    runID: UUID
+    workspaceID: UUID
+    assistantMessageID: UUID
+    dispatchID: UUID
+    engineRequestID: UUID
+    claimantID: UUID
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    dispatchIntentDigest: EffectDigest
+    operationDigest: EffectDigest
+    action: ToolEffectAction
+
+
+class ToolEffectOutput(ControlModel):
+    """Bounded adapter-reported result, not proof of rollback or artifact publication."""
+
+    schemaVersion: Literal[1]
+    outcome: Literal["succeeded", "failed"]
+    resultJSON: Annotated[StrictStr, Field(min_length=2, max_length=65536)]
+    resultDigest: EffectDigest
+    exitCode: StrictInt | None
+    fileChangeIDs: Annotated[tuple[UUID, ...], Field(max_length=64)]
+    artifactIDs: Annotated[tuple[UUID, ...], Field(max_length=64)]
+    effects: Literal["reported", "unknown"]
+
+
+class ToolEffectReceipt(ControlModel):
+    """Immutable tool result; a failed call may have performed partial effects."""
+
+    schemaVersion: Literal[1]
+    receiptID: UUID
+    effectID: UUID
+    runID: UUID
+    turnID: UUID
+    restoreEpoch: PositiveRevision
+    executionEpoch: PositiveRevision
+    intentDigest: EffectDigest
+    operationDigest: EffectDigest
+    outcome: Literal["succeeded", "failed", "notDispatched"]
+    reasonCode: Literal["authorizationDenied", "callerCancelled"] | None
+    output: ToolEffectOutput | None
+    reconciliationRequired: StrictBool
+    completedAt: datetime
+
+    @field_validator("completedAt")
+    @classmethod
+    def utc_effect_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("Effect timestamp must be UTC")
+        return value
+
+    @model_validator(mode="after")
+    def result_shape(self) -> Self:
+        if self.outcome == "notDispatched":
+            if self.output is not None or self.reasonCode is None or self.reconciliationRequired:
+                raise ValueError("notDispatched requires an undispatched reason without effects")
+        elif (
+            self.output is None
+            or self.output.outcome != self.outcome
+            or self.reasonCode is not None
+            or self.reconciliationRequired
+            != (self.outcome == "failed" or self.output.effects == "unknown")
+        ):
+            raise ValueError("terminal output and reconciliation facts must agree")
+        return self
+
+
+class ToolEffectRecord(ControlModel):
+    """Internal current view; unknown has no fabricated terminal receipt."""
+
+    intent: ToolEffectIntent
+    phase: Literal["prepared", "dispatching", "terminal", "outcomeUnknown"]
+    revision: PositiveRevision
+    dispatchStartedAt: datetime | None
+    receipt: ToolEffectReceipt | None
+    createdAt: datetime
+    updatedAt: datetime
+
+    @field_validator("dispatchStartedAt", "createdAt", "updatedAt")
+    @classmethod
+    def utc_record_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() != timedelta(0):
+            raise ValueError("Effect record timestamp must be UTC")
+        return value
+
+
+class ToolEffectPreparation(ControlModel):
+    record: ToolEffectRecord
+    replayed: StrictBool
