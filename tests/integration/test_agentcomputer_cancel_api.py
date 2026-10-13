@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from unittest.mock import Mock
 from uuid import UUID, uuid4
+
+import pytest
 
 from octop.api.routers import agentcomputer
 from octop.infra.agentcomputer import dispatch
@@ -223,6 +226,88 @@ async def test_claimed_cancel_only_records_request_and_retains_both_lanes(env, m
     task = server.services.ac_task_repo.get(str(accepted.taskID), owner_id)
     assert task is not None and task.active_run_id == str(accepted.runID)
     project = server.services.ac_project_repo.get(task.project_id, owner_id)
+    assert project is not None and project.active_run_id == str(accepted.runID)
+
+
+async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes(env, monkeypatch):
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    accepted = await seed_run(client, server, auth, owner_id)
+    assert server.services is not None and server.app_runtime is not None
+    services = server.services
+    profile = get_capabilities(services)
+    worker_profile = profile.model_copy(
+        update={
+            "capabilities": profile.capabilities.model_copy(
+                update={"runs": CapabilityStatus(supported=True, available=True)}
+            ),
+            "supportedPermissionModes": ["askForApproval"],
+        }
+    )
+    monkeypatch.setattr(dispatch, "get_capabilities", lambda _: worker_profile)
+    claim = await asyncio.to_thread(
+        dispatch.claim_run,
+        services,
+        owner_id=owner_id,
+        run_id=accepted.runID,
+        claimant_id=uuid4(),
+        expected_revision=1,
+    )
+    entered = asyncio.Event()
+    durable_at_signal: list[bool] = []
+    thread_cancel = Mock(side_effect=AssertionError("thread-wide cancel must not run"))
+    monkeypatch.setattr(server.app_runtime.agent_registry, "cancel_stream", thread_cancel)
+
+    async def hold_entry(invocation):
+        result = await asyncio.to_thread(dispatch.accept_engine_entry, services, invocation)
+        assert not result.replayed
+        async with server.agentcomputer_active_runs.track(invocation):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                with services.db.connect() as conn:
+                    durable_at_signal.append(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM ac_run_cancellations WHERE run_id=?",
+                            (str(accepted.runID),),
+                        ).fetchone()[0]
+                        == 1
+                    )
+                raise
+
+    handoff = asyncio.create_task(dispatch.dispatch_run(services, claim=claim, invoke=hold_entry))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        running = await client.get(f"{PREFIX}/runs/{accepted.runID}", headers=auth)
+        assert running.status_code == 200
+        assert running.json()["dispatchPhase"] == "engineAccepted"
+        response = await client.post(
+            f"{PREFIX}/runs/{accepted.runID}/cancel",
+            headers=auth,
+            json=cancel_body(revision=running.json()["revision"]),
+        )
+        assert response.status_code == 201
+        receipt = CancelRunReceipt.model_validate(response.json())
+        assert receipt.status == "cancelRequested"
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(handoff), timeout=5)
+    finally:
+        if not handoff.done():
+            handoff.cancel()
+            with suppress(asyncio.CancelledError):
+                await handoff
+
+    thread_cancel.assert_not_called()
+    assert durable_at_signal == [True]
+    current = await client.get(f"{PREFIX}/runs/{accepted.runID}", headers=auth)
+    assert current.status_code == 200
+    assert current.json()["state"] == "interrupted"
+    assert current.json()["reconciliationRequired"] is True
+    assert current.json()["cancelRequested"] is True
+    task = services.ac_task_repo.get(str(accepted.taskID), owner_id)
+    assert task is not None and task.active_run_id == str(accepted.runID)
+    project = services.ac_project_repo.get(task.project_id, owner_id)
     assert project is not None and project.active_run_id == str(accepted.runID)
 
 

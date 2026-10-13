@@ -30,6 +30,8 @@
 
 第十六轮完成[本地 GLM 流式与取消边界预检](agentcomputer-glm-stream-cancel-preflight.md)：真实 GLM-5 单请求 SSE 文本流自然结束；另用离线阻塞流夹具验证按 thread 取消本地消费后没有执行未完成的工具调用。远端生成停止、生产 Run 精确停止和盒子 Qwen 仍无证据。adapterVersion、capabilityRevision 和 schema 均不变。
 
+第十七轮增加[精确 Run 的本地取消信号](agentcomputer-run-cancel-signal.md)：持久取消请求提交后，服务器只对身份匹配的活动 Run task 发送进程内取消信号；取消传播时，现有派发 fence 将已交接 Run 保守收紧为 `interrupted/reconciliationRequired` 并保留双活动占用。没有生产 worker、远端模型或子进程停止证明，不能将已交接 Run 宣称为 `stopped`。adapterVersion、capabilityRevision 和 schema 均不变。
+
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
 ## 仓库与版本依据
@@ -53,6 +55,7 @@
 | 第十四轮开工基线 | `feature/agentcomputer-foundation` | `2962db3f57a1d80b1f4b00780160dd25c55e4659`，开工时主目录干净 |
 | 第十五轮开工基线 | `feature/agentcomputer-foundation` | `a225e52b91928d9a837633fb46c250cc21964c43`，开工时主目录干净 |
 | 第十六轮开工基线 | `feature/agentcomputer-foundation` | `d97c03ca33f85c8cc105c48a318f907861ad57ec`，开工时主目录干净 |
+| 第十七轮开工基线 | `feature/agentcomputer-foundation` | `64472405bb8205ba37124b05d8be5f0890288282`，开工时主目录干净 |
 
 Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写；仓库网址不等于已经推送。工作开始核对主目录 status、worktree、branch 和 HEAD，保留已有文档及代码改动。提交运行仓库 hooks，完成默认 `make all` 门禁后再交付；不跳过红测试。
 
@@ -63,7 +66,7 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 | 阶段 | 交付内容 | 当前边界 |
 |---|---|---|
 | M0 环境和协议验证 | 部署输入、模型协议、隔离与容量、最小身份及能力入口 | 离线 wire、真实 GLM-5 工具续轮与文本流、离线本地取消边界已有分项证据；目标盒子 Qwen、执行隔离和实机条件仍待验 |
-| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 25、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、持久暂停及本人 Run/审批/提问状态与原裁决收据回查、精确取消、应用入站收据、daemon 保守扫描与 Run 查询；生产 ready、真实模型/工具和完整恢复仍待验 |
+| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 25、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、持久暂停及本人 Run/审批/提问状态与原裁决收据回查、精确取消及匹配活动 Run 的本地 task 信号、应用入站收据、daemon 保守扫描与 Run 查询；生产 ready、真实模型/工具和完整恢复仍待验 |
 | M2 原生闭环 | 客户端远程会话、事件、审批、取消、正式成果及重连 | 不以实时连接成功代替可靠执行 |
 | M3 配置与恢复 | 指令/技能版本、资源、Outbox、多设备与异常对账 | 保留配置和执行快照，不盲重放 |
 | M4 调度与面板 | Schedule occurrence、Git/终端、受认证预览及资料库 | 工具隔离和项目写入规则先通过 |
@@ -152,6 +155,8 @@ Harness 普通 OpenAI 提供方默认采用 Chat Completions；已有 Swift Resp
 
 第十六轮沿用同一 Provider 完成[真实 GLM 文本流与离线取消边界预检](agentcomputer-glm-stream-cancel-preflight.md)：一次 `stream=true` 请求收到 SSE、非空 token 和最终标记；另以阻塞的合成 SSE 验证 `agent.cancel(thread_id)` 截断本地消费、关闭流且不执行未完成工具。真实请求没有取消，离线夹具没有接触远端 GLM，二者均不能证明服务端停止生成或生产 Run 已停止。目标 Qwen 仍待盒子实测。
 
+第十七轮在[认证取消命令](agentcomputer-run-cancel-signal.md)持久提交后尝试通知同服务器内精确绑定的活动 Run task。隔离 HTTP 夹具核对“先落库、后发信号”和取消传播后的不确定状态；没有调用普通 thread 取消，也没有把 GLM 流式探针当作生产 Run。目标盒子模型取消及远端生成停止仍需实测。
+
 ## 仍未验证的实机条件
 
 | 条件 | 当前已知 | 需取得的证据 |
@@ -169,7 +174,7 @@ Harness 普通 OpenAI 提供方默认采用 Chat Completions；已有 Swift Resp
 
 ## 后续 M1 领域与派发
 
-公共 ID、owner 归属、项目准备、内部 Task/thread、原子 Turn/Run 登记、命令幂等和固定输入已有本地实现与失败 Fixture。第七轮增加保守启动扫描，第八轮补充工具效果 Journal，第九至十一轮增加内部暂停、精确 Run 取消和裁决收据回查。认证 `POST /runs/{runID}/cancel` 已能持久接收本人明确目标的取消请求；已交接 Run 仍缺专属引擎停止证明。受控 Turn 写入保持执行门禁，真实模型/工具运行和暂停后的续跑尚未开放。
+公共 ID、owner 归属、项目准备、内部 Task/thread、原子 Turn/Run 登记、命令幂等和固定输入已有本地实现与失败 Fixture。第七轮增加保守启动扫描，第八轮补充工具效果 Journal，第九至十一轮增加内部暂停、精确 Run 取消和裁决收据回查，第十七轮再接入同服务器活动 Run task 的精确本地信号。认证 `POST /runs/{runID}/cancel` 已能持久接收本人明确目标的取消请求；信号不等于停止证明，已交接 Run 仍保持保守对账。受控 Turn 写入保持执行门禁，真实模型/工具运行和暂停后的续跑尚未开放。
 
 后续核实真实项目 ready、原生 harness 历史/幂等及引擎开始/停止证据，再装配生产 worker，完成审批/问答触发与安全续跑、已交接 Run 的专属停止和完整恢复。当前应用收据不替代这些证明；托管专家的 Dashboard、IM、Cron 和直接工作区写入口继续受保护，不能把普通会话入口作为执行门禁的替代路径。
 

@@ -25,6 +25,7 @@ from langgraph.types import Command
 from octop_harness.agent import HarnessAgent
 from octop_harness.request import ChatRequest
 
+from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.commands import CommandAdmissionError, canonical_json, content_digest
 from octop.infra.agentcomputer.models import (
     CheckpointUnknownReason,
@@ -203,7 +204,12 @@ def _validate_registered_workspace(agent: HarnessAgent, middleware: EngineEntryM
         raise CommandAdmissionError("accessDenied", reason="engineContextMismatch") from exc
 
 
-async def invoke_engine_entry(agent: HarnessAgent, invocation: EngineInvocation) -> None:
+async def invoke_engine_entry(
+    agent: HarnessAgent,
+    invocation: EngineInvocation,
+    *,
+    active_runs: ActiveRunRegistry | None = None,
+) -> None:
     """Consume the public stream without accepting client configuration or kwargs."""
     snapshot = invocation.intent.snapshot
     middleware = next(
@@ -222,8 +228,13 @@ async def invoke_engine_entry(agent: HarnessAgent, invocation: EngineInvocation)
     ):
         raise CommandAdmissionError("accessDenied", reason="engineContextMismatch")
     await asyncio.to_thread(_validate_registered_workspace, agent, middleware)
-    async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
-        pass
+    if active_runs is None:
+        async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
+            pass
+    else:
+        async with active_runs.track(invocation):
+            async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
+                pass
 
 
 def _checkpoint_matches(checkpoint: CheckpointTuple, invocation: EngineInvocation) -> bool:

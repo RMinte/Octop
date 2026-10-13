@@ -587,7 +587,9 @@ async def question_status(
         "proves that the request was recorded and new execution handoffs are fenced; it does "
         "not prove that an engine or child process stopped. Read the Run for current state and "
         "the original command receipt for response-loss recovery. This endpoint never invokes "
-        "a thread-wide stop or cancels another Run."
+        "a thread-wide stop or cancels another Run. After the durable request commits, it "
+        "best-effort signals a matching local Run invocation; the receipt still does not "
+        "prove the stream, remote model, or a child process stopped."
     ),
     responses={
         401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
@@ -619,7 +621,9 @@ async def request_run_cancellation(
         operation = partial(
             cancel_run, server.services, owner_id=user.id, run_id=run_id, command=body
         )
-        return await asyncio.get_running_loop().run_in_executor(None, operation)
+        receipt = await asyncio.get_running_loop().run_in_executor(None, operation)
+        server.agentcomputer_active_runs.signal_cancel(owner_id=user.id, receipt=receipt)
+        return receipt
     except CommandAdmissionError as exc:
         return admission_error_response(exc)
     except IdentityError:

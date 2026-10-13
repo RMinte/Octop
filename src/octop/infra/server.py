@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from octop.config import OctopConfig, load_config
+from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.bootstrap import DaemonBootstrap, settle_task
 from octop.infra.agents.experts.catalog import ExpertCatalog, default_library_root
 from octop.infra.agents.manager import AgentManager
@@ -265,6 +266,7 @@ class OctopServer:
         self._ldap_bind_throttle: LdapBindThrottle | None = None
         self._ldap_bind_throttle_services: SharedServices | None = None
         self._agentcomputer_bootstrap = daemon_bootstrap
+        self.agentcomputer_active_runs = ActiveRunRegistry()
 
     # Backward compat: expose user_manager directly
     @property
