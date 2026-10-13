@@ -75,7 +75,8 @@ OPENAPI_TAGS: list[dict[str, str]] = [
             "Device binding, full project readiness, and production task execution remain unavailable. "
             "Dispatch phases describe stored handoff facts; app intake acceptance does not prove model start."
             " Daemon bootstrap can conservatively fence unresolved dispatch facts before runtime; "
-            "full recovery, user cancellation, and production execution remain unavailable."
+            "full recovery and production execution remain unavailable. "
+            "Exact-Run cancellation records durable requests but lacks a production stop proof."
         ),
     },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},

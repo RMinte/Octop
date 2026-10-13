@@ -5,14 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from octop.api.routers import agentcomputer
-from octop.infra.agentcomputer.commands import admit_new_message
-from octop.infra.agentcomputer.models import CommandReceipt, NewMessageCommand
+from octop.infra.agentcomputer import approvals, dispatch, pauses, questions
+from octop.infra.agentcomputer.capabilities import CapabilityStatus, get_capabilities
+from octop.infra.agentcomputer.commands import (
+    admit_new_message,
+    canonical_json,
+    content_digest,
+)
+from octop.infra.agentcomputer.models import (
+    ApprovalDecisionCommand,
+    CommandReceipt,
+    NewMessageCommand,
+    QuestionAnswerCommand,
+    RunPauseContent,
+    RunPauseDecisionReceipt,
+)
 from octop.infra.server import OctopServer
 from tests.support.agentcomputer import register_ready_task
 from tests.support.app import octop_client, write_octop_config
@@ -37,6 +51,108 @@ async def seed_receipt(client, server: OctopServer, auth, owner_id: int) -> Comm
     )
     return await asyncio.to_thread(
         admit_new_message, server.services, owner_id=owner_id, task_id=task.taskID, command=command
+    )
+
+
+async def seed_pause_receipt(
+    client, server: OctopServer, auth, owner_id: int, monkeypatch, kind: str
+) -> RunPauseDecisionReceipt:
+    """Exercise trusted internal pause facts in a temporary DB, with no model call."""
+    assert server.services is not None
+    accepted = await seed_receipt(client, server, auth, owner_id)
+    services = server.services
+    profile = get_capabilities(services)
+    available = profile.model_copy(
+        update={
+            "capabilities": profile.capabilities.model_copy(
+                update={"runs": CapabilityStatus(supported=True, available=True)}
+            ),
+            "supportedPermissionModes": ["askForApproval"],
+        }
+    )
+    monkeypatch.setattr(dispatch, "get_capabilities", lambda _: available)
+    monkeypatch.setattr(pauses, "get_capabilities", lambda _: available)
+    claim = await asyncio.to_thread(
+        dispatch.claim_run,
+        services,
+        owner_id=owner_id,
+        run_id=accepted.runID,
+        claimant_id=uuid4(),
+        expected_revision=1,
+    )
+    invocations = []
+
+    async def accept(invocation):
+        invocations.append(invocation)
+        await asyncio.to_thread(dispatch.accept_engine_entry, services, invocation)
+
+    await dispatch.dispatch_run(services, claim=claim, invoke=accept)
+    assert len(invocations) == 1
+    invocation = invocations[0]
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE ac_runs SET state='running' WHERE run_id=?", (str(accepted.runID),))
+        run = services.ac_run_repo.get_in_transaction(conn, str(accepted.runID), owner_id)
+        assert run is not None
+        invocation = invocation.model_copy(update={"expectedRunRevision": run.revision})
+
+    payload = {"fixture": "trusted approval" if kind == "approval" else "trusted question"}
+    content = RunPauseContent(
+        schemaVersion=1,
+        payloadJSON=canonical_json(payload),
+        payloadDigest=content_digest(payload),
+        workspaceDigest=content_digest({"workspace": str(invocation.intent.snapshot.workspaceID)}),
+        policyVersion="fixture-policy-v1",
+        capabilityVersion="fixture-capability-v1",
+    )
+    expires_at = datetime.now(UTC) + timedelta(minutes=10)
+    if kind == "approval":
+        record = await asyncio.to_thread(
+            approvals.request_approval,
+            services,
+            invocation,
+            action=content,
+            expires_at=expires_at,
+        )
+        command = ApprovalDecisionCommand(
+            commandID=uuid4(),
+            idempotencyKey=str(uuid4()),
+            expectedRestoreEpoch=record.intent.restoreEpoch,
+            approvalID=record.intent.pauseID,
+            runID=record.intent.runID,
+            expectedRevision=record.revision,
+            decision="approveOnce",
+        )
+        return await asyncio.to_thread(
+            approvals.decide_approval,
+            services,
+            owner_id=owner_id,
+            command=command,
+            current_action=content,
+            authorize=lambda _: True,
+        )
+    record = await asyncio.to_thread(
+        questions.ask_question,
+        services,
+        invocation,
+        question=content,
+        expires_at=expires_at,
+    )
+    command = QuestionAnswerCommand(
+        commandID=uuid4(),
+        idempotencyKey=str(uuid4()),
+        expectedRestoreEpoch=record.intent.restoreEpoch,
+        questionID=record.intent.pauseID,
+        runID=record.intent.runID,
+        expectedRevision=record.revision,
+        answer="继续",
+    )
+    return await asyncio.to_thread(
+        questions.answer_question,
+        services,
+        owner_id=owner_id,
+        command=command,
+        current_question=content,
+        authorize=lambda _: True,
     )
 
 
@@ -133,6 +249,104 @@ async def test_receipt_survives_restart_and_keeps_acceptance_epoch(tmp_path: Pat
         capabilities = await client.get(f"{PREFIX}/capabilities", headers=auth)
         assert capabilities.json()["restoreEpoch"] == 2
         assert second.json()["restoreEpoch"] == 1
+
+
+def pause_facts(server: OctopServer) -> dict[str, list[tuple[object, ...]]]:
+    assert server.services is not None
+    with server.services.db.connect() as conn:
+        return {
+            table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY id")]
+            for table in ("ac_commands", "ac_run_pauses", "ac_events", "ac_runs")
+        }
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_pause_decision_receipt_http_is_original_and_owner_scoped(env, monkeypatch, kind):
+    client, server, admin_auth = env
+    owner_auth = await create_user(client, admin_auth, username=f"pause-{kind}-owner")
+    other_auth = await create_user(client, admin_auth, username=f"pause-{kind}-other")
+    owner_id = await resolve_user_id(client, admin_auth, f"pause-{kind}-owner")
+    receipt = await seed_pause_receipt(client, server, owner_auth, owner_id, monkeypatch, kind)
+    before = pause_facts(server)
+    own = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=owner_auth)
+    assert own.status_code == 200 and own.headers["cache-control"] == "no-store"
+    assert own.json() == receipt.model_dump(mode="json")
+    assert set(own.json()) == set(RunPauseDecisionReceipt.model_fields)
+    assert str(server.paths.root) not in own.text
+    assert pause_facts(server) == before
+
+    # An unrelated caller must not be able to distinguish this UUID from a missing UUID,
+    # even when the installation identity is broken.
+    server.paths.agentcomputer_identity.write_text('{"private-marker":', encoding="utf-8")
+    for auth in (other_auth, admin_auth):
+        missing = await client.get(f"{PREFIX}/commands/{uuid4()}", headers=auth)
+        denied = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
+        assert missing.status_code == denied.status_code == 404
+        assert (
+            missing.json()
+            == denied.json()
+            == {"error": {"code": "resourceNotFound", "retryable": False}}
+        )
+        assert "private-marker" not in denied.text
+    assert pause_facts(server) == before
+
+
+async def test_pause_decision_receipt_http_survives_expiry_epoch_and_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "control"
+    async with octop_client(home) as (client, server):
+        await bootstrap_admin(client, home)
+        auth = await auth_header(client)
+        owner_id = await resolve_user_id(client, auth, "admin")
+        receipt = await seed_pause_receipt(client, server, auth, owner_id, monkeypatch, "approval")
+        assert server.services is not None
+        await asyncio.to_thread(
+            pauses.expire_pause, server.services, owner_id=owner_id, pause_id=receipt.pauseID
+        )
+        path = server.paths.agentcomputer_identity
+        identity = json.loads(path.read_text(encoding="utf-8"))
+        identity["restoreEpoch"] = 2
+        path.write_text(json.dumps(identity), encoding="utf-8")
+        first = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
+        assert first.status_code == 200 and first.json() == receipt.model_dump(mode="json")
+    async with octop_client(home) as (client, server):
+        auth = await auth_header(client)
+        before = pause_facts(server)
+        second = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
+        assert second.status_code == 200 and second.json() == receipt.model_dump(mode="json")
+        assert second.json()["restoreEpoch"] == 1
+        assert pause_facts(server) == before
+
+
+@pytest.mark.parametrize("damage", ["receipt", "decisionEvent"])
+async def test_corrupt_pause_decision_receipt_http_returns_safe_503_without_writes(
+    env, monkeypatch, damage
+):
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    receipt = await seed_pause_receipt(client, server, auth, owner_id, monkeypatch, "question")
+    assert server.services is not None
+    with server.services.db.transaction() as conn:
+        if damage == "receipt":
+            conn.execute(
+                "UPDATE ac_run_pauses SET decision_receipt_json=? WHERE pause_id=?",
+                ('{"private-marker":', str(receipt.pauseID)),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM ac_events WHERE run_id=? AND event_type='question.answered'",
+                (str(receipt.runID),),
+            )
+    before = pause_facts(server)
+    response = await client.get(f"{PREFIX}/commands/{receipt.commandID}", headers=auth)
+    assert response.status_code == 503 and response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "error": {"code": "storageUnavailable", "retryable": False, "reasonCode": "receiptInvalid"}
+    }
+    assert "private-marker" not in response.text
+    assert str(server.paths.root) not in response.text
+    assert pause_facts(server) == before
 
 
 @pytest.mark.parametrize("invalid", ['{"private-marker":', '{"accepted":true}'])
@@ -243,6 +457,7 @@ async def test_openapi_documents_receipt_as_immutable_acceptance(tmp_path: Path)
             "ProjectCreateReceipt",
             "TaskCreateReceipt",
             "CancelRunReceipt",
+            "RunPauseDecisionReceipt",
         }
         example = response["example"]
         assert CommandReceipt.model_validate(example).runState == "queued"

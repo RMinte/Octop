@@ -34,10 +34,10 @@ def test_capabilities_are_truthful_authenticated_discovery_data(tmp_path: Path) 
     assert response.deviceID is None
     assert response.authenticationMode == "octopUserSession"
     assert response.protocolVersion == response.minimumClientProtocolVersion == 1
-    assert response.capabilityRevision == 10
+    assert response.capabilityRevision == 11
     assert response.restoreEpoch == 1
     assert response.serverBuild.octopVersion == __version__
-    assert response.serverBuild.adapterVersion == "0.10.0"
+    assert response.serverBuild.adapterVersion == "0.11.0"
     assert response.serverBuild.imageDigest is None
     assert before <= response.serverTime <= after
     assert response.serverTime.tzinfo == UTC

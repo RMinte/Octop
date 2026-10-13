@@ -122,7 +122,7 @@ async def test_recovery_projects_original_phase_lane_and_receipt_without_user_ca
             ).fetchall()
         ] == events
     profile = (await client.get(f"{PREFIX}/capabilities", headers=auth)).json()
-    assert profile["capabilityRevision"] == 10 and profile["supportedPermissionModes"] == []
+    assert profile["capabilityRevision"] == 11 and profile["supportedPermissionModes"] == []
     assert profile["capabilities"]["recovery"] == {
         "supported": False,
         "available": False,

@@ -38,6 +38,7 @@ from octop.infra.agentcomputer.models import (
     ProjectCreateCommand,
     ProjectCreateReceipt,
     ProjectView,
+    RunPauseDecisionReceipt,
     RunView,
     TaskCreateReceipt,
     TaskView,
@@ -96,13 +97,20 @@ async def capabilities(
 
 @router.get(
     "/commands/{commandID}",
-    response_model=CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | CancelRunReceipt,
+    response_model=(
+        CommandReceipt
+        | ProjectCreateReceipt
+        | TaskCreateReceipt
+        | CancelRunReceipt
+        | RunPauseDecisionReceipt
+    ),
     summary="Read an existing AgentComputer command receipt",
     description=(
         "Requires an Octop user Bearer token in the Authorization header. "
-        "Returns only the authenticated user's immutable admission or cancellation receipt. "
-        "An accepted receipt proves original durable registration, not current Run state or project preparation "
-        "or task execution. Missing and other users' commands return the same 404. "
+        "Returns only the authenticated user's immutable admission, cancellation, or pause decision receipt. "
+        "A receipt preserves the original durable fact; a pause decision receipt does not authorize a tool "
+        "or prove engine delivery. It does not report current Run state, project preparation, or task execution. "
+        "Missing and other users' commands return the same 404. "
         "This read-only endpoint does not submit, replay, or dispatch commands."
     ),
     responses={
@@ -121,7 +129,14 @@ async def command_receipt(
     command_id: UUID = Path(alias="commandID", description="Public command UUID."),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_bearer_user),
-) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | CancelRunReceipt | JSONResponse:
+) -> (
+    CommandReceipt
+    | ProjectCreateReceipt
+    | TaskCreateReceipt
+    | CancelRunReceipt
+    | RunPauseDecisionReceipt
+    | JSONResponse
+):
     require_database(server)
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"

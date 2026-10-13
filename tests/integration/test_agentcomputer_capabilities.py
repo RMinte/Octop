@@ -90,7 +90,7 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
     assert body["deviceID"] is None
     assert body["authenticationMode"] == "octopUserSession"
     assert body["restoreEpoch"] == 1
-    assert body["capabilityRevision"] == 10
+    assert body["capabilityRevision"] == 11
     assert body["supportedPermissionModes"] == []
     assert body["capabilities"]
     assert body["capabilities"]["commandReceipts"] == {
@@ -194,7 +194,7 @@ async def test_openapi_documents_typed_authenticated_discovery(tmp_path: Path) -
         example = operation["responses"]["200"]["content"]["application/json"]["example"]
         assert example["deviceID"] is None
         assert example["supportedPermissionModes"] == []
-        assert example["capabilityRevision"] == 10
+        assert example["capabilityRevision"] == 11
         assert example["capabilities"]["commandReceipts"] == {
             "supported": True,
             "available": True,

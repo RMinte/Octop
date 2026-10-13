@@ -186,7 +186,7 @@ async def test_task_http_creation_remains_absent(env) -> None:
         assert conn.execute("SELECT COUNT(*) FROM ac_runs").fetchone()[0] == 0
 
 
-async def test_openapi_documents_read_only_task_and_three_receipt_shapes(tmp_path: Path) -> None:
+async def test_openapi_documents_read_only_task_and_receipt_shapes(tmp_path: Path) -> None:
     home = tmp_path / "control"
     write_octop_config(home, enable_api_docs=True)
     async with octop_client(home) as (client, _server):
@@ -213,5 +213,6 @@ async def test_openapi_documents_read_only_task_and_three_receipt_shapes(tmp_pat
             "ProjectCreateReceipt",
             "TaskCreateReceipt",
             "CancelRunReceipt",
+            "RunPauseDecisionReceipt",
         }
         assert (await client.get("/api/docs")).status_code == 200

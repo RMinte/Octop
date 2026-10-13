@@ -23,6 +23,7 @@ from octop.infra.agentcomputer.models import (
     NewMessageCommand,
     ProjectConfiguration,
     ProjectCreateReceipt,
+    RunPauseDecisionReceipt,
     TaskCreateReceipt,
     TurnSnapshot,
 )
@@ -259,7 +260,14 @@ def validate_turn_receipt_binding(
 
 def get_command_receipt(
     services: SharedServices, owner_id: int, command_id: UUID
-) -> CommandReceipt | ProjectCreateReceipt | TaskCreateReceipt | CancelRunReceipt | None:
+) -> (
+    CommandReceipt
+    | ProjectCreateReceipt
+    | TaskCreateReceipt
+    | CancelRunReceipt
+    | RunPauseDecisionReceipt
+    | None
+):
     try:
         row = services.ac_command_repo.get(str(command_id), owner_id)
     except (sqlite3.DatabaseError, PostgresError) as exc:
@@ -269,13 +277,37 @@ def get_command_receipt(
     except (ValueError, TypeError) as exc:
         raise StorageDataError("invalid stored command value") from exc
     if row is None:
-        return None
+        try:
+            with services.db.transaction() as conn:
+                pause_row = services.ac_run_pause_repo.get_by_command_in_transaction(
+                    conn, str(command_id), owner_id
+                )
+                if pause_row is None:
+                    return None
+                from octop.infra.agentcomputer.dispatch import _existing_recovery_identity
+                from octop.infra.agentcomputer.pauses import validate_pause_read_binding
+
+                identity = _existing_recovery_identity(services)
+                record = validate_pause_read_binding(
+                    services, conn, owner_id=owner_id, row=pause_row, box_id=identity.boxID
+                )
+                if record.receipt is None or record.receipt.commandID != command_id:
+                    raise StorageDataError("missing pause decision receipt")
+                return record.receipt
+        except (sqlite3.DatabaseError, PostgresError) as exc:
+            raise StorageUnavailableError("pause decision receipt storage unavailable") from exc
+        except StorageDataError:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise StorageDataError("invalid stored pause decision receipt value") from exc
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
     try:
         with services.db.transaction() as conn:
             row = services.ac_command_repo.get_in_transaction(conn, str(command_id), owner_id)
             if row is None:
                 return None
+            if services.ac_run_pause_repo.command_exists_in_transaction(conn, str(command_id)):
+                raise StorageDataError("command and pause decision identity collision")
             # A historic epoch is readable after a restore. The original result must
             # not be rewritten to the current epoch or treated as a fresh acceptance.
             if row.operation == "task.create":

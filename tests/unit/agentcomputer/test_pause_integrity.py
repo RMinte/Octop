@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from tests.unit.agentcomputer.test_effect_runner import effect as effect
 from tests.unit.agentcomputer.test_submission_runs import control as control
 
+from octop.config import OctopConfig
 from octop.infra.agentcomputer import (
     approvals,
     cancellations,
@@ -23,6 +24,7 @@ from octop.infra.agentcomputer.commands import (
     StorageDataError,
     canonical_json,
     content_digest,
+    get_command_receipt,
 )
 from octop.infra.agentcomputer.identity import read_identity
 from octop.infra.agentcomputer.models import (
@@ -31,6 +33,8 @@ from octop.infra.agentcomputer.models import (
     RunPauseContent,
 )
 from octop.infra.agentcomputer.runs import get_run
+from octop.infra.db.pool import SqlitePool
+from octop.infra.db.services import build_shared_services
 
 
 def _open(effect, monkeypatch, kind):
@@ -200,4 +204,80 @@ async def test_old_epoch_decision_replay_is_rejected_but_history_remains_readabl
     assert historical is not None and historical.receipt == original
     with pytest.raises(CommandAdmissionError, match="restoreEpochConflict"):
         _decide(effect, content, kind, command, authorize=lambda _: True)
+    assert _facts(effect) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_decision_command_receipt_is_immutable_after_expiry_and_restart(
+    effect, monkeypatch, kind
+):
+    record, content = _open(effect, monkeypatch, kind)
+    command = _command(record, kind)
+    original = _decide(effect, content, kind, command, authorize=lambda _: True)
+    assert get_command_receipt(effect.services, 1, command.commandID) == original
+    assert get_command_receipt(effect.services, 2, command.commandID) is None
+    assert get_command_receipt(effect.services, 1, uuid4()) is None
+
+    assert pauses.expire_pause(effect.services, owner_id=1, pause_id=record.intent.pauseID)
+    identity_path = effect.services.paths.agentcomputer_identity
+    identity = read_identity(identity_path)
+    identity_path.write_text(
+        identity.model_copy(update={"restoreEpoch": identity.restoreEpoch + 1}).model_dump_json(),
+        encoding="utf-8",
+    )
+    before = _facts(effect)
+    other_pool = SqlitePool(effect.services.paths.db)
+    other = build_shared_services(db=other_pool, paths=effect.services.paths, config=OctopConfig())
+    try:
+        assert get_command_receipt(other, 1, command.commandID) == original
+        assert get_command_receipt(other, 1, command.commandID) == original
+    finally:
+        other_pool.close()
+    assert _facts(effect) == before
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+@pytest.mark.parametrize("damage", ["receipt", "decisionEvent"])
+async def test_corrupt_decision_receipt_query_fails_closed_without_writes(
+    effect, monkeypatch, kind, damage
+):
+    record, content = _open(effect, monkeypatch, kind)
+    command = _command(record, kind)
+    _decide(effect, content, kind, command, authorize=lambda _: True)
+    with effect.services.db.transaction() as conn:
+        if damage == "receipt":
+            conn.execute(
+                "UPDATE ac_run_pauses SET decision_receipt_json=? WHERE pause_id=?",
+                ('{"private-marker":', str(record.intent.pauseID)),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM ac_events WHERE run_id=? AND event_type=?",
+                (
+                    str(record.intent.runID),
+                    "approval.decided" if kind == "approval" else "question.answered",
+                ),
+            )
+    before = _facts(effect)
+    with pytest.raises(StorageDataError):
+        get_command_receipt(effect.services, 1, command.commandID)
+    assert _facts(effect) == before
+
+
+async def test_command_and_decision_id_collision_fails_closed_without_writes(effect, monkeypatch):
+    record, content = _open(effect, monkeypatch, "approval")
+    command = _command(record, "approval")
+    _decide(effect, content, "approval", command, authorize=lambda _: True)
+    with effect.services.db.transaction() as conn:
+        existing = conn.execute(
+            "SELECT command_id FROM ac_commands WHERE owner_id=1 ORDER BY id LIMIT 1"
+        ).fetchone()
+        assert existing is not None
+        conn.execute(
+            "UPDATE ac_run_pauses SET decision_command_id=? WHERE pause_id=?",
+            (existing[0], str(record.intent.pauseID)),
+        )
+    before = _facts(effect)
+    with pytest.raises(StorageDataError, match="collision"):
+        get_command_receipt(effect.services, 1, UUID(existing[0]))
     assert _facts(effect) == before

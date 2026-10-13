@@ -499,6 +499,27 @@ def open_pause(
         return record
 
 
+def validate_pause_read_binding(
+    services: SharedServices, conn: Any, *, owner_id: int, row: AcRunPauseRow, box_id: UUID
+) -> RunPauseRecord:
+    """Validate an owned pause and its Run journals in the caller's transaction."""
+    bound = load_bound_run(
+        services, conn, owner_id=owner_id, run_id=UUID(row.run_id), box_id=box_id
+    )
+    if bound is None:
+        raise StorageDataError("orphaned pause Run")
+    claim = validate_dispatch_binding(services, conn, bound)
+    validate_effect_bindings(services, conn, bound, claim)
+    records = validate_pause_bindings(services, conn, bound, claim)
+    from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
+
+    validate_cancellation_binding(services, conn, bound, claim)
+    record = _record(row)
+    if record not in records:
+        raise StorageDataError("orphaned pause record")
+    return record
+
+
 def get_pause(services: SharedServices, *, owner_id: int, pause_id: UUID) -> RunPauseRecord | None:
     """Owned private query; historical decided/expired facts remain readable."""
     identity = _existing_recovery_identity(services)
@@ -506,18 +527,9 @@ def get_pause(services: SharedServices, *, owner_id: int, pause_id: UUID) -> Run
         row = services.ac_run_pause_repo.get_in_transaction(conn, str(pause_id), owner_id)
         if row is None:
             return None
-        bound = load_bound_run(
-            services, conn, owner_id=owner_id, run_id=UUID(row.run_id), box_id=identity.boxID
+        return validate_pause_read_binding(
+            services, conn, owner_id=owner_id, row=row, box_id=identity.boxID
         )
-        if bound is None:
-            raise StorageDataError("orphaned pause Run")
-        claim = validate_dispatch_binding(services, conn, bound)
-        validate_effect_bindings(services, conn, bound, claim)
-        validate_pause_bindings(services, conn, bound, claim)
-        from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
-
-        validate_cancellation_binding(services, conn, bound, claim)
-        return _record(row)
 
 
 def _decision(
