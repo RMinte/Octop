@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from octop.config import OctopConfig, load_config
 from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.bootstrap import DaemonBootstrap, settle_task
+from octop.infra.agentcomputer.http_operations import HttpOperationRegistry
 from octop.infra.agents.experts.catalog import ExpertCatalog, default_library_root
 from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.plugins.manager import PluginManager
@@ -267,6 +268,7 @@ class OctopServer:
         self._ldap_bind_throttle_services: SharedServices | None = None
         self._agentcomputer_bootstrap = daemon_bootstrap
         self.agentcomputer_active_runs = ActiveRunRegistry()
+        self.agentcomputer_http_operations = HttpOperationRegistry()
         self._stop_task: asyncio.Task[None] | None = None
 
     # Backward compat: expose user_manager directly
@@ -339,6 +341,10 @@ class OctopServer:
             if self.services is not None or self.app_runtime is not None:
                 raise RuntimeError("agentcomputer Run drain is still in progress")
             self.agentcomputer_active_runs = ActiveRunRegistry()
+        if self.agentcomputer_http_operations.closing:
+            if self.services is not None or self.app_runtime is not None:
+                raise RuntimeError("agentcomputer HTTP drain is still in progress")
+            self.agentcomputer_http_operations = HttpOperationRegistry()
         if self._agentcomputer_bootstrap is not None:
             await self._agentcomputer_bootstrap.acquire()
         try:
@@ -684,8 +690,11 @@ class OctopServer:
             raise asyncio.CancelledError
 
     async def _stop(self) -> None:
-        # The daemon guard and DB must outlive every registered dispatch task,
-        # including its shielded uncertainty fence and DB thread work.
+        # HTTP work may outlive a cancelled request; let its DB transaction and
+        # cancellation signal settle before stopping dispatches and closing DB.
+        await self.agentcomputer_http_operations.drain()
+        # The daemon guard and DB must also outlive every registered dispatch
+        # task, including its shielded uncertainty fence and DB thread work.
         await self.agentcomputer_active_runs.drain()
         if not self._started and self.services is None and self.app_runtime is None:
             if self._agentcomputer_bootstrap is not None:

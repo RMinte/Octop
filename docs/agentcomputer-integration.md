@@ -40,6 +40,8 @@
 
 第二十一轮建立[可信派发任务的服务关闭等待](agentcomputer-dispatch-shutdown-drain.md)：服务器先封闭新的受托派发登记，取消并等待已登记任务完成数据库线程和持久异常 fence，再关闭连接池、释放 daemon 锁。独立 HTTP 命令 executor 尚未纳入此登记；生产 worker、已交接 Run 的远端停止证明和能力开关仍关闭。adapterVersion、capabilityRevision 和 schema 均不变。
 
+第二十二轮增加[AgentComputer HTTP 操作的服务关闭等待](agentcomputer-http-shutdown-drain.md)：请求取消后，项目准备、命令事务和只读查询仍由服务器登记并结算；关闭先封闭 HTTP 操作及认证入口、等待持久事务和精确 Run 信号，然后排空可信派发，最后关库并释放 daemon 锁。同实例重启建立新登记表。生产 worker、已交接 Run 的远端停止证明和能力开关仍关闭；adapterVersion、capabilityRevision 和 schema 均不变。
+
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
 ## 仓库与版本依据
@@ -68,6 +70,7 @@
 | 第十九轮开工基线 | `feature/agentcomputer-foundation` | `383baaee3052f51231ec8b997ec57c531e08a75d`，开工时主目录干净 |
 | 第二十轮开工基线 | `feature/agentcomputer-foundation` | `2e98bfbf77340c7c509052c3f6b73e9bad3fa30a`，开工时主目录干净 |
 | 第二十一轮开工基线 | `feature/agentcomputer-foundation` | `b8783f0f42ec5bd4c4bcfb55b42e0e0be85c750a`，开工时主目录干净 |
+| 第二十二轮开工基线 | `feature/agentcomputer-foundation` | `f12a34fba72f2fdd3ac228b624fdd7fb425d17f3`，开工时主目录干净 |
 
 Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写；仓库网址不等于已经推送。工作开始核对主目录 status、worktree、branch 和 HEAD，保留已有文档及代码改动。提交运行仓库 hooks，完成默认 `make all` 门禁后再交付；不跳过红测试。
 
@@ -75,10 +78,12 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 
 ## 阶段安排
 
+可核对的阶段进度条和下一项用户可见功能见[集成进度](agentcomputer-progress.md)。阶段只有通过完整退出标准才标记完成，局部 Fixture 不折算为整体百分比。
+
 | 阶段 | 交付内容 | 当前边界 |
 |---|---|---|
 | M0 环境和协议验证 | 部署输入、模型协议、隔离与容量、最小身份及能力入口 | 离线 wire、真实 GLM-5 工具续轮及固定 ASCII/中文标记文本流、离线取消与传输故障已有分项证据；目标盒子 Qwen、执行隔离和实机条件仍待验 |
-| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 25、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、持久暂停及本人 Run/审批/提问状态与原裁决收据回查、精确取消及可信 Run 到本地 harness 流关闭的隔离证据、应用入站收据、daemon 保守扫描与 Run 查询；已领取但未开始派发的 Run 可严格停止并释放双占用，显式登记的可信派发任务在服务关闭时完成本地对账；生产 ready、HTTP 命令 executor 关闭等待、真实模型/工具、已交接 Run 停止证明和完整恢复仍待验 |
+| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 25、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、持久暂停及本人 Run/审批/提问状态与原裁决收据回查、精确取消及可信 Run 到本地 harness 流关闭的隔离证据、应用入站收据、daemon 保守扫描与 Run 查询；已领取但未开始派发的 Run 可严格停止并释放双占用，显式登记的可信派发任务和 AgentComputer HTTP 操作在服务关闭时完成本地结算；生产 ready、真实模型/工具、已交接 Run 停止证明和完整恢复仍待验 |
 | M2 原生闭环 | 客户端远程会话、事件、审批、取消、正式成果及重连 | 不以实时连接成功代替可靠执行 |
 | M3 配置与恢复 | 指令/技能版本、资源、Outbox、多设备与异常对账 | 保留配置和执行快照，不盲重放 |
 | M4 调度与面板 | Schedule occurrence、Git/终端、受认证预览及资料库 | 工具隔离和项目写入规则先通过 |

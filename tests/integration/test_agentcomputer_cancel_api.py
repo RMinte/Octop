@@ -3,23 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from contextlib import suppress
 from unittest.mock import Mock
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
+from octop.api.app import build_app
 from octop.api.routers import agentcomputer
 from octop.infra.agentcomputer import dispatch
+from octop.infra.agentcomputer.bootstrap import DaemonBootstrap
 from octop.infra.agentcomputer.cancellations import CancelRunReceipt
 from octop.infra.agentcomputer.capabilities import CapabilityStatus, get_capabilities
 from octop.infra.agentcomputer.commands import CommandAdmissionError, admit_new_message
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.agentcomputer.models import CommandReceipt, NewMessageCommand
+from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.server import OctopServer
 from tests.support.agentcomputer import register_ready_task
-from tests.support.app import octop_client, write_octop_config
-from tests.support.auth import create_user, resolve_user_id
+from tests.support.app import ensure_control_plane_bound, octop_client, write_octop_config
+from tests.support.auth import auth_header, bootstrap_admin, create_user, resolve_user_id
 
 PREFIX = "/api/agentcomputer/v1"
 
@@ -352,6 +358,169 @@ async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes
     assert task is not None and task.active_run_id == str(accepted.runID)
     project = services.ac_project_repo.get(task.project_id, owner_id)
     assert project is not None and project.active_run_id == str(accepted.runID)
+
+
+async def _wait_for_http_shutdown(server: OctopServer) -> None:
+    while not server.agentcomputer_http_operations.closing:
+        await asyncio.sleep(0)
+
+
+async def test_cancelled_http_cancel_settles_before_concurrent_stop_closes_pool_and_guard(
+    tmp_octop_home, monkeypatch
+):
+    server = OctopServer(
+        home=tmp_octop_home,
+        daemon_bootstrap=DaemonBootstrap(tmp_octop_home / "agentcomputer-control"),
+    )
+    other = DaemonBootstrap(tmp_octop_home / "agentcomputer-control")
+    release = threading.Event()
+    request = first_stop = second_stop = None
+    try:
+        await server.start()
+        await ensure_control_plane_bound(server)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=build_app(server)),
+            base_url="http://testserver",
+        ) as client:
+            await bootstrap_admin(client, tmp_octop_home)
+            auth = await auth_header(client)
+            owner_id = await resolve_user_id(client, auth, "admin")
+            accepted = await seed_run(client, server, auth, owner_id)
+            assert server.services is not None
+            services = server.services
+            pool = services.db
+            entered = threading.Event()
+            close_attempted = threading.Event()
+            original_insert = services.ac_run_cancellation_repo.insert
+            original_close = pool.close
+
+            def delayed_insert(*args, **kwargs):
+                # Run and command rows have changed, but their transaction has not committed.
+                entered.set()
+                assert release.wait(timeout=10)
+                return original_insert(*args, **kwargs)
+
+            def observed_close():
+                close_attempted.set()
+                original_close()
+
+            monkeypatch.setattr(services.ac_run_cancellation_repo, "insert", delayed_insert)
+            monkeypatch.setattr(pool, "close", observed_close)
+            body = cancel_body()
+            request = asyncio.create_task(
+                client.post(f"{PREFIX}/runs/{accepted.runID}/cancel", headers=auth, json=body)
+            )
+            assert await asyncio.to_thread(entered.wait, 10)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+
+            first_stop = asyncio.create_task(server.stop())
+            second_stop = asyncio.create_task(server.stop())
+            await asyncio.wait_for(_wait_for_http_shutdown(server), timeout=5)
+            first_stop.cancel()
+            await asyncio.sleep(0)
+            first_stop.cancel()
+            assert not first_stop.done() and not second_stop.done()
+            assert server.services is services and not close_attempted.is_set()
+            with pytest.raises(OctopError) as busy:
+                await other.acquire()
+            assert busy.value.code == ErrorCode.CONTROL_PLANE_BUSY
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(first_stop, timeout=10)
+            await asyncio.wait_for(second_stop, timeout=10)
+            assert close_attempted.is_set() and server.services is None
+            with sqlite3.connect(pool.path) as conn:
+                row = conn.execute(
+                    "SELECT receipt_json FROM ac_commands WHERE command_id=?",
+                    (str(body["commandID"]),),
+                ).fetchone()
+                assert row is not None
+                receipt = CancelRunReceipt.model_validate_json(row[0])
+                assert receipt.runID == accepted.runID and receipt.status == "stopped"
+                assert (
+                    conn.execute(
+                        "SELECT COUNT(*) FROM ac_run_cancellations WHERE run_id=?",
+                        (str(accepted.runID),),
+                    ).fetchone()[0]
+                    == 1
+                )
+            await other.acquire()
+    finally:
+        release.set()
+        if request is not None and not request.done():
+            request.cancel()
+            with suppress(asyncio.CancelledError):
+                await request
+        for stop in (first_stop, second_stop):
+            if stop is not None and not stop.done():
+                with suppress(asyncio.CancelledError):
+                    await stop
+        await server.stop()
+        await other.close()
+
+
+async def test_shutdown_waits_for_cancelled_http_read_and_rejects_new_cancel(env, monkeypatch):
+    client, server, auth = env
+    owner_id = await resolve_user_id(client, auth, "admin")
+    accepted = await seed_run(client, server, auth, owner_id)
+    assert server.services is not None
+    pool = server.services.db
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    close_attempted = threading.Event()
+    original_get = agentcomputer.get_command_receipt
+    original_close = pool.close
+    request = stop = None
+
+    def delayed_get(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=10)
+        try:
+            return original_get(*args, **kwargs)
+        finally:
+            finished.set()
+
+    def observed_close():
+        close_attempted.set()
+        original_close()
+
+    monkeypatch.setattr(agentcomputer, "get_command_receipt", delayed_get)
+    monkeypatch.setattr(pool, "close", observed_close)
+    try:
+        request = asyncio.create_task(
+            client.get(f"{PREFIX}/commands/{accepted.commandID}", headers=auth)
+        )
+        assert await asyncio.to_thread(entered.wait, 10)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        stop = asyncio.create_task(server.stop())
+        await asyncio.wait_for(_wait_for_http_shutdown(server), timeout=5)
+        assert not stop.done() and not close_attempted.is_set()
+        rejected = await client.post(
+            f"{PREFIX}/runs/{accepted.runID}/cancel", headers=auth, json=cancel_body()
+        )
+        assert rejected.status_code == 503
+        assert rejected.json()["error"]["code"] == "runtimeUnavailable"
+        assert not finished.is_set() and not close_attempted.is_set()
+        release.set()
+        await asyncio.wait_for(stop, timeout=10)
+        assert finished.is_set() and close_attempted.is_set()
+        with sqlite3.connect(pool.path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM ac_run_cancellations").fetchone()[0] == 0
+    finally:
+        release.set()
+        if request is not None and not request.done():
+            request.cancel()
+            with suppress(asyncio.CancelledError):
+                await request
+        if stop is not None and not stop.done():
+            await stop
 
 
 async def chunks(body: bytes):

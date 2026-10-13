@@ -29,6 +29,8 @@ def install(app: Any, server: Any) -> None:
         path = request.url.path
         if not path.startswith("/api/"):
             return await call_next(request)
+        if is_agentcomputer_path(path) and server.agentcomputer_http_operations.closing:
+            return protocol_error_response("runtimeUnavailable", 503)
         cfg = server.services.config if server.services else getattr(server, "config", None)
         open_exact = ["/api/health"]
         if cfg and cfg.enable_api_docs:

@@ -87,9 +87,11 @@ async def capabilities(
     response.headers["Cache-Control"] = "no-store"
     try:
         # Identity initialization/reads touch disk; keep them off the ASGI loop.
-        return await asyncio.get_running_loop().run_in_executor(
-            None, get_capabilities, server.services
+        return await server.agentcomputer_http_operations.run_thread(
+            get_capabilities, server.services
         )
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
     except IdentityError:
         logger.exception("AgentComputer identity is invalid; it was not regenerated")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
@@ -144,9 +146,11 @@ async def command_receipt(
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"
     try:
-        receipt = await asyncio.get_running_loop().run_in_executor(
-            None, get_command_receipt, server.services, user.id, command_id
+        receipt = await server.agentcomputer_http_operations.run_thread(
+            get_command_receipt, server.services, user.id, command_id
         )
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
     except IdentityError:
         logger.error("AgentComputer identity is invalid during receipt lookup")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
@@ -203,9 +207,16 @@ async def register_project(
     response.headers["Cache-Control"] = "no-store"
     if server.app_runtime is None:
         return protocol_error_response("runtimeUnavailable", 503, reason="runtimeNotReady")
+    services = server.services
+    agent_registry = server.app_runtime.agent_registry
     try:
-        return await create_project(
-            server.services, server.app_runtime.agent_registry, owner_id=user.id, command=body
+        return await server.agentcomputer_http_operations.run_async(
+            lambda: create_project(
+                services,
+                agent_registry,
+                owner_id=user.id,
+                command=body,
+            )
         )
     except CommandAdmissionError as exc:
         return admission_error_response(exc)
@@ -252,9 +263,11 @@ async def project_status(
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"
     try:
-        project = await asyncio.get_running_loop().run_in_executor(
-            None, get_project, server.services, user.id, project_id
+        project = await server.agentcomputer_http_operations.run_thread(
+            get_project, server.services, user.id, project_id
         )
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
     except IdentityError:
         logger.error("AgentComputer identity is invalid during project lookup")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
@@ -299,9 +312,11 @@ async def task_metadata(
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"
     try:
-        task = await asyncio.get_running_loop().run_in_executor(
-            None, get_task, server.services, user.id, task_id
+        task = await server.agentcomputer_http_operations.run_thread(
+            get_task, server.services, user.id, task_id
         )
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
     except IdentityError:
         logger.error("AgentComputer identity is invalid during task lookup")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
@@ -367,7 +382,7 @@ async def new_message_turn(
         operation = partial(
             submit_new_message, server.services, owner_id=user.id, task_id=task_id, command=body
         )
-        return await asyncio.get_running_loop().run_in_executor(None, operation)
+        return await server.agentcomputer_http_operations.run_thread(operation)
     except CommandAdmissionError as exc:
         return admission_error_response(exc)
     except IdentityError:
@@ -422,7 +437,9 @@ async def run_status(
     response.headers["Cache-Control"] = "no-store"
     try:
         operation = partial(get_run, server.services, owner_id=user.id, run_id=run_id)
-        run = await asyncio.get_running_loop().run_in_executor(None, operation)
+        run = await server.agentcomputer_http_operations.run_thread(operation)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
     except IdentityError:
         logger.error("AgentComputer identity is invalid during Run lookup")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
@@ -470,7 +487,9 @@ async def run_pause_status(
     response.headers["Cache-Control"] = "no-store"
     try:
         operation = partial(get_run_pause_status, server.services, owner_id=user.id, run_id=run_id)
-        found, pause = await asyncio.get_running_loop().run_in_executor(None, operation)
+        found, pause = await server.agentcomputer_http_operations.run_thread(operation)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
     except IdentityError:
         logger.error("AgentComputer identity is invalid during Run pause lookup")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
@@ -499,7 +518,9 @@ async def _pause_status_by_id(
         operation = partial(
             get_pause_status, server.services, owner_id=user.id, pause_id=pause_id, kind=kind
         )
-        pause = await asyncio.get_running_loop().run_in_executor(None, operation)
+        pause = await server.agentcomputer_http_operations.run_thread(operation)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
     except IdentityError:
         logger.error("AgentComputer identity is invalid during pause lookup")
         return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
@@ -619,23 +640,18 @@ async def request_run_cancellation(
     assert server.services is not None
     response.headers["Cache-Control"] = "no-store"
     try:
-        loop = asyncio.get_running_loop()
         services = server.services
         active_runs = server.agentcomputer_active_runs
         owner_id = user.id
 
-        def operation() -> CancelRunReceipt:
-            receipt = cancel_run(services, owner_id=owner_id, run_id=run_id, command=body)
-            try:
-                loop.call_soon_threadsafe(
-                    partial(active_runs.signal_cancel, owner_id=owner_id, receipt=receipt)
-                )
-            except RuntimeError:
-                # The request may be gone and the event loop may close after the commit.
-                logger.warning("AgentComputer Run cancellation signal loop closed after commit")
+        async def operation() -> CancelRunReceipt:
+            receipt = await asyncio.to_thread(
+                cancel_run, services, owner_id=owner_id, run_id=run_id, command=body
+            )
+            active_runs.signal_cancel(owner_id=owner_id, receipt=receipt)
             return receipt
 
-        return await loop.run_in_executor(None, operation)
+        return await server.agentcomputer_http_operations.run_async(operation)
     except CommandAdmissionError as exc:
         return admission_error_response(exc)
     except IdentityError:
