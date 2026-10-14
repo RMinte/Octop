@@ -3344,6 +3344,7 @@
     "addConnection": "添加连接",
     "manageConnections": "管理连接",
     "connectionSetupHint": "连接另一台 Octop 后，即可在这里查看并使用它的项目与 Task。同一台电脑上的本地实例可填写 http://127.0.0.1:8090。",
+    "connectionCredentialHint": "Bridge 会将对端密码加密保存在此 Octop 实例，用于后续重连。",
     "connect": "保存并连接",
     "connectionFailed": "连接失败，请检查对端地址和账号信息。",
     "connectionRetryHint": "请核对地址、用户名和密码后再提交；页面不会自动重试。",

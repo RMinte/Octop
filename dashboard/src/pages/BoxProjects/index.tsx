@@ -1240,6 +1240,9 @@ export default function BoxProjectsPage() {
           <Typography.Paragraph type="secondary">
             {t("boxProjects.connectionSetupHint")}
           </Typography.Paragraph>
+          <Typography.Paragraph type="secondary">
+            {t("boxProjects.connectionCredentialHint")}
+          </Typography.Paragraph>
           {connectionCreateError && (
             <Alert
               className={styles.alert}

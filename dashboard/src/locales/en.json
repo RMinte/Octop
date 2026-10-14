@@ -3344,6 +3344,7 @@
     "addConnection": "Add connection",
     "manageConnections": "Manage connections",
     "connectionSetupHint": "Connect to another Octop to view and use its Projects and Tasks here. For another local instance on this computer, enter http://127.0.0.1:8090.",
+    "connectionCredentialHint": "Bridge stores the peer password encrypted in this Octop instance for later reconnection.",
     "connect": "Save and connect",
     "connectionFailed": "Connection failed. Check the peer address and account details.",
     "connectionRetryHint": "Check the address, username, and password before submitting again. This page will not retry automatically.",
