@@ -50,6 +50,75 @@ class HistoryArchive:
         with self._turn_lock:
             return self._begin(agent_id, thread_id, anchor=anchor, resume=resume)
 
+    def begin_bound(self, agent_id: str, thread_id: str, *, turn_id: str) -> dict[str, Any]:
+        """Start one v2 turn with an already committed external turn identity.
+
+        A repeated identity is never permission to resume or replay execution.
+        Archive checks and insertion share one immediate SQLite transaction.
+        """
+        try:
+            parsed_id = uuid.UUID(turn_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("Bound history turn ID must be a canonical UUID") from exc
+        if str(parsed_id) != turn_id:
+            raise ValueError("Bound history turn ID must be a canonical UUID")
+        with self._turn_lock:
+            if not self.enabled:
+                raise ValueError("Bound history requires v2 storage")
+            message_head = self.messages.head(thread_id)
+            event_head = self.event_head(thread_id)
+            with self.store.transaction() as conn:
+                if conn.execute("SELECT 1 FROM turns WHERE id=?", (turn_id,)).fetchone():
+                    raise ValueError("Bound history turn already exists")
+                segments = conn.execute(
+                    "SELECT * FROM segments WHERE thread_id=? ORDER BY id", (thread_id,)
+                ).fetchall()
+                if any(segment["agent_id"] != agent_id for segment in segments):
+                    raise ValueError("History belongs to another agent")
+                if conn.execute(
+                    "SELECT 1 FROM turns t JOIN segments s ON s.id=t.segment_id "
+                    "WHERE s.thread_id=? AND t.status IN ('active','paused') LIMIT 1",
+                    (thread_id,),
+                ).fetchone():
+                    raise ValueError("This history thread already has an unfinished turn")
+                current = segments[-1] if segments else None
+                if current is None:
+                    conn.execute(
+                        "INSERT INTO segments "
+                        "(thread_id,agent_id,format,legacy_start,legacy_end,trajectory_start,trajectory_end) "
+                        "VALUES (?,?,'legacy',0,?,0,?)",
+                        (thread_id, agent_id, message_head, event_head),
+                    )
+                if current is None or current["format"] != "v2":
+                    if current is not None:
+                        conn.execute(
+                            "UPDATE segments SET legacy_end=?,trajectory_end=? WHERE id=?",
+                            (message_head, event_head, current["id"]),
+                        )
+                    cursor = conn.execute(
+                        "INSERT INTO segments "
+                        "(thread_id,agent_id,format,legacy_start,trajectory_start) "
+                        "VALUES (?,?,'v2',?,?)",
+                        (thread_id, agent_id, message_head, event_head),
+                    )
+                    segment_id = int(cursor.lastrowid or 0)
+                else:
+                    segment_id = int(current["id"])
+                conn.execute(
+                    "INSERT INTO turns(id,segment_id,status,started_at) VALUES (?,?,'active',?)",
+                    (turn_id, segment_id, time.time()),
+                )
+            self._owned_turns.add(turn_id)
+            self.trajectory_errors.discard(thread_id)
+            return {
+                "id": turn_id,
+                "segment_id": segment_id,
+                "format": "v2",
+                "thread_id": thread_id,
+                "agent_id": agent_id,
+                "status": "active",
+            }
+
     def _begin(
         self, agent_id: str, thread_id: str, *, anchor: dict[str, Any] | None, resume: bool
     ) -> dict[str, Any] | None:

@@ -1,4 +1,4 @@
-"""Native request correlation without a provider, recovery execution or archive binding."""
+"""Native checkpoint request correlation without a provider or recovery execution."""
 
 from __future__ import annotations
 
@@ -142,6 +142,7 @@ async def test_later_checkpoint_on_same_thread_does_not_replace_original_request
         entry.services,
         claim,
         CountingFakeModel(responses=[AIMessage(content="later fixture response")]),
+        entry.history_archive,
         checkpointer=saver,
     )
     try:

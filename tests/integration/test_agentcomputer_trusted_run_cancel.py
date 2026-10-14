@@ -24,6 +24,7 @@ from octop.infra.agentcomputer.engine import EngineEntryMiddleware, invoke_engin
 from octop.infra.agentcomputer.models import NewMessageCommand
 from octop.infra.agents.providers.store import ProviderStore
 from tests.support.agentcomputer import register_ready_task
+from tests.support.agentcomputer_history import open_history_archive
 from tests.support.auth import resolve_user_id
 
 PREFIX = "/api/agentcomputer/v1"
@@ -38,6 +39,7 @@ async def test_trusted_run_stream_closes_on_cancel_or_server_stop(
     task = await register_ready_task(client, server, auth, owner_id)
     assert server.services is not None
     services = server.services
+    history_archive = open_history_archive(services)
     assert get_capabilities(services).capabilities.runs.available is False
     services.provider_repo.create(
         name="not-configured",
@@ -174,7 +176,7 @@ async def test_trusted_run_stream_closes_on_cancel_or_server_stop(
             providers=providers,
             default_model=snapshot.projectConfiguration.modelRef,
             system_prompt=snapshot.projectConfiguration.instructions,
-            middleware=[EngineEntryMiddleware(services, invocation)],
+            middleware=[EngineEntryMiddleware(services, invocation, history_archive)],
             tools=[synthetic_echo],
             checkpointer=False,
             bootstrap_enabled=False,
@@ -197,7 +199,10 @@ async def test_trusted_run_stream_closes_on_cancel_or_server_stop(
         agents.append(agent)
         try:
             await invoke_engine_entry(
-                agent, invocation, active_runs=server.agentcomputer_active_runs
+                agent,
+                invocation,
+                active_runs=server.agentcomputer_active_runs,
+                history_archive=history_archive,
             )
         except asyncio.CancelledError:
             with services.db.connect() as conn:
@@ -240,6 +245,18 @@ async def test_trusted_run_stream_closes_on_cancel_or_server_stop(
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(handoff), timeout=5)
         await asyncio.wait_for(closed.wait(), timeout=5)
+        history_turn = history_archive.store.turn(claim.intent.snapshot.octopThreadID)
+        assert history_turn is not None
+        assert history_turn["id"] == str(original.turnID)
+        assert history_turn["status"] == "interrupted"
+        history_messages = history_archive.store.documents(
+            claim.intent.snapshot.octopThreadID,
+            "message",
+            turn_id=str(original.turnID),
+        )
+        assert history_messages[0]["value"]["data"]["content"] == (
+            "Call synthetic_echo with value ping."
+        )
         if stop_server:
             with sqlite3.connect(services.paths.db) as conn:
                 run = conn.execute(
@@ -284,6 +301,7 @@ async def test_trusted_run_stream_closes_on_cancel_or_server_stop(
             await agent.aclose()
         await async_http.aclose()
         sync_http.close()
+        history_archive.store.close()
 
     assert len(requests) == 1
     assert cancellation_at_signal == [0 if stop_server else 1]

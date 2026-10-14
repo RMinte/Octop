@@ -10,6 +10,7 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
+from tests.support.agentcomputer_history import open_history_archive
 from tests.unit.agentcomputer.test_submission_runs import control as control
 from tests.unit.agentcomputer.test_submission_runs import request
 
@@ -27,6 +28,16 @@ from octop.infra.agentcomputer.engine import EngineEntryMiddleware
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import build_shared_services
+
+
+@pytest.fixture
+def history_archive(control):
+    services, _, _ = control
+    archive = open_history_archive(services)
+    try:
+        yield archive
+    finally:
+        archive.store.close()
 
 
 def allow(monkeypatch):
@@ -358,7 +369,9 @@ async def test_drain_waits_for_postdispatch_fence_before_return(control, monkeyp
     assert services.ac_project_repo.get(task_row.project_id, 1).active_run_id == str(receipt.runID)
 
 
-async def test_drain_waits_for_late_engine_acceptance_and_preserves_receipt(control, monkeypatch):
+async def test_drain_waits_for_late_engine_acceptance_and_preserves_receipt(
+    control, monkeypatch, history_archive
+):
     services, receipt, claim = seed(control, monkeypatch)
     registry = ActiveRunRegistry()
     original_command = services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json
@@ -381,7 +394,7 @@ async def test_drain_waits_for_late_engine_acceptance_and_preserves_receipt(cont
     monkeypatch.setattr(EngineEntryMiddleware, "_validate_context", lambda _self, _state: None)
 
     async def invoke(invocation):
-        middleware = EngineEntryMiddleware(services, invocation)
+        middleware = EngineEntryMiddleware(services, invocation, history_archive)
         async with registry.track(invocation):
             await middleware.abefore_agent({}, None)
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from tests.support.agentcomputer_history import open_history_archive
 from tests.unit.agentcomputer.test_submission_runs import allow_fixture, request
 from tests.unit.agentcomputer.test_submission_runs import control as control
 
@@ -28,6 +29,16 @@ def prepared(control, monkeypatch):
     invocation = dispatch._begin_dispatch(services, claim)
     assert isinstance(invocation, EngineInvocation)
     return services, invocation
+
+
+@pytest.fixture
+def history_archive(prepared):
+    services, _ = prepared
+    archive = open_history_archive(services)
+    try:
+        yield archive
+    finally:
+        archive.store.close()
 
 
 async def _park(registry: ActiveRunRegistry, invocation: EngineInvocation, ready: asyncio.Event):
@@ -112,7 +123,9 @@ async def test_duplicate_or_nested_registration_is_rejected(prepared):
             await asyncio.create_task(duplicate())
 
 
-async def test_engine_entry_registers_while_stream_is_active(prepared, monkeypatch):
+async def test_engine_entry_registers_while_stream_is_active(
+    prepared, monkeypatch, history_archive
+):
     services, invocation = prepared
     registry = ActiveRunRegistry()
     ready = asyncio.Event()
@@ -124,7 +137,7 @@ async def test_engine_entry_registers_while_stream_is_active(prepared, monkeypat
         config = SimpleNamespace(
             default_model=snapshot.projectConfiguration.modelRef,
             system_prompt=snapshot.projectConfiguration.instructions,
-            middleware=[engine.EngineEntryMiddleware(services, invocation)],
+            middleware=[engine.EngineEntryMiddleware(services, invocation, history_archive)],
         )
 
         async def stream(self, request, *, protocol):
@@ -134,7 +147,9 @@ async def test_engine_entry_registers_while_stream_is_active(prepared, monkeypat
             yield None
 
     task = asyncio.create_task(
-        engine.invoke_engine_entry(Agent(), invocation, active_runs=registry)
+        engine.invoke_engine_entry(
+            Agent(), invocation, active_runs=registry, history_archive=history_archive
+        )
     )
     await ready.wait()
     receipt = await asyncio.to_thread(
@@ -210,7 +225,9 @@ async def test_drain_closes_admission_and_waits_for_dispatch_scope(prepared):
             pytest.fail("completed shutdown admitted a new dispatch")
 
 
-async def test_drain_waits_for_workspace_validation_thread_before_stream(prepared, monkeypatch):
+async def test_drain_waits_for_workspace_validation_thread_before_stream(
+    prepared, monkeypatch, history_archive
+):
     services, invocation = prepared
     registry = ActiveRunRegistry()
     started, release, finished = Event(), Event(), Event()
@@ -231,7 +248,7 @@ async def test_drain_waits_for_workspace_validation_thread_before_stream(prepare
         config = SimpleNamespace(
             default_model=snapshot.projectConfiguration.modelRef,
             system_prompt=snapshot.projectConfiguration.instructions,
-            middleware=[engine.EngineEntryMiddleware(services, invocation)],
+            middleware=[engine.EngineEntryMiddleware(services, invocation, history_archive)],
         )
 
         async def stream(self, request, *, protocol):
@@ -239,7 +256,9 @@ async def test_drain_waits_for_workspace_validation_thread_before_stream(prepare
             yield None
 
     task = asyncio.create_task(
-        engine.invoke_engine_entry(Agent(), invocation, active_runs=registry)
+        engine.invoke_engine_entry(
+            Agent(), invocation, active_runs=registry, history_archive=history_archive
+        )
     )
     try:
         assert await asyncio.to_thread(started.wait, 10)

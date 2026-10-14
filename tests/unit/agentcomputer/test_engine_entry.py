@@ -17,6 +17,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from octop_harness.agent import HarnessAgent
 from octop_harness.config import HarnessAgentConfig
 from octop_harness.llm.factory import ChatModelFactory
+from tests.support.agentcomputer_history import open_history_archive
 from tests.unit.agentcomputer.test_submission_runs import control as control
 
 from octop.infra.agentcomputer import dispatch
@@ -36,6 +37,7 @@ from octop.infra.agentcomputer.engine import (
 from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.models import EngineInvocation, NewMessageCommand, RunClaim
 from octop.infra.db.services import SharedServices
+from octop.infra.history.service import HistoryArchive
 
 
 class CountingFakeModel(FakeMessagesListChatModel):
@@ -71,6 +73,7 @@ class EngineFixture:
     services: SharedServices
     claim: RunClaim
     model: CountingFakeModel
+    history_archive: HistoryArchive
     agent: HarnessAgent | None = None
     invocation: EngineInvocation | None = None
     failure: Exception | None = None
@@ -94,7 +97,7 @@ class EngineFixture:
                 default_model=snapshot.projectConfiguration.modelRef,
                 system_prompt=snapshot.projectConfiguration.instructions,
                 checkpointer=saver,
-                middleware=[EngineEntryMiddleware(self.services, invocation)],
+                middleware=[EngineEntryMiddleware(self.services, invocation, self.history_archive)],
                 tools=self.tools or [],
                 bootstrap_enabled=False,
                 memory_enabled=False,
@@ -127,7 +130,12 @@ class EngineFixture:
     async def invoke(self, invocation: EngineInvocation) -> None:
         agent = await self.prepare(invocation)
         try:
-            await invoke_engine_entry(agent, invocation, active_runs=self.active_runs)
+            await invoke_engine_entry(
+                agent,
+                invocation,
+                active_runs=self.active_runs,
+                history_archive=self.history_archive,
+            )
         except Exception as exc:
             self.failure = exc
             raise
@@ -175,12 +183,13 @@ async def entry(control, monkeypatch, request):
     model = CountingFakeModel(
         responses=[AIMessage(content="fixture response", id=str(receipt.assistantMessageID))]
     )
-    fixture = EngineFixture(services, claim, model)
+    fixture = EngineFixture(services, claim, model, open_history_archive(services))
     try:
         yield fixture
     finally:
         if fixture.agent is not None:
             await fixture.agent.aclose()
+        fixture.history_archive.store.close()
 
 
 async def test_actual_harness_accepts_before_first_model_and_preserves_exact_input(entry):
@@ -200,6 +209,24 @@ async def test_actual_harness_accepts_before_first_model_and_preserves_exact_inp
     assert [(message.id, message.content) for message in observed] == [
         (original.id, original.content)
     ]
+    thread_id = entry.claim.intent.snapshot.octopThreadID
+    turn = entry.history_archive.store.turn(thread_id)
+    assert turn is not None
+    assert turn["id"] == str(entry.claim.intent.turnID)
+    assert turn["format"] == "v2" and turn["status"] == "complete"
+    documents = entry.history_archive.store.documents(
+        thread_id, "message", turn_id=str(entry.claim.intent.turnID)
+    )
+    wires = [document["value"] for document in documents]
+    assert [(wire["type"], wire["data"]["content"]) for wire in wires] == [
+        ("human", entry.claim.intent.snapshot.request.prompt),
+        ("ai", "fixture response"),
+    ]
+    assert [wire["data"]["id"] for wire in wires] == [
+        str(entry.claim.intent.userMessageID),
+        str(entry.claim.intent.assistantMessageID),
+    ]
+    assert [document["turn_id"] for document in documents] == [str(entry.claim.intent.turnID)] * 2
 
 
 async def test_existing_entry_receipt_blocks_another_model_loop(entry):
@@ -207,11 +234,120 @@ async def test_existing_entry_receipt_blocks_another_model_loop(entry):
         entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
     )
     assert entry.agent is not None and entry.invocation is not None
+    with entry.history_archive.store.db.connect() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
     with pytest.raises(EngineEntryReplayed) as replay:
-        await invoke_engine_entry(entry.agent, entry.invocation, active_runs=entry.active_runs)
+        await invoke_engine_entry(
+            entry.agent,
+            entry.invocation,
+            active_runs=entry.active_runs,
+            history_archive=entry.history_archive,
+        )
     assert replay.value.receipt == receipt
     assert entry.current_claim().engineReceipt == receipt
     assert entry.model.calls == 1
+    with entry.history_archive.store.db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == before
+
+
+async def test_disabled_archive_rejects_before_receipt_or_model(entry):
+    entry.history_archive.enabled = False
+    with pytest.raises(CommandAdmissionError, match="runtimeUnavailable") as error:
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
+    assert error.value.reason == "historyUnavailable"
+    assert entry.model.calls == 0
+    assert entry.current_claim().engineReceipt is None
+    assert entry.history_archive.store.turn(entry.claim.intent.snapshot.octopThreadID) is None
+
+
+async def test_model_output_before_bound_history_hook_fails_closed(entry, monkeypatch):
+    async def premature_output(invocation):
+        agent = await entry.prepare(invocation)
+
+        async def stream(_request, *, protocol):
+            assert protocol == "langgraph"
+            yield {"type": "token", "content": "must not be captured before entry"}
+
+        monkeypatch.setattr(agent, "stream", stream)
+        await invoke_engine_entry(
+            agent,
+            invocation,
+            active_runs=entry.active_runs,
+            history_archive=entry.history_archive,
+        )
+
+    with pytest.raises(CommandAdmissionError, match="runtimeUnavailable") as error:
+        await dispatch.dispatch_run(
+            entry.services,
+            claim=entry.claim,
+            invoke=premature_output,
+            active_runs=entry.active_runs,
+        )
+    assert error.value.reason == "historyTurnUnavailable"
+    assert entry.model.calls == 0
+    assert entry.current_claim().engineReceipt is None
+    assert entry.history_archive.store.turn(entry.claim.intent.snapshot.octopThreadID) is None
+
+
+async def test_receipt_survives_archive_begin_failure_without_claiming_model_execution(
+    entry, monkeypatch
+):
+    def fail_archive(*_args, **_kwargs):
+        raise OSError("simulated separate archive write failure")
+
+    monkeypatch.setattr(entry.history_archive, "begin_bound", fail_archive)
+    with pytest.raises(OSError, match="separate archive"):
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
+    assert entry.model.calls == 0
+    assert entry.current_claim().engineReceipt is not None
+    assert entry.history_archive.store.turn(entry.claim.intent.snapshot.octopThreadID) is None
+    with entry.services.db.connect() as conn:
+        row = conn.execute(
+            "SELECT dispatch_phase,reconciliation_required FROM ac_runs WHERE run_id=?",
+            (str(entry.claim.intent.runID),),
+        ).fetchone()
+    assert tuple(row) == ("engineAccepted", 1)
+
+
+async def test_missing_archive_after_receipt_fails_closed_without_recreating_it(entry):
+    path = entry.history_archive.store.path
+    entry.history_archive.store.close()
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
+    assert not path.exists()
+    assert entry.model.calls == 0
+    assert entry.current_claim().engineReceipt is not None
+    with entry.services.db.connect() as conn:
+        row = conn.execute(
+            "SELECT state,reconciliation_required FROM ac_runs WHERE run_id=?",
+            (str(entry.claim.intent.runID),),
+        ).fetchone()
+    assert tuple(row) == ("interrupted", 1)
+
+
+async def test_seed_capture_failure_keeps_bound_turn_but_blocks_model(entry, monkeypatch):
+    def fail_seed(*_args, **_kwargs):
+        raise OSError("simulated archive seed write failure")
+
+    monkeypatch.setattr(entry.history_archive, "save_message_updates", fail_seed)
+    with pytest.raises(OSError, match="seed write failure"):
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
+    assert entry.model.calls == 0
+    assert entry.current_claim().engineReceipt is not None
+    turn = entry.history_archive.store.turn(entry.claim.intent.snapshot.octopThreadID)
+    assert turn is not None
+    assert turn["id"] == str(entry.claim.intent.turnID)
+    assert turn["status"] == "failed"
+    assert turn["error"] == "initial_capture_failed"
 
 
 @pytest.mark.parametrize("entry", ["/model other/unsafe", "/cancel"], indirect=True)
@@ -351,7 +487,12 @@ async def test_missing_bound_middleware_cannot_call_the_model(entry):
         agent = await entry.prepare(invocation)
         agent.config.middleware = []
         try:
-            await invoke_engine_entry(agent, invocation, active_runs=entry.active_runs)
+            await invoke_engine_entry(
+                agent,
+                invocation,
+                active_runs=entry.active_runs,
+                history_archive=entry.history_archive,
+            )
         except Exception as exc:
             entry.failure = exc
             raise
@@ -408,7 +549,12 @@ async def test_runtime_workspace_config_must_match_registered_managed_metadata(e
         else:
             agent.config.system_files_path = ".other-system"
         try:
-            await invoke_engine_entry(agent, invocation, active_runs=entry.active_runs)
+            await invoke_engine_entry(
+                agent,
+                invocation,
+                active_runs=entry.active_runs,
+                history_archive=entry.history_archive,
+            )
         except Exception as exc:
             entry.failure = exc
             raise

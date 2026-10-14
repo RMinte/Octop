@@ -26,7 +26,7 @@ from octop_harness.agent import HarnessAgent
 from octop_harness.request import ChatRequest
 
 from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
-from octop.infra.agentcomputer.bootstrap import settled_to_thread
+from octop.infra.agentcomputer.bootstrap import settle_task, settled_to_thread
 from octop.infra.agentcomputer.commands import CommandAdmissionError, canonical_json, content_digest
 from octop.infra.agentcomputer.models import (
     CheckpointUnknownReason,
@@ -35,6 +35,8 @@ from octop.infra.agentcomputer.models import (
     EngineInvocation,
 )
 from octop.infra.db.services import SharedServices
+from octop.infra.history.recorder import RecordingTracker
+from octop.infra.history.service import HistoryArchive
 
 
 class EngineEntryReplayed(Exception):
@@ -112,9 +114,16 @@ def _checkpoint_metadata(invocation: EngineInvocation) -> dict[str, str | int]:
 class EngineEntryMiddleware(AgentMiddleware[Any, Any]):
     """Commit acceptance before the model and reject all tool execution."""
 
-    def __init__(self, services: SharedServices, invocation: EngineInvocation) -> None:
+    def __init__(
+        self,
+        services: SharedServices,
+        invocation: EngineInvocation,
+        history_archive: HistoryArchive,
+    ) -> None:
         self._services = services
         self.invocation = invocation
+        self.history_archive = history_archive
+        self.history_tracker: RecordingTracker | None = None
 
     def _validate_context(self, state: Any) -> None:
         expected = build_engine_request(self.invocation).to_runnable_config()["configurable"]
@@ -153,14 +162,58 @@ class EngineEntryMiddleware(AgentMiddleware[Any, Any]):
         from octop.infra.agentcomputer.dispatch import accept_engine_entry
 
         self._validate_context(state)
+        if not self.history_archive.enabled:
+            raise CommandAdmissionError("runtimeUnavailable", reason="historyUnavailable")
         result = await settled_to_thread(accept_engine_entry, self._services, self.invocation)
         if result.replayed:
             raise EngineEntryReplayed(result.receipt)
+        intent = self.invocation.intent
+        turn, cancelled = await settle_task(
+            asyncio.create_task(
+                asyncio.to_thread(
+                    self.history_archive.begin_bound,
+                    intent.snapshot.agentID,
+                    intent.snapshot.octopThreadID,
+                    turn_id=str(intent.turnID),
+                )
+            )
+        )
+        if cancelled:
+            await settled_to_thread(self.history_archive.finish, turn["id"], "interrupted")
+            raise asyncio.CancelledError
+        try:
+            tracker = RecordingTracker(
+                self.history_archive,
+                turn,
+                [
+                    HumanMessage(
+                        content=intent.snapshot.request.prompt, id=str(intent.userMessageID)
+                    )
+                ],
+            )
+            self.history_tracker = tracker
+            await tracker.flush()
+        except BaseException as exc:
+            status = "interrupted" if isinstance(exc, asyncio.CancelledError) else "failed"
+            await settle_task(
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        self.history_archive.finish,
+                        turn["id"],
+                        status,
+                        error="initial_capture_failed",
+                    )
+                )
+            )
+            self.history_tracker = None
+            raise
 
     async def abefore_model(self, state: Any, runtime: Runtime[Any]) -> None:
         from octop.infra.agentcomputer.dispatch import validate_engine_execution
 
         self._validate_context(state)
+        if self.history_tracker is None:
+            raise CommandAdmissionError("runtimeUnavailable", reason="historyTurnUnavailable")
         await settled_to_thread(validate_engine_execution, self._services, self.invocation)
 
     async def awrap_tool_call(
@@ -205,13 +258,43 @@ def _validate_registered_workspace(agent: HarnessAgent, middleware: EngineEntryM
         raise CommandAdmissionError("accessDenied", reason="engineContextMismatch") from exc
 
 
+def _is_pre_entry_event(chunk: Any, invocation: EngineInvocation) -> bool:
+    """Ignore only input and setup events emitted before the bound hook runs."""
+    if not isinstance(chunk, dict):
+        return False
+    if chunk.get("type") == "state_update":
+        node = chunk.get("node")
+        data = chunk.get("data")
+        return (
+            isinstance(node, str)
+            and node.endswith(".before_agent")
+            and (data is None or (isinstance(data, dict) and "messages" not in data))
+        )
+    if chunk.get("type") != "state_snapshot":
+        return False
+    data = chunk.get("data")
+    messages = data.get("messages") if isinstance(data, dict) else None
+    if not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    intent = invocation.intent
+    return (
+        isinstance(last, HumanMessage)
+        and last.id == str(intent.userMessageID)
+        and last.content == intent.snapshot.request.prompt
+    )
+
+
 async def invoke_engine_entry(
     agent: HarnessAgent,
     invocation: EngineInvocation,
     *,
     active_runs: ActiveRunRegistry,
+    history_archive: HistoryArchive,
 ) -> None:
-    """Consume the public stream without accepting client configuration or kwargs."""
+    """Capture the bound native turn while consuming the public harness stream."""
+    from octop.infra.agentcomputer.dispatch import get_claim
+
     snapshot = invocation.intent.snapshot
     middleware = next(
         (
@@ -226,12 +309,53 @@ async def invoke_engine_entry(
         or agent.config.default_model != snapshot.projectConfiguration.modelRef
         or agent.config.system_prompt != snapshot.projectConfiguration.instructions
         or middleware is None
+        or middleware.history_archive is not history_archive
     ):
         raise CommandAdmissionError("accessDenied", reason="engineContextMismatch")
     async with active_runs.track(invocation):
         await settled_to_thread(_validate_registered_workspace, agent, middleware)
-        async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
-            pass
+        current = await settled_to_thread(
+            get_claim,
+            middleware._services,
+            owner_id=invocation.intent.ownerID,
+            run_id=invocation.intent.runID,
+        )
+        if (
+            current is None
+            or current.intent != invocation.intent
+            or current.claimantID != invocation.claimantID
+        ):
+            raise CommandAdmissionError("revisionConflict")
+        if current.engineReceipt is not None:
+            raise EngineEntryReplayed(current.engineReceipt)
+        completed = False
+        try:
+            async for chunk in agent.stream(build_engine_request(invocation), protocol="langgraph"):
+                tracker = middleware.history_tracker
+                if tracker is None:
+                    if _is_pre_entry_event(chunk, invocation):
+                        continue
+                    raise CommandAdmissionError(
+                        "runtimeUnavailable", reason="historyTurnUnavailable"
+                    )
+                tracker.observe(chunk)
+                await tracker.flush()
+            completed = True
+        except Exception:
+            if middleware.history_tracker is not None:
+                middleware.history_tracker.failed = True
+            raise
+        finally:
+            tracker = middleware.history_tracker
+            if tracker is not None:
+                try:
+                    _, cancelled = await settle_task(
+                        asyncio.create_task(tracker.finish(completed=completed))
+                    )
+                finally:
+                    middleware.history_tracker = None
+                if cancelled:
+                    raise asyncio.CancelledError
 
 
 def _checkpoint_matches(checkpoint: CheckpointTuple, invocation: EngineInvocation) -> bool:
