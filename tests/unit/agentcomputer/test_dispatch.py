@@ -96,9 +96,16 @@ async def test_claim_dispatch_entry_are_durable_and_duplicate_never_invokes_agai
         accepted = await asyncio.to_thread(dispatch.accept_engine_entry, services, invocation)
         assert not accepted.replayed
 
-    entry = await dispatch.dispatch_run(services, claim=claim, invoke=invoke)
+    entry = await dispatch.dispatch_run(
+        services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry()
+    )
     before = counts(services)
-    assert await dispatch.dispatch_run(services, claim=claim, invoke=invoke) == entry
+    assert (
+        await dispatch.dispatch_run(
+            services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry()
+        )
+        == entry
+    )
     assert len(calls) == 1 and counts(services) == before
     view = get_run(services, owner_id=1, run_id=receipt.runID)
     assert view.state == "queued" and view.dispatchPhase == "engineAccepted" and view.revision == 4
@@ -157,7 +164,9 @@ async def test_predispatch_failure_rolls_back_and_never_calls_engine(control, mo
     monkeypatch.setattr(repo, name, fail)
     invoke = Mock(side_effect=AssertionError("engine must not be called"))
     with pytest.raises(RuntimeError, match="predispatch"):
-        await dispatch.dispatch_run(services, claim=claim, invoke=invoke)
+        await dispatch.dispatch_run(
+            services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry()
+        )
     invoke.assert_not_called()
     assert counts(services) == before
     view = get_run(services, owner_id=1, run_id=receipt.runID)
@@ -178,7 +187,9 @@ async def test_lost_confirmation_or_failure_after_entry_keeps_both_lanes(
         raise RuntimeError("injected uncertain handoff")
 
     with pytest.raises(RuntimeError, match="handoff"):
-        await dispatch.dispatch_run(services, claim=claim, invoke=invoke)
+        await dispatch.dispatch_run(
+            services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry()
+        )
     current = dispatch.get_claim(services, owner_id=1, run_id=receipt.runID)
     view = get_run(services, owner_id=1, run_id=receipt.runID)
     assert view.state == "interrupted" and view.reconciliationRequired
@@ -212,7 +223,9 @@ async def test_cancel_during_handoff_commits_uncertainty_before_return(control, 
         started.set()
         await asyncio.Future()
 
-    task = asyncio.create_task(dispatch.dispatch_run(services, claim=claim, invoke=invoke))
+    task = asyncio.create_task(
+        dispatch.dispatch_run(services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry())
+    )
     await started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -241,7 +254,9 @@ async def test_cancel_at_dispatch_commit_waits_and_marks_uncertain(
             finished.set()
 
     monkeypatch.setattr(dispatch, "_begin_dispatch", delayed)
-    task = asyncio.create_task(dispatch.dispatch_run(services, claim=claim, invoke=invoke))
+    task = asyncio.create_task(
+        dispatch.dispatch_run(services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry())
+    )
     try:
         assert await asyncio.to_thread(committed.wait, 10)
         for _ in range(cancellations):
@@ -438,7 +453,9 @@ async def test_late_acceptance_during_fence_preserves_receipt_and_marks_uncertai
 
     monkeypatch.setattr(dispatch, "interrupt_uncertain_run", fence_after_late_acceptance)
     with pytest.raises(RuntimeError, match="handoff lost"):
-        await dispatch.dispatch_run(services, claim=claim, invoke=invoke)
+        await dispatch.dispatch_run(
+            services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry()
+        )
     view = get_run(services, owner_id=1, run_id=receipt.runID)
     current = dispatch.get_claim(services, owner_id=1, run_id=receipt.runID)
     assert view.state == "interrupted" and view.reconciliationRequired
@@ -490,7 +507,9 @@ async def test_terminal_commit_wins_over_uncertainty_and_preserves_new_writer(
         raise RuntimeError("injected handoff lost after terminal commit")
 
     with pytest.raises(RuntimeError, match="after terminal commit"):
-        await dispatch.dispatch_run(services, claim=claim, invoke=invoke)
+        await dispatch.dispatch_run(
+            services, claim=claim, invoke=invoke, active_runs=ActiveRunRegistry()
+        )
     view = get_run(services, owner_id=1, run_id=receipt.runID)
     assert view.state == "succeeded" and not view.reconciliationRequired
     assert view.dispatchPhase == "engineAccepted" and view.revision == 5
@@ -526,7 +545,9 @@ async def test_wrong_claim_cannot_handoff_or_write(control, monkeypatch, change)
     before = counts(services)
     invoke = Mock(side_effect=AssertionError("no handoff"))
     with pytest.raises(CommandAdmissionError):
-        await dispatch.dispatch_run(services, claim=bad, invoke=invoke)
+        await dispatch.dispatch_run(
+            services, claim=bad, invoke=invoke, active_runs=ActiveRunRegistry()
+        )
     assert counts(services) == before
     invoke.assert_not_called()
 

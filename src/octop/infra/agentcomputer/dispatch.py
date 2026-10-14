@@ -587,13 +587,11 @@ async def dispatch_run(
     *,
     claim: RunClaim,
     invoke: Callable[[EngineInvocation], Awaitable[None]],
-    active_runs: ActiveRunRegistry | None = None,
+    active_runs: ActiveRunRegistry,
 ) -> EngineEntryReceipt:
-    """Keep an optional server-owned task registered through the durable fence."""
-    if active_runs is not None:
-        async with active_runs.track_dispatch(claim):
-            return await _dispatch_run(services, claim=claim, invoke=invoke)
-    return await _dispatch_run(services, claim=claim, invoke=invoke)
+    """Keep the caller's registered task alive through the durable fence."""
+    async with active_runs.track_dispatch(claim):
+        return await _dispatch_run(services, claim=claim, invoke=invoke)
 
 
 async def _dispatch_run(

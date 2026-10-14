@@ -12,6 +12,7 @@ import pytest
 
 from octop.config import OctopConfig
 from octop.infra.agentcomputer import dispatch, submission
+from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.capabilities import CapabilityStatus, get_capabilities
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
@@ -231,7 +232,9 @@ async def test_current_terminal_run_does_not_rewrite_queued_receipt(control, mon
     async def intake(invocation):
         dispatch.accept_engine_entry(services, invocation)
 
-    await dispatch.dispatch_run(services, claim=claim, invoke=intake)
+    await dispatch.dispatch_run(
+        services, claim=claim, invoke=intake, active_runs=ActiveRunRegistry()
+    )
     with services.db.transaction() as conn:
         conn.execute(
             "UPDATE ac_runs SET state='succeeded',dispatch_phase='engineAccepted',execution_epoch=1,"

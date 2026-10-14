@@ -42,7 +42,9 @@ async def persisted(entry, tmp_path):
     path = tmp_path / "native-checkpoints.sqlite"
     async with AsyncSqliteSaver.from_conn_string(str(path)) as saver:
         entry.checkpointer = saver
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
         yield entry, path, saver
 
 
@@ -81,7 +83,9 @@ async def test_reopen_existing_saver_preserves_request_correlation_without_model
     path = tmp_path / "persisted-checkpoints.sqlite"
     async with AsyncSqliteSaver.from_conn_string(str(path)) as saver:
         entry.checkpointer = saver
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
         original = await inspect_engine_checkpoint(entry.agent, entry.invocation)
         await entry.agent.aclose()
         entry.agent = None
@@ -141,7 +145,9 @@ async def test_later_checkpoint_on_same_thread_does_not_replace_original_request
         checkpointer=saver,
     )
     try:
-        await dispatch.dispatch_run(entry.services, claim=claim, invoke=later.invoke)
+        await dispatch.dispatch_run(
+            entry.services, claim=claim, invoke=later.invoke, active_runs=later.active_runs
+        )
         latest = await saver.aget_tuple(
             {
                 "configurable": {
@@ -215,7 +221,12 @@ async def test_native_input_can_exist_when_app_acceptance_failed(entry, tmp_path
     async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "input-only.sqlite")) as saver:
         entry.checkpointer = saver
         with pytest.raises(StorageUnavailableError):
-            await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+            await dispatch.dispatch_run(
+                entry.services,
+                claim=entry.claim,
+                invoke=entry.invoke,
+                active_runs=entry.active_runs,
+            )
         assert entry.current_claim().engineReceipt is None
         observed = await inspect_engine_checkpoint(entry.agent, entry.invocation)
         assert observed.status == "requestObserved"

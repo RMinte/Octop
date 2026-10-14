@@ -86,7 +86,9 @@ async def test_run_get_projects_claim_dispatch_and_app_intake_without_started_cl
         assert not result.replayed
         entries.append(result.receipt)
 
-    entry = await dispatch.dispatch_run(server.services, claim=claim, invoke=invoke)
+    entry = await dispatch.dispatch_run(
+        server.services, claim=claim, invoke=invoke, active_runs=server.agentcomputer_active_runs
+    )
     assert entries == [entry]
     assert entry.runID == original.runID and entry.turnID == original.turnID
     accepted = await client.get(f"{PREFIX}/runs/{original.runID}", headers=auth)
@@ -104,7 +106,12 @@ async def test_run_get_projects_claim_dispatch_and_app_intake_without_started_cl
     async def never_reinvoke(_invocation):
         raise AssertionError("confirmed intake replay must not invoke another callback")
 
-    replay = await dispatch.dispatch_run(server.services, claim=claim, invoke=never_reinvoke)
+    replay = await dispatch.dispatch_run(
+        server.services,
+        claim=claim,
+        invoke=never_reinvoke,
+        active_runs=server.agentcomputer_active_runs,
+    )
     assert replay == entry
     repeated = await client.get(f"{PREFIX}/runs/{original.runID}", headers=auth)
     assert repeated.json() == accepted.json()

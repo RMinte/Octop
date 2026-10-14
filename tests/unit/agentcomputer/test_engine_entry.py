@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +20,7 @@ from octop_harness.llm.factory import ChatModelFactory
 from tests.unit.agentcomputer.test_submission_runs import control as control
 
 from octop.infra.agentcomputer import dispatch
+from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.capabilities import CapabilityStatus, get_capabilities
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
@@ -75,6 +76,7 @@ class EngineFixture:
     failure: Exception | None = None
     tools: list[Any] | None = None
     checkpointer: Any = None
+    active_runs: ActiveRunRegistry = field(default_factory=ActiveRunRegistry)
 
     async def prepare(self, invocation: EngineInvocation) -> HarnessAgent:
         self.invocation = invocation
@@ -125,7 +127,7 @@ class EngineFixture:
     async def invoke(self, invocation: EngineInvocation) -> None:
         agent = await self.prepare(invocation)
         try:
-            await invoke_engine_entry(agent, invocation)
+            await invoke_engine_entry(agent, invocation, active_runs=self.active_runs)
         except Exception as exc:
             self.failure = exc
             raise
@@ -182,7 +184,9 @@ async def entry(control, monkeypatch, request):
 
 
 async def test_actual_harness_accepts_before_first_model_and_preserves_exact_input(entry):
-    receipt = await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+    receipt = await dispatch.dispatch_run(
+        entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+    )
     assert entry.model.calls == 1
     assert entry.current_claim().engineReceipt == receipt
     assert entry.failure is None
@@ -199,10 +203,12 @@ async def test_actual_harness_accepts_before_first_model_and_preserves_exact_inp
 
 
 async def test_existing_entry_receipt_blocks_another_model_loop(entry):
-    receipt = await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+    receipt = await dispatch.dispatch_run(
+        entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+    )
     assert entry.agent is not None and entry.invocation is not None
     with pytest.raises(EngineEntryReplayed) as replay:
-        await invoke_engine_entry(entry.agent, entry.invocation)
+        await invoke_engine_entry(entry.agent, entry.invocation, active_runs=entry.active_runs)
     assert replay.value.receipt == receipt
     assert entry.current_claim().engineReceipt == receipt
     assert entry.model.calls == 1
@@ -210,7 +216,9 @@ async def test_existing_entry_receipt_blocks_another_model_loop(entry):
 
 @pytest.mark.parametrize("entry", ["/model other/unsafe", "/cancel"], indirect=True)
 async def test_runtime_slash_is_original_human_text_and_cannot_bypass_entry(entry):
-    receipt = await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+    receipt = await dispatch.dispatch_run(
+        entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+    )
     assert entry.current_claim().engineReceipt == receipt
     assert entry.model.calls == 1
     assert entry.agent is not None
@@ -225,7 +233,9 @@ async def test_acceptance_storage_failure_prevents_model_and_receipt(entry, monk
 
     monkeypatch.setattr(dispatch, "accept_engine_entry", fail)
     with pytest.raises(StorageUnavailableError):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
     assert isinstance(entry.failure, StorageUnavailableError)
     assert entry.model.calls == 0
     assert entry.current_claim().engineReceipt is None
@@ -261,7 +271,9 @@ async def test_fencing_after_acceptance_prevents_first_model(entry, monkeypatch,
 
     monkeypatch.setattr(dispatch, "accept_engine_entry", accept_then_fence)
     with pytest.raises(CommandAdmissionError):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
     assert isinstance(entry.failure, CommandAdmissionError)
     assert entry.model.calls == 0
     # The durable earlier entry is retained even when later execution is fenced.
@@ -299,7 +311,9 @@ async def test_configurable_override_is_rejected_before_acceptance(entry, field)
             raise
 
     with pytest.raises(CommandAdmissionError, match="accessDenied"):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=altered)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=altered, active_runs=entry.active_runs
+        )
     assert isinstance(entry.failure, CommandAdmissionError)
     assert entry.failure.reason == "engineContextMismatch"
     assert entry.model.calls == 0
@@ -323,7 +337,9 @@ async def test_tool_hook_never_calls_side_effect_handler(entry):
         )
     ]
     with pytest.raises(CommandAdmissionError, match="runtimeUnavailable"):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=entry.invoke)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+        )
     assert isinstance(entry.failure, CommandAdmissionError)
     assert entry.failure.reason == "toolExecutionUnavailable"
     assert effects == []
@@ -335,13 +351,15 @@ async def test_missing_bound_middleware_cannot_call_the_model(entry):
         agent = await entry.prepare(invocation)
         agent.config.middleware = []
         try:
-            await invoke_engine_entry(agent, invocation)
+            await invoke_engine_entry(agent, invocation, active_runs=entry.active_runs)
         except Exception as exc:
             entry.failure = exc
             raise
 
     with pytest.raises(CommandAdmissionError, match="accessDenied"):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=missing)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=missing, active_runs=entry.active_runs
+        )
     assert isinstance(entry.failure, CommandAdmissionError)
     assert entry.failure.reason == "engineContextMismatch"
     assert entry.model.calls == 0
@@ -367,7 +385,9 @@ async def test_nested_untyped_metadata_is_rejected_before_acceptance(entry, chan
             raise
 
     with pytest.raises(CommandAdmissionError, match="accessDenied"):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=altered)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=altered, active_runs=entry.active_runs
+        )
     assert entry.failure.reason == "engineContextMismatch"
     assert entry.model.calls == 0
     assert entry.current_claim().engineReceipt is None
@@ -388,13 +408,15 @@ async def test_runtime_workspace_config_must_match_registered_managed_metadata(e
         else:
             agent.config.system_files_path = ".other-system"
         try:
-            await invoke_engine_entry(agent, invocation)
+            await invoke_engine_entry(agent, invocation, active_runs=entry.active_runs)
         except Exception as exc:
             entry.failure = exc
             raise
 
     with pytest.raises(CommandAdmissionError, match="accessDenied"):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=altered)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=altered, active_runs=entry.active_runs
+        )
     assert entry.failure.reason == "engineContextMismatch"
     assert entry.model.calls == 0
     assert entry.current_claim().engineReceipt is None
@@ -416,7 +438,9 @@ async def test_native_metadata_cannot_override_server_binding_before_acceptance(
             raise
 
     with pytest.raises(CommandAdmissionError, match="accessDenied"):
-        await dispatch.dispatch_run(entry.services, claim=entry.claim, invoke=altered)
+        await dispatch.dispatch_run(
+            entry.services, claim=entry.claim, invoke=altered, active_runs=entry.active_runs
+        )
     assert entry.failure.reason == "engineContextMismatch"
     assert entry.model.calls == 0
     assert entry.current_claim().engineReceipt is None

@@ -15,4 +15,4 @@
 
 相关集成回归 73 passed；完整 `make all RUN='uv run --offline --no-sync' PYTEST_JOBS=4` 通过，5317 passed / 23 skipped，Ruff 和严格 mypy 通过。最初在受限沙盒内运行的 18 个回环端口用例因 `PermissionError: [Errno 1]` 失败；在允许本机回环绑定的环境中重跑完整门禁后通过。跳过项不计为通过。
 
-保护范围是 AgentComputer HTTP 路由及其认证入口，不代表普通 Octop HTTP 请求、未登记的内部派发、远端模型或工具子进程获得关闭等待。已经交接的 Run 仍不能因本地任务退出就宣称 `stopped` 或释放双活动占用。生产 worker、项目 `ready`、Task/Run 公开创建、客户端接线和目标盒子实机门禁仍关闭。
+保护范围是 AgentComputer HTTP 路由及其认证入口，不代表普通 Octop HTTP 请求、绕过可信派发入口的内部工作、远端模型或工具子进程获得关闭等待。可信派发入口后续已强制要求运行登记表，但生产 worker 仍须传入当前服务器持有的实例。已经交接的 Run 仍不能因本地任务退出就宣称 `stopped` 或释放双活动占用。生产 worker、项目 `ready`、Task/Run 公开创建、客户端接线和目标盒子实机门禁仍关闭。

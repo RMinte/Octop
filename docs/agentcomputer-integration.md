@@ -206,6 +206,8 @@ Harness 普通 OpenAI 提供方默认采用 Chat Completions；已有 Swift Resp
 
 第二十一轮让显式登记的可信派发任务在服务器关闭时先完成本地取消与持久对账，再关闭数据库并释放 daemon 所有权锁。它覆盖派发任务本身和引擎入口相关数据库线程；独立 HTTP 命令 executor 与未登记的内部调用仍需后续生命周期约束。该机制不是远端模型或受管子进程停止证明，不改变已交接 Run 的终态与双活动占用。
 
+第二十二轮让现有 AgentComputer HTTP 操作在服务关闭前结算。随后内部 `dispatch_run` 与 `invoke_engine_entry` 改为必须显式传入运行登记表，真实 Harness 阻塞流也覆盖了 `server.stop()` 并发路径。本地流关闭后，已交接 Run 保持 `interrupted/reconciliationRequired` 和 Task/Project 双活动占用，不伪造用户取消。生产 worker 尚未接入，仍必须使用服务器持有的登记表，并取得远端模型及工具子进程停止证据后才能开放执行能力。
+
 后续核实真实项目 ready、原生 harness 历史/幂等及引擎开始/停止证据，再装配生产 worker，完成审批/问答触发与安全续跑、已交接 Run 的专属停止和完整恢复。当前应用收据不替代这些证明；托管专家的 Dashboard、IM、Cron 和直接工作区写入口继续受保护，不能把普通会话入口作为执行门禁的替代路径。
 
 M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M0 模型续轮及执行隔离门槛通过。生产配对、资料迁移、Schedule 切换和正式发布保留各自放行条件。

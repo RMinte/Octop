@@ -87,7 +87,9 @@ async def seed_pending_pause(
         invocations.append(invocation)
         await asyncio.to_thread(dispatch.accept_engine_entry, services, invocation)
 
-    await dispatch.dispatch_run(services, claim=claim, invoke=accept)
+    await dispatch.dispatch_run(
+        services, claim=claim, invoke=accept, active_runs=server.agentcomputer_active_runs
+    )
     assert len(invocations) == 1
     invocation = invocations[0]
     with services.db.transaction() as conn:

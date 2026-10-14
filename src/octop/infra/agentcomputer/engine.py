@@ -209,7 +209,7 @@ async def invoke_engine_entry(
     agent: HarnessAgent,
     invocation: EngineInvocation,
     *,
-    active_runs: ActiveRunRegistry | None = None,
+    active_runs: ActiveRunRegistry,
 ) -> None:
     """Consume the public stream without accepting client configuration or kwargs."""
     snapshot = invocation.intent.snapshot
@@ -228,15 +228,10 @@ async def invoke_engine_entry(
         or middleware is None
     ):
         raise CommandAdmissionError("accessDenied", reason="engineContextMismatch")
-    if active_runs is None:
+    async with active_runs.track(invocation):
         await settled_to_thread(_validate_registered_workspace, agent, middleware)
         async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
             pass
-    else:
-        async with active_runs.track(invocation):
-            await settled_to_thread(_validate_registered_workspace, agent, middleware)
-            async for _ in agent.stream(build_engine_request(invocation), protocol="langgraph"):
-                pass
 
 
 def _checkpoint_matches(checkpoint: CheckpointTuple, invocation: EngineInvocation) -> bool:

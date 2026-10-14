@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import click
 import pytest
 from click.testing import CliRunner
 
@@ -26,14 +25,9 @@ def test_chats_send_help_lists_mode() -> None:
     assert "--mode" in result.output
 
 
-def test_chats_list_requires_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    import octop.cli.support.ctx as ctx_mod
-
-    def _missing(_agent: str | None) -> str:
-        click.echo("error: --agent is required", err=True)
-        raise SystemExit(2)
-
-    monkeypatch.setattr(ctx_mod, "require_agent", _missing)
+def test_chats_list_requires_agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OCTOP_HOME", str(tmp_path))
+    monkeypatch.delenv("OCTOP_AGENT", raising=False)
     runner = CliRunner()
     result = runner.invoke(cli, ["chats", "list"])
     assert result.exit_code == 2

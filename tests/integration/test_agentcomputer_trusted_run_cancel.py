@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from contextlib import suppress
 from typing import Any
 from uuid import uuid4
@@ -28,8 +29,9 @@ from tests.support.auth import resolve_user_id
 PREFIX = "/api/agentcomputer/v1"
 
 
-async def test_exact_http_cancel_closes_trusted_run_stream_after_durable_request(
-    env, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("stop_server", [False, True], ids=["cancel-command", "server-stop"])
+async def test_trusted_run_stream_closes_on_cancel_or_server_stop(
+    env, monkeypatch: pytest.MonkeyPatch, stop_server: bool
 ) -> None:
     client, server, auth = env
     owner_id = await resolve_user_id(client, auth, "admin")
@@ -86,7 +88,7 @@ async def test_exact_http_cancel_closes_trusted_run_stream_after_durable_request
     closed = asyncio.Event()
     requests: list[httpx.Request] = []
     tool_inputs: list[str] = []
-    durable_at_signal: list[bool] = []
+    cancellation_at_signal: list[int] = []
     agents: list[HarnessAgent] = []
 
     class BlockedToolCompletion(httpx.AsyncByteStream):
@@ -199,12 +201,11 @@ async def test_exact_http_cancel_closes_trusted_run_stream_after_durable_request
             )
         except asyncio.CancelledError:
             with services.db.connect() as conn:
-                durable_at_signal.append(
+                cancellation_at_signal.append(
                     conn.execute(
                         "SELECT COUNT(*) FROM ac_run_cancellations WHERE run_id=?",
                         (str(original.runID),),
                     ).fetchone()[0]
-                    == 1
                 )
             raise
 
@@ -218,33 +219,61 @@ async def test_exact_http_cancel_closes_trusted_run_stream_after_durable_request
         running = await client.get(f"{PREFIX}/runs/{original.runID}", headers=auth)
         assert running.status_code == 200
         assert running.json()["dispatchPhase"] == "engineAccepted"
-        response = await client.post(
-            f"{PREFIX}/runs/{original.runID}/cancel",
-            headers=auth,
-            json={
-                "commandID": str(uuid4()),
-                "idempotencyKey": str(uuid4()),
-                "expectedRestoreEpoch": 1,
-                "expectedRevision": running.json()["revision"],
-            },
-        )
-        assert response.status_code == 201
-        receipt = CancelRunReceipt.model_validate(response.json())
-        assert receipt.runID == original.runID
-        assert receipt.executionEpoch == claim.intent.executionEpoch
-        assert receipt.status == "cancelRequested" and not receipt.replayed
+        if stop_server:
+            await server.stop()
+        else:
+            response = await client.post(
+                f"{PREFIX}/runs/{original.runID}/cancel",
+                headers=auth,
+                json={
+                    "commandID": str(uuid4()),
+                    "idempotencyKey": str(uuid4()),
+                    "expectedRestoreEpoch": 1,
+                    "expectedRevision": running.json()["revision"],
+                },
+            )
+            assert response.status_code == 201
+            receipt = CancelRunReceipt.model_validate(response.json())
+            assert receipt.runID == original.runID
+            assert receipt.executionEpoch == claim.intent.executionEpoch
+            assert receipt.status == "cancelRequested" and not receipt.replayed
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(handoff), timeout=5)
         await asyncio.wait_for(closed.wait(), timeout=5)
-        current = await client.get(f"{PREFIX}/runs/{original.runID}", headers=auth)
-        assert current.status_code == 200
-        assert current.json()["state"] == "interrupted"
-        assert current.json()["reconciliationRequired"] is True
-        assert current.json()["cancelRequested"] is True
-        task_row = services.ac_task_repo.get(str(task.taskID), owner_id)
-        assert task_row is not None and task_row.active_run_id == str(original.runID)
-        project_row = services.ac_project_repo.get(task_row.project_id, owner_id)
-        assert project_row is not None and project_row.active_run_id == str(original.runID)
+        if stop_server:
+            with sqlite3.connect(services.paths.db) as conn:
+                run = conn.execute(
+                    "SELECT state, dispatch_phase, reconciliation_required FROM ac_runs WHERE run_id=?",
+                    (str(original.runID),),
+                ).fetchone()
+                assert run == ("interrupted", "engineAccepted", 1)
+                assert (
+                    conn.execute(
+                        "SELECT COUNT(*) FROM ac_run_cancellations WHERE run_id=?",
+                        (str(original.runID),),
+                    ).fetchone()[0]
+                    == 0
+                )
+                task_row = conn.execute(
+                    "SELECT project_id, active_run_id FROM ac_tasks WHERE task_id=?",
+                    (str(task.taskID),),
+                ).fetchone()
+                assert task_row is not None and task_row[1] == str(original.runID)
+                project_row = conn.execute(
+                    "SELECT active_run_id FROM ac_projects WHERE project_id=?",
+                    (task_row[0],),
+                ).fetchone()
+                assert project_row is not None and project_row[0] == str(original.runID)
+        else:
+            current = await client.get(f"{PREFIX}/runs/{original.runID}", headers=auth)
+            assert current.status_code == 200
+            assert current.json()["state"] == "interrupted"
+            assert current.json()["reconciliationRequired"] is True
+            assert current.json()["cancelRequested"] is True
+            task_row = services.ac_task_repo.get(str(task.taskID), owner_id)
+            assert task_row is not None and task_row.active_run_id == str(original.runID)
+            project_row = services.ac_project_repo.get(task_row.project_id, owner_id)
+            assert project_row is not None and project_row.active_run_id == str(original.runID)
     finally:
         released.set()
         if not handoff.done():
@@ -257,6 +286,6 @@ async def test_exact_http_cancel_closes_trusted_run_stream_after_durable_request
         sync_http.close()
 
     assert len(requests) == 1
-    assert durable_at_signal == [True]
+    assert cancellation_at_signal == [0 if stop_server else 1]
     assert tool_inputs == []
     assert get_capabilities(services).capabilities.runs.available is False

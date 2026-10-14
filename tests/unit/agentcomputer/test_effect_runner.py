@@ -17,6 +17,7 @@ from tests.unit.agentcomputer.test_submission_runs import request
 
 from octop.config import OctopConfig
 from octop.infra.agentcomputer import dispatch, effects
+from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageDataError,
@@ -88,7 +89,9 @@ async def effect(control, monkeypatch):
             None, partial(dispatch.accept_engine_entry, services, invocation)
         )
 
-    await dispatch.dispatch_run(services, claim=claim, invoke=accept)
+    await dispatch.dispatch_run(
+        services, claim=claim, invoke=accept, active_runs=ActiveRunRegistry()
+    )
     assert len(invocations) == 1
     invocation = invocations[0]
     arguments = {"value": "fixture effect"}
