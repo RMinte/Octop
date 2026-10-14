@@ -4,6 +4,7 @@
 当前 adapterVersion=0.7.0、capabilityRevision=7。完整 recovery 仍为 unsupported/notImplemented；projects/tasks/runs 仍 unavailable，权限模式为空。
 本轮复用 schema23，不开放生产 worker、真实模型/工具、HTTP recover/cancel/claim、用户运行按钮或恢复运行开关。
 API、原收据和公开 RunView 字段保持；最终门禁及本地结果见 [第七轮交付状态](agentcomputer-integration.md#第七轮交付状态)。
+后续已将受托业务 Turn ID 固定到 v2 原生历史，并在启动收紧后增加[只读历史对账](agentcomputer-native-history.md#启动时的只读历史对账)；本文以下仍记录第七轮当时的恢复边界。
 
 ## 当前启动边界
 

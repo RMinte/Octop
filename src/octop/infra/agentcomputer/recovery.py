@@ -7,7 +7,9 @@ engine. Installation identity and original acceptance facts remain immutable.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -18,9 +20,12 @@ from octop.infra.agentcomputer.commands import (
     StorageDataError,
     StorageUnavailableError,
 )
-from octop.infra.agentcomputer.dispatch import interrupt_startup_run
+from octop.infra.agentcomputer.dispatch import get_claim, interrupt_startup_run
 from octop.infra.agentcomputer.identity import IdentityError, read_identity
 from octop.infra.db.services import SharedServices
+from octop.infra.history.store import probe_bound_turn
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,14 +39,17 @@ class RecoveryReport:
     pauses_scanned: int = 0
     pauses_expired: int = 0
     pauses_unchanged: int = 0
+    history_observations: tuple[tuple[str, int], ...] = ()
+    history_initial_messages: int = 0
 
 
 def recover_dispatches(services: SharedServices) -> RecoveryReport:
     """Tighten only this box's persisted dispatches through one fixed high watermark.
 
-    A failure rolls back its current Run and aborts startup; preceding complete
-    per-Run commits are safe to observe on the next attempt. No missing identity
-    or journal is reconstructed. A zero-candidate startup performs no file I/O.
+    A failure before a Run's fence commit rolls it back. A later diagnostic
+    failure cannot undo that committed fence and aborts startup; other complete
+    per-Run commits remain safe. No missing identity or journal is reconstructed.
+    A zero-candidate startup performs no file I/O.
     """
     try:
         with services.db.connect() as conn:
@@ -52,6 +60,8 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
             return RecoveryReport()
         identity = read_identity(services.paths.agentcomputer_identity)
         after_pk = scanned = tightened = unchanged = 0
+        history_observations: Counter[str] = Counter()
+        history_initial_messages = 0
         while True:
             with services.db.connect() as conn:
                 candidates = services.ac_run_repo.list_recovery_candidates(
@@ -67,6 +77,32 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
                     box_id=identity.boxID,
                 ):
                     tightened += 1
+                    # Re-read after the Run lock: an ACK may have arrived just
+                    # before the fence. Never infer history from the candidate's
+                    # earlier phase or from a different thread's latest Turn.
+                    claim = get_claim(
+                        services, owner_id=candidate.owner_id, run_id=UUID(candidate.run_id)
+                    )
+                    if claim is None:
+                        raise StorageDataError("missing tightened dispatch claim")
+                    if claim.engineReceipt is not None:
+                        if services.config.database.is_sqlite:
+                            intent = claim.intent
+                            evidence = probe_bound_turn(
+                                services.paths.root / "history_v2.sqlite",
+                                identity=str(
+                                    services.config.database.resolve_sqlite_path(
+                                        services.paths.root
+                                    ).resolve()
+                                ),
+                                turn_id=str(intent.turnID),
+                                thread_id=intent.snapshot.octopThreadID,
+                                agent_id=intent.snapshot.agentID,
+                            )
+                            history_observations[evidence.status] += 1
+                            history_initial_messages += int(evidence.initial_message_saved)
+                        else:
+                            history_observations["archiveUnavailable"] += 1
                 else:
                     unchanged += 1
                 scanned += 1
@@ -120,7 +156,7 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
                     pauses_unchanged += 1
                 pauses_scanned += 1
                 pauses_after_pk = pause.pk
-        return RecoveryReport(
+        report = RecoveryReport(
             scanned=scanned,
             tightened=tightened,
             unchanged=unchanged,
@@ -130,7 +166,16 @@ def recover_dispatches(services: SharedServices) -> RecoveryReport:
             pauses_scanned=pauses_scanned,
             pauses_expired=pauses_expired,
             pauses_unchanged=pauses_unchanged,
+            history_observations=tuple(sorted(history_observations.items())),
+            history_initial_messages=history_initial_messages,
         )
+        if report.history_observations:
+            logger.warning(
+                "AgentComputer startup history observations=%s initial_messages=%d",
+                report.history_observations,
+                report.history_initial_messages,
+            )
+        return report
     except StorageDataError:
         raise
     except (IdentityError, ValueError, TypeError, CommandAdmissionError) as exc:

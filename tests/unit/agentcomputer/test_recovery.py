@@ -10,6 +10,7 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
+from tests.support.agentcomputer_history import open_history_archive
 from tests.unit.agentcomputer.test_dispatch import seed
 from tests.unit.agentcomputer.test_submission_runs import control as control
 from tests.unit.agentcomputer.test_submission_runs import request
@@ -26,6 +27,7 @@ from octop.infra.agentcomputer.identity import IdentityError, read_identity
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import build_shared_services
+from octop.infra.history.store import BoundTurnProbe, probe_bound_turn
 from octop.infra.utils.paths import PathLayout
 
 
@@ -73,10 +75,129 @@ def test_zero_candidates_does_not_read_or_create_identity(empty_services, monkey
     before = _facts(empty_services)
     reader = Mock(side_effect=AssertionError("zero candidates must not read identity"))
     monkeypatch.setattr(recovery, "read_identity", reader)
+    monkeypatch.setattr(
+        recovery,
+        "probe_bound_turn",
+        Mock(side_effect=AssertionError("zero candidates must not probe")),
+    )
     assert recovery.recover_dispatches(empty_services) == recovery.RecoveryReport()
     assert _facts(empty_services) == before
     reader.assert_not_called()
     assert not empty_services.paths.agentcomputer_identity.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "history_status", ["active", "paused", "interrupted", "failed", "partial", "complete"]
+)
+def test_ack_history_is_observed_after_fence_without_releasing_lanes(
+    control, monkeypatch, history_status
+):
+    services, receipt, claim, _ = _phase(control, monkeypatch, "engineAccepted")
+    archive = open_history_archive(services)
+    intent = claim.intent
+    try:
+        turn = archive.begin_bound(
+            intent.snapshot.agentID,
+            intent.snapshot.octopThreadID,
+            turn_id=str(intent.turnID),
+        )
+        archive.save_message_updates(
+            turn,
+            [(0, {"type": "human", "data": {"content": "recorded input"}})],
+        )
+        if history_status != "active":
+            archive.finish(
+                str(intent.turnID),
+                history_status,
+                error="capture_incomplete" if history_status == "partial" else None,
+            )
+        report = recovery.recover_dispatches(services)
+        assert report == recovery.RecoveryReport(
+            scanned=1,
+            tightened=1,
+            history_observations=((history_status, 1),),
+            history_initial_messages=1,
+        )
+        with services.db.connect() as conn:
+            run = services.ac_run_repo.get_in_transaction(conn, str(receipt.runID), 1)
+            task = services.ac_task_repo.get_in_transaction(conn, str(receipt.taskID), 1)
+            project = services.ac_project_repo.get_in_transaction(conn, str(intent.projectID), 1)
+            assert run is not None and run.state == "interrupted" and run.reconciliation_required
+            assert task is not None and task.active_run_id == str(receipt.runID)
+            assert project is not None and project.active_run_id == str(receipt.runID)
+        assert recovery.recover_dispatches(services) == recovery.RecoveryReport()
+    finally:
+        archive.store.close()
+
+
+def test_probe_distinguishes_crash_windows_and_wrong_bindings(control, monkeypatch):
+    services, _, claim, _ = _phase(control, monkeypatch, "engineAccepted")
+    intent = claim.intent
+    path = services.paths.root / "history_v2.sqlite"
+    kwargs = {
+        "identity": str(
+            services.config.database.resolve_sqlite_path(services.paths.root).resolve()
+        ),
+        "turn_id": str(intent.turnID),
+        "thread_id": intent.snapshot.octopThreadID,
+        "agent_id": intent.snapshot.agentID,
+    }
+    assert probe_bound_turn(path, **kwargs) == BoundTurnProbe("archiveMissing")
+    archive = open_history_archive(services)
+    try:
+        assert probe_bound_turn(path, **kwargs) == BoundTurnProbe("turnMissing")
+        archive.begin_bound(kwargs["agent_id"], kwargs["thread_id"], turn_id=kwargs["turn_id"])
+        assert probe_bound_turn(path, **kwargs) == BoundTurnProbe("active")
+        assert probe_bound_turn(path, **{**kwargs, "thread_id": "other"}) == BoundTurnProbe(
+            "turnBindingMismatch"
+        )
+        assert probe_bound_turn(path, **{**kwargs, "agent_id": "other"}) == BoundTurnProbe(
+            "turnBindingMismatch"
+        )
+        assert probe_bound_turn(path, **{**kwargs, "identity": "other"}) == BoundTurnProbe(
+            "archiveIdentityMismatch"
+        )
+        with archive.store.transaction() as conn:
+            conn.execute(
+                "UPDATE segments SET format='legacy' WHERE thread_id=?", (kwargs["thread_id"],)
+            )
+        assert probe_bound_turn(path, **kwargs) == BoundTurnProbe("turnBindingMismatch")
+    finally:
+        archive.store.close()
+    path.unlink()
+    assert probe_bound_turn(path, **kwargs) == BoundTurnProbe("archiveUnavailable")
+
+
+def test_ack_with_archive_but_no_bound_turn_keeps_conservative_state(control, monkeypatch, caplog):
+    services, receipt, _, _ = _phase(control, monkeypatch, "engineAccepted")
+    archive = open_history_archive(services)
+    try:
+        assert recovery.recover_dispatches(services) == recovery.RecoveryReport(
+            scanned=1, tightened=1, history_observations=(("turnMissing", 1),)
+        )
+        assert "history observations=(('turnMissing', 1),)" in caplog.text
+        assert str(receipt.runID) not in caplog.text
+        with services.db.connect() as conn:
+            run = services.ac_run_repo.get_in_transaction(conn, str(receipt.runID), 1)
+            assert run is not None and run.state == "interrupted" and run.reconciliation_required
+    finally:
+        archive.store.close()
+
+
+def test_corrupt_archive_is_unavailable_not_an_empty_history(control, monkeypatch):
+    services, _, claim, _ = _phase(control, monkeypatch, "engineAccepted")
+    path = services.paths.root / "history_v2.sqlite"
+    path.write_bytes(b"invalid SQLite")
+    assert probe_bound_turn(
+        path,
+        identity=str(services.config.database.resolve_sqlite_path(services.paths.root).resolve()),
+        turn_id=str(claim.intent.turnID),
+        thread_id=claim.intent.snapshot.octopThreadID,
+        agent_id=claim.intent.snapshot.agentID,
+    ) == BoundTurnProbe("archiveUnavailable")
+    assert recovery.recover_dispatches(services) == recovery.RecoveryReport(
+        scanned=1, tightened=1, history_observations=(("archiveUnavailable", 1),)
+    )
 
 
 def test_read_identity_never_initializes_missing_parent(tmp_path):
@@ -109,8 +230,17 @@ def test_startup_tightens_each_phase_and_preserves_original_facts(control, monke
     monkeypatch.setattr(
         dispatch, "accept_engine_entry", Mock(side_effect=AssertionError("no engine entry"))
     )
+    if phase != "engineAccepted":
+        monkeypatch.setattr(
+            recovery,
+            "probe_bound_turn",
+            Mock(side_effect=AssertionError("no ACK must not probe history")),
+        )
     report = recovery.recover_dispatches(services)
-    assert report == recovery.RecoveryReport(scanned=1, tightened=1)
+    expected_history = (("archiveMissing", 1),) if phase == "engineAccepted" else ()
+    assert report == recovery.RecoveryReport(
+        scanned=1, tightened=1, history_observations=expected_history
+    )
     after = _facts(services)
     for table in before.keys() - {"ac_runs", "ac_tasks", "ac_events"}:
         assert after[table] == before[table]
@@ -174,7 +304,9 @@ def test_disabled_owner_and_older_restore_epoch_are_still_tightened(control, mon
     with services.db.transaction() as conn:
         conn.execute("UPDATE users SET disabled=1 WHERE id=1")
     before = _facts(services)
-    assert recovery.recover_dispatches(services) == recovery.RecoveryReport(scanned=1, tightened=1)
+    assert recovery.recover_dispatches(services) == recovery.RecoveryReport(
+        scanned=1, tightened=1, history_observations=(("archiveMissing", 1),)
+    )
     after = _facts(services)
     assert after["ac_runs"][0]["restore_epoch"] == 1
     assert after["ac_runs"][0]["reconciliation_required"] == 1
@@ -273,7 +405,9 @@ def test_late_receipt_before_row_lock_is_preserved_while_run_is_tightened(contro
         return original(target, **kwargs)
 
     monkeypatch.setattr(recovery, "interrupt_startup_run", after_entry)
-    assert recovery.recover_dispatches(services) == recovery.RecoveryReport(scanned=1, tightened=1)
+    assert recovery.recover_dispatches(services) == recovery.RecoveryReport(
+        scanned=1, tightened=1, history_observations=(("archiveMissing", 1),)
+    )
     claim = dispatch.get_claim(services, owner_id=1, run_id=receipt.runID)
     assert claim.engineReceipt == entries[0] and claim.runRevision == 5
     with services.db.connect() as conn:

@@ -10,7 +10,8 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ _BODY_KEYS = frozenset(
 # Stable boundaries let an appended token reuse every completed text block.
 # Count Unicode characters so splitting and rejoining never damages UTF-8.
 TEXT_BLOCK_SIZE = 1024
+_BOUND_STATUSES = frozenset({"active", "paused", "interrupted", "failed", "partial", "complete"})
 _SCHEMA = """
 CREATE TABLE archive_meta (version INTEGER NOT NULL, identity TEXT NOT NULL);
 CREATE TABLE segments (
@@ -52,6 +54,57 @@ CREATE INDEX refs_digest ON body_refs(digest);
 
 def dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True)
+class BoundTurnProbe:
+    status: str
+    initial_message_saved: bool = False
+
+
+def probe_bound_turn(
+    path: Path, *, identity: str, turn_id: str, thread_id: str, agent_id: str
+) -> BoundTurnProbe:
+    """Read an exact external Turn without creating or repairing the archive.
+
+    This is diagnostic evidence only. A complete history Turn is not a Run
+    terminal receipt and says nothing about whether the old worker stopped.
+    """
+    try:
+        if not path.exists():
+            marker = path.with_suffix(".required")
+            return BoundTurnProbe("archiveUnavailable" if marker.exists() else "archiveMissing")
+        with closing(
+            sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            meta = conn.execute("SELECT version, identity FROM archive_meta").fetchall()
+            if len(meta) != 1 or meta[0]["version"] != 1 or meta[0]["identity"] != identity:
+                return BoundTurnProbe("archiveIdentityMismatch")
+            row = conn.execute(
+                "SELECT t.status,t.error,s.thread_id,s.agent_id,s.format FROM turns t "
+                "JOIN segments s ON s.id=t.segment_id WHERE t.id=?",
+                (turn_id,),
+            ).fetchone()
+            if row is None:
+                return BoundTurnProbe("turnMissing")
+            if (
+                row["thread_id"] != thread_id
+                or row["agent_id"] != agent_id
+                or row["format"] != "v2"
+                or row["status"] not in _BOUND_STATUSES
+                or (row["status"] == "complete" and row["error"] is not None)
+            ):
+                return BoundTurnProbe("turnBindingMismatch")
+            initial = conn.execute(
+                "SELECT 1 FROM documents WHERE id=? AND thread_id=? AND turn_id=? "
+                "AND kind='message'",
+                (f"message:{turn_id}:0", thread_id, turn_id),
+            ).fetchone()
+            return BoundTurnProbe(str(row["status"]), initial is not None)
+    except (sqlite3.DatabaseError, OSError):
+        return BoundTurnProbe("archiveUnavailable")
 
 
 class HistoryStore:
