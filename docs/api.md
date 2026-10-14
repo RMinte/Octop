@@ -35,6 +35,16 @@ routes require the Project owner and verified stopped workspace, but do not
 require a working model Provider or start a Run. The model's
 `read_project_document` tool uses the same path and size rules.
 
+`GET /api/agentcomputer/v1/runs/{runID}/tool-activity` returns an owned Run's
+bounded tool summary as `{"runID":"…","items":[{"toolName":"read_project_document",
+"path":"documents/brief.md","status":"ok","outcome":"succeeded"}]}`. A Run
+without a tool call has `items: []`. `status` may also be `notFound`, `tooLarge`,
+`unreadable`, `pending`, `unknown`, or `unavailable`; `outcome` may be
+`succeeded`, `failed`, `notDispatched`, `pending`, or `unknown`. The summary
+contains no document text, private tool receipt, or host path. Invalid Run or
+effect bindings fail closed with 503; another user's Run has the same 404 as
+an unknown Run.
+
 `GET /api/agentcomputer/v1/tasks/{taskID}` reads only the caller's existing Task
 mapping. Task creation and text execution require the local capability gate. See
 [Task mapping](agentcomputer-tasks.md) for the internal atomic registration,

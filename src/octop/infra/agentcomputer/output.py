@@ -13,12 +13,17 @@ from psycopg import Error as PostgresError
 from pydantic import Field, StrictBool, StrictStr, model_validator
 
 from octop.infra.agentcomputer.commands import (
+    CommandAdmissionError,
     StorageDataError,
     StorageUnavailableError,
     content_digest,
 )
 from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.models import ControlModel
+from octop.infra.agentcomputer.project_document_tool import (
+    TOOL_NAME,
+    validate_document_filename,
+)
 from octop.infra.agentcomputer.results import get_run_result
 from octop.infra.agentcomputer.runs import get_run_in_transaction, load_bound_run
 from octop.infra.db.services import SharedServices
@@ -149,6 +154,42 @@ def _read_partial_text(
             text = data.get("content")
             extra = data.get("additional_kwargs")
             metadata = data.get("response_metadata")
+            calls = data.get("tool_calls")
+            if calls:
+                call = calls[0] if isinstance(calls, list) and len(calls) == 1 else None
+                arguments = call.get("args") if isinstance(call, dict) else None
+                try:
+                    valid_document_call = (
+                        turn["status"] != "complete"
+                        and data.get("type") == "ai"
+                        and isinstance(data.get("id"), str)
+                        and bool(data["id"].strip())
+                        and isinstance(text, str)
+                        and isinstance(extra, dict)
+                        and isinstance(metadata, dict)
+                        and not data.get("invalid_tool_calls")
+                        and not any(
+                            extra.get(key)
+                            for key in ("tool_calls", "function_call", "history_tool_args")
+                        )
+                        and not extra.get("octop_stream_error")
+                        and metadata.get("finish_reason") not in {"length", "content_filter"}
+                        and isinstance(call, dict)
+                        and call.get("type") == "tool_call"
+                        and call.get("name") == TOOL_NAME
+                        and isinstance(call.get("id"), str)
+                        and 1 <= len(call["id"]) <= 256
+                        and isinstance(arguments, dict)
+                        and set(arguments) == {"path"}
+                        and validate_document_filename(arguments["path"]) == arguments["path"]
+                    )
+                except (CommandAdmissionError, ValueError, TypeError):
+                    valid_document_call = False
+                if not valid_document_call:
+                    raise StorageDataError("history Turn tool call is invalid")
+                # The model call may reach history before the effect journal is
+                # prepared. Do not publish its text or mislabel it as corruption.
+                return None
             if (
                 data.get("type") != "ai"
                 or not isinstance(data.get("id"), str)

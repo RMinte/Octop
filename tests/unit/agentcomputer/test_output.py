@@ -165,3 +165,36 @@ async def test_partial_output_rejects_tool_calls_and_stream_errors(accepted, ans
     _write_answer(accepted, answer)
     with pytest.raises(StorageDataError):
         get_run_output(accepted.services, owner_id=1, run_id=accepted.claim.intent.runID)
+
+
+async def test_pending_document_call_without_journal_has_no_partial_text(accepted) -> None:
+    _write_answer(
+        accepted,
+        AIMessage(
+            content="",
+            id="model-document-call",
+            tool_calls=[
+                {"name": "read_project_document", "args": {"path": "brief.md"}, "id": "call-1"}
+            ],
+            response_metadata={"finish_reason": "tool_calls"},
+        ),
+    )
+    snapshot = get_run_output(accepted.services, owner_id=1, run_id=accepted.claim.intent.runID)
+    assert snapshot is not None
+    assert snapshot.state == "queued"
+    assert snapshot.text is None and snapshot.digest is None and not snapshot.provisional
+
+
+@pytest.mark.parametrize("path", ["../secret.md", "documents/brief.md", "brief.pdf"])
+async def test_pending_document_call_rejects_invalid_path(accepted, path: str) -> None:
+    _write_answer(
+        accepted,
+        AIMessage(
+            content="",
+            id="model-document-call",
+            tool_calls=[{"name": "read_project_document", "args": {"path": path}, "id": "call-1"}],
+            response_metadata={"finish_reason": "tool_calls"},
+        ),
+    )
+    with pytest.raises(StorageDataError):
+        get_run_output(accepted.services, owner_id=1, run_id=accepted.claim.intent.runID)

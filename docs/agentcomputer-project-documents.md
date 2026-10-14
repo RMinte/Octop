@@ -8,6 +8,8 @@
 2. 客户端可调用 `PUT /api/agentcomputer/v1/projects/{projectID}/documents/{filename}`，JSON 正文为 `{"content":"..."}`。成功返回 201；同名文件返回 409，接口不会覆盖原文件。`GET /projects/{projectID}/documents` 返回排序后的 `items`，`GET /projects/{projectID}/documents/{filename}` 返回 `filename` 与 `content`。三条路由均使用完整的 `/api/agentcomputer/v1` 前缀和当前 Octop 用户 Bearer 会话，且只访问本人项目。
 3. 在该项目的 Task 中发问，并明确指定要读取的文件名，例如“请读取 `brief.md`，再回答其中的项目代号”。模型可发出一次 `read_project_document({"path":"brief.md"})`；工具参数不能写路径前缀或跨目录。客户端等待 Run 成功后通过原 `/runs/{runID}/result` 读取最终回答。
 
+Task 页面还可通过 `GET /api/agentcomputer/v1/runs/{runID}/tool-activity` 读取本人 Run 的工具活动摘要。无工具调用时 `items=[]`；有一次文档读取时，只返回 `toolName`、`documents/<filename>`、`status` 与 `outcome`，不返回资料正文、原始工具参数、私有收据或盒子文件路径。`pending` 和 `unknown` 不表示文件已经读取成功。旧版盒子没有此接口时，客户端仍可显示原 Run 和答案。
+
 导入只接受已有且已验证的受管项目工作区，不启动模型。资料不存在、超过限额或无法读取时，工具会返回有界的 `notFound`、`tooLarge` 或 `unreadable` 状态，不把其他路径内容交给模型。HTTP 读取超限文件返回 413；非法文件名或正文返回 422。项目资料和 Task 仍属于盒子上的 Octop 用户会话，目前没有设备配对或跨账号共享。
 
 ## Run 完成证据
@@ -17,6 +19,8 @@
 只有同一 Turn 的 v2 历史呈现完整 `Human → AI(tool_call) → Tool(success) → AI(final)` 四条消息，调用 ID、名称、参数摘要、结果摘要与效果日志一致，且持久检查点已到根终态时，控制库才用单事务保存 v2 完成证据、写 `run.finished`、将 Run 标为 `succeeded` 并释放 Task/Project 占用。无工具 Turn 仍使用原 v1 完成证据。完成收据的外层和数据库行格式未变，因此这轮没有 schema 迁移。
 
 如果工具已执行但模型没有可验证的最终答复，Run 保守转为 `interrupted/reconciliationRequired` 并保留双活动占用；不会自动重放读取或伪造成功。运行中的工具 Turn 不发布未经最终证据验证的部分正文。
+
+模型的工具调用可能先进入 v2 历史，随后才建立效果日志。在这段短暂窗口，`/runs/{runID}/output` 对严格合法的单次 `read_project_document` 调用返回空的进行中快照；非法工具调用和损坏历史仍拒绝，调用正文不会被当成普通回答公开。
 
 ## 本机验证与边界
 
