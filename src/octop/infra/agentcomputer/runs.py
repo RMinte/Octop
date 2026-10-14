@@ -99,32 +99,39 @@ def run_view(run: AcRunRow, *, cancel_requested: bool) -> RunView:
         raise StorageDataError("invalid run projection") from exc
 
 
+def get_run_in_transaction(
+    services: SharedServices, conn: Any, *, owner_id: int, run_id: UUID, box_id: UUID
+) -> RunView | None:
+    """Validate the same complete Run graph used by the standalone Run read."""
+    bound = load_bound_run(services, conn, owner_id=owner_id, run_id=run_id, box_id=box_id)
+    if bound is None:
+        return None
+    from octop.infra.agentcomputer.dispatch import validate_dispatch_binding
+
+    claim = validate_dispatch_binding(services, conn, bound)
+    from octop.infra.agentcomputer.effects import validate_effect_bindings
+
+    validate_effect_bindings(services, conn, bound, claim)
+    from octop.infra.agentcomputer.pauses import validate_pause_bindings
+
+    validate_pause_bindings(services, conn, bound, claim)
+    from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
+
+    cancellation = validate_cancellation_binding(services, conn, bound, claim)
+    from octop.infra.agentcomputer.completions import validate_completion_binding
+
+    validate_completion_binding(services, conn, bound, claim)
+    return run_view(bound.run, cancel_requested=cancellation is not None)
+
+
 def get_run(services: SharedServices, *, owner_id: int, run_id: UUID) -> RunView | None:
     """Read current stored state without dispatch, repair, or rewriting receipts."""
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
     try:
         with services.db.transaction() as conn:
-            bound = load_bound_run(
+            return get_run_in_transaction(
                 services, conn, owner_id=owner_id, run_id=run_id, box_id=identity.boxID
             )
-            if bound is None:
-                return None
-            from octop.infra.agentcomputer.dispatch import validate_dispatch_binding
-
-            claim = validate_dispatch_binding(services, conn, bound)
-            from octop.infra.agentcomputer.effects import validate_effect_bindings
-
-            validate_effect_bindings(services, conn, bound, claim)
-            from octop.infra.agentcomputer.pauses import validate_pause_bindings
-
-            validate_pause_bindings(services, conn, bound, claim)
-            from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
-
-            cancellation = validate_cancellation_binding(services, conn, bound, claim)
-            from octop.infra.agentcomputer.completions import validate_completion_binding
-
-            validate_completion_binding(services, conn, bound, claim)
-            return run_view(bound.run, cancel_requested=cancellation is not None)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("run storage unavailable") from exc
     except StorageDataError:

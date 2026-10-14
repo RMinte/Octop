@@ -67,6 +67,31 @@ class AcTaskRepo:
         return AcTaskRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def list_page_in_transaction(
+        conn: Any,
+        project_id: str,
+        owner_id: int,
+        *,
+        after: tuple[int, str] | None,
+        limit: int,
+    ) -> list[AcTaskRow]:
+        if after is None:
+            rows = conn.execute(
+                "SELECT * FROM ac_tasks WHERE project_id = ? AND owner_id = ? "
+                "ORDER BY created_at DESC, task_id DESC LIMIT ?",
+                (project_id, owner_id, limit),
+            ).fetchall()
+        else:
+            created_at, task_id = after
+            rows = conn.execute(
+                "SELECT * FROM ac_tasks WHERE project_id = ? AND owner_id = ? "
+                "AND (created_at < ? OR (created_at = ? AND task_id < ?)) "
+                "ORDER BY created_at DESC, task_id DESC LIMIT ?",
+                (project_id, owner_id, created_at, created_at, task_id, limit),
+            ).fetchall()
+        return [AcTaskRow.from_row(row) for row in rows]
+
+    @staticmethod
     def insert(
         conn: Any,
         *,

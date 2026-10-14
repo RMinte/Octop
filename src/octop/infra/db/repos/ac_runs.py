@@ -121,6 +121,13 @@ class AcRunRepo:
         return AcRunRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def latest_for_task_in_transaction(conn: Any, task_id: str) -> AcRunRow | None:
+        row = conn.execute(
+            "SELECT * FROM ac_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
+        ).fetchone()
+        return AcRunRow.from_row(row) if row is not None else None
+
+    @staticmethod
     def recovery_high_watermark(conn: Any) -> int:
         row = conn.execute(
             "SELECT MAX(id) AS through_pk FROM ac_runs "

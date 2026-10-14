@@ -330,6 +330,20 @@ class RunView(ControlModel):
         return value
 
 
+class TaskListItem(ControlModel):
+    task: TaskView
+    latestRun: RunView | None = Field(
+        description="Latest persisted Run by insertion order, or null when this Task has no Run."
+    )
+
+
+class TaskListResponse(ControlModel):
+    items: list[TaskListItem]
+    nextCursor: str | None = Field(
+        description="Opaque cursor for the next page, or null when no further Task exists."
+    )
+
+
 class DispatchIntent(ControlModel):
     """Complete immutable input to the dedicated engine entry, never client configuration."""
 

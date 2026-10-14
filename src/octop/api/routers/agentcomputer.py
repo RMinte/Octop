@@ -45,6 +45,7 @@ from octop.infra.agentcomputer.models import (
     RunView,
     TaskCreateCommand,
     TaskCreateReceipt,
+    TaskListResponse,
     TaskView,
 )
 from octop.infra.agentcomputer.pauses import get_pause_status, get_run_pause_status
@@ -52,6 +53,7 @@ from octop.infra.agentcomputer.projects import create_project, get_project, list
 from octop.infra.agentcomputer.results import RunResult, get_run_result
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.agentcomputer.submission import submit_new_message
+from octop.infra.agentcomputer.task_listing import InvalidTaskListCursor, list_tasks
 from octop.infra.agentcomputer.tasks import admit_task, get_task
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
@@ -329,6 +331,61 @@ async def project_status(
     if project is None:
         return protocol_error_response("resourceNotFound", 404)
     return project
+
+
+@router.get(
+    "/projects/{projectID}/tasks",
+    response_model=TaskListResponse,
+    summary="List an owned project's Tasks and each latest verified Run",
+    description=(
+        "Requires a user Bearer token. Missing and other users' projects return the same 404, "
+        "including for admins. Tasks are ordered by creation time and public Task UUID, both "
+        "descending. Pass nextCursor unchanged to read the next page; a cursor from another box, "
+        "user, project, or restore epoch is invalid. Each item has a current Task mapping view and "
+        "its latest fully verified Run, or null if no Run exists. A broken stored binding fails the "
+        "whole page instead of omitting an item. This query never dispatches a model."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No project owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid project, limit, or cursor"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Task or Run storage unavailable"},
+    },
+)
+async def task_list(
+    response: Response,
+    project_id: UUID = Path(alias="projectID", description="Owned public project UUID."),
+    limit: int = Query(default=50, ge=1, le=100, description="Page size, from 1 to 100."),
+    cursor: str | None = Query(
+        default=None, description="Opaque cursor returned by the previous page."
+    ),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> TaskListResponse | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        listing = await server.agentcomputer_http_operations.run_thread(
+            list_tasks, server.services, user.id, project_id, limit, cursor
+        )
+    except InvalidTaskListCursor:
+        return protocol_error_response("invalidRequest", 422)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Task listing")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Task or Run listing data is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="taskInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Task listing storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if listing is None:
+        return protocol_error_response("resourceNotFound", 404)
+    return listing
 
 
 @router.post(
