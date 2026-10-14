@@ -38,6 +38,7 @@ describe("sidebarNavLayout", () => {
       "chat",
       "experts",
       "tasks",
+      "box-projects",
       "token-usage",
     ]);
     expect(editor.groups.map((group) => group.id)).toEqual([
@@ -68,7 +69,10 @@ describe("sidebarNavLayout", () => {
       "settings",
       "control",
     ]);
-    expect(applied[0]?.items.map((item) => item.key)).toEqual(["chat"]);
+    expect(applied[0]?.items.map((item) => item.key)).toEqual([
+      "chat",
+      "box-projects",
+    ]);
     expect(applied[1]?.title).toBe("配置");
     expect(applied[1]?.items.map((item) => item.key)).toEqual([
       "personalization",
@@ -81,9 +85,10 @@ describe("sidebarNavLayout", () => {
       groups: [{ id: "settings" }],
       items: [{ key: "chat" }],
     });
-    expect(editor.ungrouped).toEqual(["chat"]);
+    expect(editor.ungrouped).toEqual(["chat", "box-projects"]);
     expect(editor.hidden).toContain("experts");
     expect(editor.hidden).toContain("personalization");
+    expect(editor.ungrouped).toContain("box-projects");
     expect(
       sectionsFromLayout(catalog(), {
         groups: [{ id: "settings" }],
@@ -92,6 +97,23 @@ describe("sidebarNavLayout", () => {
         .flatMap((section) => section.items.map((item) => item.key))
         .includes("experts"),
     ).toBe(false);
+    expect(
+      sectionsFromLayout(catalog(), {
+        groups: [{ id: "settings" }],
+        items: [{ key: "chat" }],
+      })
+        .flatMap((section) => section.items.map((item) => item.key))
+        .includes("box-projects"),
+    ).toBe(true);
+  });
+
+  it("respects an explicitly hidden box projects entry", () => {
+    const editor = editorFromCatalog(catalog(), {
+      groups: [],
+      items: [{ key: "box-projects", hidden: true }],
+    });
+    expect(editor.hidden).toContain("box-projects");
+    expect(editor.ungrouped).not.toContain("box-projects");
   });
 
   it("moves a deleted group's items to the front of the ungrouped list", () => {

@@ -1,0 +1,136 @@
+.sourceSelect {
+  min-width: 170px;
+  max-width: 280px;
+}
+
+.alert {
+  margin-bottom: 16px;
+}
+
+.connectionHint {
+  margin-bottom: 16px;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.8fr) minmax(240px, 1fr) minmax(
+      340px,
+      1.6fr
+    );
+  gap: 16px;
+  align-items: start;
+}
+
+.panel {
+  min-width: 0;
+  min-height: 320px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--fn-border-color, rgba(127, 127, 127, 0.18));
+  border-radius: 8px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover,
+.active {
+  background: var(--fn-sidebar-item-active-bg, rgba(127, 127, 127, 0.12));
+}
+
+.itemTitle {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin: 16px 0;
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.userMessage,
+.assistantMessage {
+  padding: 12px 14px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.userMessage {
+  align-self: flex-end;
+  max-width: 88%;
+  background: var(--fn-sidebar-item-active-bg, rgba(127, 127, 127, 0.12));
+}
+
+.assistantMessage {
+  align-self: flex-start;
+  width: 100%;
+  background: var(--fn-sidebar-bg, rgba(127, 127, 127, 0.07));
+}
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.form {
+  display: flex;
+  width: 100%;
+}
+
+@media (max-width: 1200px) {
+  .columns {
+    grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr);
+  }
+
+  .conversation {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 700px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .conversation {
+    grid-column: auto;
+  }
+
+  .composer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

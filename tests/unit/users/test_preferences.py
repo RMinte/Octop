@@ -137,6 +137,16 @@ def test_sidebar_nav_rejects_unknown_item_and_dangling_group() -> None:
         validate_sidebar_nav({"groups": [{"id": "c_short", "name": "X"}], "items": []})
 
 
+def test_sidebar_nav_accepts_box_projects_visibility() -> None:
+    groups, items = validate_sidebar_nav({"groups": [], "items": [{"key": "box-projects"}]})
+    assert groups == []
+    assert items[0].key == "box-projects"
+    _, hidden = validate_sidebar_nav(
+        {"groups": [], "items": [{"key": "box-projects", "hidden": True}]}
+    )
+    assert hidden[0].hidden is True
+
+
 def test_sidebar_nav_clear_and_invalid_payload() -> None:
     merged = merge_sidebar_nav_json("{}", {"groups": [], "items": [{"key": "chat"}]})
     cleared = merge_sidebar_nav_json(merged, None)

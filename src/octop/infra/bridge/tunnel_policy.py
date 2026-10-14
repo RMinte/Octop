@@ -6,6 +6,7 @@ are fully tunneled; tools / plugins / channels are limited writes (the
 Personalization UI still PATCHes tool-settings and may POST reload);
 skill packages, global ACP, connector admin, and knowledge-base admin stay
 peer-only in the UI even when a matching path would otherwise match.
+The separate AgentComputer project/Task protocol has its own narrow route set.
 Management / auth / bridge control planes stay local-only.
 """
 
@@ -13,8 +14,8 @@ from __future__ import annotations
 
 import re
 
-# Only agent-scoped product surfaces may be executed on behalf of the connection
-# owner. Management / auth / bridge control planes stay local-only.
+# Product surfaces run as the connection owner. Management / auth / bridge
+# control planes stay local-only.
 _AGENT_COLLECTION = re.compile(r"^/api/agents/?$")
 _AGENT_RESOURCE = re.compile(
     r"^/api/agents/"
@@ -48,6 +49,22 @@ _SUBAGENT_CATALOG = re.compile(r"^/api/subagent-catalog(?:/.*)?$")
 _ACP_GLOBAL = re.compile(r"^/api/acp(?:/[^/]+)?$")
 _CRON_SETTINGS = re.compile(r"^/api/cron/settings$")
 _CONNECTOR_INSTANCES_LIST = re.compile(r"^/api/connector-instances$")
+
+# AgentComputer exposes a separate, owner-scoped project/Task protocol. Only
+# the endpoints needed by the remote project and conversation pages may cross
+# a Bridge. Keep write methods and resource shapes explicit: this is not an
+# escape hatch into the rest of the peer's control plane.
+_AC_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_AGENTCOMPUTER_READ = re.compile(
+    rf"^/api/agentcomputer/v1/(?:"
+    rf"capabilities|projects|projects/{_AC_UUID}|projects/{_AC_UUID}/tasks|"
+    rf"tasks/{_AC_UUID}|tasks/{_AC_UUID}/turns|"
+    rf"runs/{_AC_UUID}|runs/{_AC_UUID}/result|commands/{_AC_UUID}"
+    rf")$"
+)
+_AGENTCOMPUTER_WRITE = re.compile(
+    rf"^/api/agentcomputer/v1/(?:projects|projects/{_AC_UUID}/tasks|tasks/{_AC_UUID}/turns)$"
+)
 
 
 def is_tunnel_path_allowed(method: str, path: str) -> bool:
@@ -93,4 +110,7 @@ def is_tunnel_path_allowed(method: str, path: str) -> bool:
     if _CONNECTOR_INSTANCES_LIST.fullmatch(raw):
         return verb == "GET"
 
-    return False
+    if _AGENTCOMPUTER_READ.fullmatch(raw) and verb == "GET":
+        return True
+
+    return bool(_AGENTCOMPUTER_WRITE.fullmatch(raw) and verb == "POST")

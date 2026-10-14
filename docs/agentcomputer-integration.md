@@ -329,3 +329,12 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 工程验证：最终 make all 通过：Ruff、strict mypy（592 个源文件），5175 passed / 23 skipped；跳过不计通过。提交还须通过仓库实际 pre-commit/testmon 与 Dashboard 构建。真实模型、live PostgreSQL、Ubuntu/Linux/Windows 实机及完整 M0/M1 尚未验证。隔离 Fixture 覆盖固定意图、精确重放、同 Run 竞争、派发前撤销、部分效果错误、取消/确认丢失、terminal与事件失败回滚、未知不重放及双 lane 保留；skipped/deselected不计通过。
 - 本地：完整备份后升级自有8090至adapter0.8/revision8及schema24；原用户、stopped托管专家、failed/providerUnavailable项目、box身份和原Project收据字节保持。真实库0 Task/thread/session/Turn/Run/event、原派发journal0条、新tool effects0条、usage/model calls0。未知Task/Run404、非法正文/ID422、匿名/URLtoken401、body超限413；原typed OpenAPI和Scalar五阶段卡片可读，无HTTP工具/claim/dispatch/recover/cancel或Task创建/执行入口。同home第二CLI显式host/port/SSL返回CONTROL_PLANE_BUSY、config字节与锁inode保持，首8090进程及原8088健康200。备份：/Users/fangyuan/Desktop/code/Octop/.runtime/backups/iteration-08-before-adapter-08-20261013T021821Z。原型不写 ready/Task/Turn/Run/effect Fixture 或真实模型工具配置；failed/providerUnavailable项目、stopped专家、原收据与身份保持，备份、运行数据库和凭据仅保留忽略目录。
 - 阶段边界：M1-07 部分通过，完整 M0/M1 未通过。生产 catalog/授权、实际文件 before/after、正式成果发布、工具隔离、原生历史/恢复、进程停止证明、持久取消/审批、公开事件/快照、恢复 fencing、设备配对、livePG与盒子实机继续逐项验收。
+
+
+## 2026-10-15 Octop 网页项目与 Task 接线
+
+- 基线：主工作目录 `feature/agentcomputer-foundation @ 9922d1c9a938ac26da7479c304b89f2b621cf35c`，目标仍为用户 fork 的同名分支。AgentComputer 独立分支及其已有 `.harness` 改动未触碰。
+- 页面：Dashboard 新增 `/box-projects`、项目详情和 Task 会话路由及侧栏入口；可选择当前 Octop 或已连接的 Bridge 目标，读取项目、Task、分页 Turn、Run 状态与核验后的最终回答，并在能力允许时创建项目、Task 和同 Task 追问。每次写入使用固定命令 ID 与幂等键；响应不明先查原回执，再用同一请求重试。原 `/chat` 与定时任务 `/tasks` 保持各自语义。
+- 服务端：Bridge 新增仅覆盖页面所需 AgentComputer v1 路径的同源代理，双方隧道策略仅放行明确列出的 GET/POST；当前连接的归属、Bearer 会话、远端响应类型和状态码均受约束，任意远端响应头与未列出的文本不透传。
+- 验证：Dashboard TypeScript 与生产构建通过；改动文件 ESLint、侧栏/路由 18 项、AgentComputer Bridge/权限/i18n 后端聚焦 101 项通过。全量 ESLint 因 `Channels/components/constants.test.ts` 与 `Chat/hooks/chatStore.ts` 的既有错误未通过；按用户要求未重复跑完整 `make all`。8090 重启后认证能力仍显示项目、Task、Run 均可用，真实数据只读查询得到 4 项项目、首个项目的 Task 与 Turn；8088 和 8090 的 `/box-projects` 均返回 200。
+- 未闭环：本地两库均尚无 Bridge 连接；8088 用户需在 `/bridge` 连接 8090 后选择该来源，网页登录及跨实例页面点验尚未完成。审批、正式成果、设备配对和目标 Ubuntu 盒子的阶段退出标准不因这一网页入口降低。最新进度见 [进度页](agentcomputer-progress.md)。

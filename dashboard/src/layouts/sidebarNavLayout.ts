@@ -114,7 +114,12 @@ export function editorFromCatalog(
     }
   }
   for (const key of defaultKeyOrder(base)) {
-    if (!seen.has(key)) hidden.push(key);
+    if (!seen.has(key)) {
+      // Existing custom layouts predate this route. Show the new entry until
+      // the user explicitly moves it to Hidden.
+      if (key === "box-projects") ungrouped.push(key);
+      else hidden.push(key);
+    }
   }
   return { groups, ungrouped, itemsByGroup, hidden };
 }

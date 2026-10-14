@@ -78,3 +78,42 @@ def test_denies_management_and_auth_paths() -> None:
     assert not is_tunnel_path_allowed("GET", "/api/admin/audit")
     assert not is_tunnel_path_allowed("POST", "/api/settings")
     assert not is_tunnel_path_allowed("DELETE", "/api/setup/password")
+
+
+def test_agentcomputer_tunnel_only_allows_project_task_conversation_contract() -> None:
+    uid = "11111111-1111-4111-8111-111111111111"
+    allowed = {
+        "GET": [
+            "/api/agentcomputer/v1/capabilities",
+            "/api/agentcomputer/v1/projects",
+            f"/api/agentcomputer/v1/projects/{uid}",
+            f"/api/agentcomputer/v1/projects/{uid}/tasks",
+            f"/api/agentcomputer/v1/tasks/{uid}",
+            f"/api/agentcomputer/v1/tasks/{uid}/turns",
+            f"/api/agentcomputer/v1/runs/{uid}",
+            f"/api/agentcomputer/v1/runs/{uid}/result",
+            f"/api/agentcomputer/v1/commands/{uid}",
+        ],
+        "POST": [
+            "/api/agentcomputer/v1/projects",
+            f"/api/agentcomputer/v1/projects/{uid}/tasks",
+            f"/api/agentcomputer/v1/tasks/{uid}/turns",
+        ],
+    }
+    for method, paths in allowed.items():
+        for path in paths:
+            assert is_tunnel_path_allowed(method, path), (method, path)
+
+    denied = [
+        ("POST", "/api/agentcomputer/v1/capabilities"),
+        ("DELETE", "/api/agentcomputer/v1/projects"),
+        ("POST", f"/api/agentcomputer/v1/tasks/{uid}"),
+        ("POST", f"/api/agentcomputer/v1/runs/{uid}/cancel"),
+        ("GET", f"/api/agentcomputer/v1/tasks/{uid}/snapshot"),
+        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents"),
+        ("GET", "/api/agentcomputer/v1/projects/not-a-uuid"),
+        ("GET", f"/api/agentcomputer/v1/projects/{uid}/tasks/extra"),
+        ("GET", "/api/agentcomputer/v1/../auth/login"),
+    ]
+    for method, path in denied:
+        assert not is_tunnel_path_allowed(method, path), (method, path)

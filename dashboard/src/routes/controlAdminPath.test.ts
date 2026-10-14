@@ -46,6 +46,10 @@ describe("pathPermissionKeys", () => {
     expect(ADVANCED_TAB_PERMISSIONS.captcha).toBe("captcha");
     expect("bridge" in ADVANCED_TAB_PERMISSIONS).toBe(false);
     expect(pathPermissionKeys("/bridge")).toBeNull();
+    expect(pathPermissionKeys("/box-projects")).toBeNull();
+    expect(
+      pathPermissionKeys("/box-projects/project-id/tasks/task-id"),
+    ).toBeNull();
     expect([...PERM.advancedPage]).toContain("captcha");
   });
 
@@ -125,5 +129,24 @@ describe("unknown dashboard paths", () => {
 
   it("are caught by the not-found route", () => {
     expect(routeConfigs.some((rc) => rc.path === "*")).toBe(true);
+  });
+});
+
+describe("box project routes", () => {
+  it("keeps the box projects nav selected for project and Task pages", () => {
+    expect(resolveSelectedKey("/box-projects")).toBe("box-projects");
+    expect(resolveSelectedKey("/box-projects/project-id")).toBe("box-projects");
+    expect(resolveSelectedKey("/box-projects/project-id/tasks/task-id")).toBe(
+      "box-projects",
+    );
+    expect(
+      routeConfigs
+        .filter((route) => route.path.startsWith("/box-projects"))
+        .map((route) => route.path),
+    ).toEqual([
+      "/box-projects",
+      "/box-projects/:projectID",
+      "/box-projects/:projectID/tasks/:taskID",
+    ]);
   });
 });

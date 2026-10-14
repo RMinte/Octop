@@ -17,6 +17,7 @@ import {
   Package,
   HardDrive,
   GraduationCap,
+  Boxes,
   Shield,
   PanelsTopLeft,
 } from "lucide-react";
@@ -52,6 +53,7 @@ export const SIDEBAR_NAV_KEYS = [
   "chat",
   "experts",
   "tasks",
+  "box-projects",
   "token-usage",
   "personalization",
   "channels",
@@ -155,6 +157,12 @@ export function buildNavSections(
           path: "/tasks",
           icon: <Timer size={iconSize} strokeWidth={iconStroke} />,
           labelKey: "nav.tasks",
+        },
+        {
+          key: "box-projects",
+          path: "/box-projects",
+          icon: <Boxes size={iconSize} strokeWidth={iconStroke} />,
+          labelKey: "nav.boxProjects",
         },
         {
           key: "token-usage",

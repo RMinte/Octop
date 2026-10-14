@@ -7,17 +7,66 @@ import contextlib
 import json
 import logging
 from typing import Any, cast
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.websockets import WebSocketState
 
-from octop.api.deps import current_user, get_server, resolve_user_from_token
+from octop.api.agentcomputer import ProtocolErrorEnvelope
+from octop.api.deps import (
+    current_bearer_user,
+    current_user,
+    extract_raw_token,
+    get_server,
+    resolve_user_from_token,
+)
+from octop.infra.agentcomputer.cancellations import CancelRunReceipt
+from octop.infra.agentcomputer.capabilities import AgentComputerCapabilitiesResponse
+from octop.infra.agentcomputer.models import (
+    CommandReceipt,
+    NewMessageCommand,
+    ProjectCreateCommand,
+    ProjectCreateReceipt,
+    ProjectListResponse,
+    ProjectView,
+    RunPauseDecisionReceipt,
+    RunView,
+    TaskCreateCommand,
+    TaskCreateReceipt,
+    TaskListResponse,
+    TaskView,
+)
+from octop.infra.agentcomputer.results import RunResult
+from octop.infra.agentcomputer.turn_listing import TurnListResponse
 from octop.infra.errors import ErrorCode, OctopError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_SAFE_AGENTCOMPUTER_REASONS = frozenset(
+    {
+        "cancellationInvalid",
+        "eventInvalid",
+        "executionUnavailable",
+        "identityInvalid",
+        "pauseInvalid",
+        "permissionModeUnsupported",
+        "preparationIncomplete",
+        "projectInvalid",
+        "receiptInvalid",
+        "runInvalid",
+        "runtimeNotReady",
+        "setupRequired",
+        "snapshotInvalid",
+        "submissionInvalid",
+        "taskInvalid",
+        "turnInvalid",
+        "userMessageAlreadyRegistered",
+    }
+)
 
 
 class BridgeCreateBody(BaseModel):
@@ -411,6 +460,355 @@ async def post_remote_browser_handoff(
             session_id=session_id,
             body=body.model_dump(),
         ),
+    )
+
+
+async def _bridge_bearer_user(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    user: Any = Depends(current_bearer_user),
+) -> Any:
+    # The ordinary Bridge routes allow the dashboard's legacy URL token. The
+    # AgentComputer protocol requires a header-only user session on both hops.
+    if "access_token" in request.query_params or not extract_raw_token(authorization=authorization):
+        raise OctopError(ErrorCode.AUTH_FAILED, "Bearer token required")
+    return user
+
+
+async def _agentcomputer_tunnel(
+    request: Request,
+    *,
+    connection_id: str,
+    remote_path: str,
+    response_type: Any,
+    user: Any,
+    server: Any,
+) -> JSONResponse:
+    """Relay one explicit protocol route, returning only typed JSON, never peer headers."""
+    is_post = request.method == "POST"
+    try:
+        peer = await _bridge(server).tunnel_http(
+            connection_id=connection_id,
+            owner_user_id=user.id,
+            method=request.method,
+            path=remote_path,
+            query=request.url.query,
+            headers={"content-type": "application/json"} if is_post else None,
+            body=await request.body() if is_post else None,
+        )
+    except OctopError as exc:
+        if exc.code == ErrorCode.BRIDGE_TUNNEL_FAILED:
+            raise OctopError(ErrorCode.BRIDGE_TUNNEL_FAILED, "peer request failed") from exc
+        raise
+    if 200 <= peer.status_code < 300:
+        try:
+            adapter = TypeAdapter(response_type)
+            safe_payload = adapter.dump_python(adapter.validate_python(peer.json()), mode="json")
+        except (ValueError, ValidationError) as exc:
+            raise OctopError(
+                ErrorCode.BRIDGE_TUNNEL_FAILED, "peer returned an invalid AgentComputer response"
+            ) from exc
+    else:
+        try:
+            envelope = ProtocolErrorEnvelope.model_validate(peer.json())
+            safe_payload = envelope.model_dump(mode="json", exclude_none=True)
+            if envelope.error.reasonCode not in _SAFE_AGENTCOMPUTER_REASONS:
+                safe_payload["error"].pop("reasonCode", None)
+        except (ValueError, ValidationError):
+            # Older peers may return a generic 404/503 body. Keep the status,
+            # but do not reflect arbitrary peer text or response headers.
+            safe_payload = {
+                "error": {
+                    "code": "resourceNotFound" if peer.status_code == 404 else "internalError",
+                    "retryable": peer.status_code >= 500,
+                }
+            }
+    return JSONResponse(
+        status_code=peer.status_code,
+        content=safe_payload,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/capabilities",
+    response_model=AgentComputerCapabilitiesResponse,
+    summary="Read peer AgentComputer capabilities via Bridge",
+)
+async def bridge_agentcomputer_capabilities(
+    request: Request,
+    connection_id: str,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path="/api/agentcomputer/v1/capabilities",
+        response_type=AgentComputerCapabilitiesResponse,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects",
+    response_model=ProjectListResponse,
+    summary="List peer AgentComputer projects via Bridge",
+)
+async def bridge_agentcomputer_projects(
+    request: Request,
+    connection_id: str,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path="/api/agentcomputer/v1/projects",
+        response_type=ProjectListResponse,
+        user=user,
+        server=server,
+    )
+
+
+@router.post(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects",
+    status_code=201,
+    response_model=ProjectCreateReceipt,
+    summary="Create a peer AgentComputer project via Bridge",
+)
+async def bridge_agentcomputer_create_project(
+    request: Request,
+    connection_id: str,
+    body: ProjectCreateCommand,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    _ = body
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path="/api/agentcomputer/v1/projects",
+        response_type=ProjectCreateReceipt,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects/{project_id}",
+    response_model=ProjectView,
+    summary="Read a peer AgentComputer project via Bridge",
+)
+async def bridge_agentcomputer_project(
+    request: Request,
+    connection_id: str,
+    project_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/projects/{project_id}",
+        response_type=ProjectView,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects/{project_id}/tasks",
+    response_model=TaskListResponse,
+    summary="List Tasks in a peer AgentComputer project via Bridge",
+)
+async def bridge_agentcomputer_tasks(
+    request: Request,
+    connection_id: str,
+    project_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/projects/{project_id}/tasks",
+        response_type=TaskListResponse,
+        user=user,
+        server=server,
+    )
+
+
+@router.post(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects/{project_id}/tasks",
+    status_code=201,
+    response_model=TaskCreateReceipt,
+    summary="Create a Task in a peer AgentComputer project via Bridge",
+)
+async def bridge_agentcomputer_create_task(
+    request: Request,
+    connection_id: str,
+    project_id: UUID,
+    body: TaskCreateCommand,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    _ = body
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/projects/{project_id}/tasks",
+        response_type=TaskCreateReceipt,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/tasks/{task_id}",
+    response_model=TaskView,
+    summary="Read a peer AgentComputer Task via Bridge",
+)
+async def bridge_agentcomputer_task(
+    request: Request,
+    connection_id: str,
+    task_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/tasks/{task_id}",
+        response_type=TaskView,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/tasks/{task_id}/turns",
+    response_model=TurnListResponse,
+    summary="List peer AgentComputer Task conversation turns via Bridge",
+)
+async def bridge_agentcomputer_turns(
+    request: Request,
+    connection_id: str,
+    task_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/tasks/{task_id}/turns",
+        response_type=TurnListResponse,
+        user=user,
+        server=server,
+    )
+
+
+@router.post(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/tasks/{task_id}/turns",
+    status_code=201,
+    response_model=CommandReceipt,
+    summary="Submit a peer AgentComputer Task message via Bridge",
+)
+async def bridge_agentcomputer_new_turn(
+    request: Request,
+    connection_id: str,
+    task_id: UUID,
+    body: NewMessageCommand,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    _ = body
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/tasks/{task_id}/turns",
+        response_type=CommandReceipt,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}",
+    response_model=RunView,
+    summary="Read a peer AgentComputer Run via Bridge",
+)
+async def bridge_agentcomputer_run(
+    request: Request,
+    connection_id: str,
+    run_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/runs/{run_id}",
+        response_type=RunView,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}/result",
+    response_model=RunResult,
+    summary="Read a peer AgentComputer Run result via Bridge",
+)
+async def bridge_agentcomputer_run_result(
+    request: Request,
+    connection_id: str,
+    run_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/runs/{run_id}/result",
+        response_type=RunResult,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/commands/{command_id}",
+    response_model=(
+        CommandReceipt
+        | ProjectCreateReceipt
+        | TaskCreateReceipt
+        | CancelRunReceipt
+        | RunPauseDecisionReceipt
+    ),
+    summary="Read an immutable peer AgentComputer command receipt via Bridge",
+)
+async def bridge_agentcomputer_command_receipt(
+    request: Request,
+    connection_id: str,
+    command_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/commands/{command_id}",
+        response_type=(
+            CommandReceipt
+            | ProjectCreateReceipt
+            | TaskCreateReceipt
+            | CancelRunReceipt
+            | RunPauseDecisionReceipt
+        ),
+        user=user,
+        server=server,
     )
 
 
