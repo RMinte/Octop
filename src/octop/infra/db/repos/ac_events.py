@@ -77,6 +77,23 @@ class AcEventRepo:
         return map_rows(rows, AcEventRow)
 
     @staticmethod
+    def list_page_for_task_in_transaction(
+        conn: Any,
+        task_id: str,
+        owner_id: int,
+        *,
+        after_sequence: int,
+        through_sequence: int,
+        limit: int,
+    ) -> list[AcEventRow]:
+        rows = conn.execute(
+            "SELECT * FROM ac_events WHERE task_id=? AND owner_id=? "
+            "AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?",
+            (task_id, owner_id, after_sequence, through_sequence, limit),
+        ).fetchall()
+        return map_rows(rows, AcEventRow)
+
+    @staticmethod
     def insert(
         conn: Any,
         *,

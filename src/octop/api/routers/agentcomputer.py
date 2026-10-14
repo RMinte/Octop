@@ -32,6 +32,11 @@ from octop.infra.agentcomputer.commands import (
     StorageUnavailableError,
     get_command_receipt,
 )
+from octop.infra.agentcomputer.event_listing import (
+    InvalidTaskEventCursor,
+    TaskEventListResponse,
+    list_task_events,
+)
 from octop.infra.agentcomputer.identity import IdentityError
 from octop.infra.agentcomputer.models import (
     CommandReceipt,
@@ -554,6 +559,70 @@ async def turn_list(
         return protocol_error_response("storageUnavailable", 503, reason="turnInvalid")
     except (OSError, StorageUnavailableError):
         logger.error("AgentComputer Turn listing storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if listing is None:
+        return protocol_error_response("resourceNotFound", 404)
+    return listing
+
+
+@router.get(
+    "/tasks/{taskID}/events",
+    response_model=TaskEventListResponse,
+    summary="Read an owned Task's durable control events in sequence",
+    description=(
+        "Requires a user Bearer token. Missing and other users' Tasks return the same 404, "
+        "including for admins. Events are ordered by ascending Task sequence. The opaque "
+        "nextCursor continues a fixed committed window while hasMore is true; once caught up, "
+        "pass that same cursor on a later request to poll new events. Cursors are bound to the "
+        "box, owner, Task, and current restore epoch; older epochs' stored events can be reread "
+        "from the beginning, but old cursors fail. Each listed event is a safe summary of a "
+        "persisted control fact, after its Run graph and sequence are validated. Internal event "
+        "payloads, model text, tool arguments, results, paths, and credentials are omitted. "
+        "Use the separate Run result endpoint for a verified final answer. Engine acceptance "
+        "does not prove model generation; tool events are journal facts, not proof that a "
+        "production tool executed. This read-only page is not the complete snapshot/event "
+        "protocol advertised by the events capability."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No Task owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid Task, limit, or cursor"},
+        503: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Task event graph or storage unavailable",
+        },
+    },
+)
+async def task_events(
+    response: Response,
+    task_id: UUID = Path(alias="taskID", description="Owned public Task UUID."),
+    limit: int = Query(default=50, ge=1, le=100, description="Page size, from 1 to 100."),
+    cursor: str | None = Query(
+        default=None, description="Opaque cursor returned by the previous page or poll."
+    ),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> TaskEventListResponse | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        listing = await server.agentcomputer_http_operations.run_thread(
+            list_task_events, server.services, user.id, task_id, limit, cursor
+        )
+    except InvalidTaskEventCursor:
+        return protocol_error_response("invalidRequest", 422)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Task event listing")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Task event graph is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="eventInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Task event storage is unavailable")
         return protocol_error_response("storageUnavailable", 503, retryable=True)
     if listing is None:
         return protocol_error_response("resourceNotFound", 404)

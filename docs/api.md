@@ -20,14 +20,20 @@ current capabilities, and the local development profile.
 The AgentComputer project surface now includes `POST /api/agentcomputer/v1/projects`
 and `GET /api/agentcomputer/v1/projects/{projectID}`. Creation registers an immutable
 intent receipt and prepares stopped resources; the project query reports current
-preparation progress. Full execution readiness remains unavailable. See
+preparation progress. Local text execution remains capability gated. See
 [project preparation](agentcomputer-projects.md) for request fields, retry rules,
 resource ownership, and the enforced 65536-byte command limit.
 
 `GET /api/agentcomputer/v1/tasks/{taskID}` reads only the caller's existing Task
-mapping. Task creation and execution routes remain unavailable. See
+mapping. Task creation and text execution require the local capability gate. See
 [Task mapping](agentcomputer-tasks.md) for the internal atomic registration,
 immutable receipt, and current view distinction.
+
+`GET /api/agentcomputer/v1/tasks/{taskID}/events` reads a forward page of the
+owner's durable Task control events. Its opaque `nextCursor` continues the same
+fixed page window, then serves as the cursor for later polls. The response omits
+internal payloads and model text; read the Run result for a verified final answer.
+See [Task event reads](agentcomputer-event-read.md) for the exact shape and limits.
 
 `POST /api/agentcomputer/v1/runs/{runID}/cancel` accepts an exact, owned Run
 cancellation command. `GET /api/agentcomputer/v1/runs/{runID}` reports the current
