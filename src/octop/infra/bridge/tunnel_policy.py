@@ -57,7 +57,8 @@ _CONNECTOR_INSTANCES_LIST = re.compile(r"^/api/connector-instances$")
 _AC_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _AGENTCOMPUTER_READ = re.compile(
     rf"^/api/agentcomputer/v1/(?:"
-    rf"capabilities|projects|projects/{_AC_UUID}|projects/{_AC_UUID}/tasks|"
+    rf"capabilities|projects|projects/{_AC_UUID}|projects/{_AC_UUID}/documents|"
+    rf"projects/{_AC_UUID}/tasks|"
     rf"tasks/{_AC_UUID}|tasks/{_AC_UUID}/turns|"
     rf"runs/{_AC_UUID}|runs/{_AC_UUID}/result|commands/{_AC_UUID}"
     rf")$"
@@ -65,6 +66,21 @@ _AGENTCOMPUTER_READ = re.compile(
 _AGENTCOMPUTER_WRITE = re.compile(
     rf"^/api/agentcomputer/v1/(?:projects|projects/{_AC_UUID}/tasks|tasks/{_AC_UUID}/turns)$"
 )
+_AGENTCOMPUTER_DOCUMENT = re.compile(
+    rf"^/api/agentcomputer/v1/projects/{_AC_UUID}/documents/(?P<filename>[^/]+)$"
+)
+
+
+def _allowed_document_filename(filename: str) -> bool:
+    # Mirror the peer's single-file text-document contract. Never let a
+    # general workspace path or percent-encoded separator enter the tunnel.
+    return (
+        1 <= len(filename) <= 128
+        and filename == filename.strip()
+        and not filename.startswith(".")
+        and filename.endswith((".md", ".txt"))
+        and all(character.isalnum() or character in "._-" for character in filename)
+    )
 
 
 def is_tunnel_path_allowed(method: str, path: str) -> bool:
@@ -112,5 +128,9 @@ def is_tunnel_path_allowed(method: str, path: str) -> bool:
 
     if _AGENTCOMPUTER_READ.fullmatch(raw) and verb == "GET":
         return True
+
+    document = _AGENTCOMPUTER_DOCUMENT.fullmatch(raw)
+    if document is not None and verb in {"GET", "PUT"}:
+        return _allowed_document_filename(document.group("filename"))
 
     return bool(_AGENTCOMPUTER_WRITE.fullmatch(raw) and verb == "POST")

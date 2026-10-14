@@ -87,6 +87,9 @@ def test_agentcomputer_tunnel_only_allows_project_task_conversation_contract() -
             "/api/agentcomputer/v1/capabilities",
             "/api/agentcomputer/v1/projects",
             f"/api/agentcomputer/v1/projects/{uid}",
+            f"/api/agentcomputer/v1/projects/{uid}/documents",
+            f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md",
+            f"/api/agentcomputer/v1/projects/{uid}/documents/说明.txt",
             f"/api/agentcomputer/v1/projects/{uid}/tasks",
             f"/api/agentcomputer/v1/tasks/{uid}",
             f"/api/agentcomputer/v1/tasks/{uid}/turns",
@@ -99,6 +102,7 @@ def test_agentcomputer_tunnel_only_allows_project_task_conversation_contract() -
             f"/api/agentcomputer/v1/projects/{uid}/tasks",
             f"/api/agentcomputer/v1/tasks/{uid}/turns",
         ],
+        "PUT": [f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md"],
     }
     for method, paths in allowed.items():
         for path in paths:
@@ -110,7 +114,14 @@ def test_agentcomputer_tunnel_only_allows_project_task_conversation_contract() -
         ("POST", f"/api/agentcomputer/v1/tasks/{uid}"),
         ("POST", f"/api/agentcomputer/v1/runs/{uid}/cancel"),
         ("GET", f"/api/agentcomputer/v1/tasks/{uid}/snapshot"),
-        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents"),
+        ("PUT", f"/api/agentcomputer/v1/projects/{uid}/documents"),
+        ("POST", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md"),
+        ("DELETE", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md"),
+        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/.hidden.md"),
+        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/bad%2Fname.md"),
+        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/bad:name.md"),
+        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.pdf"),
+        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md/extra"),
         ("GET", "/api/agentcomputer/v1/projects/not-a-uuid"),
         ("GET", f"/api/agentcomputer/v1/projects/{uid}/tasks/extra"),
         ("GET", "/api/agentcomputer/v1/../auth/login"),

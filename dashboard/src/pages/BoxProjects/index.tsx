@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Empty,
+  Form,
   Input,
   Modal,
   Select,
@@ -37,6 +38,17 @@ const TERMINAL_STATES = new Set([
   "stopped",
   "interrupted",
 ]);
+const DOCUMENT_LIMIT_BYTES = 16_384;
+
+function validDocumentFilename(filename: string): boolean {
+  return (
+    filename.length >= 1 &&
+    filename.length <= 128 &&
+    !filename.startsWith(".") &&
+    /\.(md|txt)$/.test(filename) &&
+    /^[\p{L}\p{N}._-]+$/u.test(filename)
+  );
+}
 
 function boxUrl(
   connectionId: string | null,
@@ -102,6 +114,26 @@ function BoxWorkspace({
   const [turns, setTurns] = useState<BoxTurn[]>([]);
   const [turnsCursor, setTurnsCursor] = useState<string | null>(null);
   const [pendingRunID, setPendingRunID] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<string[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [documentsRevision, setDocumentsRevision] = useState(0);
+  const [documentError, setDocumentError] = useState<string | null>(null);
+  const [selectedDocument, setSelectedDocument] = useState<{
+    filename: string;
+    content: string;
+  } | null>(null);
+  const [documentLoading, setDocumentLoading] = useState(false);
+  const [documentModal, setDocumentModal] = useState(false);
+  const [documentFilename, setDocumentFilename] = useState("");
+  const [documentContent, setDocumentContent] = useState("");
+  const [documentActionError, setDocumentActionError] = useState<string | null>(
+    null,
+  );
+  const [documentOutcomeUncertain, setDocumentOutcomeUncertain] =
+    useState(false);
+  const [documentChecking, setDocumentChecking] = useState(false);
+  const [documentSaving, setDocumentSaving] = useState(false);
+  const documentRequestID = useRef(0);
   const [loading, setLoading] = useState(true);
   const [projectLoading, setProjectLoading] = useState(false);
   const [taskLoading, setTaskLoading] = useState(false);
@@ -181,6 +213,13 @@ function BoxWorkspace({
       .then(async (verified) => {
         if (!current) return;
         setProject(verified);
+        setProjects((previous) =>
+          previous.some((item) => item.projectID === verified.projectID)
+            ? previous.map((item) =>
+                item.projectID === verified.projectID ? verified : item,
+              )
+            : [verified, ...previous],
+        );
         const listing = await agentComputerApi.tasks(source, projectID);
         if (!current) return;
         setTasks(listing.items);
@@ -197,6 +236,78 @@ function BoxWorkspace({
       current = false;
     };
   }, [source, projectID, refreshRevision, t]);
+
+  useEffect(() => {
+    if (
+      !projectID ||
+      project?.projectID !== projectID ||
+      (project.preparationState !== "pending" &&
+        project.preparationState !== "preparing")
+    )
+      return;
+    let current = true;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      void agentComputerApi
+        .project(source, projectID)
+        .then((verified) => {
+          if (!current) return;
+          setProject(verified);
+          setProjectError(null);
+          setProjects((previous) =>
+            previous.some((item) => item.projectID === verified.projectID)
+              ? previous.map((item) =>
+                  item.projectID === verified.projectID ? verified : item,
+                )
+              : [verified, ...previous],
+          );
+        })
+        .catch((cause: unknown) => {
+          if (current)
+            setProjectError(
+              apiErrorMessage(cause, t("boxProjects.projectRefreshFailed"), t),
+            );
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    }, 2500);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [source, projectID, project?.projectID, project?.preparationState, t]);
+
+  const documentsReady = Boolean(
+    projectID &&
+      project?.projectID === projectID &&
+      project.preparationState === "ready",
+  );
+  useEffect(() => {
+    if (!projectID || !documentsReady) return;
+    let current = true;
+    setDocumentsLoading(true);
+    setDocumentError(null);
+    agentComputerApi
+      .listProjectDocuments(source, projectID)
+      .then((listing) => {
+        if (current) setDocuments(listing.items);
+      })
+      .catch((cause: unknown) => {
+        if (current)
+          setDocumentError(
+            apiErrorMessage(cause, t("boxProjects.documentsFailed"), t),
+          );
+      })
+      .finally(() => {
+        if (current) setDocumentsLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [source, projectID, documentsReady, documentsRevision, t]);
 
   useEffect(() => {
     let current = true;
@@ -485,6 +596,100 @@ function BoxWorkspace({
     }
   }
 
+  async function readDocument(filename: string) {
+    if (!projectID) return;
+    const requestID = ++documentRequestID.current;
+    setDocumentLoading(true);
+    setDocumentError(null);
+    setSelectedDocument(null);
+    try {
+      const result = await agentComputerApi.getProjectDocument(
+        source,
+        projectID,
+        filename,
+      );
+      if (mounted.current && requestID === documentRequestID.current)
+        setSelectedDocument(result);
+    } catch (cause) {
+      if (mounted.current && requestID === documentRequestID.current)
+        setDocumentError(
+          apiErrorMessage(cause, t("boxProjects.documentReadFailed"), t),
+        );
+    } finally {
+      if (mounted.current && requestID === documentRequestID.current)
+        setDocumentLoading(false);
+    }
+  }
+
+  async function createDocument() {
+    const filename = documentFilename.trim();
+    if (
+      !projectID ||
+      !documentsReady ||
+      !validDocumentFilename(filename) ||
+      documents.includes(filename) ||
+      new TextEncoder().encode(documentContent).length > DOCUMENT_LIMIT_BYTES ||
+      documentSaving
+    )
+      return;
+    setDocumentSaving(true);
+    setDocumentActionError(null);
+    setDocumentOutcomeUncertain(false);
+    try {
+      const created = await agentComputerApi.createProjectDocument(
+        source,
+        projectID,
+        filename,
+        documentContent,
+      );
+      if (!mounted.current) return;
+      setDocuments((previous) =>
+        [...new Set([...previous, created.filename])].sort(),
+      );
+      setDocumentsRevision((value) => value + 1);
+      documentRequestID.current += 1;
+      setDocumentLoading(false);
+      setSelectedDocument(created);
+      setDocumentModal(false);
+      setDocumentFilename("");
+      setDocumentContent("");
+    } catch (cause) {
+      if (mounted.current) {
+        setDocumentOutcomeUncertain(!isDefiniteRejection(cause));
+        setDocumentActionError(
+          apiErrorMessage(cause, t("boxProjects.documentCreateFailed"), t),
+        );
+      }
+    } finally {
+      if (mounted.current) setDocumentSaving(false);
+    }
+  }
+
+  async function checkDocuments() {
+    if (!projectID || documentChecking) return;
+    setDocumentChecking(true);
+    try {
+      const listing = await agentComputerApi.listProjectDocuments(
+        source,
+        projectID,
+      );
+      if (mounted.current) setDocuments(listing.items);
+    } catch (cause) {
+      if (mounted.current)
+        setDocumentActionError(
+          apiErrorMessage(cause, t("boxProjects.documentsFailed"), t),
+        );
+    } finally {
+      if (mounted.current) setDocumentChecking(false);
+    }
+  }
+
+  const filename = documentFilename.trim();
+  const filenameValid = validDocumentFilename(filename);
+  const filenameExists = documents.includes(filename);
+  const documentBytes = new TextEncoder().encode(documentContent).length;
+  const documentTooLarge = documentBytes > DOCUMENT_LIMIT_BYTES;
+
   const canCreateProject = Boolean(
     capabilities?.capabilities.projects.available && capabilities.textModelRef,
   );
@@ -693,6 +898,64 @@ function BoxWorkspace({
           )}
         </Card>
       </div>
+      {documentsReady && (
+        <Card
+          className={styles.documentsPanel}
+          title={t("boxProjects.documents")}
+          extra={
+            <Button size="small" onClick={() => setDocumentModal(true)}>
+              {t("boxProjects.addDocument")}
+            </Button>
+          }
+        >
+          {documentError && (
+            <Alert
+              className={styles.alert}
+              type="error"
+              showIcon
+              message={documentError}
+            />
+          )}
+          <div className={styles.documentsLayout}>
+            <div className={styles.documentList}>
+              {documentsLoading ? (
+                <Typography.Text>{t("boxProjects.loading")}</Typography.Text>
+              ) : documents.length === 0 ? (
+                <Empty description={t("boxProjects.noDocuments")} />
+              ) : (
+                documents.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className={`${styles.item} ${
+                      selectedDocument?.filename === name ? styles.active : ""
+                    }`}
+                    onClick={() => void readDocument(name)}
+                  >
+                    <span className={styles.itemTitle}>{name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+            <div className={styles.documentPreview}>
+              {documentLoading ? (
+                <Typography.Text>{t("boxProjects.loading")}</Typography.Text>
+              ) : selectedDocument ? (
+                <>
+                  <Typography.Text strong>
+                    {selectedDocument.filename}
+                  </Typography.Text>
+                  <pre className={styles.documentContent}>
+                    {selectedDocument.content}
+                  </pre>
+                </>
+              ) : (
+                <Empty description={t("boxProjects.chooseDocument")} />
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
       {actionError && (
         <Alert
           className={styles.alert}
@@ -757,6 +1020,80 @@ function BoxWorkspace({
           onChange={(event) => setTaskTitle(event.target.value)}
         />
       </Modal>
+      <Modal
+        title={t("boxProjects.addDocument")}
+        open={documentModal}
+        okText={t("boxProjects.create")}
+        okButtonProps={{
+          disabled: !filenameValid || filenameExists || documentTooLarge,
+          loading: documentSaving,
+        }}
+        onOk={() => void createDocument()}
+        onCancel={() => {
+          if (documentSaving) return;
+          setDocumentModal(false);
+          setDocumentFilename("");
+          setDocumentContent("");
+          setDocumentActionError(null);
+          setDocumentOutcomeUncertain(false);
+        }}
+      >
+        <Space direction="vertical" className={styles.form}>
+          <Typography.Text type="secondary">
+            {t("boxProjects.documentCreateHint")}
+          </Typography.Text>
+          {documentActionError && (
+            <Alert
+              type="error"
+              showIcon
+              message={documentActionError}
+              description={
+                documentOutcomeUncertain
+                  ? t("boxProjects.documentUnknownOutcome")
+                  : undefined
+              }
+            />
+          )}
+          {documentOutcomeUncertain && (
+            <Button
+              loading={documentChecking}
+              onClick={() => void checkDocuments()}
+            >
+              {t("boxProjects.refreshDocuments")}
+            </Button>
+          )}
+          <Input
+            aria-label={t("boxProjects.documentFilename")}
+            value={documentFilename}
+            maxLength={128}
+            placeholder={t("boxProjects.documentFilename")}
+            onChange={(event) => setDocumentFilename(event.target.value)}
+          />
+          {filename && !filenameValid && (
+            <Typography.Text type="danger">
+              {t("boxProjects.documentFilenameInvalid")}
+            </Typography.Text>
+          )}
+          {filenameExists && (
+            <Typography.Text type="danger">
+              {t("boxProjects.documentExists")}
+            </Typography.Text>
+          )}
+          <Input.TextArea
+            aria-label={t("boxProjects.documentContent")}
+            value={documentContent}
+            rows={8}
+            placeholder={t("boxProjects.documentContent")}
+            onChange={(event) => setDocumentContent(event.target.value)}
+          />
+          <Typography.Text type={documentTooLarge ? "danger" : "secondary"}>
+            {t("boxProjects.documentSize", {
+              count: documentBytes,
+              limit: DOCUMENT_LIMIT_BYTES,
+            })}
+          </Typography.Text>
+        </Space>
+      </Modal>
     </>
   );
 }
@@ -771,8 +1108,21 @@ export default function BoxProjectsPage() {
   }>();
   const connectionId = new URLSearchParams(location.search).get("connection");
   const source = useMemo<BoxSource>(() => ({ connectionId }), [connectionId]);
+  const [connectionForm] = Form.useForm<{
+    display_name: string;
+    peer_base_url: string;
+    peer_username: string;
+    password: string;
+  }>();
   const [connections, setConnections] = useState<BridgeConnection[]>([]);
+  const [connectionsLoading, setConnectionsLoading] = useState(true);
   const [connectionsError, setConnectionsError] = useState<string | null>(null);
+  const [connectionFormOpen, setConnectionFormOpen] = useState(false);
+  const [creatingConnection, setCreatingConnection] = useState(false);
+  const [connectionCreateError, setConnectionCreateError] = useState<
+    string | null
+  >(null);
+  const creatingConnectionRef = useRef(false);
   const [refreshRevision, setRefreshRevision] = useState(0);
 
   useEffect(() => {
@@ -780,18 +1130,66 @@ export default function BoxProjectsPage() {
     bridgeApi
       .list()
       .then((rows) => {
-        if (current) setConnections(rows.filter((row) => !row.inbound));
+        if (current) {
+          setConnections(rows.filter((row) => !row.inbound));
+          setConnectionsError(null);
+        }
       })
       .catch((cause: unknown) => {
         if (current)
           setConnectionsError(
             apiErrorMessage(cause, t("boxProjects.status"), t),
           );
+      })
+      .finally(() => {
+        if (current) setConnectionsLoading(false);
       });
     return () => {
       current = false;
     };
   }, [t]);
+
+  async function createConnection() {
+    if (creatingConnectionRef.current) return;
+    creatingConnectionRef.current = true;
+    setConnectionCreateError(null);
+    try {
+      const values = await connectionForm.validateFields();
+      setCreatingConnection(true);
+      const created = await bridgeApi.create({
+        display_name: values.display_name.trim(),
+        peer_base_url: values.peer_base_url.trim(),
+        peer_username: values.peer_username.trim(),
+        password: values.password,
+        connect: true,
+      });
+      connectionForm.resetFields();
+      setConnectionFormOpen(false);
+      setConnections((previous) =>
+        mergeById([created], previous, (row) => row.connection_id),
+      );
+      setConnectionsError(null);
+      navigate(boxUrl(created.connection_id));
+    } catch (cause) {
+      if (!(cause && typeof cause === "object" && "errorFields" in cause)) {
+        setConnectionCreateError(
+          apiErrorMessage(cause, t("boxProjects.connectionFailed"), t),
+        );
+      }
+    } finally {
+      creatingConnectionRef.current = false;
+      setCreatingConnection(false);
+    }
+  }
+
+  function closeConnectionForm() {
+    connectionForm.resetFields();
+    setConnectionCreateError(null);
+    setConnectionFormOpen(false);
+  }
+
+  const showConnectionForm =
+    !connectionsLoading && (connections.length === 0 || connectionFormOpen);
 
   return (
     <PageShell
@@ -814,6 +1212,11 @@ export default function BoxProjectsPage() {
               })),
             ]}
           />
+          {connections.length > 0 && (
+            <Button onClick={() => setConnectionFormOpen(true)}>
+              {t("boxProjects.addConnection")}
+            </Button>
+          )}
           <Button onClick={() => setRefreshRevision((value) => value + 1)}>
             {t("boxProjects.refresh")}
           </Button>
@@ -828,13 +1231,103 @@ export default function BoxProjectsPage() {
           message={connectionsError}
         />
       )}
-      {connections.length === 0 && (
-        <div className={styles.connectionHint}>
-          <Typography.Text type="secondary">
-            {t("boxProjects.remoteConnection")}
-          </Typography.Text>{" "}
-          <Link to="/bridge">{t("boxProjects.addConnection")}</Link>
-        </div>
+      {showConnectionForm && (
+        <Card
+          className={styles.connectionSetup}
+          title={t("boxProjects.addConnection")}
+          extra={<Link to="/bridge">{t("boxProjects.manageConnections")}</Link>}
+        >
+          <Typography.Paragraph type="secondary">
+            {t("boxProjects.connectionSetupHint")}
+          </Typography.Paragraph>
+          {connectionCreateError && (
+            <Alert
+              className={styles.alert}
+              type="error"
+              showIcon
+              message={connectionCreateError}
+              description={t("boxProjects.connectionRetryHint")}
+            />
+          )}
+          <Form
+            form={connectionForm}
+            layout="vertical"
+            className={styles.connectionForm}
+            onFinish={() => void createConnection()}
+          >
+            <Form.Item
+              name="display_name"
+              label={t("advancedSettings.bridge.displayName")}
+              rules={[
+                {
+                  required: true,
+                  whitespace: true,
+                  message: t("advancedSettings.bridge.displayNameRequired"),
+                },
+              ]}
+            >
+              <Input maxLength={64} autoComplete="off" />
+            </Form.Item>
+            <Form.Item
+              name="peer_base_url"
+              label={t("advancedSettings.bridge.peerUrl")}
+              rules={[
+                {
+                  required: true,
+                  whitespace: true,
+                  message: t("advancedSettings.bridge.peerUrlRequired"),
+                },
+              ]}
+            >
+              <Input placeholder="http://127.0.0.1:8090" autoComplete="url" />
+            </Form.Item>
+            <Form.Item
+              name="peer_username"
+              label={t("advancedSettings.bridge.username")}
+              rules={[
+                {
+                  required: true,
+                  whitespace: true,
+                  message: t("advancedSettings.bridge.usernameRequired"),
+                },
+              ]}
+            >
+              <Input autoComplete="username" />
+            </Form.Item>
+            <Form.Item
+              name="password"
+              label={t("advancedSettings.bridge.password")}
+              rules={[
+                {
+                  required: true,
+                  message: t("advancedSettings.bridge.passwordRequired"),
+                },
+              ]}
+            >
+              <Input.Password
+                autoComplete="current-password"
+                visibilityToggle={false}
+              />
+            </Form.Item>
+            <Space>
+              <Button
+                type="primary"
+                htmlType="submit"
+                loading={creatingConnection}
+              >
+                {t("boxProjects.connect")}
+              </Button>
+              {connections.length > 0 && (
+                <Button
+                  onClick={closeConnectionForm}
+                  disabled={creatingConnection}
+                >
+                  {t("common.cancel")}
+                </Button>
+              )}
+            </Space>
+          </Form>
+        </Card>
       )}
       <BoxWorkspace
         key={[connectionId ?? "local", projectID ?? "", taskID ?? ""].join(":")}

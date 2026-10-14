@@ -9,12 +9,12 @@ import logging
 from typing import Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, Path, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.websockets import WebSocketState
 
-from octop.api.agentcomputer import ProtocolErrorEnvelope
+from octop.api.agentcomputer import ProtocolErrorEnvelope, protocol_error_response
 from octop.api.deps import (
     current_bearer_user,
     current_user,
@@ -22,8 +22,14 @@ from octop.api.deps import (
     get_server,
     resolve_user_from_token,
 )
+from octop.api.routers.agentcomputer_documents import (
+    DocumentImport,
+    ProjectDocument,
+    ProjectDocumentList,
+)
 from octop.infra.agentcomputer.cancellations import CancelRunReceipt
 from octop.infra.agentcomputer.capabilities import AgentComputerCapabilitiesResponse
+from octop.infra.agentcomputer.commands import CommandAdmissionError
 from octop.infra.agentcomputer.models import (
     CommandReceipt,
     NewMessageCommand,
@@ -37,6 +43,10 @@ from octop.infra.agentcomputer.models import (
     TaskCreateReceipt,
     TaskListResponse,
     TaskView,
+)
+from octop.infra.agentcomputer.project_document_tool import (
+    MAX_DOCUMENT_BYTES,
+    validate_document_filename,
 )
 from octop.infra.agentcomputer.results import RunResult
 from octop.infra.agentcomputer.turn_listing import TurnListResponse
@@ -485,7 +495,7 @@ async def _agentcomputer_tunnel(
     server: Any,
 ) -> JSONResponse:
     """Relay one explicit protocol route, returning only typed JSON, never peer headers."""
-    is_post = request.method == "POST"
+    has_json_body = request.method in {"POST", "PUT"}
     try:
         peer = await _bridge(server).tunnel_http(
             connection_id=connection_id,
@@ -493,8 +503,8 @@ async def _agentcomputer_tunnel(
             method=request.method,
             path=remote_path,
             query=request.url.query,
-            headers={"content-type": "application/json"} if is_post else None,
-            body=await request.body() if is_post else None,
+            headers={"content-type": "application/json"} if has_json_body else None,
+            body=await request.body() if has_json_body else None,
         )
     except OctopError as exc:
         if exc.code == ErrorCode.BRIDGE_TUNNEL_FAILED:
@@ -613,6 +623,101 @@ async def bridge_agentcomputer_project(
         connection_id=connection_id,
         remote_path=f"/api/agentcomputer/v1/projects/{project_id}",
         response_type=ProjectView,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects/{project_id}/documents",
+    response_model=ProjectDocumentList,
+    summary="List a peer AgentComputer project's text documents via Bridge",
+    description="Reads only eligible .md and .txt filenames from the connection owner's peer Project.",
+)
+async def bridge_agentcomputer_documents(
+    request: Request,
+    connection_id: str,
+    project_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/projects/{project_id}/documents",
+        response_type=ProjectDocumentList,
+        user=user,
+        server=server,
+    )
+
+
+def _project_document_path(project_id: UUID, filename: str) -> str:
+    validate_document_filename(filename)
+    return f"/api/agentcomputer/v1/projects/{project_id}/documents/{filename}"
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects/{project_id}/documents/{filename}",
+    response_model=ProjectDocument,
+    summary="Read a peer AgentComputer project text document via Bridge",
+    description="Reads one bounded .md or .txt document owned by the peer connection's user.",
+)
+async def bridge_agentcomputer_document(
+    request: Request,
+    connection_id: str,
+    project_id: UUID,
+    filename: str = Path(description="Single .md or .txt filename under documents/."),
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    try:
+        remote_path = _project_document_path(project_id, filename)
+    except CommandAdmissionError:
+        return protocol_error_response("invalidRequest", 422)
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=remote_path,
+        response_type=ProjectDocument,
+        user=user,
+        server=server,
+    )
+
+
+@router.put(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/projects/{project_id}/documents/{filename}",
+    status_code=201,
+    response_model=ProjectDocument,
+    summary="Create a peer AgentComputer project text document via Bridge",
+    description=(
+        "Creates one UTF-8 .md or .txt file in the connection owner's peer Project. "
+        "The file must not already exist; content is limited to 16384 UTF-8 bytes."
+    ),
+)
+async def bridge_agentcomputer_create_document(
+    request: Request,
+    connection_id: str,
+    project_id: UUID,
+    body: DocumentImport,
+    filename: str = Path(description="New single .md or .txt filename under documents/."),
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    try:
+        remote_path = _project_document_path(project_id, filename)
+    except CommandAdmissionError:
+        return protocol_error_response("invalidRequest", 422)
+    try:
+        content_bytes = body.content.encode("utf-8")
+    except UnicodeError:
+        return protocol_error_response("invalidRequest", 422)
+    if len(content_bytes) > MAX_DOCUMENT_BYTES:
+        return protocol_error_response("payloadLimitExceeded", 413)
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=remote_path,
+        response_type=ProjectDocument,
         user=user,
         server=server,
     )

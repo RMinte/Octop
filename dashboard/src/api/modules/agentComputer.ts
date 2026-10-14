@@ -91,6 +91,15 @@ export interface BoxTaskListItem {
   latestRun: BoxRun | null;
 }
 
+export interface BoxProjectDocumentList {
+  items: string[];
+}
+
+export interface BoxProjectDocument {
+  filename: string;
+  content: string;
+}
+
 export interface BoxCommandReceipt {
   commandID: string;
   accepted: boolean;
@@ -147,6 +156,38 @@ export const agentComputerApi = {
   project: (source: BoxSource, projectID: string) =>
     request<BoxProject>(
       resource(source, `/projects/${encodeURIComponent(projectID)}`),
+    ),
+  listProjectDocuments: (source: BoxSource, projectID: string) =>
+    request<BoxProjectDocumentList>(
+      resource(source, `/projects/${encodeURIComponent(projectID)}/documents`),
+    ),
+  getProjectDocument: (
+    source: BoxSource,
+    projectID: string,
+    filename: string,
+  ) =>
+    request<BoxProjectDocument>(
+      resource(
+        source,
+        `/projects/${encodeURIComponent(
+          projectID,
+        )}/documents/${encodeURIComponent(filename)}`,
+      ),
+    ),
+  createProjectDocument: (
+    source: BoxSource,
+    projectID: string,
+    filename: string,
+    content: string,
+  ) =>
+    request<BoxProjectDocument>(
+      resource(
+        source,
+        `/projects/${encodeURIComponent(
+          projectID,
+        )}/documents/${encodeURIComponent(filename)}`,
+      ),
+      { method: "PUT", body: JSON.stringify({ content }) },
     ),
   createProject: (source: BoxSource, command: CreateProjectCommand) =>
     request<BoxCommandReceipt>(resource(source, "/projects"), {

@@ -133,3 +133,100 @@ async def test_bridge_agentcomputer_forwards_exact_command_body_and_peer_error(e
     assert missing.status_code == 404
     assert missing.json() == {"error": {"code": "resourceNotFound", "retryable": False}}
     assert "private peer diagnostic" not in missing.text
+
+
+async def test_bridge_agentcomputer_documents_forward_only_bounded_contract(env: Any) -> None:
+    client, server, auth = env
+    assert server.services is not None and server.app_runtime is not None
+    owner_id = await resolve_user_id(client, auth, "admin")
+    server.services.bridge_connection_repo.create(
+        connection_id="01REMOTE",
+        owner_user_id=owner_id,
+        peer_base_url="https://peer.example",
+        peer_username="peer",
+        display_name="Remote",
+    )
+    project_id = uuid4()
+    filename = "说明.md"
+    base = f"{PREFIX}/projects/{project_id}/documents"
+    remote = f"/api/agentcomputer/v1/projects/{project_id}/documents"
+    document = {"filename": filename, "content": "第一行\n第二行", "access_token": "secret"}
+    session = MagicMock()
+    session.tunnel_request = AsyncMock(
+        side_effect=[
+            encode_tunnel_response(
+                status=200,
+                headers={"Set-Cookie": "secret=leak"},
+                body=json.dumps(
+                    {"items": [filename], "private": "secret"}, ensure_ascii=False
+                ).encode(),
+            ),
+            encode_tunnel_response(
+                status=200,
+                headers={"Set-Cookie": "secret=leak"},
+                body=json.dumps(document, ensure_ascii=False).encode(),
+            ),
+            encode_tunnel_response(
+                status=201,
+                headers={"Set-Cookie": "secret=leak"},
+                body=json.dumps(document, ensure_ascii=False).encode(),
+            ),
+        ]
+    )
+    manager = server.app_runtime.bridge_manager
+    assert manager is not None
+    payload = json.dumps({"content": document["content"]}, ensure_ascii=False, indent=2).encode()
+    with patch.object(manager, "require_session", return_value=session):
+        listing = await client.get(base, headers=auth)
+        read = await client.get(f"{base}/{filename}", headers=auth)
+        created = await client.put(
+            f"{base}/{filename}",
+            headers={**auth, "Content-Type": "application/json"},
+            content=payload,
+        )
+        other_auth = await create_user(client, auth, username="document-other")
+        denied = await client.get(base, headers=other_auth)
+        invalid = await client.get(f"{base}/.hidden.md", headers=auth)
+        encoded_separator = await client.get(f"{base}/bad%2Fname.md", headers=auth)
+        oversized = await client.put(
+            f"{base}/oversized.md", headers=auth, json={"content": "你" * 6000}
+        )
+
+    assert listing.status_code == 200
+    assert listing.json() == {"items": [filename]}
+    assert read.status_code == 200
+    assert read.json() == {"filename": filename, "content": document["content"]}
+    assert created.status_code == 201
+    assert created.json() == read.json()
+    assert "set-cookie" not in read.headers
+    assert denied.status_code == 404
+    assert invalid.status_code == 422
+    assert encoded_separator.status_code in {404, 422}
+    assert oversized.status_code == 413
+    assert oversized.json() == {"error": {"code": "payloadLimitExceeded", "retryable": False}}
+    assert session.tunnel_request.await_count == 3
+    assert [call.kwargs for call in session.tunnel_request.await_args_list] == [
+        {"method": "GET", "path": remote, "query": "", "headers": None, "body": None},
+        {
+            "method": "GET",
+            "path": f"{remote}/{filename}",
+            "query": "",
+            "headers": None,
+            "body": None,
+        },
+        {
+            "method": "PUT",
+            "path": f"{remote}/{filename}",
+            "query": "",
+            "headers": {"content-type": "application/json"},
+            "body": payload,
+        },
+    ]
+
+    schema = client._octop_app.openapi()  # type: ignore[attr-defined]
+    doc_path = (
+        "/api/bridge/connections/{connection_id}/agentcomputer/v1/"
+        "projects/{project_id}/documents/{filename}"
+    )
+    assert schema["paths"][doc_path]["get"]["summary"]
+    assert schema["paths"][doc_path]["put"]["requestBody"]["content"]["application/json"]

@@ -338,3 +338,11 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 服务端：Bridge 新增仅覆盖页面所需 AgentComputer v1 路径的同源代理，双方隧道策略仅放行明确列出的 GET/POST；当前连接的归属、Bearer 会话、远端响应类型和状态码均受约束，任意远端响应头与未列出的文本不透传。
 - 验证：Dashboard TypeScript 与生产构建通过；改动文件 ESLint、侧栏/路由 18 项、AgentComputer Bridge/权限/i18n 后端聚焦 101 项通过。全量 ESLint 因 `Channels/components/constants.test.ts` 与 `Chat/hooks/chatStore.ts` 的既有错误未通过；按用户要求未重复跑完整 `make all`。8090 重启后认证能力仍显示项目、Task、Run 均可用，真实数据只读查询得到 4 项项目、首个项目的 Task 与 Turn；8088 和 8090 的 `/box-projects` 均返回 200。
 - 未闭环：本地两库均尚无 Bridge 连接；8088 用户需在 `/bridge` 连接 8090 后选择该来源，网页登录及跨实例页面点验尚未完成。审批、正式成果、设备配对和目标 Ubuntu 盒子的阶段退出标准不因这一网页入口降低。最新进度见 [进度页](agentcomputer-progress.md)。
+
+## 2026-10-15 网页连接与项目文档接线
+
+- 基线：主工作目录 `feature/agentcomputer-foundation @ c6d00a6fc8d299363317f02cdd4e2b8055078eb5`，本轮只改 Octop；AgentComputer 主目录已有改动保持原样。
+- 用户入口：`/box-projects` 无出站连接时直接给出 8090 地址、对端账号和密码表单，成功后切换来源并清空密码。项目准备状态自动查询到 ready/failed，页面随后启用 Task 和文档操作。ready 项目的文档列表、纯文本预览和单文件新增均走所选来源；写入结果不明时先刷新列表核对，不自动提交第二次。
+- 代理边界：Bridge 只增加文档列表 GET、单文件 GET/PUT，保持现有连接归属及双端 Bearer 用户会话。项目 ID 与文件名按协议校验；文件名只允许项目 `documents/` 下单层 `.md`/`.txt`，正文超过 16 KiB UTF-8 在本机 413 拒绝且不转发。对端响应只返回声明的类型化 JSON，不透传未知字段、敏感响应头或任意错误文本。
+- 验证：文档 API、Bridge 策略与代理共 21 项 pytest 通过，修改的 Python 文件 Ruff 和 strict mypy 通过；Dashboard TypeScript、生产构建、修改文件 Prettier/ESLint、路由与侧栏 18 项 Vitest 通过。8088 原实例确认无 AgentComputer Run 后重启，健康、`/box-projects` 与匿名新路由认证检查分别为 200、200、401；8090 保持运行并健康 200。完整 `make all` 按用户约定后置。
+- 仍待用户侧点验：8088 当前账号尚未建立指向 8090 的 Bridge 连接，故不能据此声称浏览器已跨实例读到项目或运行 GLM。待从新页面建立连接并用已登录页面核对项目、文档与 Task；Ubuntu 实机、设备配对及全阶段验收仍未完成。
