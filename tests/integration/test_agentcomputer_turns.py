@@ -85,6 +85,7 @@ async def accepted_turn(env, monkeypatch):
     )
     monkeypatch.setattr(server.app_runtime.agent_registry, "_start_agent", no_start)
     monkeypatch.setattr(submission, "get_capabilities", available_profile)
+    monkeypatch.setattr(submission, "text_task_available", lambda _services, *, model_ref: True)
     body = command()
     response = await client.post(f"{PREFIX}/tasks/{task.taskID}/turns", headers=auth, json=body)
     assert response.status_code == 201
@@ -221,6 +222,7 @@ async def test_turn_and_run_owner_isolation_includes_admin(env, monkeypatch) -> 
     owner = await resolve_user_id(client, admin, "turn-alice")
     task = await register_ready_task(client, server, alice, owner)
     monkeypatch.setattr(submission, "get_capabilities", available_profile)
+    monkeypatch.setattr(submission, "text_task_available", lambda _services, *, model_ref: True)
     first = await client.post(f"{PREFIX}/tasks/{task.taskID}/turns", headers=alice, json=command())
     assert first.status_code == 201
     receipt = CommandReceipt.model_validate(first.json())
@@ -254,6 +256,7 @@ async def test_unimplemented_resource_or_permission_input_is_rejected(
     owner = await resolve_user_id(client, auth, "admin")
     task = await register_ready_task(client, server, auth, owner)
     monkeypatch.setattr(submission, "get_capabilities", available_profile)
+    monkeypatch.setattr(submission, "text_task_available", lambda _services, *, model_ref: True)
     before = counts(server)
     response = await client.post(
         f"{PREFIX}/tasks/{task.taskID}/turns", headers=auth, json=command(**changes)

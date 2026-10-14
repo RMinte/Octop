@@ -72,6 +72,7 @@ async def seed_pending_pause(
         }
     )
     monkeypatch.setattr(dispatch, "get_capabilities", lambda _: available)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     monkeypatch.setattr(pauses, "get_capabilities", lambda _: available)
     claim = await asyncio.to_thread(
         dispatch.claim_run,

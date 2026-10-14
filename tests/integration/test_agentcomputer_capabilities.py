@@ -1,7 +1,8 @@
-"""Protocol discovery cannot grant device or task-execution capabilities."""
+"""Protocol discovery reports only currently usable local text execution."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -90,8 +91,9 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
     assert body["deviceID"] is None
     assert body["authenticationMode"] == "octopUserSession"
     assert body["restoreEpoch"] == 1
-    assert body["capabilityRevision"] == 13
-    assert body["serverBuild"]["adapterVersion"] == "0.13.0"
+    assert body["capabilityRevision"] == 15
+    assert body["serverBuild"]["adapterVersion"] == "0.15.0"
+    assert body["textModelRef"] is None
     assert body["supportedPermissionModes"] == []
     assert body["capabilities"]
     assert body["capabilities"]["commandReceipts"] == {
@@ -148,6 +150,38 @@ async def test_discovery_reports_actual_server_and_no_execution_capabilities(env
     assert auth["Authorization"] not in response.text
     repeated = await client.get(ENDPOINT, headers=auth)
     assert repeated.json()["boxID"] == body["boxID"]
+
+
+async def test_discovery_exposes_only_currently_usable_fixed_text_model(tmp_path: Path) -> None:
+    home = tmp_path / "control"
+    write_octop_config(
+        home,
+        agentcomputer_text_enabled=True,
+        agentcomputer_text_model_ref="Trusted/glm-5",
+        history_v2_enabled=True,
+    )
+    async with octop_client(home) as (client, server):
+        await bootstrap_admin(client, home)
+        auth = await auth_header(client)
+        assert server.services is not None
+        provider_id = server.services.provider_repo.create(
+            name="Trusted",
+            kind="openai",
+            base_url="https://provider.invalid/v1",
+            api_key="fixture-key",
+            models_json=json.dumps([{"id": "glm-5", "enabled": True}]),
+        )
+        available = await client.get(ENDPOINT, headers=auth)
+        assert available.status_code == 200
+        assert available.json()["textModelRef"] == "Trusted/glm-5"
+        assert available.json()["capabilities"]["runs"]["available"] is True
+        assert "fixture-key" not in available.text
+
+        server.services.provider_repo.update(provider_id, enabled=False)
+        unavailable = await client.get(ENDPOINT, headers=auth)
+        assert unavailable.status_code == 200
+        assert unavailable.json()["textModelRef"] is None
+        assert unavailable.json()["capabilities"]["runs"]["available"] is False
 
 
 async def test_identity_persists_across_actual_server_restart(tmp_path: Path) -> None:
@@ -207,11 +241,16 @@ async def test_openapi_documents_typed_authenticated_discovery(tmp_path: Path) -
             {"type": "string", "format": "uuid"},
             {"type": "null"},
         ]
+        assert model["properties"]["textModelRef"]["anyOf"] == [
+            {"type": "string"},
+            {"type": "null"},
+        ]
         example = operation["responses"]["200"]["content"]["application/json"]["example"]
         assert example["deviceID"] is None
+        assert example["textModelRef"] is None
         assert example["supportedPermissionModes"] == []
-        assert example["capabilityRevision"] == 13
-        assert example["serverBuild"]["adapterVersion"] == "0.13.0"
+        assert example["capabilityRevision"] == 15
+        assert example["serverBuild"]["adapterVersion"] == "0.15.0"
         assert example["capabilities"]["commandReceipts"] == {
             "supported": True,
             "available": True,

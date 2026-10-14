@@ -76,6 +76,7 @@ async def test_trusted_run_stream_closes_on_cancel_or_server_stop(
         }
     )
     monkeypatch.setattr(dispatch, "get_capabilities", lambda _: worker_profile)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     claim = await asyncio.to_thread(
         dispatch.claim_run,
         services,

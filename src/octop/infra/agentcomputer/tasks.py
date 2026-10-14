@@ -1,8 +1,4 @@
-"""Internal atomic Task/thread/session registration; production execution is closed.
-
-Only isolated ready fixtures call register_task until project execution validation
-and managed engine ingress are available. The HTTP adapter exposes reads only.
-"""
+"""Atomic Task/thread/session registration with a dynamic text execution gate."""
 
 from __future__ import annotations
 
@@ -15,6 +11,7 @@ from uuid import UUID, uuid4
 from psycopg import Error as PostgresError
 from pydantic import ValidationError
 
+from octop.infra.agentcomputer.capabilities import text_task_available
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageDataError,
@@ -90,7 +87,13 @@ def _project_agent(
 
 
 def _get_task(
-    services: SharedServices, conn: Any, owner_id: int, task_id: UUID, box_id: UUID
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    task_id: UUID,
+    box_id: UUID,
+    *,
+    include_execution_ready: bool = False,
 ) -> TaskView | None:
     task = services.ac_task_repo.get_in_transaction(conn, str(task_id), owner_id)
     if task is None:
@@ -145,6 +148,29 @@ def _get_task(
         != {"channel_type": "agentcomputer", "user_id": owner_id, "task_id": str(task_id)}
     ):
         raise StorageDataError("task session metadata mismatch")
+    if include_execution_ready:
+        project = services.ac_project_repo.get_in_transaction(conn, task.project_id, owner_id)
+        preparation = services.ac_project_preparation_repo.get_in_transaction(
+            conn, task.project_id, owner_id
+        )
+        if project is None or preparation is None:
+            raise StorageDataError("missing task project preparation")
+        try:
+            configuration = ProjectConfiguration.model_validate_json(project.config_json)
+        except ValidationError as exc:
+            raise StorageDataError("invalid task project configuration") from exc
+        view = view.model_copy(
+            update={
+                "executionReady": (
+                    task.preparation_state == "ready"
+                    and project.preparation_state == "ready"
+                    and preparation.agent_state == "verified"
+                    and preparation.workspace_state == "verified"
+                    and preparation.reason_code is None
+                    and text_task_available(services, model_ref=configuration.modelRef)
+                )
+            }
+        )
     return view
 
 
@@ -152,7 +178,14 @@ def get_task(services: SharedServices, owner_id: int, task_id: UUID) -> TaskView
     try:
         identity = get_or_create_identity(services.paths.agentcomputer_identity)
         with services.db.transaction() as conn:
-            return _get_task(services, conn, owner_id, task_id, identity.boxID)
+            return _get_task(
+                services,
+                conn,
+                owner_id,
+                task_id,
+                identity.boxID,
+                include_execution_ready=True,
+            )
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("task storage unavailable") from exc
     except (IdentityError, StorageDataError):
@@ -190,11 +223,24 @@ def register_task(
 ) -> TaskCreateReceipt:
     """Commit a complete mapping in one transaction, without external preparation.
 
-    No HTTP, CLI, IM or Cron writer calls this function. A future production
-    adapter must validate project execution capabilities before registration.
+    Internal fixtures may register mappings while production admission is closed.
     """
     try:
-        return _register_task(services, owner_id, command)
+        return _register_task(services, owner_id, command, require_available=False)
+    except (sqlite3.DatabaseError, PostgresError) as exc:
+        raise StorageUnavailableError("task registration storage unavailable") from exc
+    except (IdentityError, StorageDataError):
+        raise
+    except (ValueError, TypeError) as exc:
+        raise StorageDataError("invalid stored task registration value") from exc
+
+
+def admit_task(
+    services: SharedServices, *, owner_id: int, command: TaskCreateCommand
+) -> TaskCreateReceipt:
+    """Create a Task only when the fixed project model can execute text Runs."""
+    try:
+        return _register_task(services, owner_id, command, require_available=True)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("task registration storage unavailable") from exc
     except (IdentityError, StorageDataError):
@@ -204,7 +250,11 @@ def register_task(
 
 
 def _register_task(
-    services: SharedServices, owner_id: int, command: TaskCreateCommand
+    services: SharedServices,
+    owner_id: int,
+    command: TaskCreateCommand,
+    *,
+    require_available: bool,
 ) -> TaskCreateReceipt:
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
     if command.expectedRestoreEpoch != identity.restoreEpoch:
@@ -244,6 +294,13 @@ def _register_task(
         )
         if project is None:
             raise CommandAdmissionError("resourceNotFound")
+        try:
+            configuration = ProjectConfiguration.model_validate_json(project.config_json)
+        except ValidationError as exc:
+            raise StorageDataError("invalid task project configuration") from exc
+        execution_ready = text_task_available(services, model_ref=configuration.modelRef)
+        if require_available and not execution_ready:
+            raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
         if project.preparation_state != "ready":
             raise CommandAdmissionError("runtimeUnavailable", reason="projectNotReady")
         if project.revision != command.expectedProjectRevision:
@@ -313,6 +370,7 @@ def _register_task(
             taskID=command.taskID,
             sessionID=session_id,
             taskRevision=1,
+            executionReady=execution_ready,
         )
         validate_task_receipt_binding(services, owner_id, receipt, conn=conn)
         if not services.ac_command_repo.insert(

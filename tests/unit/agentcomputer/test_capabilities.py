@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import platform
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -12,9 +14,15 @@ import pytest
 from pydantic import ValidationError
 
 from octop import __version__
-from octop.config import OctopConfig
-from octop.infra.agentcomputer.capabilities import CapabilityStatus, ServiceLimits, get_capabilities
-from octop.infra.db.pool import DatabasePool
+from octop.config import DatabaseConfig, OctopConfig
+from octop.infra.agentcomputer.capabilities import (
+    CapabilityStatus,
+    ServiceLimits,
+    get_capabilities,
+    text_task_available,
+)
+from octop.infra.db.migrate import run_migrations
+from octop.infra.db.pool import DatabasePool, SqlitePool
 from octop.infra.db.services import build_shared_services
 from octop.infra.utils.paths import PathLayout
 
@@ -34,10 +42,10 @@ def test_capabilities_are_truthful_authenticated_discovery_data(tmp_path: Path) 
     assert response.deviceID is None
     assert response.authenticationMode == "octopUserSession"
     assert response.protocolVersion == response.minimumClientProtocolVersion == 1
-    assert response.capabilityRevision == 13
+    assert response.capabilityRevision == 15
     assert response.restoreEpoch == 1
     assert response.serverBuild.octopVersion == __version__
-    assert response.serverBuild.adapterVersion == "0.13.0"
+    assert response.serverBuild.adapterVersion == "0.15.0"
     assert response.serverBuild.imageDigest is None
     assert before <= response.serverTime <= after
     assert response.serverTime.tzinfo == UTC
@@ -45,6 +53,7 @@ def test_capabilities_are_truthful_authenticated_discovery_data(tmp_path: Path) 
     assert response.executionPlatform.system == platform.system()
     assert response.executionPlatform.architecture == platform.machine()
     assert response.supportedPermissionModes == []
+    assert response.textModelRef is None
     assert data["deviceID"] is None
     assert data["serverBuild"]["imageDigest"] is None
     assert set(data["capabilities"]) == {
@@ -143,6 +152,63 @@ def test_new_services_keep_box_identity_and_use_current_timezone(tmp_path: Path)
     assert current.timezone == "UTC"
     assert paths.agentcomputer_identity.read_bytes() == identity_bytes
     assert first_pool.mock_calls == second_pool.mock_calls == []
+
+
+def test_text_task_discovery_requires_all_local_preconditions_and_current_provider(
+    tmp_path: Path,
+) -> None:
+    pool = SqlitePool(tmp_path / "octop.db")
+    try:
+        run_migrations(pool)
+        base = OctopConfig(
+            agentcomputer_text_enabled=True,
+            agentcomputer_text_model_ref="Trusted/glm-5",
+            history_v2_enabled=True,
+        )
+
+        def services_for(config: OctopConfig):
+            return build_shared_services(db=pool, paths=PathLayout(tmp_path), config=config)
+
+        services = services_for(base)
+        provider_id = services.provider_repo.create(
+            name="Trusted",
+            kind="openai",
+            base_url="https://provider.invalid/v1",
+            api_key="fixture-key",
+            models_json=json.dumps([{"id": "glm-5", "enabled": True}]),
+        )
+        assert text_task_available(services)
+        assert text_task_available(services, model_ref="Trusted/glm-5")
+        assert not text_task_available(services, model_ref="Other/glm-5")
+        profile = get_capabilities(services)
+        assert profile.supportedPermissionModes == ["askForApproval"]
+        assert profile.textModelRef == "Trusted/glm-5"
+        assert "fixture-key" not in profile.model_dump_json()
+        assert all(
+            getattr(profile.capabilities, name).available for name in ("projects", "tasks", "runs")
+        )
+        assert not any(
+            getattr(profile.capabilities, name).available
+            for name in ("cancellation", "approvals", "questions", "files", "terminal", "git")
+        )
+        for changed in (
+            replace(base, agentcomputer_text_enabled=False),
+            replace(base, bind_host="0.0.0.0"),
+            replace(base, history_v2_enabled=False),
+            replace(base, database=DatabaseConfig(driver="postgresql")),
+            replace(base, agentcomputer_text_model_ref="Other/glm-5"),
+        ):
+            assert not text_task_available(services_for(changed))
+            closed = get_capabilities(services_for(changed))
+            assert closed.supportedPermissionModes == []
+            assert closed.textModelRef is None
+        services.provider_repo.update(provider_id, enabled=False)
+        assert not text_task_available(services)
+        disabled = get_capabilities(services)
+        assert not disabled.capabilities.runs.available
+        assert disabled.textModelRef is None
+    finally:
+        pool.close()
 
 
 @pytest.mark.parametrize(

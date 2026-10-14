@@ -169,24 +169,24 @@ async def test_ready_task_with_missing_thread_is_rejected_without_repair(env) ->
         )
 
 
-async def test_task_http_creation_remains_absent(env) -> None:
+async def test_task_create_route_validates_body_without_registering(env) -> None:
     client, server, auth = env
     owner = await resolve_user_id(client, auth, "admin")
     receipt = await registered_task(client, server, auth, owner)
-    for endpoint in (
-        f"{PREFIX}/tasks",
-        f"{PREFIX}/projects/{receipt.projectID}/tasks",
-    ):
-        response = await client.post(endpoint, headers=auth, json={})
-        assert response.status_code in (404, 405)
-        assert response.json()["error"]["code"] in ("resourceNotFound", "invalidRequest")
+    absent = await client.post(f"{PREFIX}/tasks", headers=auth, json={})
+    assert absent.status_code in (404, 405)
+    invalid = await client.post(
+        f"{PREFIX}/projects/{receipt.projectID}/tasks", headers=auth, json={}
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "invalidRequest"
     assert server.services is not None
     with server.services.db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM ac_tasks").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM ac_runs").fetchone()[0] == 0
 
 
-async def test_openapi_documents_read_only_task_and_receipt_shapes(tmp_path: Path) -> None:
+async def test_openapi_documents_task_creation_and_receipt_shapes(tmp_path: Path) -> None:
     home = tmp_path / "control"
     write_octop_config(home, enable_api_docs=True)
     async with octop_client(home) as (client, _server):
@@ -196,7 +196,7 @@ async def test_openapi_documents_read_only_task_and_receipt_shapes(tmp_path: Pat
         operation = path["get"]
         assert operation["tags"] == ["agentcomputer"]
         assert operation["security"] == [{"BearerAuth": []}]
-        assert "executionReady=false" in operation["description"]
+        assert "executionReady reflects the current text execution gate" in operation["description"]
         parameter = next(p for p in operation["parameters"] if p["in"] == "path")
         assert parameter["name"] == "taskID" and parameter["schema"]["format"] == "uuid"
         response = operation["responses"]["200"]["content"]["application/json"]
@@ -205,6 +205,19 @@ async def test_openapi_documents_read_only_task_and_receipt_shapes(tmp_path: Pat
         for status in ("401", "403", "404", "422", "503"):
             error = operation["responses"][status]["content"]["application/json"]["schema"]
             assert error["$ref"].endswith("/ProtocolErrorEnvelope")
+        create = schema["paths"][f"{PREFIX}/projects/{{projectID}}/tasks"]["post"]
+        assert create["summary"] == "Create an owned Task and its dedicated thread when available"
+        assert create["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith(
+            "/TaskCreateCommand"
+        )
+        assert create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"].endswith(
+            "/TaskCreateReceipt"
+        )
+        result = schema["paths"][f"{PREFIX}/runs/{{runID}}/result"]["get"]
+        assert result["summary"] == "Read an owned Run's verified final text"
+        assert result["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+            "/RunResult"
+        )
         receipts = schema["paths"][f"{PREFIX}/commands/{{commandID}}"]["get"]["responses"]["200"][
             "content"
         ]["application/json"]["schema"]

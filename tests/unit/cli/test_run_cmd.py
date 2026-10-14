@@ -145,6 +145,30 @@ def test_run_rejects_unbindable_port_before_saving_config(
     assert not (tmp_path / "config.json").exists()
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [["--host", "0.0.0.0"], ["--workers", "2"], ["--reload"]],
+)
+def test_text_task_run_rejects_unsafe_listener_before_saving_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: list[str]
+) -> None:
+    _patch_home(monkeypatch, tmp_path)
+    config_path = tmp_path / "config.json"
+    original = b'{"agentcomputer_text_enabled":true,"bind_host":"127.0.0.1"}\n'
+    config_path.write_bytes(original)
+
+    import octop.cli.commands.run as run_cmd
+
+    def fail(**_kw: object) -> None:
+        raise AssertionError("uvicorn must not start")
+
+    monkeypatch.setattr(run_cmd, "_run_uvicorn", fail)
+    result = CliRunner().invoke(cli, ["run", *extra])
+    assert result.exit_code != 0
+    assert "loopback listener" in _all_output(result)
+    assert config_path.read_bytes() == original
+
+
 def test_run_accepts_zero_port_as_os_assigned(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

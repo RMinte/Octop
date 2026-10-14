@@ -107,6 +107,18 @@ def resolve_bind(host: str | None, port: int | None) -> tuple[str | None, int | 
     return resolved_host, resolved_port
 
 
+def _text_task_mode_enabled() -> bool:
+    """Inspect the saved opt-in without creating or rewriting config.json."""
+    try:
+        data = read_json_object(PathLayout.from_env().config)
+    except OSError:
+        return False
+    if data is None:
+        return False
+    value = data.get("agentcomputer_text_enabled", False)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _save_configfile_overrides(host: str | None, port: int | None) -> None:
     """Persist resolved host/port to config.json (read-merge-write, atomic).
 
@@ -180,6 +192,12 @@ def run(
     try:
         with DaemonBootstrap(PathLayout.from_env().agentcomputer_identity.parent) as guard:
             host, port = resolve_bind(host, port)
+            if _text_task_mode_enabled() and (
+                (host or "127.0.0.1") not in {"127.0.0.1", "::1"} or reload or workers != 1
+            ):
+                raise click.UsageError(
+                    "AgentComputer text Tasks require a loopback listener, one worker, and no reload"
+                )
             if cli_host is not None or cli_port is not None:
                 _save_configfile_overrides(cli_host, cli_port)
             certfile, keyfile = _maybe_generate_self_signed(ssl, ssl_certfile, ssl_keyfile)

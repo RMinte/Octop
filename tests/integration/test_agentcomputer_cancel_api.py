@@ -206,6 +206,7 @@ async def test_claimed_unstarted_cancel_stops_without_thread_cancel(env, monkeyp
         }
     )
     monkeypatch.setattr(dispatch, "get_capabilities", lambda _: worker_profile)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     claim = await asyncio.to_thread(
         dispatch.claim_run,
         server.services,
@@ -262,6 +263,7 @@ async def test_durable_cancel_signals_exact_active_run_and_keeps_uncertain_lanes
         }
     )
     monkeypatch.setattr(dispatch, "get_capabilities", lambda _: worker_profile)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     claim = await asyncio.to_thread(
         dispatch.claim_run,
         services,

@@ -69,15 +69,13 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     {
         "name": "agentcomputer",
         "description": (
-            "Versioned AgentComputer discovery, local project intent registration, "
-            "task/Run metadata, guarded Turn admission, and receipt queries. Requires a user Bearer token. "
-            "Receipts preserve original admission facts; project preparation has a separate view. "
-            "Device binding, full project readiness, and production task execution remain unavailable. "
-            "Dispatch phases describe stored handoff facts; app intake acceptance does not prove model start."
-            " Daemon bootstrap can conservatively fence unresolved dispatch facts before runtime; "
-            "full recovery and production execution remain unavailable. "
-            "Exact-Run cancellation records durable requests but lacks a production stop proof."
-            " Run pause lookup exposes only validated status metadata; it does not submit a decision or resume execution."
+            "Versioned AgentComputer discovery, project and Task creation, Turn admission, Run status, "
+            "verified text results, and immutable receipt queries. Requires a user Bearer token. "
+            "Opt-in loopback SQLite mode runs tool-free text Tasks using one configured model. "
+            "Receipts preserve original admission facts; dispatch phases describe stored handoff facts. "
+            "Daemon bootstrap conservatively fences unresolved dispatch facts before runtime. "
+            "Device binding, tool execution, approval resume, and full recovery remain unavailable. "
+            "Exact-Run cancellation records durable requests without proving remote model stop."
         ),
     },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},
@@ -300,7 +298,7 @@ def configure_openapi(app: FastAPI) -> None:
                 "contextMode": "newMessage",
                 "userMessageID": "66666666-6666-4666-8666-666666666666",
                 "expectedProjectRevision": 1,
-                "prompt": "A new message; admission is unavailable in production.",
+                "prompt": "A new text message for the opt-in local Task worker.",
                 "inputArtifactIDs": [],
                 "selectedSkillIDs": [],
                 "permissionMode": "askForApproval",

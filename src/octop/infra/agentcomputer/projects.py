@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from psycopg import Error as PostgresError
 from pydantic import ValidationError
 
+from octop.infra.agentcomputer.capabilities import text_task_available
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageDataError,
@@ -209,6 +210,18 @@ def _project_view(
         raise StorageDataError("missing preparation journal")
     _intent_for(services, project_id, owner_id, conn=conn)
     try:
+        configuration = ProjectConfiguration.model_validate_json(project.config_json)
+        execution_ready = (
+            project.preparation_state == "ready"
+            and preparation.agent_state == "verified"
+            and preparation.workspace_state == "verified"
+            and preparation.reason_code is None
+            and text_task_available(services, model_ref=configuration.modelRef)
+        )
+        if execution_ready:
+            from octop.infra.agentcomputer.tasks import _project_agent
+
+            _project_agent(services, conn, owner_id, project_id, UUID(project.box_id))
         return ProjectView.model_validate(
             {
                 "projectID": project_id,
@@ -225,6 +238,7 @@ def _project_view(
                 },
                 "reasonCode": preparation.reason_code,
                 "retryable": preparation.retryable,
+                "executionReady": execution_ready,
             }
         )
     except (ValueError, ValidationError) as exc:
@@ -362,6 +376,41 @@ def _progress(
             services.ac_project_preparation_repo.confirm_workspace(
                 conn, project_id, intent.ownerID, updated_at=timestamp
             )
+        elif step == "ready":
+            if _intent_for(services, intent.projectID, intent.ownerID, conn=conn) != intent:
+                raise StorageDataError("project preparation intent changed")
+            project = services.ac_project_repo.get_in_transaction(conn, project_id, intent.ownerID)
+            preparation = services.ac_project_preparation_repo.get_in_transaction(
+                conn, project_id, intent.ownerID
+            )
+            if (
+                project is None
+                or preparation is None
+                or project.default_agent_id != intent.plannedAgentID
+                or preparation.agent_state != "verified"
+                or preparation.workspace_state != "verified"
+            ):
+                raise StorageDataError("project preparation incomplete")
+            configuration = ProjectConfiguration.model_validate_json(project.config_json)
+            if text_task_available(services, model_ref=configuration.modelRef):
+                services.ac_project_repo.set_preparation(
+                    conn, project_id, intent.ownerID, "ready", updated_at=timestamp
+                )
+                services.ac_project_preparation_repo.clear_reason(
+                    conn, project_id, intent.ownerID, updated_at=timestamp
+                )
+            else:
+                services.ac_project_preparation_repo.fail(
+                    conn,
+                    project_id,
+                    intent.ownerID,
+                    "executionValidationPending",
+                    True,
+                    updated_at=timestamp,
+                )
+                services.ac_project_repo.set_preparation(
+                    conn, project_id, intent.ownerID, "failed", updated_at=timestamp
+                )
         else:
             services.ac_project_repo.set_preparation(
                 conn, project_id, intent.ownerID, "preparing", updated_at=timestamp
@@ -444,17 +493,22 @@ async def _prepare_project(
                 ):
                     raise StorageDataError("workspace confirmation failed")
             await asyncio.to_thread(_progress, services, intent, "workspace")
-            usable = await asyncio.to_thread(
-                registry.providers.is_model_ref_usable, command.configuration.modelRef
-            )
-            await asyncio.to_thread(
-                _progress,
-                services,
-                intent,
-                None,
-                reason="executionValidationPending" if usable else "providerUnavailable",
-                retryable=not usable,
-            )
+            if await asyncio.to_thread(
+                text_task_available, services, model_ref=command.configuration.modelRef
+            ):
+                await asyncio.to_thread(_progress, services, intent, "ready")
+            else:
+                usable = await asyncio.to_thread(
+                    registry.providers.is_model_ref_usable, command.configuration.modelRef
+                )
+                await asyncio.to_thread(
+                    _progress,
+                    services,
+                    intent,
+                    None,
+                    reason="executionValidationPending" if usable else "providerUnavailable",
+                    retryable=not usable,
+                )
         except OctopError:
             await asyncio.to_thread(
                 _progress,

@@ -1,8 +1,4 @@
-"""Guarded transport ingress sharing the atomic registration kernel.
-
-Production discovery keeps runs unavailable. No request, setting, or environment
-flag can bypass this gate, and this module never dispatches an engine.
-"""
+"""Guarded transport ingress sharing the atomic registration kernel."""
 
 from __future__ import annotations
 
@@ -10,16 +6,18 @@ import sqlite3
 from uuid import UUID
 
 from psycopg import Error as PostgresError
+from pydantic import ValidationError
 
-from octop.infra.agentcomputer.capabilities import get_capabilities
+from octop.infra.agentcomputer.capabilities import get_capabilities, text_task_available
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageDataError,
     StorageUnavailableError,
     admit_new_message_in_transaction,
+    content_digest,
 )
 from octop.infra.agentcomputer.identity import get_or_create_identity
-from octop.infra.agentcomputer.models import CommandReceipt, NewMessageCommand
+from octop.infra.agentcomputer.models import CommandReceipt, NewMessageCommand, ProjectConfiguration
 from octop.infra.agentcomputer.tasks import _get_task
 from octop.infra.db.services import SharedServices
 
@@ -43,7 +41,8 @@ def submit_new_message(
         with services.db.transaction() as conn:
             if not services.ac_command_repo.lock_owner(conn, owner_id):
                 raise CommandAdmissionError("accessDenied")
-            if _get_task(services, conn, owner_id, task_id, identity.boxID) is None:
+            task = _get_task(services, conn, owner_id, task_id, identity.boxID)
+            if task is None:
                 raise CommandAdmissionError("resourceNotFound")
             previous = services.ac_command_repo.get_by_key(conn, owner_id, command.idempotencyKey)
             collision = services.ac_command_repo.get_global_in_transaction(
@@ -60,7 +59,21 @@ def submit_new_message(
                     command=command,
                     identity=identity,
                 )
-            if not profile.capabilities.runs.available:
+            project = services.ac_project_repo.get_in_transaction(
+                conn, str(task.projectID), owner_id
+            )
+            if project is None:
+                raise StorageDataError("missing submission project")
+            try:
+                configuration = ProjectConfiguration.model_validate_json(project.config_json)
+            except ValidationError as exc:
+                raise StorageDataError("invalid submission project configuration") from exc
+            if (
+                configuration.model_fields_set != set(ProjectConfiguration.model_fields)
+                or content_digest(configuration.model_dump(mode="json")) != project.config_digest
+            ):
+                raise StorageDataError("submission project configuration digest mismatch")
+            if not text_task_available(services, model_ref=configuration.modelRef):
                 raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
             if command.permissionMode not in profile.supportedPermissionModes:
                 raise CommandAdmissionError(

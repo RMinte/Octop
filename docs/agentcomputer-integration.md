@@ -2,6 +2,8 @@
 
 本项目把 Octop 作为 AgentComputer 的盒子执行引擎。首轮已建立认证能力查询和稳定服务身份；第二轮继续建立持久数据层、内部原子接收与已有收据查询，详细规则见 [第二轮数据层说明](agentcomputer-core.md)。
 
+当前新增[本机纯文本 Task 试用](agentcomputer-local-text-task.md)：显式 opt-in、固定可用模型与回环单进程条件满足时，可从 AgentComputer 盒子项目创建 Task、提交 Turn、等待后台 worker、读取经完成收据和 v2 历史共同验证的回答。默认仍关闭，工具、审批续跑和远端设备配对未开放；8090 隔离实例已用 GLM-5 完成一次真实项目、Task、Turn 和结果验收，详见[进度记录](agentcomputer-progress.md)。
+
 第三轮实现项目意图、停止的默认专家和受限工作区准备，详见 [项目准备说明](agentcomputer-projects.md)。当前完整项目执行能力仍未开放。
 
 第四轮建立内部 Task/thread/session 原子映射和本人只读 Task 查询，详见 [Task 映射说明](agentcomputer-tasks.md)。真实任务创建和执行仍等待后续门禁。
@@ -161,11 +163,11 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 ```sh
 OCTOP_HOME="$PWD/.runtime/agentcomputer" \
 OCTOP_ENABLE_API_DOCS=1 \
-OCTOP_HISTORY_V2_ENABLED=false \
+OCTOP_HISTORY_V2_ENABLED=true \
 .venv/bin/octop run --host 127.0.0.1 --port 8090 --workers 1
 ```
 
-打开 [本地实验控制台](http://127.0.0.1:8090) 或 [协议文档](http://127.0.0.1:8090/api/docs#tag/agentcomputer)。本机专用账号为 local-admin，生成的密码仅在忽略目录 `.runtime/agentcomputer/local-credentials.json` 保存；不提交或写入普通日志。登录后查询能力接口。不得在该实验导入原 `~/.octop`、真实项目或云厂商秘密，不点击模型探测或启动模型任务。
+打开 [本地实验控制台](http://127.0.0.1:8090) 或 [协议文档](http://127.0.0.1:8090/api/docs#tag/agentcomputer)。本机专用账号为 local-admin，生成的密码仅在忽略目录 `.runtime/agentcomputer/local-credentials.json` 保存；不提交或写入普通日志。当前实例已启用固定 GLM 模型的本机文本 Task；创建项目和任务的步骤见[试用指南](agentcomputer-local-text-task.md)。8088 用户实例保持独立。
 
 如 8090 已被占用，先核对监听进程；不终止不明进程，也不自动回退到 8088。启动命令的 host/port 会写入所选数据目录配置，必须核对 `OCTOP_HOME`。日志和本机人工验证结果在交付时另行填写。
 

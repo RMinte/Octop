@@ -7,8 +7,8 @@
 | 阶段 | 状态 | 已有可复核结果 | 尚缺的退出条件 |
 |---|---|---|---|
 | M0 环境与协议 | ◐ | 本机 GLM-5 工具续轮、文本流，以及离线故障和取消夹具 | 目标 Ubuntu 盒子的资源、模型协议、执行隔离与容量实测 |
-| M1 盒子服务端 | ◐ | 稳定身份、持久领域、项目准备、内部派发与对账、精确取消；AgentComputer HTTP 操作关闭等待（15 项审计通过）；内部派发和引擎入口强制登记，真实 Harness 流的服务关闭并发回归；受托 Turn 的原生 v2 历史固定身份、流归档和启动只读对账；无工具 Run 的严格历史/检查点证明、自然完成收据及原子双占用释放；按登录用户隔离的只读项目列表和 8090 本机联调 | 生产项目 `ready`、公开 Task/Run 创建、托管 worker、真实工具、已交接停止证明和完整恢复；控制库与历史库仍无原子提交 |
-| M2 原生客户端 | ◐ | AgentComputer“设置 → 连接”可用 Octop 用户会话查看盒子能力和远端项目准备状态；macOS 项目侧栏和 iOS 任务目录已有独立只读“盒子项目”入口、身份绑定的项目详情与状态解释；macOS 实际界面已点验项目列表与 `providerUnavailable` 详情；盒子专项单测 8/8、完整 `make verify`、macOS/iOS 模拟器构建通过 | 设备配对、远端项目与本机项目绑定、Task/Run、消息/事件/审批/取消/成果与重连验收；iOS 实际界面点验 |
+| M1 盒子服务端 | ◐ | 稳定身份、持久领域、项目准备、内部派发与对账、精确取消；AgentComputer HTTP 操作关闭等待；受托 Turn 的原生 v2 历史与无工具自然完成证明；本机固定 GLM 模型的公开项目/Task/Turn、单进程 worker 和验证过的 Run 结果，8090 实例真实运行成功 | Ubuntu 盒子部署、真实工具授权、已交接停止证明、完整恢复与控制库/历史库跨库一致性 |
+| M2 原生客户端 | ◐ | AgentComputer“设置 → 连接”已可查看能力；独立“盒子项目”入口已实现项目创建、Task 提交、Run 轮询与结果显示，命令丢失响应可按原 ID 回查；客户端测试和构建正在复验 | 客户端实际界面点验、设备配对、远端项目与本机项目绑定、事件/审批/取消/正式成果与重连验收 |
 | M3 配置与恢复 | ○ | 规划已形成 | 指令/技能版本、资源、Outbox、多设备和异常对账验收 |
 | M4 调度与面板 | ○ | 规划已形成 | Schedule、Git/终端、受认证预览与资料库验收 |
 | M5 迁移与发布 | ○ | 规划已形成 | 显式导入、备份恢复、TLS/配对、升级回滚和盒子实机发布验收 |
@@ -17,12 +17,14 @@
 
 后续[启动只读对账](agentcomputer-native-history.md#启动时的只读历史对账)已把 ACK 后的归档缺失、Turn 缺失、归属不符、六种历史状态和初始消息落盘窗口纳入内部恢复报告及无身份信息的汇总警告日志。它只做诊断：即使历史为 `complete`，Run 仍保守中断并保留双活动占用；不会因为这项证据开放执行。定向恢复测试 37 passed；最终完整 `make all` 的 Ruff、严格 mypy（600 个源文件）和非 live 全套通过，5342 passed / 23 skipped。
 
-**当前用户可见的切片**位于 AgentComputer“设置 → 连接”及独立“盒子项目”入口：macOS 本机可输入 `http://127.0.0.1:8090`，使用这个独立实验实例的 `local-admin` 账号查看盒子身份、能力、远端项目列表与只读详情。实验密码仅保存在本机忽略文件 `.runtime/agentcomputer/local-credentials.json`，不与 8088 的 `fangyuan` 账号共用；iOS 真机需要可访问的 HTTPS 盒子地址。8090 当前 Provider 数为 0，8088 的 GLM 配置未进入这个隔离实例；旧项目的 `modelRef=local/qwen` 因此保持 `failed/providerUnavailable`、`executionReady=false`。这里使用用户会话，尚无设备配对或远端任务执行。Octop 8088 的现有聊天页不会因服务端 API 增加而自动出现项目入口；AgentComputer 原有的本机项目与盒子项目分开展示，不能作为盒子端到端执行验收。
+**当前用户可见的切片**位于 AgentComputer“设置 → 连接”及独立“盒子项目”入口：macOS 本机可输入 `http://127.0.0.1:8090`，使用独立实验实例的 `local-admin` 账号创建 GLM 项目与 Task，并查看 Run 状态和回答。实验密码仅保存在本机忽略文件 `.runtime/agentcomputer/local-credentials.json`，不与 8088 的 `fangyuan` 账号共用；iOS 真机需要可访问的 HTTPS 盒子地址。旧项目的 `modelRef=local/qwen` 仍是 `failed/providerUnavailable`，应创建固定 GLM 模型的新项目。这里使用用户会话，尚无设备配对；Octop 8088 的现有聊天页不会因服务端 API 增加而自动出现项目入口。
 
-本轮[自然完成内核](agentcomputer-run-completion.md)已把无工具真实 Harness 流的严格历史/持久检查点证明、完成收据、`run.finished` 和双占用释放串起来；取消造成的正常 EOF、空回答或缺证据仍保守对账。schema 升至 26，公开 HTTP 和能力开关没有放行；当前 8090 运行实例未经本轮重启升级，不能将代码验收当作实例部署。
+第二十六轮[自然完成内核](agentcomputer-run-completion.md)已把无工具真实 Harness 流的严格历史/持久检查点证明、完成收据、`run.finished` 和双占用释放串起来；取消造成的正常 EOF、空回答或缺证据仍保守对账。当轮 schema 升至 26，公开 HTTP 和能力开关尚未放行，8090 实例也尚未升级；本页下方记录了后续本机文本 Task 升级与实测。
 
-本轮完整 `make all` 通过，5396 passed / 23 skipped；严格 mypy 覆盖 602 个源文件。数据库与备份的旧“最新 schema=25”断言已同步到 26，旧 v25 故障注入条件仍针对 v25 本身。
+第二十六轮完整 `make all` 通过，5396 passed / 23 skipped；严格 mypy 覆盖 602 个源文件。数据库与备份的旧“最新 schema=25”断言已同步到 26，旧 v25 故障注入条件仍针对 v25 本身。
 
-**下一步按依赖推进：**建立每 Run 独立的受限托管 worker，显式选择 Provider/模型并接入服务器关闭等待；之后逐项验收真实工具授权与效果、已交接停止证明，才开放生产项目 `ready` 和公开 Task/Run。项目列表可读不代表项目 `ready`；当前 `projects.available=false`，Task/Run 创建与执行门禁仍关闭，不能把本地夹具称为远端任务已可用。
+**2026-10-14 本机 Task 试用验收：**以 `feature/agentcomputer-foundation @ 74ce4d82` 为基线，8090 独立控制目录先备份后升级到 adapter 0.15.0，配置已存在的 GLM-5 Provider 与固定 `textModelRef`。认证能力返回 `projects/tasks/runs.available=true`；新项目 `ready/executionReady=true`，Task 创建成功，Run 从 `queued` 到 `succeeded`，严格结果接口返回“2+2 等于 4。”。`/api/openapi.json` 中新路由的摘要、说明与类型化 2xx 响应已核对。本轮最终 `make all` 通过，5416 passed / 23 skipped；运行中的 8088 用户实例未重启。这个证据只覆盖开发机本地、无工具、单 Run 的真实模型路径；客户端实际界面点验仍待完成。
+
+**下一步按依赖推进：**完成 AgentComputer 的完整构建和实际界面点验，继而验证重启/断线后原命令回查与保守对账；然后逐项验收 Ubuntu 盒子部署、真实工具授权与效果、已交接停止证明，最后才扩大生产范围。完整阶段退出标准没有因本机试用而降低。
 
 当前实施分支是 `feature/agentcomputer-foundation`，交付目标为 [RMinte/Octop](https://github.com/RMinte/Octop)。每轮在主[集成记录](agentcomputer-integration.md)中注明基线、改动、验证与剩余门禁。

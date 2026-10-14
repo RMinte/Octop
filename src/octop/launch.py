@@ -75,7 +75,12 @@ async def run_foreground(
     from octop.infra.setup.tls.store import resolve_tls_paths
 
     guard = daemon_bootstrap or DaemonBootstrap(PathLayout.from_env().agentcomputer_identity.parent)
-    srv = OctopServer(daemon_bootstrap=guard)
+    srv = OctopServer(
+        daemon_bootstrap=guard,
+        agentcomputer_listen_host=host,
+        agentcomputer_workers=workers,
+        agentcomputer_reload=reload,
+    )
     bwrap_task: asyncio.Task[None] | None = None
     memory_control = None
     try:
@@ -96,6 +101,12 @@ async def run_foreground(
             ssl_certfile=ssl_certfile,
             ssl_keyfile=ssl_keyfile,
         )
+        if cfg.agentcomputer_text_enabled and (
+            plan.bind_host not in {"127.0.0.1", "::1"} or reload or workers != 1
+        ):
+            raise ValueError(
+                "AgentComputer text Tasks require a loopback listener, one worker, and no reload"
+            )
         level = (log_level or cfg.log_level).lower()
         worker_count = 1 if plan.dual_listeners or reload else workers
         if plan.dual_listeners and (reload or workers > 1):

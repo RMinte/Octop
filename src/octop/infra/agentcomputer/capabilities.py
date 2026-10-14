@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import platform
+import sqlite3
 from datetime import UTC, datetime
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
+from psycopg import Error as PostgresError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from octop import __version__
@@ -14,7 +16,7 @@ from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.limits import MAX_COMMAND_BYTES
 from octop.infra.db.services import SharedServices
 
-ADAPTER_VERSION = "0.13.0"
+ADAPTER_VERSION = "0.15.0"
 PROTOCOL_VERSION: Literal[1] = 1
 
 
@@ -113,8 +115,9 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
                     "serverTime": "2026-10-12T00:00:00Z",
                     "timezone": "Asia/Shanghai",
                     "executionPlatform": {"system": "Darwin", "architecture": "arm64"},
-                    "capabilityRevision": 13,
+                    "capabilityRevision": 15,
                     "restoreEpoch": 1,
+                    "textModelRef": None,
                     "supportedPermissionModes": [],
                     "capabilities": {
                         name: (
@@ -164,18 +167,49 @@ class AgentComputerCapabilitiesResponse(ProtocolModel):
     serverTime: datetime
     timezone: str
     executionPlatform: ExecutionPlatform
-    capabilityRevision: Literal[13] = 13
+    capabilityRevision: Literal[15] = 15
     restoreEpoch: Annotated[int, Field(strict=True, ge=1)] = Field(
         description="Persisted initial epoch; restore fencing remains unavailable."
+    )
+    textModelRef: str | None = Field(
+        description="Fixed local text model reference for new projects; null when unavailable."
     )
     supportedPermissionModes: list[Literal["askForApproval", "approveForMe", "fullAccess"]]
     capabilities: BusinessCapabilities
     limits: ServiceLimits = Field(description="Null limits are unconfigured, never unlimited.")
 
 
+def text_task_available(services: SharedServices, *, model_ref: str | None = None) -> bool:
+    """Admit only the configured model on this loopback SQLite installation.
+
+    Provider state is read on every call, so disabling or removing the model
+    immediately closes new admission and current execution readiness views.
+    This does not authorize tools, external clients, or a worker by itself.
+    """
+    config = services.config
+    selected = config.agentcomputer_text_model_ref
+    if (
+        not config.agentcomputer_text_enabled
+        or config.bind_host not in {"127.0.0.1", "::1"}
+        or not config.database.is_sqlite
+        or not config.history_v2_enabled
+        or not selected
+        or selected != selected.strip()
+        or (model_ref is not None and model_ref != selected)
+    ):
+        return False
+    from octop.infra.agents.providers.store import ProviderStore
+
+    try:
+        return ProviderStore(services.provider_repo).is_model_ref_usable(selected)
+    except (sqlite3.DatabaseError, PostgresError, TypeError, ValueError):
+        return False
+
+
 def get_capabilities(services: SharedServices) -> AgentComputerCapabilitiesResponse:
     """Read installation identity and advertise only implemented protocol abilities."""
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
+    text_ready = text_task_available(services)
     unavailable = CapabilityStatus(supported=False, available=False, reasonCode="notImplemented")
     return AgentComputerCapabilitiesResponse(
         boxID=identity.boxID,
@@ -186,17 +220,24 @@ def get_capabilities(services: SharedServices) -> AgentComputerCapabilitiesRespo
             system=platform.system(), architecture=platform.machine()
         ),
         restoreEpoch=identity.restoreEpoch,
-        supportedPermissionModes=[],
+        textModelRef=services.config.agentcomputer_text_model_ref if text_ready else None,
+        supportedPermissionModes=["askForApproval"] if text_ready else [],
         capabilities=BusinessCapabilities(
             projects=CapabilityStatus(
-                supported=True, available=False, reasonCode="executionUnavailable"
+                supported=True,
+                available=text_ready,
+                reasonCode=None if text_ready else "executionUnavailable",
             ),
             tasks=CapabilityStatus(
-                supported=True, available=False, reasonCode="executionUnavailable"
+                supported=True,
+                available=text_ready,
+                reasonCode=None if text_ready else "executionUnavailable",
             ),
             commandReceipts=CapabilityStatus(supported=True, available=True),
             runs=CapabilityStatus(
-                supported=True, available=False, reasonCode="executionUnavailable"
+                supported=True,
+                available=text_ready,
+                reasonCode=None if text_ready else "executionUnavailable",
             ),
             cancellation=CapabilityStatus(
                 supported=True, available=False, reasonCode="executionUnavailable"

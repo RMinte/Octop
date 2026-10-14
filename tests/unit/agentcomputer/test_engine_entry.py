@@ -164,6 +164,7 @@ def _open_fixture_gate(services: SharedServices):
 async def entry(control, monkeypatch, request):
     services, _, task_id = control
     monkeypatch.setattr(dispatch, "get_capabilities", _open_fixture_gate)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     command = NewMessageCommand(
         commandID=uuid4(),
         idempotencyKey=str(uuid4()),

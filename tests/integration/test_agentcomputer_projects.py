@@ -88,6 +88,83 @@ async def test_project_receipt_is_pending_while_current_preparation_fails_withou
         assert conn.execute("SELECT COUNT(*) FROM ac_tasks").fetchone()[0] == 0
 
 
+async def test_text_project_ready_tracks_current_provider_without_starting_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "control"
+    write_octop_config(
+        home,
+        agentcomputer_text_enabled=True,
+        agentcomputer_text_model_ref="Trusted/glm-5",
+        history_v2_enabled=True,
+    )
+    async with octop_client(home) as (client, server):
+        await bootstrap_admin(client, home)
+        auth = await auth_header(client)
+        assert server.services is not None and server.app_runtime is not None
+        provider_id = server.services.provider_repo.create(
+            name="Trusted",
+            kind="openai",
+            base_url="https://provider.invalid/v1",
+            api_key="fixture-key",
+            models_json=json.dumps([{"id": "glm-5", "enabled": True}]),
+        )
+        no_start = AsyncMock(side_effect=AssertionError("preparation must not start an agent"))
+        monkeypatch.setattr(server.app_runtime.agent_registry, "_start_agent", no_start)
+        body = command(
+            configuration={
+                "schemaVersion": 1,
+                "modelRef": "Trusted/glm-5",
+                "instructions": "使用中文回答",
+            }
+        )
+        created = await client.post(ENDPOINT, headers=auth, json=body)
+        assert created.status_code == 201
+        current = await client.get(f"{ENDPOINT}/{body['projectID']}", headers=auth)
+        assert current.status_code == 200
+        assert current.json()["preparationState"] == "ready"
+        assert current.json()["reasonCode"] is None
+        assert current.json()["executionReady"] is True
+        no_start.assert_not_awaited()
+
+        server.services.provider_repo.update(provider_id, enabled=False)
+        unavailable = await client.get(f"{ENDPOINT}/{body['projectID']}", headers=auth)
+        assert unavailable.status_code == 200
+        assert unavailable.json()["preparationState"] == "ready"
+        assert unavailable.json()["executionReady"] is False
+        profile = await client.get(f"{PREFIX}/capabilities", headers=auth)
+        assert profile.json()["capabilities"]["runs"]["available"] is False
+
+        server.services.provider_repo.update(provider_id, enabled=True)
+        restored = await client.get(f"{ENDPOINT}/{body['projectID']}", headers=auth)
+        assert restored.json()["executionReady"] is True
+
+
+async def test_usable_provider_without_explicit_text_opt_in_keeps_project_unready(env) -> None:
+    client, server, auth = env
+    assert server.services is not None
+    server.services.provider_repo.create(
+        name="Trusted",
+        kind="openai",
+        base_url="https://provider.invalid/v1",
+        api_key="fixture-key",
+        models_json=json.dumps([{"id": "glm-5", "enabled": True}]),
+    )
+    body = command(
+        configuration={
+            "schemaVersion": 1,
+            "modelRef": "Trusted/glm-5",
+            "instructions": "使用中文回答",
+        }
+    )
+    assert (await client.post(ENDPOINT, headers=auth, json=body)).status_code == 201
+    current = await client.get(f"{ENDPOINT}/{body['projectID']}", headers=auth)
+    assert current.status_code == 200
+    assert current.json()["preparationState"] == "failed"
+    assert current.json()["reasonCode"] == "executionValidationPending"
+    assert current.json()["executionReady"] is False
+
+
 async def test_project_replay_keeps_original_ack_and_resources(env) -> None:
     client, server, auth = env
     body = command()

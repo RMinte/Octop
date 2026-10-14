@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Barrier, Event
 from unittest.mock import Mock
@@ -58,6 +59,7 @@ def allow(monkeypatch):
         )
 
     monkeypatch.setattr(dispatch, "get_capabilities", profile)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
 
 
 def counts(services):
@@ -88,6 +90,50 @@ def test_production_claim_gate_does_not_change_original_run_or_sequence(control)
         )
     assert counts(services) == before
     view = get_run(services, owner_id=1, run_id=receipt.runID)
+    assert view.revision == 1 and view.executionEpoch == 0 and view.dispatchPhase == "notDispatched"
+
+
+@pytest.mark.parametrize("change", ["differentProjectModel", "disabledAfterDiscovery"])
+def test_claim_rechecks_original_project_model_and_current_provider(control, monkeypatch, change):
+    services, _, task_id = control
+    provider_name, model_id = (
+        ("other", "model") if change == "differentProjectModel" else ("fixture", "no-model")
+    )
+    provider_id = services.provider_repo.create(
+        name=provider_name,
+        kind="openai",
+        base_url="https://provider.invalid/v1",
+        api_key="fixture-key",
+        models_json=json.dumps([{"id": model_id, "enabled": True}]),
+    )
+    eligible = replace(
+        services,
+        config=replace(
+            services.config,
+            agentcomputer_text_enabled=True,
+            agentcomputer_text_model_ref=f"{provider_name}/{model_id}",
+            history_v2_enabled=True,
+        ),
+    )
+    receipt = admit_new_message(eligible, owner_id=1, task_id=task_id, command=request())
+    assert get_capabilities(eligible).capabilities.runs.available
+    if change == "disabledAfterDiscovery":
+        discovered = dispatch.get_capabilities
+
+        def close_after_discovery(target):
+            profile = discovered(target)
+            services.provider_repo.update(provider_id, enabled=False)
+            return profile
+
+        monkeypatch.setattr(dispatch, "get_capabilities", close_after_discovery)
+    before = counts(eligible)
+    with pytest.raises(CommandAdmissionError, match="runtimeUnavailable") as error:
+        dispatch.claim_run(
+            eligible, owner_id=1, run_id=receipt.runID, claimant_id=uuid4(), expected_revision=1
+        )
+    assert error.value.reason == "executionUnavailable"
+    assert counts(eligible) == before
+    view = get_run(eligible, owner_id=1, run_id=receipt.runID)
     assert view.revision == 1 and view.executionEpoch == 0 and view.dispatchPhase == "notDispatched"
 
 

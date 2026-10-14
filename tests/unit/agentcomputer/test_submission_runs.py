@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from threading import Barrier
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -74,6 +75,8 @@ def allow_fixture(services, monkeypatch):
     )
     monkeypatch.setattr(submission, "get_capabilities", lambda _: profile)
     monkeypatch.setattr(dispatch, "get_capabilities", lambda _: profile)
+    monkeypatch.setattr(submission, "text_task_available", lambda _services, *, model_ref: True)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
 
 
 @pytest.fixture
@@ -139,6 +142,66 @@ def test_production_closed_gate_preserves_all_counts_and_lanes(control):
     task = services.ac_task_repo.get(str(task_id), 1)
     assert task.revision == task.next_sequence == 1 and task.active_run_id is None
     assert services.ac_project_repo.get(task.project_id, 1).active_run_id is None
+
+
+def test_turn_requires_the_original_project_model_even_when_discovery_is_open(control):
+    services, _, task_id = control
+    services.provider_repo.create(
+        name="other",
+        kind="openai",
+        base_url="https://provider.invalid/v1",
+        api_key="fixture-key",
+        models_json=json.dumps([{"id": "model", "enabled": True}]),
+    )
+    eligible = replace(
+        services,
+        config=replace(
+            services.config,
+            agentcomputer_text_enabled=True,
+            agentcomputer_text_model_ref="other/model",
+            history_v2_enabled=True,
+        ),
+    )
+    assert get_capabilities(eligible).capabilities.runs.available
+    before = counts(eligible)
+    with pytest.raises(CommandAdmissionError, match="runtimeUnavailable") as error:
+        submit_new_message(eligible, owner_id=1, task_id=task_id, command=request())
+    assert error.value.reason == "executionUnavailable"
+    assert counts(eligible) == before
+
+
+def test_turn_rechecks_provider_after_discovery_and_before_new_admission(control, monkeypatch):
+    services, _, task_id = control
+    provider_id = services.provider_repo.create(
+        name="fixture",
+        kind="openai",
+        base_url="https://provider.invalid/v1",
+        api_key="fixture-key",
+        models_json=json.dumps([{"id": "no-model", "enabled": True}]),
+    )
+    eligible = replace(
+        services,
+        config=replace(
+            services.config,
+            agentcomputer_text_enabled=True,
+            agentcomputer_text_model_ref="fixture/no-model",
+            history_v2_enabled=True,
+        ),
+    )
+    assert get_capabilities(eligible).capabilities.runs.available
+    discovered = submission.get_capabilities
+
+    def close_after_discovery(target):
+        profile = discovered(target)
+        services.provider_repo.update(provider_id, enabled=False)
+        return profile
+
+    monkeypatch.setattr(submission, "get_capabilities", close_after_discovery)
+    before = counts(eligible)
+    with pytest.raises(CommandAdmissionError, match="runtimeUnavailable") as error:
+        submit_new_message(eligible, owner_id=1, task_id=task_id, command=request())
+    assert error.value.reason == "executionUnavailable"
+    assert counts(eligible) == before
 
 
 def test_unknown_and_cross_owner_are_indistinguishable_before_gate(control):

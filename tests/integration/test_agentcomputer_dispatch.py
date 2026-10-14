@@ -59,6 +59,7 @@ async def test_run_get_projects_claim_dispatch_and_app_intake_without_started_cl
     assert before is not None
     immutable_json = before.receipt_json
     monkeypatch.setattr(dispatch, "get_capabilities", available_profile)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     claim = await asyncio.to_thread(
         dispatch.claim_run,
         server.services,
@@ -147,6 +148,7 @@ async def test_dispatch_projection_keeps_owner_isolation_including_admin(env, mo
     _task, receipt = await registered_run(client, server, alice, owner)
     assert server.services is not None
     monkeypatch.setattr(dispatch, "get_capabilities", available_profile)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     await asyncio.to_thread(
         dispatch.claim_run,
         server.services,

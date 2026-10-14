@@ -1,9 +1,4 @@
-"""Durable, fenced dispatch boundaries; no production worker is started here.
-
-The installed capability profile keeps new claims unavailable. The dedicated
-entry and its tests use the same fixed intent and acceptance ledger. An entry
-receipt does not prove a model started, a tool ran, or execution completed.
-"""
+"""Durable, fenced dispatch boundaries for the execution worker."""
 
 from __future__ import annotations
 
@@ -19,7 +14,7 @@ from psycopg import Error as PostgresError
 from pydantic import ValidationError
 
 from octop.infra.agentcomputer.bootstrap import settled_to_thread
-from octop.infra.agentcomputer.capabilities import get_capabilities
+from octop.infra.agentcomputer.capabilities import get_capabilities, text_task_available
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageDataError,
@@ -284,6 +279,10 @@ def claim_run(
         _active(services, conn, bound, current)
         if current is not None:
             raise CommandAdmissionError("revisionConflict")
+        if not text_task_available(
+            services, model_ref=bound.snapshot.projectConfiguration.modelRef
+        ):
+            raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
         now = int(datetime.now(UTC).timestamp() * 1000)
         run = services.ac_run_repo.claim(
             conn, str(run_id), owner_id, expected_revision, identity.restoreEpoch, updated_at=now

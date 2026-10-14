@@ -84,6 +84,36 @@ class AcRunRepo:
         )
 
     @staticmethod
+    def queued_high_watermark(conn: Any) -> int:
+        row = conn.execute(
+            "SELECT MAX(id) AS through_pk FROM ac_runs WHERE state='queued' "
+            "AND dispatch_phase='notDispatched' AND execution_epoch=0 "
+            "AND reconciliation_required=0"
+        ).fetchone()
+        return (
+            strict_int(row["through_pk"])
+            if row is not None and row["through_pk"] is not None
+            else 0
+        )
+
+    @staticmethod
+    def list_queued_candidates(
+        conn: Any, box_id: str, *, after_pk: int, through_pk: int
+    ) -> list[AcRunRecoveryCandidate]:
+        rows = conn.execute(
+            "SELECT r.id, r.run_id, r.owner_id FROM ac_runs r JOIN ac_projects p "
+            "ON p.project_id=r.project_id AND p.owner_id=r.owner_id "
+            "JOIN ac_tasks t ON t.task_id=r.task_id AND t.owner_id=r.owner_id "
+            "WHERE p.box_id=? AND r.id>? AND r.id<=? AND r.state='queued' "
+            "AND r.dispatch_phase='notDispatched' AND r.execution_epoch=0 "
+            "AND r.reconciliation_required=0 AND p.preparation_state='ready' "
+            "AND t.preparation_state='ready' AND p.active_run_id=r.run_id "
+            "AND t.active_run_id=r.run_id ORDER BY r.id LIMIT 100",
+            (box_id, after_pk, through_pk),
+        ).fetchall()
+        return [AcRunRecoveryCandidate.from_row(row) for row in rows]
+
+    @staticmethod
     def get_in_transaction(conn: Any, run_id: str, owner_id: int) -> AcRunRow | None:
         row = conn.execute(
             "SELECT * FROM ac_runs WHERE run_id = ? AND owner_id = ?", (run_id, owner_id)

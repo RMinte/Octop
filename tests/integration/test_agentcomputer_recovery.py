@@ -48,6 +48,7 @@ async def persisted_dispatch(client, server, auth, owner, phase, monkeypatch):
         admit_new_message, server.services, owner_id=owner, task_id=task.taskID, command=command
     )
     monkeypatch.setattr(dispatch, "get_capabilities", available_profile)
+    monkeypatch.setattr(dispatch, "text_task_available", lambda _services, *, model_ref: True)
     claim = await asyncio.to_thread(
         dispatch.claim_run,
         server.services,
@@ -122,7 +123,7 @@ async def test_recovery_projects_original_phase_lane_and_receipt_without_user_ca
             ).fetchall()
         ] == events
     profile = (await client.get(f"{PREFIX}/capabilities", headers=auth)).json()
-    assert profile["capabilityRevision"] == 13 and profile["supportedPermissionModes"] == []
+    assert profile["capabilityRevision"] == 15 and profile["supportedPermissionModes"] == []
     assert profile["capabilities"]["recovery"] == {
         "supported": False,
         "available": False,

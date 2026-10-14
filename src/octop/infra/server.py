@@ -37,6 +37,7 @@ from octop.infra.users.manager import UserManager
 from octop.infra.utils.paths import PathLayout
 
 if TYPE_CHECKING:
+    from octop.infra.agentcomputer.text_worker import LocalTextTaskWorker
     from octop.infra.auth.ldap.service import LdapAuthService
     from octop.infra.auth.ldap.throttle import LdapBindThrottle
     from octop.infra.auth.sso.service import SsoService
@@ -249,7 +250,13 @@ class AppRuntime:
 
 class OctopServer:
     def __init__(
-        self, home: Path | None = None, *, daemon_bootstrap: DaemonBootstrap | None = None
+        self,
+        home: Path | None = None,
+        *,
+        daemon_bootstrap: DaemonBootstrap | None = None,
+        agentcomputer_listen_host: str | None = None,
+        agentcomputer_workers: int = 1,
+        agentcomputer_reload: bool = False,
     ) -> None:
         self._home = home or PathLayout.from_env().root
         self.paths = PathLayout(self._home)
@@ -267,8 +274,12 @@ class OctopServer:
         self._ldap_bind_throttle: LdapBindThrottle | None = None
         self._ldap_bind_throttle_services: SharedServices | None = None
         self._agentcomputer_bootstrap = daemon_bootstrap
+        self._agentcomputer_listen_host = agentcomputer_listen_host
+        self._agentcomputer_workers = agentcomputer_workers
+        self._agentcomputer_reload = agentcomputer_reload
         self.agentcomputer_active_runs = ActiveRunRegistry()
         self.agentcomputer_http_operations = HttpOperationRegistry()
+        self.agentcomputer_text_worker: LocalTextTaskWorker | None = None
         self._stop_task: asyncio.Task[None] | None = None
 
     # Backward compat: expose user_manager directly
@@ -353,6 +364,16 @@ class OctopServer:
             await self.stop()
             raise
 
+    def _check_agentcomputer_text_listener(self, config: OctopConfig) -> None:
+        if config.agentcomputer_text_enabled and (
+            (self._agentcomputer_listen_host or config.bind_host) not in {"127.0.0.1", "::1"}
+            or self._agentcomputer_workers != 1
+            or self._agentcomputer_reload
+        ):
+            raise ValueError(
+                "AgentComputer text Tasks require a loopback listener, one worker, and no reload"
+            )
+
     async def _start(self) -> None:
         self.paths.ensure_root()
         # fnOS/容器内非 root 用户场景：把用户级 npm 全局 bin 目录（~/.npm-global）
@@ -366,6 +387,12 @@ class OctopServer:
         self._setup_logging()
         config = ensure_mobile_capabilities_probed(self.paths.config)
         self.config = config
+        self._check_agentcomputer_text_listener(config)
+        if config.agentcomputer_text_enabled and self._agentcomputer_bootstrap is None:
+            self._agentcomputer_bootstrap = DaemonBootstrap(
+                self.paths.agentcomputer_identity.parent
+            )
+            await self._agentcomputer_bootstrap.acquire()
 
         self.expert_catalog = ExpertCatalog(
             default_library_root(),
@@ -415,6 +442,12 @@ class OctopServer:
             return
         config = load_config(self.paths.config)
         self.config = config
+        self._check_agentcomputer_text_listener(config)
+        if config.agentcomputer_text_enabled and self._agentcomputer_bootstrap is None:
+            self._agentcomputer_bootstrap = DaemonBootstrap(
+                self.paths.agentcomputer_identity.parent
+            )
+            await self._agentcomputer_bootstrap.acquire()
         db = open_database(config, self.paths)
         try:
             run_migrations(db)
@@ -442,6 +475,20 @@ class OctopServer:
             if self._agentcomputer_bootstrap is not None:
                 await self._agentcomputer_bootstrap.recover(self.services)
             await self._construct_runtime(config, cleanup)
+            if config.agentcomputer_text_enabled and self.app_runtime is not None:
+                archive = self.app_runtime.history_archive
+                if archive is not None:
+                    from octop.infra.agentcomputer.text_worker import LocalTextTaskWorker
+
+                    worker = LocalTextTaskWorker(
+                        self.services,
+                        self.app_runtime.agent_registry,
+                        archive,
+                        self.agentcomputer_active_runs,
+                    )
+                    self.agentcomputer_text_worker = worker
+                    cleanup.push_async_callback(worker.close)
+                    await worker.start()
         except BaseException:
             try:
                 await settle_task(asyncio.create_task(cleanup.aclose()))
@@ -693,6 +740,9 @@ class OctopServer:
         # HTTP work may outlive a cancelled request; let its DB transaction and
         # cancellation signal settle before stopping dispatches and closing DB.
         await self.agentcomputer_http_operations.drain()
+        if self.agentcomputer_text_worker is not None:
+            await self.agentcomputer_text_worker.close()
+            self.agentcomputer_text_worker = None
         # The daemon guard and DB must also outlive every registered dispatch
         # task, including its shielded uncertainty fence and DB thread work.
         await self.agentcomputer_active_runs.drain()

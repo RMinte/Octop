@@ -1,7 +1,7 @@
 """Typed command and immutable acceptance records for the control-plane kernel.
 
-Turn registration and execution availability are separate facts. The HTTP
-ingress remains gated until managed engine dispatch is implemented.
+Turn registration and execution availability are separate facts. Tool-free
+text execution requires the explicit local capability gate.
 """
 
 from __future__ import annotations
@@ -212,8 +212,9 @@ class ProjectView(ControlModel):
     steps: PreparationSteps
     reasonCode: str | None
     retryable: StrictBool
-    executionReady: Literal[False] = Field(
-        default=False, description="Engine ingress and execution validation remain unavailable."
+    executionReady: StrictBool = Field(
+        default=False,
+        description="Current eligibility for the configured text-only execution mode.",
     )
 
 
@@ -262,8 +263,9 @@ class TaskCreateReceipt(ControlModel):
     preparationStateAtAcceptance: Literal["ready"] = Field(
         default="ready", description="Task/thread/session mapping was committed atomically."
     )
-    executionReady: Literal[False] = Field(
-        default=False, description="A ready mapping does not enable engine execution."
+    executionReady: StrictBool = Field(
+        default=False,
+        description="Execution eligibility when this immutable Task mapping receipt was accepted.",
     )
 
     @field_validator("acceptedAt")
@@ -281,8 +283,9 @@ class TaskView(ControlModel):
     title: Annotated[StrictStr, Field(min_length=1, max_length=256)]
     taskRevision: PositiveRevision
     preparationState: Literal["pending", "preparing", "ready", "failed"]
-    executionReady: Literal[False] = Field(
-        default=False, description="Engine ingress remains unavailable."
+    executionReady: StrictBool = Field(
+        default=False,
+        description="Current eligibility for the configured text-only execution mode.",
     )
 
 
