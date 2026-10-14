@@ -219,7 +219,7 @@ def test_invalid_persisted_task_numeric_value_is_a_storage_error(control, monkey
     assert counts(services) == before
 
 
-async def test_current_terminal_run_does_not_rewrite_queued_receipt(control, monkeypatch):
+async def test_forged_terminal_run_cannot_rewrite_queued_receipt(control, monkeypatch):
     services, _, task_id = control
     allow_fixture(services, monkeypatch)
     command = request()
@@ -245,9 +245,8 @@ async def test_current_terminal_run_does_not_rewrite_queued_receipt(control, mon
         conn.execute(
             "UPDATE ac_projects SET active_run_id=NULL WHERE active_run_id=?", (str(receipt.runID),)
         )
-    view = get_run(services, owner_id=1, run_id=receipt.runID)
-    assert view.state == "succeeded" and view.dispatchPhase == "engineAccepted"
-    assert view.revision == 4 and view.executionEpoch == 1
+    with pytest.raises(StorageDataError, match="missing natural completion receipt"):
+        get_run(services, owner_id=1, run_id=receipt.runID)
     assert get_command_receipt(services, 1, receipt.commandID) == receipt
     assert submit_new_message(services, owner_id=1, task_id=task_id, command=command).replayed
     assert services.ac_command_repo.get(str(receipt.commandID), 1).receipt_json == raw

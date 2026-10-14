@@ -27,6 +27,7 @@ from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageUnavailableError,
     admit_new_message,
+    content_digest,
 )
 from octop.infra.agentcomputer.engine import (
     EngineEntryMiddleware,
@@ -38,6 +39,7 @@ from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.models import EngineInvocation, NewMessageCommand, RunClaim
 from octop.infra.db.services import SharedServices
 from octop.infra.history.service import HistoryArchive
+from octop.infra.history.store import probe_bound_completion
 
 
 class CountingFakeModel(FakeMessagesListChatModel):
@@ -227,6 +229,33 @@ async def test_actual_harness_accepts_before_first_model_and_preserves_exact_inp
         str(entry.claim.intent.assistantMessageID),
     ]
     assert [document["turn_id"] for document in documents] == [str(entry.claim.intent.turnID)] * 2
+
+
+async def test_actual_harness_turn_passes_strict_bound_completion_probe(entry):
+    await dispatch.dispatch_run(
+        entry.services, claim=entry.claim, invoke=entry.invoke, active_runs=entry.active_runs
+    )
+    intent = entry.claim.intent
+    documents = entry.history_archive.store.documents(
+        intent.snapshot.octopThreadID, "message", turn_id=str(intent.turnID)
+    )
+    assert len(documents) == 2
+    native_answer = documents[-1]["value"]
+    assert native_answer["type"] == "ai"
+
+    proof = probe_bound_completion(
+        entry.history_archive.store.path,
+        identity=str(entry.services.paths.db.resolve()),
+        turn_id=str(intent.turnID),
+        thread_id=intent.snapshot.octopThreadID,
+        agent_id=intent.snapshot.agentID,
+        user_message_id=str(intent.userMessageID),
+        prompt=intent.snapshot.request.prompt,
+    )
+    assert proof.status == "complete"
+    assert proof.assistant_message_id == native_answer["data"]["id"]
+    assert proof.assistant_message_id == str(intent.assistantMessageID)
+    assert proof.assistant_content_digest == content_digest(native_answer["data"]["content"])
 
 
 async def test_existing_entry_receipt_blocks_another_model_loop(entry):

@@ -67,7 +67,7 @@ def test_v24_upgrade_and_repair_preserve_existing_graph(tmp_path: Path) -> None:
             )
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 25
+        assert _version(pool) == 26
         with pool.connect() as conn:
             assert (
                 tuple(
@@ -83,7 +83,7 @@ def test_v24_upgrade_and_repair_preserve_existing_graph(tmp_path: Path) -> None:
             conn.execute("DROP TABLE ac_run_pauses")
             conn.execute("UPDATE _schema_version SET version=999")
         migrate.run_migrations(pool)
-        assert _version(pool) == 25
+        assert _version(pool) == 26
         with pool.connect() as conn:
             assert conn.execute("SELECT COUNT(*) FROM ac_run_pauses").fetchone()[0] == 0
     finally:

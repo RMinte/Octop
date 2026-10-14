@@ -123,6 +123,24 @@ _AGENTCOMPUTER_CANCELLATION_COLUMNS = {
     "requested_at",
     "stopped_at",
 }
+_AGENTCOMPUTER_TERMINAL_COLUMNS = {
+    "id",
+    "receipt_id",
+    "run_id",
+    "turn_id",
+    "task_id",
+    "project_id",
+    "owner_id",
+    "dispatch_id",
+    "engine_request_id",
+    "claimant_id",
+    "restore_epoch",
+    "execution_epoch",
+    "receipt_json",
+    "receipt_digest",
+    "schema_version",
+    "completed_at",
+}
 
 
 def _split_pg_sql(sql: str) -> list[str]:
@@ -1947,6 +1965,26 @@ def _ensure_agentcomputer_pause_schema(db: DatabasePool) -> None:
                 conn.execute(stmt)
 
 
+def _ensure_agentcomputer_completion_schema(db: DatabasePool) -> None:
+    """Create v26 only when doing so cannot erase prior terminal evidence."""
+    if _table_exists(db, "ac_run_terminals"):
+        if not _table_columns(db, "ac_run_terminals") >= _AGENTCOMPUTER_TERMINAL_COLUMNS:
+            raise RuntimeError("Incomplete AgentComputer terminal receipt schema")
+    else:
+        with db.connect() as conn:
+            if conn.execute("SELECT 1 FROM ac_runs WHERE state='succeeded' LIMIT 1").fetchone():
+                raise RuntimeError("Missing AgentComputer terminal receipts for succeeded Runs")
+    path = next(path for version, path in _discover(db.dialect) if version == 26)
+    sql = path.read_text(encoding="utf-8")
+    with db.transaction() as conn:
+        if db.dialect == "postgresql":
+            _apply_postgresql_migration(conn, sql)
+            return
+        for stmt in _split_pg_sql(sql):
+            if stmt not in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
+                conn.execute(stmt)
+
+
 def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
     """Clamp develop DBs that applied split 005–009 down to the consolidated max.
 
@@ -2230,6 +2268,9 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
     if version == 25:
         _ensure_agentcomputer_pause_schema(db)
         return
+    if version == 26:
+        _ensure_agentcomputer_completion_schema(db)
+        return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
         conn.executescript(sql)
@@ -2262,6 +2303,9 @@ def run_migrations(db: DatabasePool) -> None:
             continue
         if version == 25:
             _ensure_agentcomputer_pause_schema(db)
+            continue
+        if version == 26:
+            _ensure_agentcomputer_completion_schema(db)
             continue
         if db.dialect == "postgresql":
             sql = path.read_text(encoding="utf-8")
@@ -2334,3 +2378,9 @@ def run_migrations(db: DatabasePool) -> None:
         or not _agentcomputer_pause_indexes_present(db)
     ):
         _ensure_agentcomputer_pause_schema(db)
+    if _max_discovered_version(db.dialect) >= 26 and (
+        _current_version(db) < 26
+        or not _table_exists(db, "ac_run_terminals")
+        or not _table_columns(db, "ac_run_terminals") >= _AGENTCOMPUTER_TERMINAL_COLUMNS
+    ):
+        _ensure_agentcomputer_completion_schema(db)

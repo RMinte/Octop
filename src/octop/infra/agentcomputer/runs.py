@@ -121,6 +121,9 @@ def get_run(services: SharedServices, *, owner_id: int, run_id: UUID) -> RunView
             from octop.infra.agentcomputer.cancellations import validate_cancellation_binding
 
             cancellation = validate_cancellation_binding(services, conn, bound, claim)
+            from octop.infra.agentcomputer.completions import validate_completion_binding
+
+            validate_completion_binding(services, conn, bound, claim)
             return run_view(bound.run, cancel_requested=cancellation is not None)
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("run storage unavailable") from exc

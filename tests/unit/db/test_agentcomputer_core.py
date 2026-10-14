@@ -174,7 +174,7 @@ def _next_run(template: dict[str, Any], turn: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_empty_database_gets_complete_core_schema(db: SqlitePool) -> None:
-    assert _version(db) == 25
+    assert _version(db) == 26
     assert set(PUBLIC_IDS) <= _tables(db)
     with db.connect() as conn:
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -192,7 +192,7 @@ def test_v20_and_skipped_watermarks_preserve_users_and_create_core(
             before = dict(conn.execute("SELECT * FROM users WHERE id = ?", (owner_id,)).fetchone())
             conn.execute("UPDATE _schema_version SET version = ?", (watermark,))
         migrate.run_migrations(pool)
-        assert _version(pool) == 25
+        assert _version(pool) == 26
         assert set(PUBLIC_IDS) <= _tables(pool)
         with pool.connect() as conn:
             after = dict(conn.execute("SELECT * FROM users WHERE id = ?", (owner_id,)).fetchone())
@@ -253,7 +253,7 @@ def test_sqlite_failed_ddl_rolls_back_schema_and_watermark(
         with pool.connect() as conn:
             assert not conn.in_transaction
         migrate.run_migrations(pool)
-        assert _version(pool) == 25
+        assert _version(pool) == 26
     finally:
         pool.close()
 

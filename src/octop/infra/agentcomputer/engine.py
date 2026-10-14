@@ -10,12 +10,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import CheckpointTuple
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.config import get_config
@@ -28,6 +31,7 @@ from octop_harness.request import ChatRequest
 from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.bootstrap import settle_task, settled_to_thread
 from octop.infra.agentcomputer.commands import CommandAdmissionError, canonical_json, content_digest
+from octop.infra.agentcomputer.completions import CompletionEvidence, complete_run
 from octop.infra.agentcomputer.models import (
     CheckpointUnknownReason,
     EngineCheckpointObservation,
@@ -35,8 +39,10 @@ from octop.infra.agentcomputer.models import (
     EngineInvocation,
 )
 from octop.infra.db.services import SharedServices
+from octop.infra.gateway.process.message_keys import STREAM_ERROR_FLAG
 from octop.infra.history.recorder import RecordingTracker
 from octop.infra.history.service import HistoryArchive
+from octop.infra.history.store import probe_bound_completion
 
 
 class EngineEntryReplayed(Exception):
@@ -329,6 +335,7 @@ async def invoke_engine_entry(
         if current.engineReceipt is not None:
             raise EngineEntryReplayed(current.engineReceipt)
         completed = False
+        stream_ended_at: datetime | None = None
         try:
             async for chunk in agent.stream(build_engine_request(invocation), protocol="langgraph"):
                 tracker = middleware.history_tracker
@@ -341,6 +348,7 @@ async def invoke_engine_entry(
                 tracker.observe(chunk)
                 await tracker.flush()
             completed = True
+            stream_ended_at = datetime.now(UTC)
         except Exception:
             if middleware.history_tracker is not None:
                 middleware.history_tracker.failed = True
@@ -356,6 +364,76 @@ async def invoke_engine_entry(
                     middleware.history_tracker = None
                 if cancelled:
                     raise asyncio.CancelledError
+        # A transient in-memory saver cannot supply durable terminal evidence.
+        # The trusted persistent path must either settle an exact, tool-free
+        # answer or let dispatch fence the handoff as uncertain.
+        if (
+            completed
+            and stream_ended_at is not None
+            and isinstance(agent.checkpointer, AsyncSqliteSaver)
+        ):
+            await _complete_persisted_entry(
+                agent, invocation, middleware, history_archive, stream_ended_at
+            )
+
+
+async def _complete_persisted_entry(
+    agent: HarnessAgent,
+    invocation: EngineInvocation,
+    middleware: EngineEntryMiddleware,
+    history_archive: HistoryArchive,
+    stream_ended_at: datetime,
+) -> None:
+    """Join independent archive and checkpoint proof before the final DB CAS."""
+    terminal = await inspect_terminal_checkpoint(agent, invocation)
+    if terminal is None:
+        raise CommandAdmissionError("runtimeUnavailable", reason="completionEvidenceUnavailable")
+    services = middleware._services
+    if not services.config.database.is_sqlite:
+        raise CommandAdmissionError("runtimeUnavailable", reason="historyUnavailable")
+    intent = invocation.intent
+    history = await settled_to_thread(
+        probe_bound_completion,
+        history_archive.store.path,
+        identity=str(services.config.database.resolve_sqlite_path(services.paths.root).resolve()),
+        turn_id=str(intent.turnID),
+        thread_id=intent.snapshot.octopThreadID,
+        agent_id=intent.snapshot.agentID,
+        user_message_id=str(intent.userMessageID),
+        prompt=intent.snapshot.request.prompt,
+    )
+    if (
+        history.status != "complete"
+        or history.assistant_message_id is None
+        or history.assistant_content_digest is None
+    ):
+        raise CommandAdmissionError("runtimeUnavailable", reason="completionEvidenceUnavailable")
+    evidence = CompletionEvidence(
+        schemaVersion=1,
+        historyTurnID=intent.turnID,
+        historyThreadID=intent.snapshot.octopThreadID,
+        historyAgentID=intent.snapshot.agentID,
+        historyStatus="complete",
+        historyDigest=content_digest(
+            {
+                "schemaVersion": 1,
+                "turnID": str(intent.turnID),
+                "threadID": intent.snapshot.octopThreadID,
+                "agentID": intent.snapshot.agentID,
+                "status": "complete",
+                "assistantMessageID": history.assistant_message_id,
+                "assistantContentDigest": history.assistant_content_digest,
+            }
+        ),
+        historyAssistantMessageID=history.assistant_message_id,
+        historyAssistantContentDigest=history.assistant_content_digest,
+        terminalCheckpointID=terminal.checkpoint_id,
+        terminalCheckpointDigest=terminal.checkpoint_digest,
+        terminalAssistantMessageID=terminal.assistant_message_id,
+        terminalAssistantContentDigest=terminal.assistant_content_digest,
+        engineStreamEndedAt=stream_ended_at,
+    )
+    await settled_to_thread(complete_run, services, invocation, evidence)
 
 
 def _checkpoint_matches(checkpoint: CheckpointTuple, invocation: EngineInvocation) -> bool:
@@ -504,4 +582,139 @@ async def inspect_engine_checkpoint(
         reasonCode=None,
         checkpointID=checkpoint_id,
         checkpointNamespace="",
+    )
+
+
+@dataclass(frozen=True)
+class TerminalCheckpointEvidence:
+    """A bound, persisted graph terminal state for one text-only invocation.
+
+    This is checkpoint evidence, not permission to finish a Run or release its
+    lanes. The control transaction must independently fence cancellation and
+    any tool effect before using it.
+    """
+
+    checkpoint_id: UUID
+    assistant_message_id: str
+    assistant_content_digest: str
+    checkpoint_digest: str
+
+
+async def inspect_terminal_checkpoint(
+    agent: HarnessAgent, invocation: EngineInvocation
+) -> TerminalCheckpointEvidence | None:
+    """Read one fixed native checkpoint; never infer completion from stream EOF.
+
+    Harness cancellation can end a stream normally while its graph still has
+    work to do. For now only an already initialized, persistent SQLite saver
+    is accepted as natural-completion evidence.
+    """
+    saver = agent.checkpointer
+    if not isinstance(saver, AsyncSqliteSaver) or not saver.is_setup:
+        return None
+    observation = await inspect_engine_checkpoint(agent, invocation)
+    if observation.status != "requestObserved" or observation.checkpointID is None:
+        return None
+    middleware = next(
+        (
+            item
+            for item in agent.config.middleware or []
+            if isinstance(item, EngineEntryMiddleware) and item.invocation == invocation
+        ),
+        None,
+    )
+    if middleware is None:
+        return None
+    checkpoint_id = observation.checkpointID
+    try:
+        config: RunnableConfig = {
+            "configurable": {
+                "thread_id": invocation.intent.snapshot.octopThreadID,
+                "checkpoint_ns": "",
+                "checkpoint_id": str(checkpoint_id),
+            }
+        }
+        checkpoint = await saver.aget_tuple(config)
+        if (
+            checkpoint is None
+            or not _checkpoint_matches(checkpoint, invocation)
+            or checkpoint.pending_writes != []
+            or checkpoint.metadata.get("source") != "loop"
+            or type(checkpoint.metadata.get("step")) is not int
+            or checkpoint.metadata["step"] < 0
+        ):
+            return None
+        state = await agent.graph.aget_state(checkpoint.config)
+        state_config = state.config.get("configurable") or {}
+        messages = (state.values or {}).get("messages")
+        if (
+            state_config.get("checkpoint_id") != str(checkpoint_id)
+            or state_config.get("thread_id") != invocation.intent.snapshot.octopThreadID
+            or state_config.get("checkpoint_ns", "") != ""
+            or state.next != ()
+            or state.tasks != ()
+            or not isinstance(messages, list)
+            or not _original_message_matches(messages, invocation)
+            or any(
+                canonical_json((state.metadata or {}).get(key)) != canonical_json(value)
+                for key, value in _checkpoint_metadata(invocation).items()
+            )
+        ):
+            return None
+        user_id = str(invocation.intent.userMessageID)
+        original_index = next(i for i, message in enumerate(messages) if message.id == user_id)
+        answer = messages[original_index + 1 :]
+        if len(answer) != 1 or not isinstance(answer[0], AIMessage):
+            return None
+        assistant = answer[0]
+        if (
+            not isinstance(assistant.id, str)
+            or not assistant.id
+            or assistant.id == user_id
+            or not isinstance(assistant.content, str)
+            or not assistant.content
+            or assistant.tool_calls
+            or assistant.invalid_tool_calls
+            or STREAM_ERROR_FLAG in assistant.additional_kwargs
+        ):
+            return None
+    except Exception:
+        return None
+
+    # Native input can predate the durable application ACK. Recheck that exact
+    # claim without opening execution; a later cancellation still needs the
+    # final control-DB transaction to win its own CAS race.
+    from octop.infra.agentcomputer.dispatch import get_claim
+
+    try:
+        claim = await asyncio.to_thread(
+            get_claim,
+            middleware._services,
+            owner_id=invocation.intent.ownerID,
+            run_id=invocation.intent.runID,
+        )
+    except Exception:
+        return None
+    if (
+        claim is None
+        or claim.intent != invocation.intent
+        or claim.claimantID != invocation.claimantID
+        or claim.engineReceipt is None
+    ):
+        return None
+    assistant_content_digest = content_digest(assistant.content)
+    return TerminalCheckpointEvidence(
+        checkpoint_id=checkpoint_id,
+        assistant_message_id=assistant.id,
+        assistant_content_digest=assistant_content_digest,
+        checkpoint_digest=content_digest(
+            {
+                "schemaVersion": 1,
+                "checkpointID": str(checkpoint_id),
+                "checkpointNamespace": "",
+                "metadata": _checkpoint_metadata(invocation),
+                "assistantMessageID": assistant.id,
+                "assistantContentDigest": assistant_content_digest,
+            }
+        ),
     )

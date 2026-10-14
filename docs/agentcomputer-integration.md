@@ -52,6 +52,10 @@
 
 第二十五轮验证：定向恢复测试 37 passed；最终完整 `make all` 的 Ruff、严格 mypy（600 个源文件）与非 live 全套通过，5342 passed / 23 skipped。汇总日志经过定向测试，且最终复验已包含日志补丁；跳过项不计为通过。未改动 8090 实验实例的运行数据，也未升级现有 8088 会话。
 
+第二十六轮建立[无工具 Run 自然完成内核](agentcomputer-run-completion.md)：可信 Harness 流结束后，固定 v2 历史 Turn 与已初始化的持久 SQLite 根终态检查点必须共同证明同一最终回答；控制库在一个事务中保存 v26 完成收据、Run 成功 CAS、`run.finished` 并释放 Task/Project 双占用。取消引起的正常 EOF、空回答或任一缺证据会保守收紧而不会宣称成功。生产 worker、公开 Task/Run 创建、真实工具、已交接停止证明和完整恢复继续关闭；adapterVersion、capabilityRevision 和公开 HTTP 均不变。
+
+第二十六轮验证：真实 Harness 和控制事务定向回归、数据库/备份迁移回归均通过；最终 `make all` 的 Ruff、严格 mypy（602 个源文件）和非 live 全套通过，5396 passed / 23 skipped。跳过项不计为通过。8090 实验实例未在本轮重启升级，也未改动现有 8088 会话。
+
 当前只能在开发机本地部署。用户提供的目标设备描述是“可能为 Ubuntu、约 16 GB 内存的普通电脑，并有可部署 Qwen 27B 的独立算力”；系统、CPU 架构、容器条件、网络与实际可用资源尚未核实。它们是待确认输入，不是已验收的部署规格。
 
 ## 仓库与版本依据
@@ -84,6 +88,7 @@
 | 第二十三轮开工基线 | `feature/agentcomputer-foundation` | `fe39d2d2e8b70822fd20eb3fc1ac23d148cbb4d1`，开工时主目录干净；AgentComputer 主目录 `feature/0.0.2/all @ 67d203b` 的既有文档改动保留 |
 | 第二十四轮开工基线 | `feature/agentcomputer-foundation` | `12b3623d5cef1f9c49bd2e83faf00e95907198f4`，开工时主目录干净；本轮受托引擎与历史实现并行修改 |
 | 第二十五轮开工基线 | `feature/agentcomputer-foundation` | `6d6a988fa8a0635d42ccc8c87beb17d893398d07`，开工时主目录干净 |
+| 第二十六轮开工基线 | `feature/agentcomputer-foundation` | `a5c33187c0071bc157f65ecc70a6690b71af8b1d`，开工时主目录干净；本轮仅修改 Octop checkout |
 
 Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写；仓库网址不等于已经推送。工作开始核对主目录 status、worktree、branch 和 HEAD，保留已有文档及代码改动。提交运行仓库 hooks，完成默认 `make all` 门禁后再交付；不跳过红测试。
 
@@ -96,7 +101,7 @@ Git remote 的实际名称、推送分支、提交和 PR 由交付记录填写�
 | 阶段 | 交付内容 | 当前边界 |
 |---|---|---|
 | M0 环境和协议验证 | 部署输入、模型协议、隔离与容量、最小身份及能力入口 | 离线 wire、真实 GLM-5 工具续轮及固定 ASCII/中文标记文本流、离线取消与传输故障已有分项证据；目标盒子 Qwen、执行隔离和实机条件仍待验 |
-| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 25、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、持久暂停及本人 Run/审批/提问状态与原裁决收据回查、精确取消及可信 Run 到本地 harness 流关闭的隔离证据、应用入站收据、受托 Turn 的 v2 原生历史固定身份、流归档和启动只读对账、daemon 保守扫描与 Run 查询；已领取但未开始派发的 Run 可严格停止并释放双占用，显式登记的可信派发任务和 AgentComputer HTTP 操作在服务关闭时完成本地结算；生产 ready、真实模型/工具、已交接 Run 停止证明和完整恢复仍待验 |
+| M1 领域和命令接收 | 项目、Task/thread、Run、固定输入、命令幂等、最小派发和恢复 | 已有 schema 26、本地项目准备、内部 Task/Turn 登记、内部派发/工具 journal、持久暂停及本人 Run/审批/提问状态与原裁决收据回查、精确取消及可信 Run 到本地 harness 流关闭的隔离证据、应用入站收据、受托 Turn 的 v2 原生历史固定身份、流归档、启动只读对账与无工具自然完成收据、daemon 保守扫描与 Run 查询；已领取但未开始派发的 Run 可严格停止并释放双占用，可信无工具 Run 可持久成功并释放双占用，显式登记的可信派发任务和 AgentComputer HTTP 操作在服务关闭时完成本地结算；生产 ready、真实模型/工具、已交接 Run 停止证明和完整恢复仍待验 |
 | M2 原生闭环 | 客户端远程会话、事件、审批、取消、正式成果及重连 | 不以实时连接成功代替可靠执行 |
 | M3 配置与恢复 | 指令/技能版本、资源、Outbox、多设备与异常对账 | 保留配置和执行快照，不盲重放 |
 | M4 调度与面板 | Schedule occurrence、Git/终端、受认证预览及资料库 | 工具隔离和项目写入规则先通过 |

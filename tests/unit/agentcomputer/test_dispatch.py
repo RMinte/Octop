@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from threading import Barrier, Event
 from unittest.mock import Mock
 from uuid import uuid4
@@ -22,9 +23,11 @@ from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
     StorageDataError,
     admit_new_message,
+    content_digest,
     get_command_receipt,
 )
-from octop.infra.agentcomputer.engine import EngineEntryMiddleware
+from octop.infra.agentcomputer.completions import CompletionEvidence, complete_run
+from octop.infra.agentcomputer.engine import EngineEntryMiddleware, _checkpoint_metadata
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import build_shared_services
@@ -497,22 +500,47 @@ async def test_terminal_commit_wins_over_uncertainty_and_preserves_new_writer(
         winner["entry"] = await asyncio.to_thread(
             dispatch.accept_engine_entry, services, invocation
         )
-        # A separate definitive terminal committer is simulated only in this
-        # fixture. Intake does not implement or claim production completion.
-        with services.db.transaction() as conn:
-            conn.execute(
-                "UPDATE ac_runs SET state='succeeded',revision=revision+1,updated_at=updated_at+1 "
-                "WHERE run_id=?",
-                (str(receipt.runID),),
-            )
-            conn.execute(
-                "UPDATE ac_tasks SET active_run_id=NULL WHERE task_id=?",
-                (str(receipt.taskID),),
-            )
-            conn.execute(
-                "UPDATE ac_projects SET active_run_id=NULL WHERE project_id=?",
-                (str(claim.intent.projectID),),
-            )
+        # Fixture-only trusted evidence exercises the actual terminal transaction.
+        answer_digest = content_digest("fixture-answer")
+        checkpoint_id = uuid4()
+        complete_run(
+            services,
+            invocation,
+            CompletionEvidence(
+                schemaVersion=1,
+                historyTurnID=invocation.intent.turnID,
+                historyThreadID=invocation.intent.snapshot.octopThreadID,
+                historyAgentID=invocation.intent.snapshot.agentID,
+                historyStatus="complete",
+                historyDigest=content_digest(
+                    {
+                        "schemaVersion": 1,
+                        "turnID": str(invocation.intent.turnID),
+                        "threadID": invocation.intent.snapshot.octopThreadID,
+                        "agentID": invocation.intent.snapshot.agentID,
+                        "status": "complete",
+                        "assistantMessageID": "fixture-answer",
+                        "assistantContentDigest": answer_digest,
+                    }
+                ),
+                historyAssistantMessageID="fixture-answer",
+                historyAssistantContentDigest=answer_digest,
+                terminalCheckpointID=checkpoint_id,
+                terminalCheckpointDigest=content_digest(
+                    {
+                        "schemaVersion": 1,
+                        "checkpointID": str(checkpoint_id),
+                        "checkpointNamespace": "",
+                        "metadata": _checkpoint_metadata(invocation),
+                        "assistantMessageID": "fixture-answer",
+                        "assistantContentDigest": answer_digest,
+                    }
+                ),
+                terminalAssistantMessageID="fixture-answer",
+                terminalAssistantContentDigest=answer_digest,
+                engineStreamEndedAt=datetime.now(UTC),
+            ),
+        )
         if new_writer:
             winner["next"] = admit_new_message(
                 services, owner_id=1, task_id=receipt.taskID, command=request()

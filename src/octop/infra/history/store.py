@@ -56,10 +56,149 @@ def dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _decode_document(conn: sqlite3.Connection, node: Any) -> Any:
+    tag, value = node
+    if tag == "body":
+        row = conn.execute("SELECT value FROM bodies WHERE digest=?", (value,)).fetchone()
+        if row is None:
+            raise ValueError("History body reference is missing")
+        return json.loads(row[0])
+    if tag == "text":
+        return "".join(_decode_document(conn, ["body", digest]) for digest in value)
+    if tag == "dict":
+        return {key: _decode_document(conn, item) for key, item in value}
+    if tag == "list":
+        return [_decode_document(conn, item) for item in value]
+    if tag == "value":
+        return value
+    raise ValueError("Unknown history encoding")
+
+
 @dataclass(frozen=True)
 class BoundTurnProbe:
     status: str
     initial_message_saved: bool = False
+
+
+@dataclass(frozen=True)
+class BoundCompletionProbe:
+    """Exact archived answer evidence; it is not a control-plane Run receipt."""
+
+    status: str
+    assistant_message_id: str | None = None
+    assistant_content_digest: str | None = None
+
+
+def probe_bound_completion(
+    path: Path,
+    *,
+    identity: str,
+    turn_id: str,
+    thread_id: str,
+    agent_id: str,
+    user_message_id: str,
+    prompt: str,
+) -> BoundCompletionProbe:
+    """Read one complete, tool-free bound Turn from a consistent archive snapshot.
+
+    A generic history ``complete`` flag alone is insufficient. This validates
+    the fixed input and a single persisted final answer without creating an
+    archive or using another thread's latest Turn. It does not prove that the
+    engine stopped, nor that the control-plane Run may release its lanes.
+    """
+    try:
+        if not path.exists():
+            marker = path.with_suffix(".required")
+            return BoundCompletionProbe(
+                "archiveUnavailable" if marker.exists() else "archiveMissing"
+            )
+        with closing(
+            sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            meta = conn.execute("SELECT version, identity FROM archive_meta").fetchall()
+            if len(meta) != 1 or meta[0]["version"] != 1 or meta[0]["identity"] != identity:
+                return BoundCompletionProbe("archiveIdentityMismatch")
+            turn = conn.execute(
+                "SELECT t.status,t.error,t.finished_at,s.thread_id,s.agent_id,s.format "
+                "FROM turns t JOIN segments s ON s.id=t.segment_id WHERE t.id=?",
+                (turn_id,),
+            ).fetchone()
+            if turn is None:
+                return BoundCompletionProbe("turnMissing")
+            if (
+                turn["thread_id"] != thread_id
+                or turn["agent_id"] != agent_id
+                or turn["format"] != "v2"
+                or turn["status"] not in _BOUND_STATUSES
+            ):
+                return BoundCompletionProbe("turnBindingMismatch")
+            if turn["status"] != "complete":
+                return BoundCompletionProbe("turnNotComplete")
+            if turn["error"] is not None or turn["finished_at"] is None:
+                return BoundCompletionProbe("turnIncomplete")
+            rows = conn.execute(
+                "SELECT id,thread_id,turn_id,kind,seq,data FROM documents "
+                "WHERE turn_id=? ORDER BY seq,id",
+                (turn_id,),
+            ).fetchall()
+            if (
+                len(rows) != 2
+                or rows[0]["id"] != f"message:{turn_id}:0"
+                or rows[1]["id"] != f"message:{turn_id}:1"
+                or rows[0]["seq"] >= rows[1]["seq"]
+                or any(
+                    row["thread_id"] != thread_id
+                    or row["turn_id"] != turn_id
+                    or row["kind"] != "message"
+                    for row in rows
+                )
+            ):
+                return BoundCompletionProbe("messagesIncomplete")
+            seed = _decode_document(conn, json.loads(rows[0]["data"]))
+            answer = _decode_document(conn, json.loads(rows[1]["data"]))
+            if not isinstance(seed, dict) or seed.get("type") != "human":
+                return BoundCompletionProbe("inputMismatch")
+            seed_data = seed.get("data")
+            if (
+                not isinstance(seed_data, dict)
+                or seed_data.get("type") != "human"
+                or seed_data.get("id") != user_message_id
+                or seed_data.get("content") != prompt
+            ):
+                return BoundCompletionProbe("inputMismatch")
+            if not isinstance(answer, dict) or answer.get("type") != "ai":
+                return BoundCompletionProbe("answerIncomplete")
+            answer_data = answer.get("data")
+            if not isinstance(answer_data, dict):
+                return BoundCompletionProbe("answerIncomplete")
+            answer_id = answer_data.get("id")
+            content = answer_data.get("content")
+            extra = answer_data.get("additional_kwargs")
+            metadata = answer_data.get("response_metadata")
+            if (
+                not isinstance(answer_id, str)
+                or not answer_id.strip()
+                or answer_id.startswith(f"{turn_id}:stream:")
+                or answer_data.get("type") != "ai"
+                or not isinstance(content, str)
+                or not content.strip()
+                or not isinstance(extra, dict)
+                or not isinstance(metadata, dict)
+                or any(answer_data.get(key) for key in ("tool_calls", "invalid_tool_calls"))
+                or any(
+                    extra.get(key) for key in ("tool_calls", "function_call", "history_tool_args")
+                )
+                or extra.get("octop_stream_error")
+                or metadata.get("finish_reason") in {"length", "content_filter", "tool_calls"}
+            ):
+                return BoundCompletionProbe("answerIncomplete")
+            digest = "sha256:" + hashlib.sha256(dumps(content).encode("utf-8")).hexdigest()
+            return BoundCompletionProbe("complete", answer_id, digest)
+    except (sqlite3.DatabaseError, OSError, ValueError, TypeError, KeyError):
+        return BoundCompletionProbe("archiveUnavailable")
 
 
 def probe_bound_turn(
@@ -230,21 +369,7 @@ class HistoryStore:
             )
 
     def _decode(self, conn: sqlite3.Connection, node: Any) -> Any:
-        tag, value = node
-        if tag == "body":
-            row = conn.execute("SELECT value FROM bodies WHERE digest=?", (value,)).fetchone()
-            if row is None:
-                raise ValueError("History body reference is missing")
-            return json.loads(row[0])
-        if tag == "text":
-            return "".join(self._decode(conn, ["body", digest]) for digest in value)
-        if tag == "dict":
-            return {k: self._decode(conn, v) for k, v in value}
-        if tag == "list":
-            return [self._decode(conn, v) for v in value]
-        if tag == "value":
-            return value
-        raise ValueError("Unknown history encoding")
+        return _decode_document(conn, node)
 
     def documents(
         self,
