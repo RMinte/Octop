@@ -28,6 +28,26 @@ def test_db_pool_creates_file(tmp_path: Path):
     assert db_path.exists()
 
 
+def test_read_snapshot_keeps_one_view_without_blocking_wal_writer(tmp_path: Path) -> None:
+    path = tmp_path / "read-snapshot.db"
+    reader = SqlitePool(path)
+    writer = SqlitePool(path)
+    try:
+        with writer.transaction() as conn:
+            conn.execute("CREATE TABLE snapshot_fixture(value INTEGER NOT NULL)")
+            conn.execute("INSERT INTO snapshot_fixture VALUES(1)")
+        with reader.read_snapshot() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM snapshot_fixture").fetchone()[0] == 1
+            with writer.transaction() as other:
+                other.execute("INSERT INTO snapshot_fixture VALUES(2)")
+            assert conn.execute("SELECT COUNT(*) FROM snapshot_fixture").fetchone()[0] == 1
+        with reader.read_snapshot() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM snapshot_fixture").fetchone()[0] == 2
+    finally:
+        reader.close()
+        writer.close()
+
+
 class _ObservedClose:
     """Keep a broken close implementation from crashing while the assertion fails."""
 

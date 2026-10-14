@@ -63,6 +63,23 @@ class AcEventRepo:
         return AcEventRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def span_for_task_in_transaction(
+        conn: Any, task_id: str, owner_id: int
+    ) -> tuple[int, int | None, int | None]:
+        row = conn.execute(
+            "SELECT COUNT(*) AS event_count, MIN(sequence) AS first_sequence, "
+            "MAX(sequence) AS last_sequence FROM ac_events WHERE task_id=? AND owner_id=?",
+            (task_id, owner_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Task event span query returned no row")
+        return (
+            strict_int(row["event_count"]),
+            strict_int(row["first_sequence"]) if row["first_sequence"] is not None else None,
+            strict_int(row["last_sequence"]) if row["last_sequence"] is not None else None,
+        )
+
+    @staticmethod
     def list_for_run_in_transaction(
         conn: Any, run_id: str, owner_id: int, *, event_type: str = "run.accepted"
     ) -> list[AcEventRow]:

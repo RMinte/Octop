@@ -59,6 +59,7 @@ from octop.infra.agentcomputer.results import RunResult, get_run_result
 from octop.infra.agentcomputer.runs import get_run
 from octop.infra.agentcomputer.submission import submit_new_message
 from octop.infra.agentcomputer.task_listing import InvalidTaskListCursor, list_tasks
+from octop.infra.agentcomputer.task_snapshot import TaskControlSnapshot, get_task_control_snapshot
 from octop.infra.agentcomputer.tasks import admit_task, get_task
 from octop.infra.agentcomputer.turn_listing import (
     InvalidTurnListCursor,
@@ -563,6 +564,59 @@ async def turn_list(
     if listing is None:
         return protocol_error_response("resourceNotFound", 404)
     return listing
+
+
+@router.get(
+    "/tasks/{taskID}/snapshot",
+    response_model=TaskControlSnapshot,
+    summary="Read an owned Task control snapshot and event continuation",
+    description=(
+        "Requires a user Bearer token. Missing and other users' Tasks return the same 404, "
+        "including for admins. The Task, latest verified Run, committed event watermark, "
+        "and continuation cursor are read from one control-database snapshot. Pass nextCursor "
+        "to the Task events endpoint to read facts committed after coveredSequence. The cursor "
+        "is scoped to this box, user, Task, and restore epoch; after a cursor failure, fetch "
+        "a new snapshot. This control baseline omits messages, model text, tool payloads, "
+        "history pages, and artifacts; it is not the complete events capability."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No Task owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid Task identifier"},
+        503: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Task control snapshot graph or storage unavailable",
+        },
+    },
+)
+async def task_control_snapshot(
+    response: Response,
+    task_id: UUID = Path(alias="taskID", description="Owned public Task UUID."),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> TaskControlSnapshot | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        snapshot = await server.agentcomputer_http_operations.run_thread(
+            get_task_control_snapshot, server.services, user.id, task_id
+        )
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Task control snapshot")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Task control snapshot is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="snapshotInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Task control snapshot storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if snapshot is None:
+        return protocol_error_response("resourceNotFound", 404)
+    return snapshot
 
 
 @router.get(

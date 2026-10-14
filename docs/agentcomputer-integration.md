@@ -4,6 +4,8 @@
 
 当前新增[本机纯文本 Task 试用](agentcomputer-local-text-task.md)：显式 opt-in、固定可用模型与回环单进程条件满足时，可从 AgentComputer 盒子项目创建 Task、提交 Turn、等待后台 worker、读取经完成收据和 v2 历史共同验证的回答。默认仍关闭，工具、审批续跑和远端设备配对未开放；8090 隔离实例已用 GLM-5 完成一次真实项目、Task、Turn 和结果验收，详见[进度记录](agentcomputer-progress.md)。
 
+当前[Task 控制事件读取](agentcomputer-event-read.md)增加一致的控制面快照和续读 cursor；AgentComputer 原生客户端把阶段事件和 cursor 原子缓存并按账号、盒子和恢复代次隔离。它可为中断的控制阶段读取建立新基线，尚不包含消息正文、正式成果或完整离线事件投影；详细验收与剩余边界见[进度记录](agentcomputer-progress.md)。
+
 第三轮实现项目意图、停止的默认专家和受限工作区准备，详见 [项目准备说明](agentcomputer-projects.md)。当前完整项目执行能力仍未开放。
 
 第四轮建立内部 Task/thread/session 原子映射和本人只读 Task 查询，详见 [Task 映射说明](agentcomputer-tasks.md)。真实任务创建和执行仍等待后续门禁。

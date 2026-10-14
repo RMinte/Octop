@@ -34,6 +34,10 @@ owner's durable Task control events. Its opaque `nextCursor` continues the same
 fixed page window, then serves as the cursor for later polls. The response omits
 internal payloads and model text; read the Run result for a verified final answer.
 See [Task event reads](agentcomputer-event-read.md) for the exact shape and limits.
+`GET /api/agentcomputer/v1/tasks/{taskID}/snapshot` reads the owned Task, latest
+verified Run, committed event watermark, and an event continuation cursor from
+one control-database snapshot. It is a recovery baseline for control state, not
+a message-history or artifact snapshot.
 
 `POST /api/agentcomputer/v1/runs/{runID}/cancel` accepts an exact, owned Run
 cancellation command. `GET /api/agentcomputer/v1/runs/{runID}` reports the current

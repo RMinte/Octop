@@ -27,6 +27,9 @@ class DatabasePool(Protocol):
     @contextmanager
     def transaction(self) -> Iterator[Any]: ...
 
+    @contextmanager
+    def read_snapshot(self) -> Iterator[Any]: ...
+
     def close(self) -> None: ...
 
 
@@ -67,6 +70,19 @@ class SqlitePool:
             # cannot wait that out. Taking the write lock up front makes the competing writer
             # wait instead of aborting us.
             self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            # A deferred transaction pins a WAL read snapshot at the first
+            # SELECT without taking the write reservation used by transaction().
+            self._conn.execute("BEGIN")
             try:
                 yield self._conn
                 self._conn.execute("COMMIT")
@@ -171,6 +187,12 @@ class PostgresPool:
     @contextmanager
     def transaction(self) -> Iterator[_PgConnectionProxy]:
         with self._pool.connection() as conn, conn.transaction():
+            yield _PgConnectionProxy(conn)
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[_PgConnectionProxy]:
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             yield _PgConnectionProxy(conn)
 
     def close(self) -> None:
