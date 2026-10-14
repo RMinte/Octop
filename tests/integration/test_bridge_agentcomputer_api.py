@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+from octop.infra.agentcomputer.commands import content_digest
 from octop.infra.bridge.http_tunnel import encode_tunnel_response
 from tests.support.auth import create_user, resolve_user_id
 
@@ -230,3 +231,175 @@ async def test_bridge_agentcomputer_documents_forward_only_bounded_contract(env:
     )
     assert schema["paths"][doc_path]["get"]["summary"]
     assert schema["paths"][doc_path]["put"]["requestBody"]["content"]["application/json"]
+
+
+async def test_bridge_agentcomputer_run_output_is_owned_typed_and_read_only(env: Any) -> None:
+    client, server, auth = env
+    assert server.services is not None and server.app_runtime is not None
+    owner_id = await resolve_user_id(client, auth, "admin")
+    server.services.bridge_connection_repo.create(
+        connection_id="01REMOTE",
+        owner_user_id=owner_id,
+        peer_base_url="https://peer.example",
+        peer_username="peer",
+        display_name="Remote",
+    )
+    run_id = uuid4()
+    path = f"{PREFIX}/runs/{run_id}/output"
+    remote = f"/api/agentcomputer/v1/runs/{run_id}/output"
+    provisional_text = "正在生成"
+    session = MagicMock()
+    session.tunnel_request = AsyncMock(
+        return_value=encode_tunnel_response(
+            status=200,
+            headers={"Set-Cookie": "secret=leak", "Authorization": "Bearer leak"},
+            body=json.dumps(
+                {
+                    "runID": str(run_id),
+                    "state": "running",
+                    "text": provisional_text,
+                    "digest": content_digest(provisional_text),
+                    "provisional": True,
+                },
+                ensure_ascii=False,
+            ).encode(),
+        )
+    )
+    manager = server.app_runtime.bridge_manager
+    assert manager is not None
+    with patch.object(manager, "require_session", return_value=session):
+        output = await client.get(path, headers=auth)
+        other_auth = await create_user(client, auth, username="output-other")
+        denied = await client.get(path, headers=other_auth)
+        wrong_method = await client.post(path, headers=auth)
+        malformed = await client.get(f"{PREFIX}/runs/not-a-uuid/output", headers=auth)
+        extra_path = await client.get(f"{path}/private", headers=auth)
+
+    assert output.status_code == 200
+    assert output.json() == {
+        "runID": str(run_id),
+        "state": "running",
+        "text": provisional_text,
+        "digest": content_digest(provisional_text),
+        "provisional": True,
+    }
+    assert output.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in output.headers
+    assert "authorization" not in output.headers
+    assert "peer-secret" not in output.text
+    assert denied.status_code == 404
+    assert wrong_method.status_code == 405
+    assert malformed.status_code == 422
+    assert extra_path.status_code == 404
+    session.tunnel_request.assert_awaited_once_with(
+        method="GET", path=remote, query="", headers=None, body=None
+    )
+
+    session.tunnel_request.return_value = encode_tunnel_response(
+        status=200,
+        headers={},
+        body=json.dumps(
+            {
+                "runID": str(run_id),
+                "state": "running",
+                "text": "peer-secret",
+                "digest": content_digest("peer-secret"),
+                "provisional": True,
+                "private": "peer-secret",
+            }
+        ).encode(),
+    )
+    with patch.object(manager, "require_session", return_value=session):
+        invalid = await client.get(path, headers=auth)
+    assert invalid.status_code == 502
+    assert "peer-secret" not in invalid.text
+
+    schema = client._octop_app.openapi()  # type: ignore[attr-defined]
+    operation = schema["paths"][
+        "/api/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}/output"
+    ]["get"]
+    assert operation["summary"] == "Read a peer AgentComputer Run text output snapshot via Bridge"
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/RunOutputSnapshot"
+    )
+
+
+async def test_bridge_agentcomputer_tool_activity_is_owned_typed_and_read_only(env: Any) -> None:
+    client, server, auth = env
+    assert server.services is not None and server.app_runtime is not None
+    owner_id = await resolve_user_id(client, auth, "admin")
+    server.services.bridge_connection_repo.create(
+        connection_id="01REMOTE",
+        owner_user_id=owner_id,
+        peer_base_url="https://peer.example",
+        peer_username="peer",
+        display_name="Remote",
+    )
+    run_id = uuid4()
+    path = f"{PREFIX}/runs/{run_id}/tool-activity"
+    remote = f"/api/agentcomputer/v1/runs/{run_id}/tool-activity"
+    item = {
+        "toolName": "read_project_document",
+        "path": "documents/brief.md",
+        "status": "ok",
+        "outcome": "succeeded",
+    }
+    session = MagicMock()
+    session.tunnel_request = AsyncMock(
+        return_value=encode_tunnel_response(
+            status=200,
+            headers={"Set-Cookie": "secret=leak", "Authorization": "Bearer leak"},
+            body=json.dumps({"runID": str(run_id), "items": [item]}).encode(),
+        )
+    )
+    manager = server.app_runtime.bridge_manager
+    assert manager is not None
+    with patch.object(manager, "require_session", return_value=session):
+        activity = await client.get(path, headers=auth)
+        other_auth = await create_user(client, auth, username="activity-other")
+        denied = await client.get(path, headers=other_auth)
+        wrong_method = await client.post(path, headers=auth)
+        malformed = await client.get(f"{PREFIX}/runs/not-a-uuid/tool-activity", headers=auth)
+        extra_path = await client.get(f"{path}/private", headers=auth)
+
+    assert activity.status_code == 200
+    assert activity.json() == {"runID": str(run_id), "items": [item]}
+    assert activity.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in activity.headers
+    assert "authorization" not in activity.headers
+    assert denied.status_code == 404
+    assert wrong_method.status_code == 405
+    assert malformed.status_code == 422
+    assert extra_path.status_code == 404
+    session.tunnel_request.assert_awaited_once_with(
+        method="GET", path=remote, query="", headers=None, body=None
+    )
+
+    invalid_items = [
+        [{**item, "content": "private document text"}],
+        [{**item, "path": "/private/host-secret.txt"}],
+        [{**item, "path": "documents/../host-secret.md"}],
+        [item, item],
+    ]
+    with patch.object(manager, "require_session", return_value=session):
+        for items in invalid_items:
+            session.tunnel_request.return_value = encode_tunnel_response(
+                status=200,
+                headers={},
+                body=json.dumps({"runID": str(run_id), "items": items}).encode(),
+            )
+            invalid = await client.get(path, headers=auth)
+            assert invalid.status_code == 502
+            assert "private document text" not in invalid.text
+            assert "host-secret" not in invalid.text
+
+    schema = client._octop_app.openapi()  # type: ignore[attr-defined]
+    operation = schema["paths"][
+        "/api/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}/tool-activity"
+    ]["get"]
+    assert operation["summary"] == (
+        "Read a peer AgentComputer Run's Project document tool activity via Bridge"
+    )
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/RunToolActivity"
+    )

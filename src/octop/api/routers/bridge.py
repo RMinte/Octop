@@ -44,11 +44,13 @@ from octop.infra.agentcomputer.models import (
     TaskListResponse,
     TaskView,
 )
+from octop.infra.agentcomputer.output import RunOutputSnapshot
 from octop.infra.agentcomputer.project_document_tool import (
     MAX_DOCUMENT_BYTES,
     validate_document_filename,
 )
 from octop.infra.agentcomputer.results import RunResult
+from octop.infra.agentcomputer.tool_activity import RunToolActivity
 from octop.infra.agentcomputer.turn_listing import TurnListResponse
 from octop.infra.errors import ErrorCode, OctopError
 
@@ -878,6 +880,58 @@ async def bridge_agentcomputer_run_result(
         connection_id=connection_id,
         remote_path=f"/api/agentcomputer/v1/runs/{run_id}/result",
         response_type=RunResult,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}/output",
+    response_model=RunOutputSnapshot,
+    summary="Read a peer AgentComputer Run text output snapshot via Bridge",
+    description=(
+        "Returns only the connection owner's validated text snapshot. Text without "
+        "verified successful completion is provisional; only a verified success is final."
+    ),
+)
+async def bridge_agentcomputer_run_output(
+    request: Request,
+    connection_id: str,
+    run_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/runs/{run_id}/output",
+        response_type=RunOutputSnapshot,
+        user=user,
+        server=server,
+    )
+
+
+@router.get(
+    "/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}/tool-activity",
+    response_model=RunToolActivity,
+    summary="Read a peer AgentComputer Run's Project document tool activity via Bridge",
+    description=(
+        "Returns only the connection owner's validated Project document read summary. "
+        "Document content, tool arguments, private receipts, and host paths are omitted."
+    ),
+)
+async def bridge_agentcomputer_run_tool_activity(
+    request: Request,
+    connection_id: str,
+    run_id: UUID,
+    user: Any = Depends(_bridge_bearer_user),
+    server: Any = Depends(get_server),
+) -> JSONResponse:
+    return await _agentcomputer_tunnel(
+        request,
+        connection_id=connection_id,
+        remote_path=f"/api/agentcomputer/v1/runs/{run_id}/tool-activity",
+        response_type=RunToolActivity,
         user=user,
         server=server,
     )

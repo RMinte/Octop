@@ -346,3 +346,10 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 代理边界：Bridge 只增加文档列表 GET、单文件 GET/PUT，保持现有连接归属及双端 Bearer 用户会话。项目 ID 与文件名按协议校验；文件名只允许项目 `documents/` 下单层 `.md`/`.txt`，正文超过 16 KiB UTF-8 在本机 413 拒绝且不转发。对端响应只返回声明的类型化 JSON，不透传未知字段、敏感响应头或任意错误文本。
 - 验证：文档 API、Bridge 策略与代理共 21 项 pytest 通过，修改的 Python 文件 Ruff 和 strict mypy 通过；Dashboard TypeScript、生产构建、修改文件 Prettier/ESLint、路由与侧栏 18 项 Vitest 通过。8088 原实例确认无 AgentComputer Run 后重启，健康、`/box-projects` 与匿名新路由认证检查分别为 200、200、401；8090 保持运行并健康 200。完整 `make all` 按用户约定后置。
 - 仍待用户侧点验：8088 当前账号尚未建立指向 8090 的 Bridge 连接，故不能据此声称浏览器已跨实例读到项目或运行 GLM。待从新页面建立连接并用已登录页面核对项目、文档与 Task；Ubuntu 实机、设备配对及全阶段验收仍未完成。
+
+## 2026-10-15 网页会话文字与文档读取接线
+
+- 基线：主工作目录 `feature/agentcomputer-foundation @ 8a0ce8e1041da37ca4a3c3ef2c56351034f9defe`，继续用户 fork 的同名分支；AgentComputer 工作目录已有的 `.harness` 改动未触碰。
+- 会话：活动 Run 读取已落盘文字快照，页面以“生成中 · 尚未验证”提示其暂态性质；Run 到达成功态后重新读取 Turn 历史，以原核验后的最终答复为准。页面保留已读历史，在临时轮询故障时明确提示状态可能过期。每条 Turn 可按需展开项目文档读取摘要，并手动刷新进行中的活动。
+- 代理：Bridge 只增加 Run `/output` 与 `/tool-activity` 两条精确 UUID 的 GET；仍要求本机登录、连接归属、对端认证及类型化响应，不转发未知对端字段/私有响应头。工具摘要限一条受控读取及 `documents/<filename>` 安全路径；无正文、原始参数或主机路径。非法对端数据按 502 安全失败。
+- 验证：相关后端接口和 Bridge 定向测试 19 passed，Ruff 与严格 mypy、Dashboard TypeScript/生产构建、改动文件 Prettier/ESLint、21 项路由/侧栏 Vitest 与 i18n 78 项通过。8088 和未重启的 8090 健康接口均返回 200，8088 `/box-projects` 返回 200，两条新增 Bridge 路由匿名访问均为 401。完整 `make all` 按用户要求后置。跨实例浏览器实测仍取决于 8088 用户建立到 8090 的 Bridge 连接；M0–M2 均未达到完整退出条件。

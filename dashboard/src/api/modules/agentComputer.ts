@@ -70,6 +70,31 @@ export interface BoxRun {
   updatedAt: string;
 }
 
+export interface BoxRunOutputSnapshot {
+  runID: string;
+  state: BoxRunState;
+  text: string | null;
+  digest: string | null;
+  provisional: boolean;
+}
+
+export interface BoxRunToolActivity {
+  runID: string;
+  items: {
+    toolName: "read_project_document";
+    path: string;
+    status:
+      | "ok"
+      | "notFound"
+      | "tooLarge"
+      | "unreadable"
+      | "pending"
+      | "unknown"
+      | "unavailable";
+    outcome: "succeeded" | "failed" | "notDispatched" | "pending" | "unknown";
+  }[];
+}
+
 export interface BoxTurn {
   turnID: string;
   prompt: string;
@@ -226,6 +251,14 @@ export const agentComputerApi = {
         method: "POST",
         body: JSON.stringify(command),
       },
+    ),
+  runOutput: (source: BoxSource, runID: string) =>
+    request<BoxRunOutputSnapshot>(
+      resource(source, `/runs/${encodeURIComponent(runID)}/output`),
+    ),
+  runToolActivity: (source: BoxSource, runID: string) =>
+    request<BoxRunToolActivity>(
+      resource(source, `/runs/${encodeURIComponent(runID)}/tool-activity`),
     ),
   command: (source: BoxSource, commandID: string) =>
     request<BoxCommandReceipt>(

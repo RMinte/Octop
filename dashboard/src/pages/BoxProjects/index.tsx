@@ -18,7 +18,10 @@ import {
   agentComputerApi,
   type BoxCapabilities,
   type BoxCommandReceipt,
+  type BoxPage,
   type BoxProject,
+  type BoxRunOutputSnapshot,
+  type BoxRunToolActivity,
   type BoxSource,
   type BoxTask,
   type BoxTaskListItem,
@@ -114,6 +117,19 @@ function BoxWorkspace({
   const [turns, setTurns] = useState<BoxTurn[]>([]);
   const [turnsCursor, setTurnsCursor] = useState<string | null>(null);
   const [pendingRunID, setPendingRunID] = useState<string | null>(null);
+  const [runOutput, setRunOutput] = useState<BoxRunOutputSnapshot | null>(null);
+  const [runOutputError, setRunOutputError] = useState<string | null>(null);
+  const [turnRefreshError, setTurnRefreshError] = useState<string | null>(null);
+  const [expandedToolRunID, setExpandedToolRunID] = useState<string | null>(
+    null,
+  );
+  const [toolActivityByRun, setToolActivityByRun] = useState<
+    Record<string, BoxRunToolActivity>
+  >({});
+  const [toolActivityLoading, setToolActivityLoading] = useState(false);
+  const [toolActivityError, setToolActivityError] = useState<string | null>(
+    null,
+  );
   const [documents, setDocuments] = useState<string[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsRevision, setDocumentsRevision] = useState(0);
@@ -316,6 +332,13 @@ function BoxWorkspace({
     setTurnsCursor(null);
     setTaskError(null);
     setPendingRunID(null);
+    setRunOutput(null);
+    setRunOutputError(null);
+    setTurnRefreshError(null);
+    setExpandedToolRunID(null);
+    setToolActivityByRun({});
+    setToolActivityLoading(false);
+    setToolActivityError(null);
     if (!projectID || !taskID)
       return () => {
         current = false;
@@ -347,8 +370,18 @@ function BoxWorkspace({
 
   const refreshTurns = useCallback(async () => {
     if (!taskID) return;
-    const listing = await agentComputerApi.turns(source, taskID);
+    let listing: BoxPage<BoxTurn>;
+    try {
+      listing = await agentComputerApi.turns(source, taskID);
+    } catch (cause) {
+      if (mounted.current)
+        setTurnRefreshError(
+          apiErrorMessage(cause, t("boxProjects.turnRefreshFailed"), t),
+        );
+      throw cause;
+    }
     if (!mounted.current) return;
+    setTurnRefreshError(null);
     setTurns((previous) =>
       mergeById(listing.items, previous, (item) => item.turnID),
     );
@@ -363,11 +396,15 @@ function BoxWorkspace({
     ) {
       setPendingRunID(null);
     }
-  }, [source, taskID, pendingRunID]);
+  }, [source, taskID, pendingRunID, t]);
 
   const needsPolling = Boolean(
     pendingRunID || turns.some((item) => !TERMINAL_STATES.has(item.run.state)),
   );
+  const activeRunID =
+    pendingRunID ??
+    turns.find((item) => !TERMINAL_STATES.has(item.run.state))?.run.runID ??
+    null;
   useEffect(() => {
     if (!taskID || !needsPolling) return;
     const timer = window.setInterval(() => {
@@ -375,6 +412,75 @@ function BoxWorkspace({
     }, 3000);
     return () => window.clearInterval(timer);
   }, [taskID, needsPolling, refreshTurns]);
+
+  useEffect(() => {
+    if (!activeRunID) {
+      setRunOutput(null);
+      setRunOutputError(null);
+      return;
+    }
+    let current = true;
+    let inFlight = false;
+    const refreshOutput = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const snapshot = await agentComputerApi.runOutput(source, activeRunID);
+        if (!current) return;
+        if (snapshot.runID !== activeRunID)
+          throw new Error(t("boxProjects.outputMismatch"));
+        setRunOutput(snapshot);
+        setRunOutputError(null);
+        if (snapshot.state === "succeeded")
+          await refreshTurns().catch(() => undefined);
+      } catch (cause) {
+        if (current)
+          setRunOutputError(
+            apiErrorMessage(cause, t("boxProjects.outputRefreshFailed"), t),
+          );
+      } finally {
+        inFlight = false;
+      }
+    };
+    void refreshOutput();
+    const timer = window.setInterval(() => void refreshOutput(), 3000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [source, activeRunID, refreshTurns, t]);
+
+  async function loadToolActivity(runID: string) {
+    setToolActivityLoading(true);
+    setToolActivityError(null);
+    try {
+      const activity = await agentComputerApi.runToolActivity(source, runID);
+      if (activity.runID !== runID)
+        throw new Error(t("boxProjects.toolActivityMismatch"));
+      if (mounted.current)
+        setToolActivityByRun((previous) => ({
+          ...previous,
+          [runID]: activity,
+        }));
+    } catch (cause) {
+      if (mounted.current)
+        setToolActivityError(
+          apiErrorMessage(cause, t("boxProjects.toolActivityFailed"), t),
+        );
+    } finally {
+      if (mounted.current) setToolActivityLoading(false);
+    }
+  }
+
+  function toggleToolActivity(runID: string) {
+    if (expandedToolRunID === runID) {
+      setExpandedToolRunID(null);
+      return;
+    }
+    setExpandedToolRunID(runID);
+    setToolActivityError(null);
+    if (!toolActivityByRun[runID]) void loadToolActivity(runID);
+  }
 
   async function submitOrRecover(
     commandID: string,
@@ -850,6 +956,23 @@ function BoxWorkspace({
             <Alert type="error" showIcon message={taskError} />
           ) : (
             <>
+              {turnRefreshError && (
+                <Alert
+                  className={styles.alert}
+                  type="warning"
+                  showIcon
+                  message={t("boxProjects.turnRefreshStale")}
+                  description={turnRefreshError}
+                />
+              )}
+              {runOutputError && (
+                <Alert
+                  className={styles.alert}
+                  type="warning"
+                  showIcon
+                  message={runOutputError}
+                />
+              )}
               {turnsCursor && (
                 <Button onClick={() => void loadOlderTurns()}>
                   {t("boxProjects.loadMore")}
@@ -863,10 +986,99 @@ function BoxWorkspace({
                   <div className={styles.turn} key={item.turnID}>
                     <div className={styles.userMessage}>{item.prompt}</div>
                     <div className={styles.assistantMessage}>
-                      {item.result.text ?? (
-                        <Tag color={statusColor(item.run.state)}>
-                          {stateLabel(item.run.state)}
-                        </Tag>
+                      {item.result.text ??
+                        (runOutput?.runID === item.run.runID &&
+                        runOutput.provisional &&
+                        runOutput.text !== null &&
+                        !TERMINAL_STATES.has(item.run.state) &&
+                        !TERMINAL_STATES.has(runOutput.state) ? (
+                          <>
+                            <Tag color="processing">
+                              {t("boxProjects.provisionalOutput")}
+                            </Tag>
+                            <div>{runOutput.text}</div>
+                          </>
+                        ) : (
+                          <Tag color={statusColor(item.run.state)}>
+                            {stateLabel(item.run.state)}
+                          </Tag>
+                        ))}
+                      <div className={styles.toolActivityActions}>
+                        <Button
+                          size="small"
+                          type="link"
+                          disabled={
+                            toolActivityLoading &&
+                            expandedToolRunID !== item.run.runID
+                          }
+                          onClick={() => toggleToolActivity(item.run.runID)}
+                        >
+                          {expandedToolRunID === item.run.runID
+                            ? t("boxProjects.hideToolActivity")
+                            : t("boxProjects.showToolActivity")}
+                        </Button>
+                      </div>
+                      {expandedToolRunID === item.run.runID && (
+                        <div className={styles.toolActivity}>
+                          {toolActivityError && (
+                            <Alert
+                              type="warning"
+                              showIcon
+                              message={toolActivityError}
+                            />
+                          )}
+                          {toolActivityByRun[item.run.runID] ? (
+                            toolActivityByRun[item.run.runID].items.length ? (
+                              toolActivityByRun[item.run.runID].items.map(
+                                (activity) => (
+                                  <div key={activity.path}>
+                                    <Typography.Text>
+                                      {activity.path}
+                                    </Typography.Text>{" "}
+                                    <Tag
+                                      color={
+                                        activity.status === "ok"
+                                          ? "success"
+                                          : "warning"
+                                      }
+                                    >
+                                      {t(
+                                        `boxProjects.documentReadStatuses.${activity.status}`,
+                                      )}
+                                    </Tag>
+                                    <Tag>
+                                      {t(
+                                        `boxProjects.toolOutcomes.${activity.outcome}`,
+                                      )}
+                                    </Tag>
+                                  </div>
+                                ),
+                              )
+                            ) : (
+                              <Typography.Text type="secondary">
+                                {t(
+                                  TERMINAL_STATES.has(item.run.state)
+                                    ? "boxProjects.noToolActivity"
+                                    : "boxProjects.noToolActivityYet",
+                                )}
+                              </Typography.Text>
+                            )
+                          ) : toolActivityLoading ? (
+                            <Typography.Text type="secondary">
+                              {t("boxProjects.loading")}
+                            </Typography.Text>
+                          ) : null}
+                          <Button
+                            size="small"
+                            type="link"
+                            loading={toolActivityLoading}
+                            onClick={() =>
+                              void loadToolActivity(item.run.runID)
+                            }
+                          >
+                            {t("boxProjects.refresh")}
+                          </Button>
+                        </div>
                       )}
                     </div>
                   </div>

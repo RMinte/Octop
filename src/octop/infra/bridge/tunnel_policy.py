@@ -60,7 +60,8 @@ _AGENTCOMPUTER_READ = re.compile(
     rf"capabilities|projects|projects/{_AC_UUID}|projects/{_AC_UUID}/documents|"
     rf"projects/{_AC_UUID}/tasks|"
     rf"tasks/{_AC_UUID}|tasks/{_AC_UUID}/turns|"
-    rf"runs/{_AC_UUID}|runs/{_AC_UUID}/result|commands/{_AC_UUID}"
+    rf"runs/{_AC_UUID}|runs/{_AC_UUID}/result|runs/{_AC_UUID}/output|"
+    rf"runs/{_AC_UUID}/tool-activity|commands/{_AC_UUID}"
     rf")$"
 )
 _AGENTCOMPUTER_WRITE = re.compile(

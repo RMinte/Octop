@@ -8,7 +8,7 @@ from typing import Literal
 from uuid import UUID
 
 from psycopg import Error as PostgresError
-from pydantic import Field
+from pydantic import Field, StrictStr, field_validator
 
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
@@ -36,17 +36,30 @@ EffectOutcome = Literal["succeeded", "failed", "notDispatched", "pending", "unkn
 
 class ToolActivityItem(ControlModel):
     toolName: Literal["read_project_document"]
-    path: str = Field(description="Safe Project-relative documents/<filename> path.")
+    path: StrictStr = Field(description="Safe Project-relative documents/<filename> path.")
     status: DocumentStatus = Field(
         description="Document read status, pending/unknown effect, or unavailable failed read."
     )
     outcome: EffectOutcome = Field(description="Bound effect outcome without its private receipt.")
 
+    @field_validator("path")
+    @classmethod
+    def managed_document_path(cls, value: str) -> str:
+        prefix = "documents/"
+        if not value.startswith(prefix):
+            raise ValueError("tool activity path must name a managed Project document")
+        try:
+            validate_document_filename(value[len(prefix) :])
+        except CommandAdmissionError as exc:
+            raise ValueError("tool activity path must name a managed Project document") from exc
+        return value
+
 
 class RunToolActivity(ControlModel):
     runID: UUID
     items: list[ToolActivityItem] = Field(
-        description="At most one validated read_project_document activity for this Run."
+        max_length=1,
+        description="At most one validated read_project_document activity for this Run.",
     )
 
 
