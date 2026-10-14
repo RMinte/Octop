@@ -2,7 +2,7 @@
 
 本项目把 Octop 作为 AgentComputer 的盒子执行引擎。首轮已建立认证能力查询和稳定服务身份；第二轮继续建立持久数据层、内部原子接收与已有收据查询，详细规则见 [第二轮数据层说明](agentcomputer-core.md)。
 
-当前新增[本机纯文本 Task 试用](agentcomputer-local-text-task.md)：显式 opt-in、固定可用模型与回环单进程条件满足时，可从 AgentComputer 盒子项目创建 Task、提交 Turn、等待后台 worker、读取经完成收据和 v2 历史共同验证的回答。默认仍关闭，工具、审批续跑和远端设备配对未开放；8090 隔离实例已用 GLM-5 完成一次真实项目、Task、Turn 和结果验收，详见[进度记录](agentcomputer-progress.md)。
+当前[本机 Task 试用](agentcomputer-local-text-task.md)在显式 opt-in、固定可用模型与回环单进程条件满足时，可从 AgentComputer 盒子项目创建 Task、提交 Turn、等待后台 worker、读取经完成收据和 v2 历史共同验证的回答。新增[项目文档与受控读取](agentcomputer-project-documents.md)：本人可导入、列出和读取项目中的小型文本文件，模型可调用一次 `read_project_document`，完成证据绑定工具日志、四条历史消息和最终回答。默认仍关闭；其他工具、审批续跑和远端设备配对未开放。8090 隔离实例已用 GLM-5 完成真实文档读取与结果验收，详见[进度记录](agentcomputer-progress.md)。
 
 当前[Task 控制事件读取](agentcomputer-event-read.md)增加一致的控制面快照和续读 cursor；AgentComputer 原生客户端把阶段事件和 cursor 原子缓存并按账号、盒子和恢复代次隔离。它可为中断的控制阶段读取建立新基线，尚不包含消息正文、正式成果或完整离线事件投影；详细验收与剩余边界见[进度记录](agentcomputer-progress.md)。
 

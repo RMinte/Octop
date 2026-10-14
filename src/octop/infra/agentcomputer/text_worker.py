@@ -24,6 +24,7 @@ from octop.infra.agentcomputer.dispatch import claim_run, dispatch_run
 from octop.infra.agentcomputer.engine import EngineEntryMiddleware, invoke_engine_entry
 from octop.infra.agentcomputer.identity import read_identity
 from octop.infra.agentcomputer.models import EngineInvocation
+from octop.infra.agentcomputer.project_document_tool import read_project_document
 from octop.infra.agentcomputer.runs import get_run
 
 if TYPE_CHECKING:
@@ -202,9 +203,30 @@ class LocalTextTaskWorker:
                 system_prompt=snapshot.projectConfiguration.instructions,
                 checkpointer=saver,
                 middleware=[
-                    EngineEntryMiddleware(self._services, invocation, self._history_archive)
+                    EngineEntryMiddleware(
+                        self._services, invocation, self._history_archive, registry=self._registry
+                    )
                 ],
-                tools=[],
+                tools=[read_project_document],
+                tools_disabled=frozenset(
+                    {
+                        "ls",
+                        "read_file",
+                        "write_file",
+                        "edit_file",
+                        "glob",
+                        "grep",
+                        "execute",
+                        "task",
+                        "current_time",
+                        "web_fetch",
+                        "browser_use",
+                        "desktop_screenshot",
+                        "send_file_to_user",
+                        "read_env_file",
+                        "write_env_file",
+                    }
+                ),
                 bootstrap_enabled=False,
                 memory_enabled=False,
                 memory_jsonl_enabled=False,

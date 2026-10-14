@@ -1,6 +1,6 @@
 # AgentComputer 本机纯文本 Task 试用
 
-这一切片让 AgentComputer 的“盒子项目”页面创建 Task、提交文本 Turn、列出项目已有 Task 与最近 Run，并查看 Run 状态和最终回答。Octop 服务端可读取同一 Task 的多轮原文与结果；本机 GLM 已完成三轮问答，macOS 原生 App 已完成第三轮追问并展示三轮历史。它只面向本机回环地址上的单进程 Octop，使用 Octop 用户 Bearer 会话。默认关闭；启用时固定一个已配置的模型，并要求 SQLite 控制库和 v2 历史。工具、MCP、技能、子代理、文件操作、审批续跑和远端设备配对均未开放。
+这一切片让 AgentComputer 的“盒子项目”页面创建 Task、提交文本 Turn、列出项目已有 Task 与最近 Run，并查看 Run 状态和最终回答。Octop 服务端可读取同一 Task 的多轮原文与结果；本机 GLM 已完成多轮问答，macOS 原生 App 已展示五轮历史。它只面向本机回环地址上的单进程 Octop，使用 Octop 用户 Bearer 会话。默认关闭；启用时固定一个已配置的模型，并要求 SQLite 控制库和 v2 历史。后续增加了[项目文档与一次受控读取](agentcomputer-project-documents.md)；其他工具、MCP、技能、子代理、任意文件操作、审批续跑和远端设备配对仍未开放。
 
 ## 本机启用
 

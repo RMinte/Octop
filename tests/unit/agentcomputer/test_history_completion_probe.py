@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messag
 from octop.infra.agentcomputer.commands import content_digest
 from octop.infra.history.store import (
     BoundCompletionProbe,
+    BoundToolExpectation,
     HistoryStore,
     probe_bound_completion,
 )
@@ -75,6 +76,33 @@ def _replace(store, kwargs, index, wire):
             seq=index + 1,
             value=wire,
         )
+
+
+def _tool_turn(store, kwargs):
+    arguments = {"path": "project/notes.md"}
+    result = '{"text":"项目资料"}'
+    call = AIMessage(
+        content="",
+        id="model-tool-call-1",
+        tool_calls=[{"id": "call-1", "name": "box_read_project_file", "args": arguments}],
+    )
+    tool = ToolMessage(
+        content=result,
+        id="tool-result-1",
+        name="box_read_project_file",
+        tool_call_id="call-1",
+    )
+    _replace(store, kwargs, 1, message_to_dict(call))
+    _replace(store, kwargs, 2, message_to_dict(tool))
+    _replace(
+        store, kwargs, 3, message_to_dict(AIMessage(content="依据项目资料回答", id="model-final-1"))
+    )
+    return BoundToolExpectation(
+        tool_call_id="call-1",
+        tool_name="box_read_project_file",
+        tool_arguments_digest=content_digest(arguments),
+        tool_content_digest=content_digest(result),
+    )
 
 
 def test_exact_completed_answer_is_read_without_changing_archive(complete_turn):
@@ -192,6 +220,137 @@ def test_extra_tool_result_or_extra_answer_is_not_tool_free_completion(complete_
     )
     assert probe_bound_completion(store.path, **kwargs) == BoundCompletionProbe(
         "messagesIncomplete"
+    )
+
+
+def test_exact_single_tool_exchange_proves_final_answer_only_with_journal_expectation(
+    complete_turn,
+):
+    store, kwargs = complete_turn
+    expected = _tool_turn(store, kwargs)
+    assert probe_bound_completion(store.path, **kwargs) == BoundCompletionProbe(
+        "messagesIncomplete"
+    )
+    assert probe_bound_completion(store.path, **kwargs, expected_tool=expected) == (
+        BoundCompletionProbe(
+            "complete",
+            "model-final-1",
+            content_digest("依据项目资料回答"),
+            "call-1",
+            "box_read_project_file",
+            content_digest({"path": "project/notes.md"}),
+            "tool-result-1",
+            content_digest('{"text":"项目资料"}'),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["tool_call_id", "tool_name", "tool_arguments_digest", "tool_content_digest"],
+)
+def test_tool_exchange_requires_exact_journal_binding(complete_turn, field):
+    store, kwargs = complete_turn
+    expected = _tool_turn(store, kwargs)
+    altered = dict(expected.__dict__)
+    altered[field] = "wrong"
+    assert probe_bound_completion(
+        store.path, **kwargs, expected_tool=BoundToolExpectation(**altered)
+    ) == BoundCompletionProbe("toolMismatch")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "twoCalls",
+        "invalidCall",
+        "unfinishedArguments",
+        "callError",
+        "toolError",
+        "wrongToolName",
+        "wrongToolCallID",
+        "wrongToolText",
+        "missingToolID",
+        "duplicateMessageID",
+    ],
+)
+def test_partial_or_ambiguous_tool_exchange_cannot_prove_completion(complete_turn, mutation):
+    store, kwargs = complete_turn
+    expected = _tool_turn(store, kwargs)
+    call = message_to_dict(
+        AIMessage(
+            content="",
+            id="model-tool-call-1",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "name": "box_read_project_file",
+                    "args": {"path": "project/notes.md"},
+                }
+            ],
+        )
+    )
+    tool = message_to_dict(
+        ToolMessage(
+            content='{"text":"项目资料"}',
+            id="tool-result-1",
+            name="box_read_project_file",
+            tool_call_id="call-1",
+        )
+    )
+    if mutation == "twoCalls":
+        call["data"]["tool_calls"].append(
+            {"id": "call-2", "name": "box_read_project_file", "args": {}, "type": "tool_call"}
+        )
+    elif mutation == "invalidCall":
+        call["data"]["invalid_tool_calls"] = [{"name": "other", "args": "{"}]
+    elif mutation == "unfinishedArguments":
+        call["data"]["additional_kwargs"]["history_tool_args"] = {"0": "{"}
+    elif mutation == "callError":
+        call["data"]["additional_kwargs"]["octop_stream_error"] = True
+    elif mutation == "toolError":
+        tool["data"]["status"] = "error"
+    elif mutation == "wrongToolName":
+        tool["data"]["name"] = "other"
+    elif mutation == "wrongToolCallID":
+        tool["data"]["tool_call_id"] = "call-2"
+    elif mutation == "wrongToolText":
+        tool["data"]["content"] = "different"
+    elif mutation == "missingToolID":
+        tool["data"]["id"] = None
+    elif mutation == "duplicateMessageID":
+        tool["data"]["id"] = "model-tool-call-1"
+    _replace(store, kwargs, 1, call)
+    _replace(store, kwargs, 2, tool)
+    assert probe_bound_completion(store.path, **kwargs, expected_tool=expected).status != "complete"
+
+
+def test_tool_exchange_requires_four_ordered_messages_and_tool_free_final(complete_turn):
+    store, kwargs = complete_turn
+    expected = _tool_turn(store, kwargs)
+    _replace(
+        store,
+        kwargs,
+        3,
+        message_to_dict(
+            AIMessage(
+                content="unfinished",
+                id="model-final-1",
+                tool_calls=[{"id": "call-2", "name": "other", "args": {}}],
+            )
+        ),
+    )
+    assert probe_bound_completion(store.path, **kwargs, expected_tool=expected) == (
+        BoundCompletionProbe("answerIncomplete")
+    )
+    _replace(store, kwargs, 3, message_to_dict(AIMessage(content="finished", id="model-final-1")))
+    with store.transaction() as conn:
+        conn.execute(
+            "UPDATE documents SET seq=0 WHERE id=?",
+            (f"message:{kwargs['turn_id']}:2",),
+        )
+    assert probe_bound_completion(store.path, **kwargs, expected_tool=expected) == (
+        BoundCompletionProbe("messagesIncomplete")
     )
 
 

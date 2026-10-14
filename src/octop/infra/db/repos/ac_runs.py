@@ -311,6 +311,46 @@ class AcRunRepo:
         return AcRunRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def mark_succeeded_with_read_effect(
+        conn: Any,
+        run_id: str,
+        owner_id: int,
+        expected_revision: int,
+        restore_epoch: int,
+        execution_epoch: int,
+        effect_id: str,
+        *,
+        updated_at: int,
+    ) -> AcRunRow | None:
+        """Complete only an accepted Run with one settled, bound read effect."""
+        row = conn.execute(
+            "UPDATE ac_runs SET state='succeeded',revision=revision+1,updated_at=? "
+            "WHERE run_id=? AND owner_id=? AND revision=? AND restore_epoch=? "
+            "AND execution_epoch=? AND execution_epoch>0 AND state='queued' "
+            "AND dispatch_phase='engineAccepted' AND reconciliation_required=0 "
+            "AND EXISTS (SELECT 1 FROM ac_tasks t WHERE t.task_id=ac_runs.task_id "
+            "AND t.owner_id=ac_runs.owner_id AND t.active_run_id=ac_runs.run_id) "
+            "AND EXISTS (SELECT 1 FROM ac_projects p WHERE p.project_id=ac_runs.project_id "
+            "AND p.owner_id=ac_runs.owner_id AND p.active_run_id=ac_runs.run_id) "
+            "AND NOT EXISTS (SELECT 1 FROM ac_run_cancellations c WHERE c.run_id=ac_runs.run_id) "
+            "AND NOT EXISTS (SELECT 1 FROM ac_run_pauses a WHERE a.run_id=ac_runs.run_id) "
+            "AND (SELECT COUNT(*) FROM ac_tool_effects e WHERE e.run_id=ac_runs.run_id) = 1 "
+            "AND EXISTS (SELECT 1 FROM ac_tool_effects e WHERE e.run_id=ac_runs.run_id "
+            "AND e.effect_id=? AND e.phase='terminal' AND e.terminal_json IS NOT NULL) "
+            "RETURNING *",
+            (
+                updated_at,
+                run_id,
+                owner_id,
+                expected_revision,
+                restore_epoch,
+                execution_epoch,
+                effect_id,
+            ),
+        ).fetchone()
+        return AcRunRow.from_row(row) if row is not None else None
+
+    @staticmethod
     def mark_cancel_requested(
         conn: Any,
         run_id: str,

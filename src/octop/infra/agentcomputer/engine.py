@@ -13,8 +13,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-from uuid import UUID
+from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -31,18 +31,34 @@ from octop_harness.request import ChatRequest
 from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.bootstrap import settle_task, settled_to_thread
 from octop.infra.agentcomputer.commands import CommandAdmissionError, canonical_json, content_digest
-from octop.infra.agentcomputer.completions import CompletionEvidence, complete_run
+from octop.infra.agentcomputer.completions import (
+    CompletionEvidence,
+    ToolCompletionEvidence,
+    complete_run,
+)
+from octop.infra.agentcomputer.effect_runner import execute_effect
 from octop.infra.agentcomputer.models import (
     CheckpointUnknownReason,
     EngineCheckpointObservation,
     EngineEntryReceipt,
     EngineInvocation,
+    ToolEffectAction,
+    ToolEffectOutput,
+    ToolEffectReceipt,
+)
+from octop.infra.agentcomputer.project_document_tool import (
+    TOOL_NAME,
+    document_read_action,
+    execute_document_read,
 )
 from octop.infra.db.services import SharedServices
 from octop.infra.gateway.process.message_keys import STREAM_ERROR_FLAG
 from octop.infra.history.recorder import RecordingTracker
 from octop.infra.history.service import HistoryArchive
-from octop.infra.history.store import probe_bound_completion
+from octop.infra.history.store import BoundToolExpectation, probe_bound_completion
+
+if TYPE_CHECKING:
+    from octop.infra.agents.manager import AgentManager
 
 
 class EngineEntryReplayed(Exception):
@@ -118,18 +134,24 @@ def _checkpoint_metadata(invocation: EngineInvocation) -> dict[str, str | int]:
 
 
 class EngineEntryMiddleware(AgentMiddleware[Any, Any]):
-    """Commit acceptance before the model and reject all tool execution."""
+    """Commit acceptance before the model and journal one scoped document read."""
 
     def __init__(
         self,
         services: SharedServices,
         invocation: EngineInvocation,
         history_archive: HistoryArchive,
+        registry: AgentManager | None = None,
     ) -> None:
         self._services = services
         self.invocation = invocation
         self.history_archive = history_archive
+        self.registry = registry
         self.history_tracker: RecordingTracker | None = None
+        self.tool_action: ToolEffectAction | None = None
+        self.tool_receipt: ToolEffectReceipt | None = None
+        self.tool_message_id: str | None = None
+        self._tool_attempted = False
 
     def _validate_context(self, state: Any) -> None:
         expected = build_engine_request(self.invocation).to_runnable_config()["configurable"]
@@ -227,7 +249,65 @@ class EngineEntryMiddleware(AgentMiddleware[Any, Any]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        raise CommandAdmissionError("runtimeUnavailable", reason="toolExecutionUnavailable")
+        call = request.tool_call
+        state = request.state
+        messages = state.get("messages") if isinstance(state, dict) else None
+        if (
+            self.registry is None
+            or self.history_tracker is None
+            or self._tool_attempted
+            or not isinstance(call, dict)
+            or call.get("name") != TOOL_NAME
+            or not isinstance(call.get("id"), str)
+            or not isinstance(call.get("args"), dict)
+            or not isinstance(messages, list)
+            or not messages
+            or not isinstance(messages[-1], AIMessage)
+            or len(messages[-1].tool_calls) != 1
+            or messages[-1].invalid_tool_calls
+            or canonical_json(messages[-1].tool_calls[0]) != canonical_json(call)
+        ):
+            raise CommandAdmissionError("runtimeUnavailable", reason="toolExecutionUnavailable")
+        self._validate_context(state)
+        self._tool_attempted = True
+        action = await settled_to_thread(
+            document_read_action,
+            self.registry,
+            self.invocation,
+            tool_call_id=call["id"],
+            arguments=call["args"],
+        )
+
+        async def authorize() -> bool:
+            from octop.infra.agentcomputer.dispatch import validate_engine_execution
+
+            await settled_to_thread(validate_engine_execution, self._services, self.invocation)
+            return True
+
+        async def execute() -> ToolEffectOutput:
+            assert self.registry is not None
+            return await execute_document_read(self.registry, self.invocation, action)
+
+        receipt = await execute_effect(
+            self._services,
+            invocation=self.invocation,
+            action=action,
+            authorize=authorize,
+            handler=execute,
+        )
+        if receipt.outcome != "succeeded" or receipt.output is None:
+            raise CommandAdmissionError("runtimeUnavailable", reason="toolExecutionUnavailable")
+        message_id = str(uuid4())
+        self.tool_action = action
+        self.tool_receipt = receipt
+        self.tool_message_id = message_id
+        return ToolMessage(
+            content=receipt.output.resultJSON,
+            tool_call_id=action.toolCallID,
+            name=TOOL_NAME,
+            id=message_id,
+            status="success",
+        )
 
 
 def _validate_registered_workspace(agent: HarnessAgent, middleware: EngineEntryMiddleware) -> None:
@@ -385,7 +465,26 @@ async def _complete_persisted_entry(
     stream_ended_at: datetime,
 ) -> None:
     """Join independent archive and checkpoint proof before the final DB CAS."""
-    terminal = await inspect_terminal_checkpoint(agent, invocation)
+    action = middleware.tool_action
+    tool_receipt = middleware.tool_receipt
+    tool_message_id = middleware.tool_message_id
+    if any(value is not None for value in (action, tool_receipt, tool_message_id)) and not all(
+        value is not None for value in (action, tool_receipt, tool_message_id)
+    ):
+        raise CommandAdmissionError("runtimeUnavailable", reason="completionEvidenceUnavailable")
+    expected_tool: BoundToolExpectation | None = None
+    if action is not None and tool_receipt is not None and tool_message_id is not None:
+        if tool_receipt.outcome != "succeeded" or tool_receipt.output is None:
+            raise CommandAdmissionError(
+                "runtimeUnavailable", reason="completionEvidenceUnavailable"
+            )
+        expected_tool = BoundToolExpectation(
+            tool_call_id=action.toolCallID,
+            tool_name=action.toolName,
+            tool_arguments_digest=action.argumentsDigest,
+            tool_content_digest=content_digest(tool_receipt.output.resultJSON),
+        )
+    terminal = await inspect_terminal_checkpoint(agent, invocation, expected_tool=expected_tool)
     if terminal is None:
         raise CommandAdmissionError("runtimeUnavailable", reason="completionEvidenceUnavailable")
     services = middleware._services
@@ -401,6 +500,7 @@ async def _complete_persisted_entry(
         agent_id=intent.snapshot.agentID,
         user_message_id=str(intent.userMessageID),
         prompt=intent.snapshot.request.prompt,
+        expected_tool=expected_tool,
     )
     if (
         history.status != "complete"
@@ -408,31 +508,67 @@ async def _complete_persisted_entry(
         or history.assistant_content_digest is None
     ):
         raise CommandAdmissionError("runtimeUnavailable", reason="completionEvidenceUnavailable")
-    evidence = CompletionEvidence(
-        schemaVersion=1,
-        historyTurnID=intent.turnID,
-        historyThreadID=intent.snapshot.octopThreadID,
-        historyAgentID=intent.snapshot.agentID,
-        historyStatus="complete",
-        historyDigest=content_digest(
+    tool_fields: dict[str, str] = {}
+    if expected_tool is not None:
+        assert tool_message_id is not None
+        if (
+            history.tool_call_id != expected_tool.tool_call_id
+            or history.tool_name != expected_tool.tool_name
+            or history.tool_arguments_digest != expected_tool.tool_arguments_digest
+            or history.tool_content_digest != expected_tool.tool_content_digest
+            or history.tool_message_id != tool_message_id
+            or terminal.tool_message_id != tool_message_id
+            or terminal.tool_call_id != expected_tool.tool_call_id
+            or terminal.tool_content_digest != expected_tool.tool_content_digest
+        ):
+            raise CommandAdmissionError(
+                "runtimeUnavailable", reason="completionEvidenceUnavailable"
+            )
+        tool_fields = {
+            "toolCallID": expected_tool.tool_call_id,
+            "toolName": expected_tool.tool_name,
+            "toolArgumentsDigest": expected_tool.tool_arguments_digest,
+            "toolMessageID": tool_message_id,
+            "toolContentDigest": expected_tool.tool_content_digest,
+        }
+    evidence_fields: dict[str, Any] = {
+        "schemaVersion": 2 if expected_tool is not None else 1,
+        "historyTurnID": intent.turnID,
+        "historyThreadID": intent.snapshot.octopThreadID,
+        "historyAgentID": intent.snapshot.agentID,
+        "historyStatus": "complete",
+        "historyDigest": content_digest(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2 if expected_tool is not None else 1,
                 "turnID": str(intent.turnID),
                 "threadID": intent.snapshot.octopThreadID,
                 "agentID": intent.snapshot.agentID,
                 "status": "complete",
                 "assistantMessageID": history.assistant_message_id,
                 "assistantContentDigest": history.assistant_content_digest,
+                **tool_fields,
             }
         ),
-        historyAssistantMessageID=history.assistant_message_id,
-        historyAssistantContentDigest=history.assistant_content_digest,
-        terminalCheckpointID=terminal.checkpoint_id,
-        terminalCheckpointDigest=terminal.checkpoint_digest,
-        terminalAssistantMessageID=terminal.assistant_message_id,
-        terminalAssistantContentDigest=terminal.assistant_content_digest,
-        engineStreamEndedAt=stream_ended_at,
-    )
+        "historyAssistantMessageID": history.assistant_message_id,
+        "historyAssistantContentDigest": history.assistant_content_digest,
+        "terminalCheckpointID": terminal.checkpoint_id,
+        "terminalCheckpointDigest": terminal.checkpoint_digest,
+        "terminalAssistantMessageID": terminal.assistant_message_id,
+        "terminalAssistantContentDigest": terminal.assistant_content_digest,
+        "engineStreamEndedAt": stream_ended_at,
+    }
+    if expected_tool is not None:
+        assert action is not None and tool_receipt is not None and tool_message_id is not None
+        evidence_fields.update(
+            toolEffectID=tool_receipt.effectID,
+            toolReceiptDigest=content_digest(tool_receipt.model_dump(mode="json")),
+            **tool_fields,
+        )
+        evidence: CompletionEvidence | ToolCompletionEvidence = (
+            ToolCompletionEvidence.model_validate(evidence_fields)
+        )
+    else:
+        evidence = CompletionEvidence.model_validate(evidence_fields)
     await settled_to_thread(complete_run, services, invocation, evidence)
 
 
@@ -587,7 +723,7 @@ async def inspect_engine_checkpoint(
 
 @dataclass(frozen=True)
 class TerminalCheckpointEvidence:
-    """A bound, persisted graph terminal state for one text-only invocation.
+    """A bound, persisted graph terminal state for one invocation.
 
     This is checkpoint evidence, not permission to finish a Run or release its
     lanes. The control transaction must independently fence cancellation and
@@ -598,10 +734,16 @@ class TerminalCheckpointEvidence:
     assistant_message_id: str
     assistant_content_digest: str
     checkpoint_digest: str
+    tool_call_id: str | None = None
+    tool_message_id: str | None = None
+    tool_content_digest: str | None = None
 
 
 async def inspect_terminal_checkpoint(
-    agent: HarnessAgent, invocation: EngineInvocation
+    agent: HarnessAgent,
+    invocation: EngineInvocation,
+    *,
+    expected_tool: BoundToolExpectation | None = None,
 ) -> TerminalCheckpointEvidence | None:
     """Read one fixed native checkpoint; never infer completion from stream EOF.
 
@@ -664,9 +806,40 @@ async def inspect_terminal_checkpoint(
         user_id = str(invocation.intent.userMessageID)
         original_index = next(i for i, message in enumerate(messages) if message.id == user_id)
         answer = messages[original_index + 1 :]
-        if len(answer) != 1 or not isinstance(answer[0], AIMessage):
-            return None
-        assistant = answer[0]
+        tool_message: ToolMessage | None = None
+        if expected_tool is None:
+            if len(answer) != 1 or not isinstance(answer[0], AIMessage):
+                return None
+        else:
+            if (
+                len(answer) != 3
+                or not isinstance(answer[0], AIMessage)
+                or not isinstance(answer[1], ToolMessage)
+                or not isinstance(answer[2], AIMessage)
+            ):
+                return None
+            call_message = answer[0]
+            tool_message = answer[1]
+            calls = call_message.tool_calls
+            if (
+                not isinstance(call_message.id, str)
+                or not call_message.id
+                or len(calls) != 1
+                or call_message.invalid_tool_calls
+                or calls[0].get("id") != expected_tool.tool_call_id
+                or calls[0].get("name") != expected_tool.tool_name
+                or not isinstance(calls[0].get("args"), dict)
+                or content_digest(calls[0]["args"]) != expected_tool.tool_arguments_digest
+                or tool_message.tool_call_id != expected_tool.tool_call_id
+                or tool_message.name != expected_tool.tool_name
+                or tool_message.status != "success"
+                or not isinstance(tool_message.id, str)
+                or not tool_message.id
+                or not isinstance(tool_message.content, str)
+                or content_digest(tool_message.content) != expected_tool.tool_content_digest
+            ):
+                return None
+        assistant = answer[-1]
         if (
             not isinstance(assistant.id, str)
             or not assistant.id
@@ -676,6 +849,18 @@ async def inspect_terminal_checkpoint(
             or assistant.tool_calls
             or assistant.invalid_tool_calls
             or STREAM_ERROR_FLAG in assistant.additional_kwargs
+            or (
+                tool_message is not None
+                and len(
+                    {
+                        user_id,
+                        answer[0].id,
+                        tool_message.id,
+                        assistant.id,
+                    }
+                )
+                != 4
+            )
         ):
             return None
     except Exception:
@@ -703,18 +888,35 @@ async def inspect_terminal_checkpoint(
     ):
         return None
     assistant_content_digest = content_digest(assistant.content)
+    tool_fields = (
+        {
+            "toolCallID": expected_tool.tool_call_id,
+            "toolName": expected_tool.tool_name,
+            "toolArgumentsDigest": expected_tool.tool_arguments_digest,
+            "toolMessageID": tool_message.id,
+            "toolContentDigest": expected_tool.tool_content_digest,
+        }
+        if expected_tool is not None and tool_message is not None
+        else {}
+    )
     return TerminalCheckpointEvidence(
         checkpoint_id=checkpoint_id,
         assistant_message_id=assistant.id,
         assistant_content_digest=assistant_content_digest,
         checkpoint_digest=content_digest(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2 if expected_tool is not None else 1,
                 "checkpointID": str(checkpoint_id),
                 "checkpointNamespace": "",
                 "metadata": _checkpoint_metadata(invocation),
                 "assistantMessageID": assistant.id,
                 "assistantContentDigest": assistant_content_digest,
+                **tool_fields,
             }
+        ),
+        tool_call_id=expected_tool.tool_call_id if expected_tool is not None else None,
+        tool_message_id=tool_message.id if tool_message is not None else None,
+        tool_content_digest=(
+            expected_tool.tool_content_digest if expected_tool is not None else None
         ),
     )

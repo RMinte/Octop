@@ -37,6 +37,7 @@ from octop.infra.agentcomputer.engine import (
 )
 from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.models import EngineInvocation, NewMessageCommand, RunClaim
+from octop.infra.agents.manager import AgentManager
 from octop.infra.db.services import SharedServices
 from octop.infra.history.service import HistoryArchive
 from octop.infra.history.store import probe_bound_completion
@@ -80,6 +81,7 @@ class EngineFixture:
     invocation: EngineInvocation | None = None
     failure: Exception | None = None
     tools: list[Any] | None = None
+    registry: AgentManager | None = None
     checkpointer: Any = None
     active_runs: ActiveRunRegistry = field(default_factory=ActiveRunRegistry)
 
@@ -99,7 +101,11 @@ class EngineFixture:
                 default_model=snapshot.projectConfiguration.modelRef,
                 system_prompt=snapshot.projectConfiguration.instructions,
                 checkpointer=saver,
-                middleware=[EngineEntryMiddleware(self.services, invocation, self.history_archive)],
+                middleware=[
+                    EngineEntryMiddleware(
+                        self.services, invocation, self.history_archive, registry=self.registry
+                    )
+                ],
                 tools=self.tools or [],
                 bootstrap_enabled=False,
                 memory_enabled=False,

@@ -87,6 +87,133 @@ class BoundCompletionProbe:
     status: str
     assistant_message_id: str | None = None
     assistant_content_digest: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_arguments_digest: str | None = None
+    tool_message_id: str | None = None
+    tool_content_digest: str | None = None
+
+
+@dataclass(frozen=True)
+class BoundToolExpectation:
+    """The exact single call and result authorized by the Run's tool journal."""
+
+    tool_call_id: str
+    tool_name: str
+    tool_arguments_digest: str
+    tool_content_digest: str
+
+
+def _bound_final_answer(answer: Any, turn_id: str) -> tuple[str, str] | None:
+    if not isinstance(answer, dict) or answer.get("type") != "ai":
+        return None
+    data = answer.get("data")
+    if not isinstance(data, dict):
+        return None
+    answer_id = data.get("id")
+    content = data.get("content")
+    extra = data.get("additional_kwargs")
+    metadata = data.get("response_metadata")
+    if (
+        not isinstance(answer_id, str)
+        or not answer_id.strip()
+        or answer_id.startswith(f"{turn_id}:stream:")
+        or data.get("type") != "ai"
+        or not isinstance(content, str)
+        or not content.strip()
+        or not isinstance(extra, dict)
+        or not isinstance(metadata, dict)
+        or any(data.get(key) for key in ("tool_calls", "invalid_tool_calls"))
+        or any(extra.get(key) for key in ("tool_calls", "function_call", "history_tool_args"))
+        or extra.get("octop_stream_error")
+        or metadata.get("finish_reason") in {"length", "content_filter", "tool_calls"}
+    ):
+        return None
+    digest = "sha256:" + hashlib.sha256(dumps(content).encode("utf-8")).hexdigest()
+    return answer_id, digest
+
+
+def _bound_tool_exchange(
+    call_message: Any, result_message: Any, turn_id: str, expected: BoundToolExpectation
+) -> tuple[str, str, str, str, str] | None:
+    if (
+        not isinstance(call_message, dict)
+        or call_message.get("type") != "ai"
+        or not isinstance(result_message, dict)
+        or result_message.get("type") != "tool"
+    ):
+        return None
+    call_data = call_message.get("data")
+    result_data = result_message.get("data")
+    if not isinstance(call_data, dict) or not isinstance(result_data, dict):
+        return None
+    call_id = call_data.get("id")
+    call_content = call_data.get("content")
+    call_extra = call_data.get("additional_kwargs")
+    call_metadata = call_data.get("response_metadata")
+    calls = call_data.get("tool_calls")
+    if (
+        call_data.get("type") != "ai"
+        or not isinstance(call_id, str)
+        or not call_id.strip()
+        or call_id.startswith(f"{turn_id}:stream:")
+        or not isinstance(call_content, str)
+        or not isinstance(call_extra, dict)
+        or not isinstance(call_metadata, dict)
+        or call_data.get("invalid_tool_calls")
+        or any(call_extra.get(key) for key in ("tool_calls", "function_call", "history_tool_args"))
+        or call_extra.get("octop_stream_error")
+        or call_metadata.get("finish_reason") in {"length", "content_filter"}
+        or not isinstance(calls, list)
+        or len(calls) != 1
+        or not isinstance(calls[0], dict)
+    ):
+        return None
+    call = calls[0]
+    arguments = call.get("args")
+    if (
+        call.get("type") != "tool_call"
+        or call.get("id") != expected.tool_call_id
+        or call.get("name") != expected.tool_name
+        or not isinstance(arguments, dict)
+    ):
+        return None
+    try:
+        arguments_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+    except (ValueError, TypeError):
+        return None
+    result_id = result_data.get("id")
+    result_content = result_data.get("content")
+    result_extra = result_data.get("additional_kwargs")
+    if (
+        arguments_digest != expected.tool_arguments_digest
+        or result_data.get("type") != "tool"
+        or not isinstance(result_id, str)
+        or not result_id.strip()
+        or result_data.get("tool_call_id") != expected.tool_call_id
+        or result_data.get("name") != expected.tool_name
+        or result_data.get("status") != "success"
+        or not isinstance(result_content, str)
+        or not result_content
+        or not isinstance(result_extra, dict)
+        or result_extra.get("octop_stream_error")
+    ):
+        return None
+    result_digest = "sha256:" + hashlib.sha256(dumps(result_content).encode("utf-8")).hexdigest()
+    if result_digest != expected.tool_content_digest:
+        return None
+    return call_id, expected.tool_call_id, expected.tool_name, arguments_digest, result_id
 
 
 def probe_bound_completion(
@@ -98,13 +225,14 @@ def probe_bound_completion(
     agent_id: str,
     user_message_id: str,
     prompt: str,
+    expected_tool: BoundToolExpectation | None = None,
 ) -> BoundCompletionProbe:
-    """Read one complete, tool-free bound Turn from a consistent archive snapshot.
+    """Read one complete bound Turn from a consistent archive snapshot.
 
     A generic history ``complete`` flag alone is insufficient. This validates
-    the fixed input and a single persisted final answer without creating an
-    archive or using another thread's latest Turn. It does not prove that the
-    engine stopped, nor that the control-plane Run may release its lanes.
+    the fixed input, an optional single journal-bound tool exchange, and one
+    persisted final answer. It does not prove that the engine stopped, nor that
+    the control-plane Run may release its lanes.
     """
     try:
         if not path.exists():
@@ -144,21 +272,17 @@ def probe_bound_completion(
                 "WHERE turn_id=? ORDER BY seq,id",
                 (turn_id,),
             ).fetchall()
-            if (
-                len(rows) != 2
-                or rows[0]["id"] != f"message:{turn_id}:0"
-                or rows[1]["id"] != f"message:{turn_id}:1"
-                or rows[0]["seq"] >= rows[1]["seq"]
-                or any(
-                    row["thread_id"] != thread_id
-                    or row["turn_id"] != turn_id
-                    or row["kind"] != "message"
-                    for row in rows
-                )
+            expected_count = 4 if expected_tool is not None else 2
+            if len(rows) != expected_count or any(
+                row["id"] != f"message:{turn_id}:{index}"
+                or row["thread_id"] != thread_id
+                or row["turn_id"] != turn_id
+                or row["kind"] != "message"
+                or (index > 0 and rows[index - 1]["seq"] >= row["seq"])
+                for index, row in enumerate(rows)
             ):
                 return BoundCompletionProbe("messagesIncomplete")
             seed = _decode_document(conn, json.loads(rows[0]["data"]))
-            answer = _decode_document(conn, json.loads(rows[1]["data"]))
             if not isinstance(seed, dict) or seed.get("type") != "human":
                 return BoundCompletionProbe("inputMismatch")
             seed_data = seed.get("data")
@@ -169,34 +293,38 @@ def probe_bound_completion(
                 or seed_data.get("content") != prompt
             ):
                 return BoundCompletionProbe("inputMismatch")
-            if not isinstance(answer, dict) or answer.get("type") != "ai":
-                return BoundCompletionProbe("answerIncomplete")
-            answer_data = answer.get("data")
-            if not isinstance(answer_data, dict):
-                return BoundCompletionProbe("answerIncomplete")
-            answer_id = answer_data.get("id")
-            content = answer_data.get("content")
-            extra = answer_data.get("additional_kwargs")
-            metadata = answer_data.get("response_metadata")
-            if (
-                not isinstance(answer_id, str)
-                or not answer_id.strip()
-                or answer_id.startswith(f"{turn_id}:stream:")
-                or answer_data.get("type") != "ai"
-                or not isinstance(content, str)
-                or not content.strip()
-                or not isinstance(extra, dict)
-                or not isinstance(metadata, dict)
-                or any(answer_data.get(key) for key in ("tool_calls", "invalid_tool_calls"))
-                or any(
-                    extra.get(key) for key in ("tool_calls", "function_call", "history_tool_args")
+            tool_exchange = None
+            if expected_tool is not None:
+                call_message = _decode_document(conn, json.loads(rows[1]["data"]))
+                result_message = _decode_document(conn, json.loads(rows[2]["data"]))
+                tool_exchange = _bound_tool_exchange(
+                    call_message, result_message, turn_id, expected_tool
                 )
-                or extra.get("octop_stream_error")
-                or metadata.get("finish_reason") in {"length", "content_filter", "tool_calls"}
-            ):
+                if tool_exchange is None:
+                    return BoundCompletionProbe("toolMismatch")
+            answer = _decode_document(conn, json.loads(rows[-1]["data"]))
+            final = _bound_final_answer(answer, turn_id)
+            if final is None:
                 return BoundCompletionProbe("answerIncomplete")
-            digest = "sha256:" + hashlib.sha256(dumps(content).encode("utf-8")).hexdigest()
-            return BoundCompletionProbe("complete", answer_id, digest)
+            answer_id, digest = final
+            if tool_exchange is None:
+                return BoundCompletionProbe("complete", answer_id, digest)
+            assert expected_tool is not None
+            call_message_id, tool_call_id, tool_name, arguments_digest, tool_message_id = (
+                tool_exchange
+            )
+            if len({user_message_id, call_message_id, tool_message_id, answer_id}) != 4:
+                return BoundCompletionProbe("toolMismatch")
+            return BoundCompletionProbe(
+                "complete",
+                answer_id,
+                digest,
+                tool_call_id,
+                tool_name,
+                arguments_digest,
+                tool_message_id,
+                expected_tool.tool_content_digest,
+            )
     except (sqlite3.DatabaseError, OSError, ValueError, TypeError, KeyError):
         return BoundCompletionProbe("archiveUnavailable")
 

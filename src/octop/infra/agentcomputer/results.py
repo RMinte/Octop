@@ -1,4 +1,4 @@
-"""Read an owned Run's verified, tool-free final answer from fixed v2 history."""
+"""Read an owned Run's verified final answer from fixed v2 history."""
 
 from __future__ import annotations
 
@@ -17,13 +17,20 @@ from octop.infra.agentcomputer.commands import (
     StorageUnavailableError,
     content_digest,
 )
-from octop.infra.agentcomputer.completions import validate_completion_binding
+from octop.infra.agentcomputer.completions import (
+    ToolCompletionEvidence,
+    validate_completion_binding,
+)
 from octop.infra.agentcomputer.dispatch import validate_dispatch_binding
 from octop.infra.agentcomputer.identity import get_or_create_identity
 from octop.infra.agentcomputer.models import ControlModel
 from octop.infra.agentcomputer.runs import get_run, load_bound_run
 from octop.infra.db.services import SharedServices
-from octop.infra.history.store import _decode_document, probe_bound_completion
+from octop.infra.history.store import (
+    BoundToolExpectation,
+    _decode_document,
+    probe_bound_completion,
+)
 
 
 class RunResult(ControlModel):
@@ -57,7 +64,9 @@ class RunResult(ControlModel):
         return self
 
 
-def _read_final_text(path: Path, turn_id: UUID, message_id: str, digest: str) -> str:
+def _read_final_text(
+    path: Path, turn_id: UUID, message_id: str, digest: str, *, message_index: int
+) -> str:
     """Re-read one archived answer without creating or modifying the archive."""
     try:
         with closing(
@@ -68,7 +77,7 @@ def _read_final_text(path: Path, turn_id: UUID, message_id: str, digest: str) ->
             conn.execute("BEGIN")
             row = conn.execute(
                 "SELECT d.data FROM documents d WHERE d.id=? AND d.turn_id=? AND d.kind='message'",
-                (f"message:{turn_id}:1", str(turn_id)),
+                (f"message:{turn_id}:{message_index}", str(turn_id)),
             ).fetchone()
             if row is None:
                 raise StorageDataError("missing final history message")
@@ -121,6 +130,16 @@ def get_run_result(services: SharedServices, *, owner_id: int, run_id: UUID) -> 
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("Run result storage unavailable") from exc
     path = services.paths.root / "history_v2.sqlite"
+    expected_tool = (
+        BoundToolExpectation(
+            tool_call_id=evidence.toolCallID,
+            tool_name=evidence.toolName,
+            tool_arguments_digest=evidence.toolArgumentsDigest,
+            tool_content_digest=evidence.toolContentDigest,
+        )
+        if isinstance(evidence, ToolCompletionEvidence)
+        else None
+    )
     probe = probe_bound_completion(
         path,
         identity=str(services.config.database.resolve_sqlite_path(services.paths.root).resolve()),
@@ -129,11 +148,16 @@ def get_run_result(services: SharedServices, *, owner_id: int, run_id: UUID) -> 
         agent_id=snapshot.agentID,
         user_message_id=str(user_message_id),
         prompt=snapshot.request.prompt,
+        expected_tool=expected_tool,
     )
     if (
         probe.status != "complete"
         or probe.assistant_message_id != evidence.historyAssistantMessageID
         or probe.assistant_content_digest != evidence.historyAssistantContentDigest
+        or (
+            isinstance(evidence, ToolCompletionEvidence)
+            and probe.tool_message_id != evidence.toolMessageID
+        )
     ):
         raise StorageDataError("final history evidence differs from Run completion")
     text = _read_final_text(
@@ -141,6 +165,7 @@ def get_run_result(services: SharedServices, *, owner_id: int, run_id: UUID) -> 
         turn_id,
         evidence.historyAssistantMessageID,
         evidence.historyAssistantContentDigest,
+        message_index=3 if expected_tool is not None else 1,
     )
     return RunResult(
         runID=run_id,

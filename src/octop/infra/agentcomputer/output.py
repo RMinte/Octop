@@ -191,6 +191,11 @@ def get_run_output(
             snapshot = bound.snapshot
             turn_id = bound.receipt.turnID
             user_message_id = bound.receipt.userMessageID
+            has_tool_effect = bool(
+                services.ac_tool_effect_repo.list_for_run_in_transaction(
+                    conn, bound.run.run_id, owner_id
+                )
+            )
     except (sqlite3.DatabaseError, PostgresError) as exc:
         raise StorageUnavailableError("Run output storage unavailable") from exc
     except (ValueError, TypeError) as exc:
@@ -209,6 +214,14 @@ def get_run_output(
             provisional=False,
         )
     if current.dispatchPhase != "engineAccepted":
+        return RunOutputSnapshot(
+            runID=run_id,
+            state=current.state,
+            text=None,
+            digest=None,
+            provisional=False,
+        )
+    if has_tool_effect:
         return RunOutputSnapshot(
             runID=run_id,
             state=current.state,

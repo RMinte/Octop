@@ -1,4 +1,4 @@
-"""Trusted no-tool Run completion; no worker or public execution route is installed."""
+"""Trusted Run completion after independently bound archive and checkpoint proof."""
 
 from __future__ import annotations
 
@@ -22,22 +22,22 @@ from octop.infra.agentcomputer.dispatch import (
     _transaction,
     validate_dispatch_binding,
 )
-from octop.infra.agentcomputer.effects import validate_effect_bindings
+from octop.infra.agentcomputer.effects import _record, validate_effect_bindings
 from octop.infra.agentcomputer.models import (
     ControlModel,
     EffectDigest,
     EngineInvocation,
     PositiveRevision,
+    ToolEffectRecord,
 )
 from octop.infra.agentcomputer.pauses import validate_pause_bindings
 from octop.infra.agentcomputer.runs import BoundRun, load_bound_run
 from octop.infra.db.services import SharedServices
 
 
-class CompletionEvidence(ControlModel):
+class _CompletionEvidenceBase(ControlModel):
     """Observations supplied by the trusted stream/history/checkpoint boundary."""
 
-    schemaVersion: Literal[1]
     historyTurnID: UUID
     historyThreadID: StrictStr = Field(min_length=1)
     historyAgentID: StrictStr = Field(min_length=1)
@@ -57,6 +57,23 @@ class CompletionEvidence(ControlModel):
         if value.utcoffset() != timedelta(0):
             raise ValueError("stream end must be UTC")
         return value
+
+
+class CompletionEvidence(_CompletionEvidenceBase):
+    schemaVersion: Literal[1]
+
+
+class ToolCompletionEvidence(_CompletionEvidenceBase):
+    """The one read-only tool result and final answer bound to the same Run."""
+
+    schemaVersion: Literal[2]
+    toolEffectID: UUID
+    toolReceiptDigest: EffectDigest
+    toolCallID: StrictStr = Field(min_length=1)
+    toolName: Literal["read_project_document"]
+    toolArgumentsDigest: EffectDigest
+    toolMessageID: StrictStr = Field(min_length=1)
+    toolContentDigest: EffectDigest
 
 
 class RunCompletionReceipt(ControlModel):
@@ -79,7 +96,7 @@ class RunCompletionReceipt(ControlModel):
     dispatchIntentDigest: EffectDigest
     entryExpectedRunRevision: PositiveRevision
     resultRunRevision: PositiveRevision
-    evidence: CompletionEvidence
+    evidence: CompletionEvidence | ToolCompletionEvidence
     completedAt: datetime
     replayed: StrictBool
 
@@ -91,33 +108,48 @@ class RunCompletionReceipt(ControlModel):
         return value
 
 
-def _validate_evidence(evidence: CompletionEvidence, invocation: EngineInvocation) -> None:
+def _tool_fields(evidence: ToolCompletionEvidence) -> dict[str, str]:
+    return {
+        "toolCallID": evidence.toolCallID,
+        "toolName": evidence.toolName,
+        "toolArgumentsDigest": evidence.toolArgumentsDigest,
+        "toolMessageID": evidence.toolMessageID,
+        "toolContentDigest": evidence.toolContentDigest,
+    }
+
+
+def _validate_evidence(
+    evidence: CompletionEvidence | ToolCompletionEvidence, invocation: EngineInvocation
+) -> None:
     from octop.infra.agentcomputer.engine import _checkpoint_metadata
 
     intent = invocation.intent
+    tool_fields = _tool_fields(evidence) if isinstance(evidence, ToolCompletionEvidence) else {}
     expected_history_digest = content_digest(
         {
-            "schemaVersion": 1,
+            "schemaVersion": evidence.schemaVersion,
             "turnID": str(intent.turnID),
             "threadID": intent.snapshot.octopThreadID,
             "agentID": intent.snapshot.agentID,
             "status": "complete",
             "assistantMessageID": evidence.historyAssistantMessageID,
             "assistantContentDigest": evidence.historyAssistantContentDigest,
+            **tool_fields,
         }
     )
     expected_checkpoint_digest = content_digest(
         {
-            "schemaVersion": 1,
+            "schemaVersion": evidence.schemaVersion,
             "checkpointID": str(evidence.terminalCheckpointID),
             "checkpointNamespace": "",
             "metadata": _checkpoint_metadata(invocation),
             "assistantMessageID": evidence.terminalAssistantMessageID,
             "assistantContentDigest": evidence.terminalAssistantContentDigest,
+            **tool_fields,
         }
     )
     if (
-        evidence.model_fields_set != set(CompletionEvidence.model_fields)
+        evidence.model_fields_set != set(type(evidence).model_fields)
         or evidence.historyTurnID != intent.turnID
         or evidence.historyThreadID != intent.snapshot.octopThreadID
         or evidence.historyAgentID != intent.snapshot.agentID
@@ -127,6 +159,40 @@ def _validate_evidence(evidence: CompletionEvidence, invocation: EngineInvocatio
         or evidence.terminalCheckpointDigest != expected_checkpoint_digest
     ):
         raise CommandAdmissionError("revisionConflict")
+
+
+def _validated_tool_effect(
+    services: SharedServices,
+    conn: Any,
+    invocation: EngineInvocation,
+    evidence: ToolCompletionEvidence,
+) -> ToolEffectRecord:
+    rows = services.ac_tool_effect_repo.list_for_run_in_transaction(
+        conn, str(invocation.intent.runID), invocation.intent.ownerID
+    )
+    if len(rows) != 1:
+        raise CommandAdmissionError("revisionConflict")
+    record = _record(rows[0], invocation)
+    receipt = record.receipt
+    output = receipt.output if receipt is not None else None
+    if (
+        record.phase != "terminal"
+        or receipt is None
+        or receipt.outcome != "succeeded"
+        or receipt.reconciliationRequired
+        or output is None
+        or output.outcome != "succeeded"
+        or output.fileChangeIDs
+        or output.artifactIDs
+        or record.intent.effectID != evidence.toolEffectID
+        or content_digest(receipt.model_dump(mode="json")) != evidence.toolReceiptDigest
+        or record.intent.action.toolCallID != evidence.toolCallID
+        or record.intent.action.toolName != evidence.toolName
+        or record.intent.action.argumentsDigest != evidence.toolArgumentsDigest
+        or content_digest(output.resultJSON) != evidence.toolContentDigest
+    ):
+        raise CommandAdmissionError("revisionConflict")
+    return record
 
 
 def _payload(receipt: RunCompletionReceipt) -> dict[str, Any]:
@@ -218,12 +284,31 @@ def validate_completion_binding(
         or row.completed_at < int(receipt.evidence.engineStreamEndedAt.timestamp() * 1000)
         or len(events) != 1
         or len(natural_events) != 1
-        or services.ac_tool_effect_repo.list_for_run_in_transaction(conn, run.run_id, run.owner_id)
         or services.ac_run_pause_repo.list_for_run_in_transaction(conn, run.run_id, run.owner_id)
         or services.ac_run_cancellation_repo.get_in_transaction(conn, run.run_id, run.owner_id)
         is not None
     ):
         raise StorageDataError("natural completion binding mismatch")
+    effect_rows = services.ac_tool_effect_repo.list_for_run_in_transaction(
+        conn, run.run_id, run.owner_id
+    )
+    if isinstance(receipt.evidence, ToolCompletionEvidence):
+        try:
+            validate_effect_bindings(services, conn, bound, claim)
+            _validated_tool_effect(
+                services,
+                conn,
+                EngineInvocation(
+                    intent=claim.intent,
+                    claimantID=claim.claimantID,
+                    expectedRunRevision=receipt.entryExpectedRunRevision,
+                ),
+                receipt.evidence,
+            )
+        except (CommandAdmissionError, ValueError) as exc:
+            raise StorageDataError("natural completion tool binding mismatch") from exc
+    elif effect_rows:
+        raise StorageDataError("tool effect on no-tool completion")
     event = natural_events[0]
     accepted = services.ac_event_repo.list_for_run_in_transaction(
         conn, run.run_id, run.owner_id, event_type="run.engineAccepted"
@@ -254,9 +339,11 @@ def validate_completion_binding(
 
 
 def complete_run(
-    services: SharedServices, invocation: EngineInvocation, evidence: CompletionEvidence
+    services: SharedServices,
+    invocation: EngineInvocation,
+    evidence: CompletionEvidence | ToolCompletionEvidence,
 ) -> RunCompletionReceipt:
-    """Atomically finish one trusted, effect-free invocation after external proof."""
+    """Atomically finish one trusted invocation after external proof."""
     _validate_evidence(evidence, invocation)
     identity = _existing_recovery_identity(services)
     _epoch(identity, invocation.intent)
@@ -293,6 +380,11 @@ def complete_run(
                 raise CommandAdmissionError("revisionConflict")
             return existing.model_copy(update={"replayed": True})
         run = bound.run
+        tool_record = (
+            _validated_tool_effect(services, conn, invocation, evidence)
+            if isinstance(evidence, ToolCompletionEvidence)
+            else None
+        )
         if (
             cancellation is not None
             or run.restore_epoch != identity.restoreEpoch
@@ -300,8 +392,11 @@ def complete_run(
             or run.state != "queued"
             or run.dispatch_phase != "engineAccepted"
             or run.revision != invocation.expectedRunRevision + 1
-            or services.ac_tool_effect_repo.list_for_run_in_transaction(
-                conn, run.run_id, run.owner_id
+            or (
+                tool_record is None
+                and services.ac_tool_effect_repo.list_for_run_in_transaction(
+                    conn, run.run_id, run.owner_id
+                )
             )
             or services.ac_run_pause_repo.list_for_run_in_transaction(
                 conn, run.run_id, run.owner_id
@@ -314,15 +409,27 @@ def complete_run(
             claim.engineReceipt.acceptedAt.timestamp() * 1000
         ):
             raise CommandAdmissionError("revisionConflict")
-        succeeded = services.ac_run_repo.mark_succeeded_without_effects(
-            conn,
-            run.run_id,
-            run.owner_id,
-            run.revision,
-            run.restore_epoch,
-            run.execution_epoch,
-            updated_at=timestamp,
-        )
+        if tool_record is None:
+            succeeded = services.ac_run_repo.mark_succeeded_without_effects(
+                conn,
+                run.run_id,
+                run.owner_id,
+                run.revision,
+                run.restore_epoch,
+                run.execution_epoch,
+                updated_at=timestamp,
+            )
+        else:
+            succeeded = services.ac_run_repo.mark_succeeded_with_read_effect(
+                conn,
+                run.run_id,
+                run.owner_id,
+                run.revision,
+                run.restore_epoch,
+                run.execution_epoch,
+                str(tool_record.intent.effectID),
+                updated_at=timestamp,
+            )
         if succeeded is None:
             raise CommandAdmissionError("revisionConflict")
         receipt = RunCompletionReceipt(

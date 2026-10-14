@@ -24,6 +24,17 @@ preparation progress. Local text execution remains capability gated. See
 [project preparation](agentcomputer-projects.md) for request fields, retry rules,
 resource ownership, and the enforced 65536-byte command limit.
 
+An owned Project can import and read bounded text documents via
+`PUT /api/agentcomputer/v1/projects/{projectID}/documents/{filename}`,
+`GET /api/agentcomputer/v1/projects/{projectID}/documents`, and
+`GET /api/agentcomputer/v1/projects/{projectID}/documents/{filename}`. The `PUT`
+body is `{"content":"…"}` and creates the file only once; a duplicate returns
+409. Filenames are single `.md` or `.txt` names under the managed
+`documents/` directory, and content is limited to 16384 UTF-8 bytes. These
+routes require the Project owner and verified stopped workspace, but do not
+require a working model Provider or start a Run. The model's
+`read_project_document` tool uses the same path and size rules.
+
 `GET /api/agentcomputer/v1/tasks/{taskID}` reads only the caller's existing Task
 mapping. Task creation and text execution require the local capability gate. See
 [Task mapping](agentcomputer-tasks.md) for the internal atomic registration,
