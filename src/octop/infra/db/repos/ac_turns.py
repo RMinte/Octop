@@ -59,6 +59,34 @@ class AcTurnRepo:
         return AcTurnRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def get_by_pk_for_task_in_transaction(
+        conn: Any, task_id: str, owner_id: int, pk: int
+    ) -> AcTurnRow | None:
+        row = conn.execute(
+            "SELECT * FROM ac_turns WHERE id = ? AND task_id = ? AND owner_id = ?",
+            (pk, task_id, owner_id),
+        ).fetchone()
+        return AcTurnRow.from_row(row) if row is not None else None
+
+    @staticmethod
+    def list_page_for_task_in_transaction(
+        conn: Any, task_id: str, owner_id: int, *, after_id: int | None, limit: int
+    ) -> list[AcTurnRow]:
+        if after_id is None:
+            rows = conn.execute(
+                "SELECT * FROM ac_turns WHERE task_id = ? AND owner_id = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (task_id, owner_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM ac_turns WHERE task_id = ? AND owner_id = ? "
+                "AND id < ? ORDER BY id DESC LIMIT ?",
+                (task_id, owner_id, after_id, limit),
+            ).fetchall()
+        return [AcTurnRow.from_row(row) for row in rows]
+
+    @staticmethod
     def has_user_message(conn: Any, task_id: str, owner_id: int, user_message_id: str) -> bool:
         row = conn.execute(
             "SELECT 1 FROM ac_turns WHERE task_id = ? AND owner_id = ? AND user_message_id = ?",

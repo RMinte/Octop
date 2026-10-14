@@ -121,6 +121,16 @@ class AcRunRepo:
         return AcRunRow.from_row(row) if row is not None else None
 
     @staticmethod
+    def get_by_turn_in_transaction(
+        conn: Any, turn_id: str, task_id: str, owner_id: int
+    ) -> AcRunRow | None:
+        row = conn.execute(
+            "SELECT * FROM ac_runs WHERE turn_id = ? AND task_id = ? AND owner_id = ?",
+            (turn_id, task_id, owner_id),
+        ).fetchone()
+        return AcRunRow.from_row(row) if row is not None else None
+
+    @staticmethod
     def latest_for_task_in_transaction(conn: Any, task_id: str) -> AcRunRow | None:
         row = conn.execute(
             "SELECT * FROM ac_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,)

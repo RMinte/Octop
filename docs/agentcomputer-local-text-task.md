@@ -1,6 +1,6 @@
 # AgentComputer 本机纯文本 Task 试用
 
-这一切片让 AgentComputer 的“盒子项目”页面创建 Task、提交文本 Turn、列出项目已有 Task 与最近 Run，并查看 Run 状态和最终回答。它只面向本机回环地址上的单进程 Octop，使用 Octop 用户 Bearer 会话。默认关闭；启用时固定一个已配置的模型，并要求 SQLite 控制库和 v2 历史。工具、MCP、技能、子代理、文件操作、审批续跑和远端设备配对均未开放。
+这一切片让 AgentComputer 的“盒子项目”页面创建 Task、提交文本 Turn、列出项目已有 Task 与最近 Run，并查看 Run 状态和最终回答。Octop 服务端可读取同一 Task 的多轮原文与结果；本机 GLM 已完成三轮问答，macOS 原生 App 已完成第三轮追问并展示三轮历史。它只面向本机回环地址上的单进程 Octop，使用 Octop 用户 Bearer 会话。默认关闭；启用时固定一个已配置的模型，并要求 SQLite 控制库和 v2 历史。工具、MCP、技能、子代理、文件操作、审批续跑和远端设备配对均未开放。
 
 ## 本机启用
 
@@ -30,5 +30,7 @@
 - 关闭服务器会等待已交接 Run 的本地结算和不确定性围栏。若远端模型流或底层 I/O 永不返回，关闭可能继续等待；不能通过超时释放单实例锁来假装远端执行已经停止。
 - 2026-10-14 已先备份并升级独立的 8090 实例，固定使用已有的 GLM-5 配置。一次真实 HTTP 验收完成：新项目 `ready/executionReady=true`，Task 与 Turn 接收成功，Run 由 `queued` 到 `succeeded`，结果接口返回“2+2 等于 4。”；8088 用户实例未重启。随后 AgentComputer macOS 实包已将已有 ready 项目加入主项目列表，创建文本 Task，Run 成功并显示“项目接线测试成功。”。这只证明开发机本地无工具文本任务可运行，尚未验收 Ubuntu 盒子或网络断线恢复。
 - 项目下远端 Task 列表接口 `GET /api/agentcomputer/v1/projects/{projectID}/tasks` 返回分页 `items[].task`、`items[].latestRun` 和 `nextCursor`。新构建的 AgentComputer 原生窗口已发现服务器直接创建、App 本地索引中不存在的 Task“跨设备发现验证”，并显示成功结果“跨设备发现成功。”；仍需在真实第二设备上验证重新发现，且尚未验收冷重启与断线恢复。
+- 同一 Task 在上一 Run 成功并释放活动占用后，可用新的 `contextMode=newMessage` 提交下一条用户消息；不需新增 `continueOriginalMessage` 协议模式。8090 隔离实例已对“跨设备发现验证”Task 提交第二轮，Run 成功，并准确回答上一轮原句“跨设备发现成功。”。随后最新 macOS Debug App 由主目录 DerivedData 构建并运行，在同一 Task 的原生窗口发送第三轮“请只回复：原生追问验收成功。”，Run 从排队到完成，界面展示三轮原文和回答，第三轮回答为“原生追问验收成功。”。
+- `GET /api/agentcomputer/v1/tasks/{taskID}/turns` 按 Turn 持久插入顺序倒序分页，默认 20 条、最多 100 条，返回每轮 `turnID`、`userMessageID`、原始 `prompt`、当前 `run` 和 `result`；未成功的 `result.text` 为 null，成功结果复用 Run 完成收据与 v2 历史校验。仅本人可读，未知和他人 Task 同为 404；游标绑定盒子、用户、Task 与当前恢复代次。旧恢复代次的已接受 Turn 可重新从第一页只读，旧游标不可继续使用。Run 状态可能在同页 Run 快照和较晚的结果读取之间前进，客户端可用较新的 `result.state` 或刷新；任何损坏的持久绑定使整页失败，不返回部分历史。8090 实例已实际读出两页两轮历史，macOS 原生窗口也已展示第三轮后的完整三轮历史。上述点验都在开发机本地完成，尚未覆盖第二设备、冷重启或 Ubuntu 盒子。
 
 API 详情见 `/api/docs` 的 AgentComputer 分组。实现和更广阶段边界见[集成入口](agentcomputer-integration.md)与[阶段进度](agentcomputer-progress.md)。

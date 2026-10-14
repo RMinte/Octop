@@ -55,6 +55,11 @@ from octop.infra.agentcomputer.runs import get_run
 from octop.infra.agentcomputer.submission import submit_new_message
 from octop.infra.agentcomputer.task_listing import InvalidTaskListCursor, list_tasks
 from octop.infra.agentcomputer.tasks import admit_task, get_task
+from octop.infra.agentcomputer.turn_listing import (
+    InvalidTurnListCursor,
+    TurnListResponse,
+    list_turns,
+)
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
 
@@ -493,6 +498,66 @@ async def task_metadata(
     if task is None:
         return protocol_error_response("resourceNotFound", 404)
     return task
+
+
+@router.get(
+    "/tasks/{taskID}/turns",
+    response_model=TurnListResponse,
+    summary="List an owned Task's original messages and verified Run results",
+    description=(
+        "Requires a user Bearer token. Missing and other users' Tasks return the same 404, "
+        "including for admins. Turns are ordered by insertion order, newest first. Pass nextCursor "
+        "unchanged to read older Turns; a cursor from another box, user, Task, or restore epoch "
+        "is invalid. Each item returns the exact accepted prompt, a fully validated current Run "
+        "and its result. The result text is null until success and is then revalidated against "
+        "the completion receipt and bound v2 history. Old-epoch accepted Turns remain readable "
+        "through the current installation identity. A Run may advance between the Run snapshot "
+        "and the later result read; refresh to see current state. A broken fact fails the whole page."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        404: {"model": ProtocolErrorEnvelope, "description": "No Task owned by this user"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid Task, limit, or cursor"},
+        503: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Turn, Run, or result evidence unavailable",
+        },
+    },
+)
+async def turn_list(
+    response: Response,
+    task_id: UUID = Path(alias="taskID", description="Owned public Task UUID."),
+    limit: int = Query(default=20, ge=1, le=100, description="Page size, from 1 to 100."),
+    cursor: str | None = Query(
+        default=None, description="Opaque cursor returned by the previous page."
+    ),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> TurnListResponse | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        listing = await server.agentcomputer_http_operations.run_thread(
+            list_turns, server.services, user.id, task_id, limit, cursor
+        )
+    except InvalidTurnListCursor:
+        return protocol_error_response("invalidRequest", 422)
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during Turn listing")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored Turn, Run, or result data is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="turnInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer Turn listing storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    if listing is None:
+        return protocol_error_response("resourceNotFound", 404)
+    return listing
 
 
 @router.post(
