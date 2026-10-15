@@ -328,6 +328,8 @@ def validate_pause_bindings(
         raise StorageDataError("multiple active pauses")
     if active:
         pause = active[0]
+        if run.project_id is None:
+            raise StorageDataError("project-free Run has an active pause")
         if run.state not in (
             "waitingApproval" if pause.intent.kind == "approval" else "waitingInput",
             "interrupted",
@@ -416,6 +418,8 @@ def open_pause(
         ):
             raise CommandAdmissionError("runtimeUnavailable", reason="approvalUnavailable")
         task = services.ac_task_repo.get_in_transaction(conn, bound.run.task_id, source.ownerID)
+        if bound.run.project_id is None:
+            raise CommandAdmissionError("runtimeUnavailable", reason="approvalUnavailable")
         project = services.ac_project_repo.get_in_transaction(
             conn, bound.run.project_id, source.ownerID
         )
@@ -443,6 +447,8 @@ def open_pause(
 
         if validate_cancellation_binding(services, conn, bound, claim) is not None:
             raise CommandAdmissionError("revisionConflict")
+        if source.projectID is None:
+            raise CommandAdmissionError("runtimeUnavailable", reason="approvalUnavailable")
         intent = RunPauseIntent(
             schemaVersion=1,
             pauseID=uuid4(),

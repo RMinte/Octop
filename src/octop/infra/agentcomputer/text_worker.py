@@ -23,7 +23,7 @@ from octop.infra.agentcomputer.commands import CommandAdmissionError, StorageDat
 from octop.infra.agentcomputer.dispatch import claim_run, dispatch_run
 from octop.infra.agentcomputer.engine import EngineEntryMiddleware, invoke_engine_entry
 from octop.infra.agentcomputer.identity import read_identity
-from octop.infra.agentcomputer.models import EngineInvocation
+from octop.infra.agentcomputer.models import EngineInvocation, execution_configuration
 from octop.infra.agentcomputer.project_document_tool import read_project_document
 from octop.infra.agentcomputer.runs import get_run
 
@@ -164,9 +164,14 @@ class LocalTextTaskWorker:
 
     def _managed_config(self, invocation: EngineInvocation) -> dict[str, Any]:
         snapshot = invocation.intent.snapshot
-        self._registry.workspace_for_project_preparation(
-            snapshot.agentID, str(invocation.intent.projectID)
-        )
+        if invocation.intent.projectID is None:
+            self._registry.workspace_for_task_preparation(
+                snapshot.agentID, str(invocation.intent.taskID)
+            )
+        else:
+            self._registry.workspace_for_project_preparation(
+                snapshot.agentID, str(invocation.intent.projectID)
+            )
         row = self._services.agent_repo.get(snapshot.agentID)
         if row is None or row.config_json is None:
             raise StorageDataError("missing managed agent configuration")
@@ -181,16 +186,22 @@ class LocalTextTaskWorker:
 
     async def _invoke(self, invocation: EngineInvocation) -> None:
         snapshot = invocation.intent.snapshot
+        configuration = execution_configuration(snapshot)
         if not await asyncio.to_thread(
             text_task_available,
             self._services,
-            model_ref=snapshot.projectConfiguration.modelRef,
+            model_ref=configuration.modelRef,
         ):
             raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
         saved = await settled_to_thread(self._managed_config, invocation)
         checkpoint_dir = self._services.paths.root / "agentcomputer-checkpoints"
         await settled_to_thread(checkpoint_dir.mkdir, mode=0o700, parents=True, exist_ok=True)
-        checkpoint_path = checkpoint_dir / f"{invocation.intent.projectID}.sqlite"
+        checkpoint_name = (
+            f"task-{invocation.intent.taskID}"
+            if invocation.intent.projectID is None
+            else str(invocation.intent.projectID)
+        )
+        checkpoint_path = checkpoint_dir / f"{checkpoint_name}.sqlite"
         async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
             providers = await settled_to_thread(self._registry.providers.build_harness_configs)
             factory = ChatModelFactory(providers)
@@ -199,15 +210,20 @@ class LocalTextTaskWorker:
                 workspace_dir=saved["workspace_dir"],
                 system_files_path=saved["system_files_path"],
                 backend=saved["backend"],
-                default_model=snapshot.projectConfiguration.modelRef,
-                system_prompt=snapshot.projectConfiguration.instructions,
+                default_model=configuration.modelRef,
+                system_prompt=configuration.instructions,
                 checkpointer=saver,
                 middleware=[
                     EngineEntryMiddleware(
-                        self._services, invocation, self._history_archive, registry=self._registry
+                        self._services,
+                        invocation,
+                        self._history_archive,
+                        registry=self._registry
+                        if invocation.intent.projectID is not None
+                        else None,
                     )
                 ],
-                tools=[read_project_document],
+                tools=[read_project_document] if invocation.intent.projectID is not None else [],
                 tools_disabled=frozenset(
                     {
                         "ls",

@@ -2,6 +2,18 @@
 
 Navigation guide for AI coding agents working in this repository.
 
+## 当前用户分工约定（2026-10-15，最新修订）
+
+- 当前改造 Octop 的「项目和任务」正式页面，以及支撑它的服务端项目和任务接口。
+- Task 是多轮会话：首条消息创建任务，追问沿用同一任务；可关联独立项目，也可没有项目。每轮使用当时项目配置，不创建或绑定专家。
+- 项目独立于专家，自己持有服务端工作目录、客户端工作目录、多个 Skill/MCP 引用和行动指南；新建或编辑项目不得创建、关联或修改专家。
+- 撤销此前不合适的专家绑定配置方案；不增加旧模型兼容、双向同步或自动迁移。保留已有运行数据，删除数据须另行明确授权。
+- 两类目录独立保存：服务端目录在 Octop 主机上校验；客户端目录仅保存用户电脑绝对路径，不在服务端探测、解析、读取或上传文件。
+- 菜单与页面统一使用「项目和任务」，不再使用「项目与 Task」。
+- AgentComputer 保留 `/api/agentcomputer/v1` 专用协议；网页使用 `/api/projects`、`/api/project-tasks`。两组入口调用同一独立项目/多轮任务服务与数据，不要求 App 改用网页入口；保留专用协议不恢复旧专家绑定模型。
+- AgentComputer 客户端仅用于核对产品与接口；本轮不修改其 Swift/UI，不新增测试或验收页面。
+- 先整体功能再细节，使用有针对性的验证；本轮不重复执行完整门禁，不提交或推送。
+
 ## 1. Collaboration principles
 
 > Favor caution over speed; trivial tasks may relax these rules. These principles complement [§10 Change workflow](#10-change-workflow) and [§11 Communication](#11-communication).

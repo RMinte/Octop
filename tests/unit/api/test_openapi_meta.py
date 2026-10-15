@@ -20,12 +20,18 @@ async def test_openapi_has_bearer_security_and_descriptions(tmp_octop_home: Path
         app = build_app(srv)
         with TestClient(app) as c:
             spec = c.get("/api/openapi.json").json()
+            docs = c.get("/api/docs")
+            assert docs.status_code == 200
+            assert "/api/openapi.json" in docs.text
         assert spec["info"]["description"]
         assert "BearerAuth" in spec["components"]["securitySchemes"]
         login = spec["paths"]["/api/auth/login"]["post"]
         assert login["summary"] == "Sign in"
         me = spec["paths"]["/api/auth/me"]["get"]
         assert "BearerAuth" in me["security"][0]
+        tags = {tag["name"]: tag["description"] for tag in spec["tags"]}
+        assert "independent-project-tasks" in tags["agentcomputer"]
+        assert "projects" in tags
         assert "security" not in spec["paths"]["/api/setup/status"]["get"]
     finally:
         await srv.stop()

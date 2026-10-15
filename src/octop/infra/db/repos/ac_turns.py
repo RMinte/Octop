@@ -14,7 +14,7 @@ class AcTurnRow:
     pk: int
     turn_id: str
     task_id: str
-    project_id: str
+    project_id: str | None
     owner_id: int
     user_message_id: str
     assistant_message_id: str
@@ -34,7 +34,7 @@ class AcTurnRow:
             pk=strict_int(r["id"]),
             turn_id=str(r["turn_id"]),
             task_id=str(r["task_id"]),
-            project_id=str(r["project_id"]),
+            project_id=str(r["project_id"]) if r["project_id"] is not None else None,
             owner_id=strict_int(r["owner_id"]),
             user_message_id=str(r["user_message_id"]),
             assistant_message_id=str(r["assistant_message_id"]),
@@ -100,7 +100,7 @@ class AcTurnRepo:
         *,
         turn_id: str,
         task_id: str,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         user_message_id: str,
         assistant_message_id: str,

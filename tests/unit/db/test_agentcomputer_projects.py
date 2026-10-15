@@ -171,7 +171,7 @@ def test_v21_upgrade_preserves_project_agent_and_original_receipt(tmp_path: Path
             before_command = dict(conn.execute("SELECT * FROM ac_commands").fetchone())
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             after_project = dict(conn.execute("SELECT * FROM ac_projects").fetchone())
             after_agent = dict(conn.execute("SELECT * FROM agents").fetchone())
@@ -181,7 +181,11 @@ def test_v21_upgrade_preserves_project_agent_and_original_receipt(tmp_path: Path
             assert after_project == before_project
             assert {key: after_agent[key] for key in before_agent} == before_agent
             # Raw v21 DDL can still need the older profile-column repair helpers.
-            assert set(after_agent) - set(before_agent) <= {"knowledge_base_ids", "mcp_servers"}
+            assert set(after_agent) - set(before_agent) <= {
+                "knowledge_base_ids",
+                "mcp_servers",
+                "managed_task_id",
+            }
             assert dict(conn.execute("SELECT * FROM ac_commands").fetchone()) == before_command
             assert conn.execute("SELECT receipt_json FROM ac_commands").fetchone()[0] == receipt
             assert conn.execute("SELECT COUNT(*) FROM ac_project_preparations").fetchone()[0] == 0
@@ -200,7 +204,7 @@ def test_minimal_legacy_users_database_materializes_foundation_and_v22(
             before = dict(conn.execute("SELECT * FROM users").fetchone())
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         assert {"managed_by", "managed_project_id", "kind", "is_shared"} <= _columns(pool, "agents")
         assert "name" in _columns(pool, "ac_projects")
         assert "preparation_id" in _columns(pool, "ac_project_preparations")
@@ -256,7 +260,7 @@ def test_missing_initial_tables_repair_failure_preserves_legacy_watermark_and_da
             assert conn.execute("SELECT note FROM legacy_notes").fetchone()[0] == "kept-note"
             assert not conn.in_transaction
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
     finally:
         pool.close()
 
@@ -284,7 +288,7 @@ def test_skipped_watermarks_and_partial_columns_repair_atomically(
             conn.execute("UPDATE _schema_version SET version = ?", (watermark,))
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         assert "name" in _columns(pool, "ac_projects")
         assert {"managed_by", "managed_project_id"} <= _columns(pool, "agents")
         assert "preparation_id" in _columns(pool, "ac_project_preparations")
@@ -327,7 +331,7 @@ def test_sqlite_v22_ddl_failure_rolls_back_columns_journal_and_watermark(
         with pool.connect() as conn:
             assert not conn.in_transaction
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
     finally:
         pool.close()
 
@@ -341,9 +345,9 @@ def test_v22_missing_journal_is_repaired_without_rewriting_project_or_agent(db: 
             conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent,)).fetchone()
         )
         conn.execute("DROP TABLE ac_project_preparations")
-    assert _version(db) == 26
+    assert _version(db) == 32
     migrate.run_migrations(db)
-    assert _version(db) == 26
+    assert _version(db) == 32
     with db.connect() as conn:
         assert dict(conn.execute("SELECT * FROM ac_projects").fetchone()) == before_project
         assert (

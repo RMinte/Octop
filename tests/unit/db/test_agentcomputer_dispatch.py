@@ -183,6 +183,17 @@ def _claim(conn: Any, graph: dict[str, Any], index: int = 1) -> AcRunDispatchRow
     return AcRunDispatchRepo.insert(conn, **_journal_fields(graph, index))
 
 
+def _legacy_claim(conn: Any, graph: dict[str, Any]) -> AcRunDispatchRow:
+    # Seed the historical graph before migration without running current-schema SQL.
+    cursor = conn.execute(
+        "UPDATE ac_runs SET dispatch_phase='claimed', execution_epoch=1, "
+        "revision=2, updated_at=2000 WHERE run_id=? AND owner_id=?",
+        (graph["run_id"], graph["owner_id"]),
+    )
+    assert cursor.rowcount == 1
+    return AcRunDispatchRepo.insert(conn, **_journal_fields(graph))
+
+
 def _start(conn: Any, graph: dict[str, Any]) -> None:
     assert AcRunDispatchRepo.start_dispatch(
         conn, graph["run_id"], graph["owner_id"], 1, updated_at=3000
@@ -204,10 +215,21 @@ def _receipt(index: int = 1) -> dict[str, Any]:
 
 
 def _facts(conn: Any) -> dict[str, list[dict[str, Any]]]:
-    return {
+    facts = {
         table: [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY id")]
         for table in ("ac_projects", "ac_tasks", "ac_turns", "ac_runs", "ac_commands", "ac_events")
     }
+    for task in facts["ac_tasks"]:
+        for column in (
+            "standalone_box_id",
+            "standalone_workspace_id",
+            "standalone_agent_id",
+            "standalone_config_json",
+            "standalone_config_digest",
+        ):
+            if task.get(column) is None:
+                task.pop(column, None)
+    return facts
 
 
 def _successor(
@@ -254,7 +276,7 @@ def test_v22_upgrade_preserves_original_rows_receipt_and_epoch(tmp_path: Path) -
             before = _facts(conn)
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             assert _facts(conn) == before
             assert conn.execute("SELECT COUNT(*) FROM ac_run_dispatches").fetchone()[0] == 0
@@ -274,7 +296,7 @@ def test_watermark_repair_creates_journal_without_claiming_runs(
             before = _facts(conn)
             conn.execute("UPDATE _schema_version SET version = ?", (watermark,))
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             assert _facts(conn) == before
             assert conn.execute("SELECT COUNT(*) FROM ac_run_dispatches").fetchone()[0] == 0
@@ -288,7 +310,7 @@ def test_v23_missing_v22_journal_finishes_at_23_without_data_changes(db: SqliteP
         before = _facts(conn)
         conn.execute("DROP TABLE ac_project_preparations")
     migrate.run_migrations(db)
-    assert _version(db) == 26
+    assert _version(db) == 32
     with db.connect() as conn:
         assert _facts(conn) == before
         assert conn.execute("SELECT COUNT(*) FROM ac_project_preparations").fetchone()[0] == 0
@@ -341,7 +363,7 @@ def test_v23_ddl_failure_rolls_back_journal_and_watermark(
                 is None
             )
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
     finally:
         pool.close()
 

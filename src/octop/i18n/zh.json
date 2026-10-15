@@ -497,7 +497,18 @@
     "TEAM_MEMBER_BUSY": "该专家有进行中的团队任务，请等结束后再调整成员或删除。",
     "TEAM_NOT_SHAREABLE": "当前版本不支持分享团队。",
     "SKILL_PACKAGE_COPY_DENIED": "该技能包的创建者已禁止复制其中的技能。",
-    "SKILL_PACKAGE_LOCKED": "此技能复制自锁定策略的技能包，无法在工作区编辑。"
+    "SKILL_PACKAGE_LOCKED": "此技能复制自锁定策略的技能包，无法在工作区编辑。",
+    "PROJECT_NAME_TAKEN": "已存在同名项目。",
+    "PROJECT_REQUEST_CONFLICT": "该创建标识已用于其他项目内容，请使用新的标识。",
+    "PROJECT_REVISION_CONFLICT": "项目已被修改，请刷新后重新编辑。",
+    "PROJECT_RESOURCE_INVALID": "关联的 Skill 或 MCP 不存在或无权使用，请重新选择。",
+    "PROJECT_DIRECTORY_INVALID": "目录不存在、不可访问或超出允许范围。",
+    "TASK_BUSY": "任务正在回复，请等待完成或停止后再发送。",
+    "TASK_REQUEST_CONFLICT": "该发送标识已经用于另一条消息，请刷新后重试。",
+    "TASK_MODEL_UNAVAILABLE": "尚无可用的对话模型，请先在模型设置中配置。",
+    "TASK_EXECUTION_FAILED": "本轮执行失败，可重新发送消息；已完成的历史仍然保留。",
+    "TASK_INTERRUPTED": "服务重启或执行中断，本轮未自动重试。可重新发送消息。",
+    "TASK_RESOURCE_UNAVAILABLE": "项目的目录、Skill 或 MCP 无法加载，请检查项目配置和连接。"
   },
   "desktop": {
     "install_log_deps": "正在安装 Python 依赖…",
@@ -873,5 +884,8 @@
       "bind_failed": "目录服务拒绝了绑定 DN 或密码",
       "search_failed": "目录服务拒绝了用户检索"
     }
+  },
+  "projects": {
+    "task_prompt": "你是项目中的任务助手。直接帮助用户完成工作，保留多轮对话上下文。遵循下方项目行动指南。客户端目录仅是路径记录，尚未同步到服务端，不能声称已访问其中的文件。只在用户请求需要时使用工具，不得编造工具执行结果。"
   }
 }

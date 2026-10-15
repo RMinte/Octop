@@ -1,405 +1,228 @@
-"""Owner-scoped Bridge routes for remote AgentComputer project conversations."""
+"""Bridge relays only the dedicated independent project/task protocol."""
 
 from __future__ import annotations
 
 import json
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from octop.infra.agentcomputer.commands import content_digest
-from octop.infra.bridge.http_tunnel import encode_tunnel_response
+from octop.infra.bridge.http_tunnel import encode_tunnel_response, execute_local_http
 from tests.support.auth import create_user, resolve_user_id
 
 PREFIX = "/api/bridge/connections/01REMOTE/agentcomputer/v1"
 
 
-async def test_bridge_agentcomputer_keeps_owner_bearer_scope_and_safe_json(env: Any) -> None:
-    client, server, auth = env
-    assert server.services is not None and server.app_runtime is not None
-    owner_id = await resolve_user_id(client, auth, "admin")
+async def connection(client, server, auth):
+    owner = await resolve_user_id(client, auth, "admin")
     server.services.bridge_connection_repo.create(
         connection_id="01REMOTE",
-        owner_user_id=owner_id,
+        owner_user_id=owner,
         peer_base_url="https://peer.example",
         peer_username="peer",
         display_name="Remote",
     )
-    session = MagicMock()
-    session.tunnel_request = AsyncMock(
-        return_value=encode_tunnel_response(
-            status=200,
-            headers={"Set-Cookie": "secret=leak", "Authorization": "Bearer leak"},
-            body=json.dumps({"items": [], "nextCursor": None}).encode(),
-        )
-    )
-    manager = server.app_runtime.bridge_manager
-    assert manager is not None
-    with patch.object(manager, "require_session", return_value=session):
-        response = await client.get(f"{PREFIX}/projects?limit=5", headers=auth)
-        assert response.status_code == 200
-        assert response.json() == {"items": [], "nextCursor": None}
-        assert response.headers["cache-control"] == "no-store"
-        assert "set-cookie" not in response.headers
-        assert "authorization" not in response.headers
-        session.tunnel_request.assert_awaited_once_with(
-            method="GET",
-            path="/api/agentcomputer/v1/projects",
-            query="limit=5",
-            headers=None,
-            body=None,
-        )
-
-        token = auth["Authorization"].split(" ", 1)[1]
-        query_token = await client.get(f"{PREFIX}/projects?access_token={token}")
-        assert query_token.status_code == 401
-        assert session.tunnel_request.await_count == 1
-
-        other_auth = await create_user(client, auth, username="other")
-        other = await client.get(f"{PREFIX}/projects", headers=other_auth)
-        assert other.status_code == 404
-        assert session.tunnel_request.await_count == 1
-
-        disallowed = await client.get(f"{PREFIX}/users", headers=auth)
-        assert disallowed.status_code == 404
-        assert session.tunnel_request.await_count == 1
-
-    schema = client._octop_app.openapi()  # type: ignore[attr-defined]
-    project_path = "/api/bridge/connections/{connection_id}/agentcomputer/v1/projects"
-    assert schema["paths"][project_path]["get"]["summary"]
-    assert schema["paths"][project_path]["post"]["requestBody"]["content"]["application/json"]
+    return server.app_runtime.bridge_manager
 
 
-async def test_bridge_agentcomputer_forwards_exact_command_body_and_peer_error(env: Any) -> None:
+async def test_bridge_shares_actual_domain_and_forwards_creation_idempotency(env):
     client, server, auth = env
-    assert server.services is not None and server.app_runtime is not None
-    owner_id = await resolve_user_id(client, auth, "admin")
-    server.services.bridge_connection_repo.create(
-        connection_id="01REMOTE",
-        owner_user_id=owner_id,
-        peer_base_url="https://peer.example",
-        peer_username="peer",
-        display_name="Remote",
-    )
+    manager = await connection(client, server, auth)
+    token = auth["Authorization"].split(" ", 1)[1]
     session = MagicMock()
-    session.tunnel_request = AsyncMock(
-        return_value=encode_tunnel_response(
-            status=503,
-            headers={"Set-Cookie": "secret=leak"},
-            body=(
-                b'{"error":{"code":"runtimeUnavailable","retryable":true,'
-                b'"reasonCode":"private-token"},"access_token":"secret"}'
-            ),
-        )
-    )
-    manager = server.app_runtime.bridge_manager
-    assert manager is not None
-    command = {
-        "commandID": str(uuid4()),
-        "idempotencyKey": str(uuid4()),
-        "expectedRestoreEpoch": 1,
-        "projectID": str(uuid4()),
-        "name": "远端项目",
-        "configuration": {
-            "schemaVersion": 1,
-            "modelRef": "GLM/glm-5",
-            "instructions": "保持中文",
-        },
+
+    async def local_peer(**kwargs):
+        return await execute_local_http(app=client._octop_app, access_token=token, **kwargs)
+
+    session.tunnel_request = AsyncMock(side_effect=local_peer)
+    key = str(uuid4())
+    body = {
+        "name": "Bridge project",
+        "instructions": "Shared instructions",
+        "client_directory": "/client/only",
     }
-    original = json.dumps(command, ensure_ascii=False, separators=(",", ":")).encode()
+    before = server.services.agent_repo.list_all()
     with patch.object(manager, "require_session", return_value=session):
-        response = await client.post(
-            f"{PREFIX}/projects",
-            headers={**auth, "Content-Type": "application/json"},
-            content=original,
+        created = await client.post(
+            PREFIX + "/projects", headers={**auth, "Idempotency-Key": key}, json=body
         )
-    assert response.status_code == 503
-    assert response.json() == {"error": {"code": "runtimeUnavailable", "retryable": True}}
-    assert "set-cookie" not in response.headers
-    session.tunnel_request.assert_awaited_once_with(
-        method="POST",
-        path="/api/agentcomputer/v1/projects",
-        query="",
-        headers={"content-type": "application/json"},
-        body=original,
-    )
-
-    session.tunnel_request.return_value = encode_tunnel_response(
-        status=404,
-        headers={},
-        body=b'{"detail":"private peer diagnostic"}',
-    )
-    with patch.object(manager, "require_session", return_value=session):
-        missing = await client.get(f"{PREFIX}/projects", headers=auth)
-    assert missing.status_code == 404
-    assert missing.json() == {"error": {"code": "resourceNotFound", "retryable": False}}
-    assert "private peer diagnostic" not in missing.text
-
-
-async def test_bridge_agentcomputer_documents_forward_only_bounded_contract(env: Any) -> None:
-    client, server, auth = env
-    assert server.services is not None and server.app_runtime is not None
-    owner_id = await resolve_user_id(client, auth, "admin")
-    server.services.bridge_connection_repo.create(
-        connection_id="01REMOTE",
-        owner_user_id=owner_id,
-        peer_base_url="https://peer.example",
-        peer_username="peer",
-        display_name="Remote",
-    )
-    project_id = uuid4()
-    filename = "说明.md"
-    base = f"{PREFIX}/projects/{project_id}/documents"
-    remote = f"/api/agentcomputer/v1/projects/{project_id}/documents"
-    document = {"filename": filename, "content": "第一行\n第二行", "access_token": "secret"}
-    session = MagicMock()
-    session.tunnel_request = AsyncMock(
-        side_effect=[
-            encode_tunnel_response(
-                status=200,
-                headers={"Set-Cookie": "secret=leak"},
-                body=json.dumps(
-                    {"items": [filename], "private": "secret"}, ensure_ascii=False
-                ).encode(),
-            ),
-            encode_tunnel_response(
-                status=200,
-                headers={"Set-Cookie": "secret=leak"},
-                body=json.dumps(document, ensure_ascii=False).encode(),
-            ),
-            encode_tunnel_response(
-                status=201,
-                headers={"Set-Cookie": "secret=leak"},
-                body=json.dumps(document, ensure_ascii=False).encode(),
-            ),
-        ]
-    )
-    manager = server.app_runtime.bridge_manager
-    assert manager is not None
-    payload = json.dumps({"content": document["content"]}, ensure_ascii=False, indent=2).encode()
-    with patch.object(manager, "require_session", return_value=session):
-        listing = await client.get(base, headers=auth)
-        read = await client.get(f"{base}/{filename}", headers=auth)
-        created = await client.put(
-            f"{base}/{filename}",
-            headers={**auth, "Content-Type": "application/json"},
-            content=payload,
+        assert created.status_code == 201, created.text
+        project = created.json()
+        assert (
+            await client.get("/api/projects/" + project["project_id"], headers=auth)
+        ).json() == project
+        assert (await client.get(PREFIX + "/projects", headers=auth)).json() == [project]
+        changed = await client.patch(
+            PREFIX + "/projects/" + project["project_id"],
+            headers=auth,
+            json={"instructions": "Changed", "expected_revision": 1},
         )
-        other_auth = await create_user(client, auth, username="document-other")
-        denied = await client.get(base, headers=other_auth)
-        invalid = await client.get(f"{base}/.hidden.md", headers=auth)
-        encoded_separator = await client.get(f"{base}/bad%2Fname.md", headers=auth)
-        oversized = await client.put(
-            f"{base}/oversized.md", headers=auth, json={"content": "你" * 6000}
-        )
-
-    assert listing.status_code == 200
-    assert listing.json() == {"items": [filename]}
-    assert read.status_code == 200
-    assert read.json() == {"filename": filename, "content": document["content"]}
-    assert created.status_code == 201
-    assert created.json() == read.json()
-    assert "set-cookie" not in read.headers
-    assert denied.status_code == 404
-    assert invalid.status_code == 422
-    assert encoded_separator.status_code in {404, 422}
-    assert oversized.status_code == 413
-    assert oversized.json() == {"error": {"code": "payloadLimitExceeded", "retryable": False}}
-    assert session.tunnel_request.await_count == 3
-    assert [call.kwargs for call in session.tunnel_request.await_args_list] == [
-        {"method": "GET", "path": remote, "query": "", "headers": None, "body": None},
-        {
-            "method": "GET",
-            "path": f"{remote}/{filename}",
-            "query": "",
-            "headers": None,
-            "body": None,
-        },
-        {
-            "method": "PUT",
-            "path": f"{remote}/{filename}",
-            "query": "",
-            "headers": {"content-type": "application/json"},
-            "body": payload,
-        },
-    ]
-
-    schema = client._octop_app.openapi()  # type: ignore[attr-defined]
-    doc_path = (
-        "/api/bridge/connections/{connection_id}/agentcomputer/v1/"
-        "projects/{project_id}/documents/{filename}"
-    )
-    assert schema["paths"][doc_path]["get"]["summary"]
-    assert schema["paths"][doc_path]["put"]["requestBody"]["content"]["application/json"]
-
-
-async def test_bridge_agentcomputer_run_output_is_owned_typed_and_read_only(env: Any) -> None:
-    client, server, auth = env
-    assert server.services is not None and server.app_runtime is not None
-    owner_id = await resolve_user_id(client, auth, "admin")
-    server.services.bridge_connection_repo.create(
-        connection_id="01REMOTE",
-        owner_user_id=owner_id,
-        peer_base_url="https://peer.example",
-        peer_username="peer",
-        display_name="Remote",
-    )
-    run_id = uuid4()
-    path = f"{PREFIX}/runs/{run_id}/output"
-    remote = f"/api/agentcomputer/v1/runs/{run_id}/output"
-    provisional_text = "正在生成"
-    session = MagicMock()
-    session.tunnel_request = AsyncMock(
-        return_value=encode_tunnel_response(
-            status=200,
-            headers={"Set-Cookie": "secret=leak", "Authorization": "Bearer leak"},
-            body=json.dumps(
-                {
-                    "runID": str(run_id),
-                    "state": "running",
-                    "text": provisional_text,
-                    "digest": content_digest(provisional_text),
-                    "provisional": True,
-                },
-                ensure_ascii=False,
-            ).encode(),
-        )
-    )
-    manager = server.app_runtime.bridge_manager
-    assert manager is not None
-    with patch.object(manager, "require_session", return_value=session):
-        output = await client.get(path, headers=auth)
-        other_auth = await create_user(client, auth, username="output-other")
-        denied = await client.get(path, headers=other_auth)
-        wrong_method = await client.post(path, headers=auth)
-        malformed = await client.get(f"{PREFIX}/runs/not-a-uuid/output", headers=auth)
-        extra_path = await client.get(f"{path}/private", headers=auth)
-
-    assert output.status_code == 200
-    assert output.json() == {
-        "runID": str(run_id),
-        "state": "running",
-        "text": provisional_text,
-        "digest": content_digest(provisional_text),
-        "provisional": True,
-    }
-    assert output.headers["cache-control"] == "no-store"
-    assert "set-cookie" not in output.headers
-    assert "authorization" not in output.headers
-    assert "peer-secret" not in output.text
-    assert denied.status_code == 404
-    assert wrong_method.status_code == 405
-    assert malformed.status_code == 422
-    assert extra_path.status_code == 404
-    session.tunnel_request.assert_awaited_once_with(
-        method="GET", path=remote, query="", headers=None, body=None
-    )
-
-    session.tunnel_request.return_value = encode_tunnel_response(
-        status=200,
-        headers={},
-        body=json.dumps(
-            {
-                "runID": str(run_id),
-                "state": "running",
-                "text": "peer-secret",
-                "digest": content_digest("peer-secret"),
-                "provisional": True,
-                "private": "peer-secret",
-            }
-        ).encode(),
-    )
-    with patch.object(manager, "require_session", return_value=session):
-        invalid = await client.get(path, headers=auth)
-    assert invalid.status_code == 502
-    assert "peer-secret" not in invalid.text
-
-    schema = client._octop_app.openapi()  # type: ignore[attr-defined]
-    operation = schema["paths"][
-        "/api/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}/output"
-    ]["get"]
-    assert operation["summary"] == "Read a peer AgentComputer Run text output snapshot via Bridge"
-    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
-        "/RunOutputSnapshot"
-    )
-
-
-async def test_bridge_agentcomputer_tool_activity_is_owned_typed_and_read_only(env: Any) -> None:
-    client, server, auth = env
-    assert server.services is not None and server.app_runtime is not None
-    owner_id = await resolve_user_id(client, auth, "admin")
-    server.services.bridge_connection_repo.create(
-        connection_id="01REMOTE",
-        owner_user_id=owner_id,
-        peer_base_url="https://peer.example",
-        peer_username="peer",
-        display_name="Remote",
-    )
-    run_id = uuid4()
-    path = f"{PREFIX}/runs/{run_id}/tool-activity"
-    remote = f"/api/agentcomputer/v1/runs/{run_id}/tool-activity"
-    item = {
-        "toolName": "read_project_document",
-        "path": "documents/brief.md",
-        "status": "ok",
-        "outcome": "succeeded",
-    }
-    session = MagicMock()
-    session.tunnel_request = AsyncMock(
-        return_value=encode_tunnel_response(
-            status=200,
-            headers={"Set-Cookie": "secret=leak", "Authorization": "Bearer leak"},
-            body=json.dumps({"runID": str(run_id), "items": [item]}).encode(),
-        )
-    )
-    manager = server.app_runtime.bridge_manager
-    assert manager is not None
-    with patch.object(manager, "require_session", return_value=session):
-        activity = await client.get(path, headers=auth)
-        other_auth = await create_user(client, auth, username="activity-other")
-        denied = await client.get(path, headers=other_auth)
-        wrong_method = await client.post(path, headers=auth)
-        malformed = await client.get(f"{PREFIX}/runs/not-a-uuid/tool-activity", headers=auth)
-        extra_path = await client.get(f"{path}/private", headers=auth)
-
-    assert activity.status_code == 200
-    assert activity.json() == {"runID": str(run_id), "items": [item]}
-    assert activity.headers["cache-control"] == "no-store"
-    assert "set-cookie" not in activity.headers
-    assert "authorization" not in activity.headers
-    assert denied.status_code == 404
-    assert wrong_method.status_code == 405
-    assert malformed.status_code == 422
-    assert extra_path.status_code == 404
-    session.tunnel_request.assert_awaited_once_with(
-        method="GET", path=remote, query="", headers=None, body=None
-    )
-
-    invalid_items = [
-        [{**item, "content": "private document text"}],
-        [{**item, "path": "/private/host-secret.txt"}],
-        [{**item, "path": "documents/../host-secret.md"}],
-        [item, item],
-    ]
-    with patch.object(manager, "require_session", return_value=session):
-        for items in invalid_items:
-            session.tunnel_request.return_value = encode_tunnel_response(
-                status=200,
-                headers={},
-                body=json.dumps({"runID": str(run_id), "items": items}).encode(),
+        assert changed.status_code == 200, changed.text
+        assert (
+            await client.get(
+                "/api/agentcomputer/v1/projects/" + project["project_id"], headers=auth
             )
-            invalid = await client.get(path, headers=auth)
-            assert invalid.status_code == 502
-            assert "private document text" not in invalid.text
-            assert "host-secret" not in invalid.text
+        ).json() == changed.json()
+        replay = await client.post(
+            PREFIX + "/projects", headers={**auth, "Idempotency-Key": key}, json=body
+        )
+        assert replay.json() == project
+        conflict = await client.post(
+            PREFIX + "/projects",
+            headers={**auth, "Idempotency-Key": key},
+            json={**body, "name": "Other"},
+        )
+        assert (
+            conflict.status_code == 409
+            and conflict.json()["error"]["code"] == "idempotencyConflict"
+        )
+    forwarded = session.tunnel_request.await_args_list[0].kwargs
+    assert forwarded["path"] == "/api/agentcomputer/v1/projects"
+    assert forwarded["headers"] == {"content-type": "application/json", "idempotency-key": key}
+    assert json.loads(forwarded["body"]) == body
+    assert server.services.agent_repo.list_all() == before
 
-    schema = client._octop_app.openapi()  # type: ignore[attr-defined]
-    operation = schema["paths"][
-        "/api/bridge/connections/{connection_id}/agentcomputer/v1/runs/{run_id}/tool-activity"
-    ]["get"]
-    assert operation["summary"] == (
-        "Read a peer AgentComputer Run's Project document tool activity via Bridge"
+
+async def test_bridge_keeps_bearer_ownership_typed_responses_and_safe_errors(env):
+    client, server, auth = env
+    manager = await connection(client, server, auth)
+    session = MagicMock()
+    session.tunnel_request = AsyncMock(
+        return_value=encode_tunnel_response(
+            status=200,
+            headers={"Set-Cookie": "secret=leak", "Authorization": "Bearer leak"},
+            body=b"[]",
+        )
     )
-    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
-        "/RunToolActivity"
-    )
+    with patch.object(manager, "require_session", return_value=session):
+        response = await client.get(PREFIX + "/projects", headers=auth)
+        assert response.status_code == 200 and response.json() == []
+        assert response.headers["cache-control"] == "no-store"
+        assert "set-cookie" not in response.headers and "authorization" not in response.headers
+        token = auth["Authorization"].split(" ", 1)[1]
+        assert (await client.get(PREFIX + "/projects?access_token=" + token)).status_code == 401
+        other = await create_user(client, auth, username="bridge-other")
+        assert (await client.get(PREFIX + "/projects", headers=other)).status_code == 404
+        assert (await client.get(PREFIX + "/users", headers=auth)).status_code == 404
+        assert session.tunnel_request.await_count == 1
+        session.tunnel_request.return_value = encode_tunnel_response(
+            status=200, headers={}, body=b'{"private":"secret-diagnostic"}'
+        )
+        invalid = await client.get(PREFIX + "/projects", headers=auth)
+        assert invalid.status_code == 502 and "secret-diagnostic" not in invalid.text
+        session.tunnel_request.return_value = encode_tunnel_response(
+            status=409,
+            headers={},
+            body=b'{"error":{"code":"resourceConflict","retryable":false,"reasonCode":"private-diagnostic"},"secret":"private-value"}',
+        )
+        refusal = await client.get(PREFIX + "/projects", headers=auth)
+        assert refusal.status_code == 409
+        assert refusal.json() == {"error": {"code": "resourceConflict", "retryable": False}}
+        session.tunnel_request.return_value = encode_tunnel_response(
+            status=404, headers={}, body=b'{"detail":"private diagnostic"}'
+        )
+        missing = await client.get(PREFIX + "/projects", headers=auth)
+        assert missing.status_code == 404
+        assert missing.json() == {"error": {"code": "resourceNotFound", "retryable": False}}
+    for call in session.tunnel_request.await_args_list:
+        assert call.kwargs["headers"] is None and call.kwargs["query"] == ""
+
+
+async def test_bridge_rejects_invalid_or_oversized_commands_before_peer_hop(env):
+    client, server, auth = env
+    manager = await connection(client, server, auth)
+    session = MagicMock()
+    session.tunnel_request = AsyncMock()
+    with patch.object(manager, "require_session", return_value=session):
+        missing_key = await client.post(
+            PREFIX + "/projects", headers=auth, json={"name": "Missing key"}
+        )
+        assert (
+            missing_key.status_code == 422
+            and missing_key.json()["error"]["code"] == "invalidRequest"
+        )
+        invalid = await client.post(
+            PREFIX + "/projects",
+            headers={**auth, "Idempotency-Key": str(uuid4())},
+            json={"name": "Bad", "agent_id": "private-secret"},
+        )
+        assert invalid.status_code == 422 and "private-secret" not in invalid.text
+        oversized = await client.post(
+            PREFIX + "/tasks", headers=auth, json={"request_id": "oversized", "prompt": "x" * 65536}
+        )
+        assert oversized.status_code == 413
+        assert (await client.get(PREFIX + "/runs/old/output", headers=auth)).status_code == 404
+        assert (
+            await client.put(
+                PREFIX + "/projects/proj_01ABC/documents/file.md",
+                headers=auth,
+                json={"content": "text"},
+            )
+        ).status_code in {404, 405}
+        assert session.tunnel_request.await_count == 0
+
+
+async def test_bridge_task_conversations_use_shared_worker_and_history(
+    env_with_provider, monkeypatch
+):
+    import asyncio
+
+    from octop.infra.projects import runtime
+
+    client, server, auth = env_with_provider
+    manager = await connection(client, server, auth)
+    token = auth["Authorization"].split(" ", 1)[1]
+    calls = []
+
+    async def run(services, owner, turn, history):
+        calls.append(history)
+        yield {"type": "token", "content": f"Reply {len(history) // 2 + 1}"}
+
+    monkeypatch.setattr(runtime, "run_turn", run)
+
+    async def local_peer(**kwargs):
+        return await execute_local_http(app=client._octop_app, access_token=token, **kwargs)
+
+    session = MagicMock()
+    session.tunnel_request = AsyncMock(side_effect=local_peer)
+
+    async def done(task_id):
+        for _ in range(300):
+            response = await client.get(PREFIX + "/tasks/" + task_id, headers=auth)
+            assert response.status_code == 200, response.text
+            task = response.json()
+            if task["active_turn_id"] is None:
+                return task
+            await asyncio.sleep(0.01)
+        raise AssertionError("task did not finish")
+
+    before = server.services.agent_repo.list_all()
+    with patch.object(manager, "require_session", return_value=session):
+        capabilities = await client.get(PREFIX + "/capabilities", headers=auth)
+        assert capabilities.status_code == 200, capabilities.text
+        assert capabilities.json()["executionAvailable"] is True
+        resources = await client.get(PREFIX + "/projects/resources", headers=auth)
+        assert resources.status_code == 200, resources.text
+        first = {"request_id": "bridge-first-message", "prompt": "Remember a bird"}
+        created = await client.post(PREFIX + "/tasks", headers=auth, json=first)
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = await done(task_id)
+        assert task["project_id"] is None and task["turns"][0]["reply"] == "Reply 1"
+        assert (await client.get("/api/project-tasks/" + task_id, headers=auth)).json() == task
+        assert (await client.get(PREFIX + "/tasks", headers=auth)).json()[0]["task_id"] == task_id
+        next_turn = {"request_id": "bridge-second-message", "prompt": "Which bird?"}
+        response = await client.post(
+            PREFIX + "/tasks/" + task_id + "/turns", headers=auth, json=next_turn
+        )
+        assert response.status_code == 202, response.text
+        task = await done(task_id)
+        assert task["turns"][1]["reply"] == "Reply 2"
+        assert calls[1] == [
+            {"role": "user", "content": first["prompt"]},
+            {"role": "assistant", "content": "Reply 1"},
+        ]
+        turns = await client.get(PREFIX + "/tasks/" + task_id + "/turns", headers=auth)
+        assert turns.json() == task["turns"]
+        cancelled = await client.post(PREFIX + "/tasks/" + task_id + "/cancel", headers=auth)
+        assert cancelled.status_code == 200 and cancelled.json() == task
+    assert server.services.agent_repo.list_all() == before

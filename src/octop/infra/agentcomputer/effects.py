@@ -258,6 +258,8 @@ def validate_effect_bindings(
         if record.phase != "terminal" or (
             record.receipt is not None and record.receipt.reconciliationRequired
         ):
+            if bound.run.project_id is None:
+                raise StorageDataError("project-free Run has a tool effect")
             task = services.ac_task_repo.get_in_transaction(
                 conn, bound.run.task_id, bound.run.owner_id
             )
@@ -409,6 +411,8 @@ def prepare_effect(
         ):
             raise CommandAdmissionError("reconciliationRequired")
         source = invocation.intent
+        if source.projectID is None:
+            raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
         intent = ToolEffectIntent(
             schemaVersion=1,
             effectID=uuid4(),

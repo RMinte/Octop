@@ -1,5 +1,11 @@
 # AgentComputer 与 Octop 集成
 
+> 2026-10-15 专用协议边界修正：AgentComputer 继续使用 `/api/agentcomputer/v1`，网页使用 `/api/projects`、`/api/project-tasks`；两组 HTTP 入口共享独立项目/多轮任务服务与数据。专用入口和受限 Bridge 转发已接回，`/capabilities` 以 `contract=independent-project-tasks` 声明新契约。创建项目需要 `Idempotency-Key`，编辑推荐 `PATCH + expected_revision`。旧专家绑定、UUID 准备回执、Run/事件/文档协议不接入新模型，历史数据保留。此前“让 App 直接改用网页接口、删除整个 v1”的方向已撤销。本轮没有修改原生 App、重启 8088 或宣称客户端已经适配。详见 [当前接口契约](api.md#agentcomputer-专用协议与接入顺序)。
+
+> 2026-10-15 最新独立模型：项目与专家无关；正式网页项目与多轮任务已接入 `/api/projects`、`/api/project-tasks`，可选项目或无项目。8088 现有 GLM-5 已完成双轮会话与历史恢复。详见 [当前交付记录](agentcomputer-progress.md#2026-10-15-独立项目任务会话已接通) 和 [现有接口](api.md)。下文原托管专家/Bridge 实现为历史记录，不是新模型依赖。
+
+> 2026-10-15 最新方向：Octop「项目和任务」先交付独立项目新建与修改。项目独立持有目录、Skill/MCP、行动指南，不依赖专家。正式项目接口为 `/api/projects`；不迁移或兼容此前托管专家的项目原型。下文早期里程碑仅作历史记录，不代表新模型的任务执行已接入。
+
 本项目把 Octop 作为 AgentComputer 的盒子执行引擎。首轮已建立认证能力查询和稳定服务身份；第二轮继续建立持久数据层、内部原子接收与已有收据查询，详细规则见 [第二轮数据层说明](agentcomputer-core.md)。
 
 当前[本机 Task 试用](agentcomputer-local-text-task.md)在显式 opt-in、固定可用模型与回环单进程条件满足时，可从 AgentComputer 盒子项目创建 Task、提交 Turn、等待后台 worker、读取经完成收据和 v2 历史共同验证的回答。新增[项目文档与受控读取](agentcomputer-project-documents.md)：本人可导入、列出和读取项目中的小型文本文件，模型可调用一次 `read_project_document`，完成证据绑定工具日志、四条历史消息和最终回答。默认仍关闭；其他工具、审批续跑和远端设备配对未开放。8090 隔离实例已用 GLM-5 完成真实文档读取与结果验收，详见[进度记录](agentcomputer-progress.md)。
@@ -353,3 +359,15 @@ M1 的本地 Fixture 可以继续迭代；真正派发模型与工具前仍需 M
 - 会话：活动 Run 读取已落盘文字快照，页面以“生成中 · 尚未验证”提示其暂态性质；Run 到达成功态后重新读取 Turn 历史，以原核验后的最终答复为准。页面保留已读历史，在临时轮询故障时明确提示状态可能过期。每条 Turn 可按需展开项目文档读取摘要，并手动刷新进行中的活动。
 - 代理：Bridge 只增加 Run `/output` 与 `/tool-activity` 两条精确 UUID 的 GET；仍要求本机登录、连接归属、对端认证及类型化响应，不转发未知对端字段/私有响应头。工具摘要限一条受控读取及 `documents/<filename>` 安全路径；无正文、原始参数或主机路径。非法对端数据按 502 安全失败。
 - 验证：相关后端接口和 Bridge 定向测试 19 passed，Ruff 与严格 mypy、Dashboard TypeScript/生产构建、改动文件 Prettier/ESLint、21 项路由/侧栏 Vitest 与 i18n 78 项通过。8088 和未重启的 8090 健康接口均返回 200，8088 `/box-projects` 返回 200，两条新增 Bridge 路由匿名访问均为 401。完整 `make all` 按用户要求后置。跨实例浏览器实测仍取决于 8088 用户建立到 8090 的 Bridge 连接；M0–M2 均未达到完整退出条件。
+
+## 2026-10-15 单 Octop 的无项目 Task 会话
+
+- 基线：主工作目录 `feature/agentcomputer-foundation @ c34f5b735c13e4a46cf744e843cbc9a4985986e9`；已有工作树改动原样衔接。AgentComputer 另在 `feature/0.0.2/octp @ 601a3b145220d13ec3fa5c6d1ef789b881cc7d01`，其 `.harness/context/current-session.md` 已有改动不覆盖。
+- 语义：Task 是用户看到的会话，项目关联可选。v27 让 Task、Turn、Run 与派发/完成记录拥有真实的无项目作用域；无项目 Task 拥有自己的工作区、受控 Agent 与 Thread/Session，不创建隐藏项目。公开 `POST/GET /api/agentcomputer/v1/tasks`、`POST /tasks/{taskID}/turns` 与既有 Run、Turn、事件和快照读取共同组成单实例路径；项目 Task 保持原协议。下一轮提交以当前 Task revision 做并发条件，不能用上一轮收据 revision 推算。
+- Task 最近活动读取：当前开发树的本人 `GET /api/agentcomputer/v1/tasks` 仅列无项目 Task，按持久 `updatedAt`、Task UUID 倒序分页；`GET /projects/{projectID}/tasks` 保持按 `createdAt`、Task UUID 倒序。两类 Task view 增加可选的 UTC `createdAt`/`updatedAt`，本版从数据库非空毫秒时间字段填充，客户端应允许旧服务端缺字段。游标分别绑定排序键、盒子、用户、作用域和恢复代次；项目内原游标格式不变。27 项相关单测/HTTP 测试、Ruff、严格 mypy 与差异检查通过，未跑完整 `make all`；本轮只验证开发树，未将新排序单独计作 8088 在线验收。分页期间若尚未读取的 Task 发生新活动并前移，现有可变行无法提供严格历史快照。
+- 页面：`/box-projects` 改为读取当前 Octop 自己的项目及无项目 Task；此页移除历史 Bridge 来源选择。无项目 Task 的创建、网页会话发送、历史和经核验的结果均已接入。
+- 验证：无项目公开 HTTP 到本地 worker 的两轮纯文字集成测试通过，最终结果、Turn 列表、控制事件与 Task 快照均可读，Projects 表为 0；旧 Task revision 返回 409，跨用户读写返回 404。相关 HTTP 聚焦测试 60 passed、AgentComputer 核心单测 605 passed，Ruff 与严格 mypy 通过。8088 的 v26 数据库先在临时副本演练 v27，随后停止原进程、完整备份本机数据目录、配置原有 GLM Provider 并用当前开发树启动；实际 schema 升至 v27，用户和 Agent 数量未变，`foreign_key_check` 为 0、`quick_check=ok`，`/api/health` 正常。已登录网页创建无项目 Task `c21bc229-03d4-4a31-ae47-4b25b8dbe3f4`，使用 GLM 在同 Task 完成两轮问答，刷新后历史保留。完整 `make all` 按用户快速迭代要求后置。
+- 项目关联回归：同一 8088 网页创建项目 `b6854fc9-f650-4e15-84b1-d0fe86c1ac07` 及 Task `72e41f76-de38-4f8f-954d-a41a24919370`；GLM 首轮正常回复，第二轮从新建合成文档 `integration-smoke.md` 读取未写在提示中的校验标记，Run 成功且工具摘要确认 `read_project_document` 已执行。刷新后历史保留。四轮之后的只读库核查为 v27、项目 1、无项目 Task 1、项目 Task 1、Turn/Run 各 4、外键违规 0、`quick_check=ok`。
+- AgentComputer 原生协议与入口：Task/Run 的 `projectID` 可空，新增无项目 Task 列表、创建、收据与 Task-revision Turn 命令；已有项目 Task 的精确项目归属核验保留。macOS/iOS New Task 已接入“盒子任务”目录、创建、历史会话和同 Task 多轮发送；创建/Turn 响应丢失可按原命令回查。连接测试 19/19、既有 Task 测试 48 tests/49 runs、无项目会话测试 3/3 通过，macOS 与 iOS Simulator 构建通过；真实 8088 的原生实包登录点验尚未做，离线会话快照未完成。
+- 接口说明：本机 8088 的 `/api/docs#tag/agentcomputer` 已增加 25 条接口的中文用途表与中文操作标题，真实 OpenAPI 的 25 个已发布操作与说明逐项核对一致；文档单测、Ruff 和严格 mypy 通过。交互式文档仅在本机回环实例启用。
+- 剩余：AgentComputer 原生实包对单一 8088 的登录与双轮点验、Ubuntu 盒子及 M0–M5 阶段退出条件。8090 与 Bridge 的历史联调记录不代表当前产品的第二个 Octop 数据源。

@@ -45,6 +45,7 @@ from octop.infra.agentcomputer.models import (
     ToolEffectAction,
     ToolEffectOutput,
     ToolEffectReceipt,
+    execution_configuration,
 )
 from octop.infra.agentcomputer.project_document_tool import (
     TOOL_NAME,
@@ -73,6 +74,7 @@ def build_engine_request(invocation: EngineInvocation) -> ChatRequest:
     """Build every request field from the fixed server-side dispatch intent."""
     intent = invocation.intent
     snapshot = intent.snapshot
+    configuration = execution_configuration(snapshot)
     messages: list[BaseMessage] = [
         HumanMessage(content=snapshot.request.prompt, id=str(intent.userMessageID))
     ]
@@ -82,7 +84,7 @@ def build_engine_request(invocation: EngineInvocation) -> ChatRequest:
         thread_id=snapshot.octopThreadID,
         user=str(intent.ownerID),
         source="agentcomputer",
-        model=snapshot.projectConfiguration.modelRef,
+        model=configuration.modelRef,
         agent_id=snapshot.agentID,
         skills=[],
         mcp_servers=[],
@@ -96,7 +98,7 @@ def build_engine_request(invocation: EngineInvocation) -> ChatRequest:
         "thread_id": snapshot.octopThreadID,
         "user": str(intent.ownerID),
         "source": "agentcomputer",
-        "model": snapshot.projectConfiguration.modelRef,
+        "model": configuration.modelRef,
         "agent_id": snapshot.agentID,
         "skills": [],
         "mcp_servers": [],
@@ -110,11 +112,10 @@ def build_engine_request(invocation: EngineInvocation) -> ChatRequest:
 
 def _checkpoint_metadata(invocation: EngineInvocation) -> dict[str, str | int]:
     intent = invocation.intent
-    return {
+    metadata: dict[str, str | int] = {
         "ac_schema_version": 1,
         "ac_box_id": str(intent.boxID),
         "ac_owner_id": intent.ownerID,
-        "ac_project_id": str(intent.projectID),
         "ac_task_id": str(intent.taskID),
         "ac_run_id": str(intent.runID),
         "ac_turn_id": str(intent.turnID),
@@ -131,6 +132,12 @@ def _checkpoint_metadata(invocation: EngineInvocation) -> dict[str, str | int]:
         "ac_thread_id": intent.snapshot.octopThreadID,
         "ac_workspace_id": str(intent.snapshot.workspaceID),
     }
+    if intent.projectID is None:
+        metadata["ac_schema_version"] = 2
+        metadata["ac_scope"] = "task"
+    else:
+        metadata["ac_project_id"] = str(intent.projectID)
+    return metadata
 
 
 class EngineEntryMiddleware(AgentMiddleware[Any, Any]):
@@ -319,7 +326,20 @@ def _validate_registered_workspace(agent: HarnessAgent, middleware: EngineEntryM
                 row is None
                 or row.user_id != intent.ownerID
                 or row.managed_by != "agentcomputer"
-                or row.managed_project_id != str(intent.projectID)
+                or (
+                    intent.projectID is None
+                    and (
+                        row.managed_task_id != str(intent.taskID)
+                        or row.managed_project_id is not None
+                    )
+                )
+                or (
+                    intent.projectID is not None
+                    and (
+                        row.managed_project_id != str(intent.projectID)
+                        or row.managed_task_id is not None
+                    )
+                )
                 or row.enabled
                 or row.last_state != "stopped"
                 or row.config_json is None
@@ -382,6 +402,7 @@ async def invoke_engine_entry(
     from octop.infra.agentcomputer.dispatch import get_claim
 
     snapshot = invocation.intent.snapshot
+    configuration = execution_configuration(snapshot)
     middleware = next(
         (
             item
@@ -392,8 +413,8 @@ async def invoke_engine_entry(
     )
     if (
         agent.agent_id != snapshot.agentID
-        or agent.config.default_model != snapshot.projectConfiguration.modelRef
-        or agent.config.system_prompt != snapshot.projectConfiguration.instructions
+        or agent.config.default_model != configuration.modelRef
+        or agent.config.system_prompt != configuration.instructions
         or middleware is None
         or middleware.history_archive is not history_archive
     ):
@@ -642,8 +663,8 @@ async def inspect_engine_checkpoint(
     if (
         middleware is None
         or agent.agent_id != intent.snapshot.agentID
-        or agent.config.default_model != intent.snapshot.projectConfiguration.modelRef
-        or agent.config.system_prompt != intent.snapshot.projectConfiguration.instructions
+        or agent.config.default_model != execution_configuration(intent.snapshot).modelRef
+        or agent.config.system_prompt != execution_configuration(intent.snapshot).instructions
     ):
         return unknown("runtimeContextMismatch")
     try:

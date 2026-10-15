@@ -18,7 +18,11 @@ from octop.infra.agentcomputer.commands import (
     canonical_json,
 )
 from octop.infra.agentcomputer.identity import IdentityError, get_or_create_identity
-from octop.infra.agentcomputer.models import ControlModel, RunView, TurnSnapshot
+from octop.infra.agentcomputer.models import (
+    ControlModel,
+    RunView,
+    parse_turn_snapshot,
+)
 from octop.infra.agentcomputer.results import RunResult, get_run_result
 from octop.infra.agentcomputer.runs import get_run_in_transaction
 from octop.infra.agentcomputer.tasks import _get_task
@@ -158,9 +162,10 @@ def list_turns(
                 if (
                     row.pk < 1
                     or row.task_id != str(task_id)
-                    or row.project_id != str(task.projectID)
+                    or row.project_id
+                    != (str(task.projectID) if task.projectID is not None else None)
                     or row.owner_id != owner_id
-                    or row.schema_version != 1
+                    or row.schema_version != (1 if task.projectID is not None else 2)
                     or row.context_mode != "newMessage"
                     or row.created_at < 0
                 ):
@@ -187,7 +192,7 @@ def list_turns(
                     or run.projectID != task.projectID
                 ):
                     raise StorageDataError("Task Turn Run binding mismatch")
-                snapshot = TurnSnapshot.model_validate_json(row.snapshot_json)
+                snapshot = parse_turn_snapshot(row.snapshot_json)
                 if snapshot.request.userMessageID != user_message_id:
                     raise StorageDataError("Task Turn message binding mismatch")
                 accepted.append((turn_id, user_message_id, snapshot.request.prompt, run))

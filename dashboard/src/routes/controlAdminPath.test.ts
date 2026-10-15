@@ -136,6 +136,9 @@ describe("box project routes", () => {
   it("keeps the box projects nav selected for project and Task pages", () => {
     expect(resolveSelectedKey("/box-projects")).toBe("box-projects");
     expect(resolveSelectedKey("/box-projects/project-id")).toBe("box-projects");
+    expect(resolveSelectedKey("/box-projects/tasks/task-id")).toBe(
+      "box-projects",
+    );
     expect(resolveSelectedKey("/box-projects/project-id/tasks/task-id")).toBe(
       "box-projects",
     );
@@ -143,10 +146,6 @@ describe("box project routes", () => {
       routeConfigs
         .filter((route) => route.path.startsWith("/box-projects"))
         .map((route) => route.path),
-    ).toEqual([
-      "/box-projects",
-      "/box-projects/:projectID",
-      "/box-projects/:projectID/tasks/:taskID",
-    ]);
+    ).toEqual(["/box-projects", "/box-projects/:projectID"]);
   });
 });

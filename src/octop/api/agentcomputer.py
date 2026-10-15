@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Literal
 
@@ -12,6 +13,7 @@ from octop.infra.agentcomputer.commands import CommandAdmissionError
 from octop.infra.errors import ErrorCode, OctopError
 
 API_PREFIX = "/api/agentcomputer/v1"
+_BRIDGE_PREFIX = re.compile(r"^/api/bridge/connections/[^/]+/agentcomputer/v1(?:/|$)")
 
 ProtocolErrorCode = Literal[
     "authenticationRequired",
@@ -44,7 +46,11 @@ class ProtocolErrorEnvelope(BaseModel):
 
 
 def is_agentcomputer_path(path: str) -> bool:
-    return path == API_PREFIX or path.startswith(f"{API_PREFIX}/")
+    return (
+        path == API_PREFIX
+        or path.startswith(f"{API_PREFIX}/")
+        or _BRIDGE_PREFIX.match(path) is not None
+    )
 
 
 def protocol_error_response(
@@ -76,13 +82,37 @@ def octop_error_response(error: OctopError) -> JSONResponse:
         ErrorCode.USER_DISABLED: "accessDenied",
         ErrorCode.NOT_FOUND: "resourceNotFound",
         ErrorCode.SETUP_REQUIRED: "runtimeUnavailable",
+        **PROJECT_TASK_ERROR_CODES,
     }
     setup = error.code == ErrorCode.SETUP_REQUIRED
     return protocol_error_response(
         codes.get(error.code, "internalError"),
         503 if setup else error.status,
-        reason="setupRequired" if setup else None,
+        reason="setupRequired"
+        if setup
+        else error.code.value
+        if error.code in PROJECT_TASK_ERROR_CODES
+        else None,
     )
+
+
+PROJECT_TASK_ERROR_CODES: dict[ErrorCode, ProtocolErrorCode] = {
+    ErrorCode.PROJECT_NAME_TAKEN: "resourceConflict",
+    ErrorCode.PROJECT_REQUEST_CONFLICT: "idempotencyConflict",
+    ErrorCode.PROJECT_REVISION_CONFLICT: "revisionConflict",
+    ErrorCode.PROJECT_RESOURCE_INVALID: "invalidRequest",
+    ErrorCode.PROJECT_DIRECTORY_INVALID: "invalidRequest",
+    ErrorCode.TASK_BUSY: "activeRunConflict",
+    ErrorCode.TASK_REQUEST_CONFLICT: "idempotencyConflict",
+    ErrorCode.TASK_MODEL_UNAVAILABLE: "runtimeUnavailable",
+    ErrorCode.TASK_RESOURCE_UNAVAILABLE: "invalidRequest",
+    ErrorCode.CONTROL_PLANE_BUSY: "runtimeUnavailable",
+    ErrorCode.TOKEN_QUOTA_EXCEEDED: "accessDenied",
+    ErrorCode.BRIDGE_NOT_FOUND: "resourceNotFound",
+    ErrorCode.BRIDGE_NOT_CONNECTED: "runtimeUnavailable",
+    ErrorCode.BRIDGE_REMOTE_UNSUPPORTED: "capabilityUnsupported",
+    ErrorCode.BRIDGE_TUNNEL_FAILED: "runtimeUnavailable",
+}
 
 
 def admission_error_response(error: CommandAdmissionError) -> JSONResponse:

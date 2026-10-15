@@ -80,61 +80,54 @@ def test_denies_management_and_auth_paths() -> None:
     assert not is_tunnel_path_allowed("DELETE", "/api/setup/password")
 
 
-def test_agentcomputer_tunnel_only_allows_project_task_conversation_contract() -> None:
-    uid = "11111111-1111-4111-8111-111111111111"
+def test_agentcomputer_tunnel_only_allows_independent_project_task_contract() -> None:
+    prefix = "/api/agentcomputer/v1"
+    project = "proj_01ABC"
+    task = "task_01DEF"
     allowed = {
         "GET": [
-            "/api/agentcomputer/v1/capabilities",
-            "/api/agentcomputer/v1/projects",
-            f"/api/agentcomputer/v1/projects/{uid}",
-            f"/api/agentcomputer/v1/projects/{uid}/documents",
-            f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md",
-            f"/api/agentcomputer/v1/projects/{uid}/documents/说明.txt",
-            f"/api/agentcomputer/v1/projects/{uid}/tasks",
-            f"/api/agentcomputer/v1/tasks/{uid}",
-            f"/api/agentcomputer/v1/tasks/{uid}/turns",
-            f"/api/agentcomputer/v1/runs/{uid}",
-            f"/api/agentcomputer/v1/runs/{uid}/result",
-            f"/api/agentcomputer/v1/runs/{uid}/output",
-            f"/api/agentcomputer/v1/runs/{uid}/tool-activity",
-            f"/api/agentcomputer/v1/commands/{uid}",
+            "/capabilities",
+            "/projects",
+            "/projects/resources",
+            f"/projects/{project}",
+            f"/projects/{project}/tasks",
+            "/tasks",
+            f"/tasks/{task}",
+            f"/tasks/{task}/turns",
         ],
         "POST": [
-            "/api/agentcomputer/v1/projects",
-            f"/api/agentcomputer/v1/projects/{uid}/tasks",
-            f"/api/agentcomputer/v1/tasks/{uid}/turns",
+            "/projects",
+            f"/projects/{project}/tasks",
+            "/tasks",
+            f"/tasks/{task}/turns",
+            f"/tasks/{task}/cancel",
         ],
-        "PUT": [f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md"],
+        "PATCH": [f"/projects/{project}"],
+        "PUT": [f"/projects/{project}"],
     }
     for method, paths in allowed.items():
         for path in paths:
-            assert is_tunnel_path_allowed(method, path), (method, path)
-
+            assert is_tunnel_path_allowed(method, prefix + path), (method, path)
     denied = [
-        ("POST", "/api/agentcomputer/v1/capabilities"),
-        ("DELETE", "/api/agentcomputer/v1/projects"),
-        ("POST", f"/api/agentcomputer/v1/tasks/{uid}"),
-        ("POST", f"/api/agentcomputer/v1/runs/{uid}/cancel"),
-        ("POST", f"/api/agentcomputer/v1/runs/{uid}/output"),
-        ("PUT", f"/api/agentcomputer/v1/runs/{uid}/output"),
-        ("GET", f"/api/agentcomputer/v1/runs/{uid}/output/extra"),
-        ("GET", "/api/agentcomputer/v1/runs/not-a-uuid/output"),
-        ("POST", f"/api/agentcomputer/v1/runs/{uid}/tool-activity"),
-        ("PUT", f"/api/agentcomputer/v1/runs/{uid}/tool-activity"),
-        ("GET", f"/api/agentcomputer/v1/runs/{uid}/tool-activity/extra"),
-        ("GET", "/api/agentcomputer/v1/runs/not-a-uuid/tool-activity"),
-        ("GET", f"/api/agentcomputer/v1/tasks/{uid}/snapshot"),
-        ("PUT", f"/api/agentcomputer/v1/projects/{uid}/documents"),
-        ("POST", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md"),
-        ("DELETE", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md"),
-        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/.hidden.md"),
-        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/bad%2Fname.md"),
-        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/bad:name.md"),
-        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.pdf"),
-        ("GET", f"/api/agentcomputer/v1/projects/{uid}/documents/brief.md/extra"),
-        ("GET", "/api/agentcomputer/v1/projects/not-a-uuid"),
-        ("GET", f"/api/agentcomputer/v1/projects/{uid}/tasks/extra"),
-        ("GET", "/api/agentcomputer/v1/../auth/login"),
+        ("POST", "/capabilities"),
+        ("DELETE", "/projects"),
+        ("POST", f"/tasks/{task}"),
+        ("GET", f"/tasks/{task}/cancel"),
+        ("GET", f"/projects/{project}/documents"),
+        ("PUT", f"/projects/{project}/documents/brief.md"),
+        ("GET", f"/runs/{task}/output"),
+        ("GET", f"/tasks/{task}/snapshot"),
+        ("GET", "/projects/not-a-project"),
+        ("GET", "/tasks/not-a-task"),
+        ("GET", f"/projects/{project}/tasks/extra"),
+        ("GET", "/../auth/login"),
+        ("GET", "/projects/.."),
+        ("GET", "/projects/proj_bad%2Fname"),
+        ("PATCH", "/projects/resources"),
+        ("PUT", f"/tasks/{task}/turns"),
     ]
     for method, path in denied:
-        assert not is_tunnel_path_allowed(method, path), (method, path)
+        assert not is_tunnel_path_allowed(method, prefix + path), (method, path)
+    for method in ("GET", "POST", "PATCH", "PUT"):
+        assert not is_tunnel_path_allowed(method, "/api/projects")
+        assert not is_tunnel_path_allowed(method, "/api/project-tasks")

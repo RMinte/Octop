@@ -9,11 +9,19 @@ from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, strict_int
 
 
+def _optional_text(r: DbRow, key: str) -> str | None:
+    try:
+        value = r[key]
+    except (KeyError, IndexError):
+        return None
+    return str(value) if value is not None else None
+
+
 @dataclass(frozen=True)
 class AcTaskRow:
     pk: int
     task_id: str
-    project_id: str
+    project_id: str | None
     owner_id: int
     session_id: str
     octop_thread_id: str | None
@@ -25,6 +33,11 @@ class AcTaskRow:
     title: str
     created_at: int
     updated_at: int
+    standalone_box_id: str | None
+    standalone_workspace_id: str | None
+    standalone_agent_id: str | None
+    standalone_config_json: str | None
+    standalone_config_digest: str | None
 
     @property
     def id(self) -> str:
@@ -35,7 +48,7 @@ class AcTaskRow:
         return cls(
             pk=strict_int(r["id"]),
             task_id=str(r["task_id"]),
-            project_id=str(r["project_id"]),
+            project_id=str(r["project_id"]) if r["project_id"] is not None else None,
             owner_id=strict_int(r["owner_id"]),
             session_id=str(r["session_id"]),
             octop_thread_id=str(r["octop_thread_id"]) if r["octop_thread_id"] is not None else None,
@@ -47,6 +60,11 @@ class AcTaskRow:
             title=str(r["title"]),
             created_at=strict_int(r["created_at"]),
             updated_at=strict_int(r["updated_at"]),
+            standalone_box_id=_optional_text(r, "standalone_box_id"),
+            standalone_workspace_id=_optional_text(r, "standalone_workspace_id"),
+            standalone_agent_id=_optional_text(r, "standalone_agent_id"),
+            standalone_config_json=_optional_text(r, "standalone_config_json"),
+            standalone_config_digest=_optional_text(r, "standalone_config_digest"),
         )
 
 
@@ -69,25 +87,28 @@ class AcTaskRepo:
     @staticmethod
     def list_page_in_transaction(
         conn: Any,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         *,
         after: tuple[int, str] | None,
         limit: int,
     ) -> list[AcTaskRow]:
+        project_filter = "project_id IS NULL" if project_id is None else "project_id = ?"
+        project_params: tuple[str, ...] = () if project_id is None else (project_id,)
+        sort_column = "updated_at" if project_id is None else "created_at"
         if after is None:
             rows = conn.execute(
-                "SELECT * FROM ac_tasks WHERE project_id = ? AND owner_id = ? "
-                "ORDER BY created_at DESC, task_id DESC LIMIT ?",
-                (project_id, owner_id, limit),
+                f"SELECT * FROM ac_tasks WHERE {project_filter} AND owner_id = ? "
+                f"ORDER BY {sort_column} DESC, task_id DESC LIMIT ?",
+                (*project_params, owner_id, limit),
             ).fetchall()
         else:
-            created_at, task_id = after
+            sort_at, task_id = after
             rows = conn.execute(
-                "SELECT * FROM ac_tasks WHERE project_id = ? AND owner_id = ? "
-                "AND (created_at < ? OR (created_at = ? AND task_id < ?)) "
-                "ORDER BY created_at DESC, task_id DESC LIMIT ?",
-                (project_id, owner_id, created_at, created_at, task_id, limit),
+                f"SELECT * FROM ac_tasks WHERE {project_filter} AND owner_id = ? "
+                f"AND ({sort_column} < ? OR ({sort_column} = ? AND task_id < ?)) "
+                f"ORDER BY {sort_column} DESC, task_id DESC LIMIT ?",
+                (*project_params, owner_id, sort_at, sort_at, task_id, limit),
             ).fetchall()
         return [AcTaskRow.from_row(row) for row in rows]
 
@@ -96,7 +117,7 @@ class AcTaskRepo:
         conn: Any,
         *,
         task_id: str,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         session_id: str,
         octop_thread_id: str | None,
@@ -104,22 +125,45 @@ class AcTaskRepo:
         created_at: int,
         updated_at: int,
         preparation_state: str = "ready",
+        standalone_box_id: str | None = None,
+        standalone_workspace_id: str | None = None,
+        standalone_agent_id: str | None = None,
+        standalone_config_json: str | None = None,
+        standalone_config_digest: str | None = None,
     ) -> AcTaskRow | None:
+        standalone_fields = (
+            standalone_box_id,
+            standalone_workspace_id,
+            standalone_agent_id,
+            standalone_config_json,
+            standalone_config_digest,
+        )
+        columns = (
+            "task_id, project_id, owner_id, session_id, octop_thread_id, title, "
+            "preparation_state, created_at, updated_at"
+        )
+        values: tuple[Any, ...] = (
+            task_id,
+            project_id,
+            owner_id,
+            session_id,
+            octop_thread_id,
+            title,
+            preparation_state,
+            created_at,
+            updated_at,
+        )
+        if any(field is not None for field in standalone_fields):
+            columns += (
+                ", standalone_box_id, standalone_workspace_id, standalone_agent_id, "
+                "standalone_config_json, standalone_config_digest"
+            )
+            values += standalone_fields
+        placeholders = ", ".join("?" for _ in values)
         row = conn.execute(
-            "INSERT INTO ac_tasks (task_id, project_id, owner_id, session_id, "
-            "octop_thread_id, title, preparation_state, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING *",
-            (
-                task_id,
-                project_id,
-                owner_id,
-                session_id,
-                octop_thread_id,
-                title,
-                preparation_state,
-                created_at,
-                updated_at,
-            ),
+            f"INSERT INTO ac_tasks ({columns}) VALUES ({placeholders}) "
+            "ON CONFLICT DO NOTHING RETURNING *",
+            values,
         ).fetchone()
         return AcTaskRow.from_row(row) if row is not None else None
 
@@ -132,6 +176,26 @@ class AcTaskRepo:
             "updated_at = ? WHERE task_id = ? AND owner_id = ? "
             "AND preparation_state = 'pending' AND octop_thread_id IS NULL",
             (thread_id, updated_at, task_id, owner_id),
+        )
+        return bool(cursor.rowcount == 1)
+
+    @staticmethod
+    def fail_preparation(conn: Any, task_id: str, owner_id: int, *, updated_at: int) -> bool:
+        cursor = conn.execute(
+            "UPDATE ac_tasks SET preparation_state = 'failed', updated_at = ? "
+            "WHERE task_id = ? AND owner_id = ? AND project_id IS NULL "
+            "AND preparation_state = 'pending' AND octop_thread_id IS NULL",
+            (updated_at, task_id, owner_id),
+        )
+        return bool(cursor.rowcount == 1)
+
+    @staticmethod
+    def retry_preparation(conn: Any, task_id: str, owner_id: int, *, updated_at: int) -> bool:
+        cursor = conn.execute(
+            "UPDATE ac_tasks SET preparation_state = 'pending', updated_at = ? "
+            "WHERE task_id = ? AND owner_id = ? AND project_id IS NULL "
+            "AND preparation_state = 'failed' AND octop_thread_id IS NULL",
+            (updated_at, task_id, owner_id),
         )
         return bool(cursor.rowcount == 1)
 

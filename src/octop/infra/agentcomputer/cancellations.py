@@ -266,6 +266,8 @@ def validate_cancellation_binding(
         ):
             raise StorageDataError("invalid pending cancellation")
         if run.state in {"queued", "running", "waitingApproval", "waitingInput", "interrupted"}:
+            if run.project_id is None:
+                raise StorageDataError("project-free Run has a cancellation")
             task = services.ac_task_repo.get_in_transaction(conn, run.task_id, run.owner_id)
             project = services.ac_project_repo.get_in_transaction(
                 conn, run.project_id, run.owner_id
@@ -299,6 +301,8 @@ def validate_cancellation_binding(
     ):
         raise StorageDataError("invalid stopped cancellation")
     if row.phase == "stopped":
+        if run.project_id is None:
+            raise StorageDataError("project-free Run has a cancellation")
         assert row.stopped_at is not None
         _check_event(
             cancel_finished[0],
@@ -425,6 +429,8 @@ def cancel_run(
                 raise CommandAdmissionError("revisionConflict")
             if run.revision != command.expectedRevision:
                 raise CommandAdmissionError("revisionConflict")
+            if run.project_id is None:
+                raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
             task = services.ac_task_repo.get_in_transaction(conn, run.task_id, owner_id)
             project = services.ac_project_repo.get_in_transaction(conn, run.project_id, owner_id)
             if (

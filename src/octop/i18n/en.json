@@ -497,7 +497,18 @@
     "TEAM_MEMBER_BUSY": "This expert has an in-flight team job. Wait until it finishes.",
     "TEAM_NOT_SHAREABLE": "Teams cannot be shared in this version.",
     "SKILL_PACKAGE_COPY_DENIED": "The creator of this skill package has disabled copying its skills.",
-    "SKILL_PACKAGE_LOCKED": "This skill was copied from a locked skill package and cannot be edited in the workspace."
+    "SKILL_PACKAGE_LOCKED": "This skill was copied from a locked skill package and cannot be edited in the workspace.",
+    "PROJECT_NAME_TAKEN": "A project with this name already exists.",
+    "PROJECT_REQUEST_CONFLICT": "This creation key was used with different project details. Use a new key.",
+    "PROJECT_REVISION_CONFLICT": "The project has changed. Refresh it before editing.",
+    "PROJECT_RESOURCE_INVALID": "A selected Skill or MCP connection is unavailable. Please select again.",
+    "PROJECT_DIRECTORY_INVALID": "The directory is missing, inaccessible, or outside your allowed root.",
+    "TASK_BUSY": "The task is running. Wait for completion or stop it before sending.",
+    "TASK_REQUEST_CONFLICT": "This request ID was used for a different message. Refresh and try again.",
+    "TASK_MODEL_UNAVAILABLE": "No chat model is available. Configure a model in settings first.",
+    "TASK_EXECUTION_FAILED": "This turn failed. You can send another message; completed history is preserved.",
+    "TASK_INTERRUPTED": "Execution was interrupted. This turn was not retried automatically. You can send another message.",
+    "TASK_RESOURCE_UNAVAILABLE": "A project directory, skill, or MCP could not be loaded. Check the project settings and connections."
   },
   "desktop": {
     "install_log_deps": "Installing Python dependencies…",
@@ -873,5 +884,8 @@
       "bind_failed": "The directory rejected the bind DN or password",
       "search_failed": "The directory refused the user search"
     }
+  },
+  "projects": {
+    "task_prompt": "You are a project task assistant. Help the user complete their work and retain conversation context. Follow the project instructions below. The client directory is metadata only and is not synced to this server; do not claim to have accessed its files. Use tools when required by the request, and never invent tool results."
   }
 }

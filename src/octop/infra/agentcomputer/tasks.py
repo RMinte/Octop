@@ -32,6 +32,46 @@ from octop.infra.gateway.threads import ThreadRegistry
 from octop.infra.utils.ulid import new_ulid
 
 
+def _verify_task_thread(
+    services: SharedServices, conn: Any, owner_id: int, task: Any, agent_id: str
+) -> None:
+    if task.octop_thread_id is None:
+        raise StorageDataError("missing task thread binding")
+    key = ThreadRegistry.task_key(agent_id=agent_id, task_id=task.task_id)
+    thread = services.thread_repo.get_in_transaction(conn, task.octop_thread_id)
+    # Legacy SessionRow decoding can fill missing fields; inspect the stored
+    # binding directly so it cannot repair a damaged Task mapping while reading.
+    session = services.session_repo.get_raw_in_transaction(conn, key)
+    if (
+        thread is None
+        or session is None
+        or thread.agent_id != agent_id
+        or thread.user_id != owner_id
+        or thread.channel_type != "agentcomputer"
+        or thread.session_key != key
+        or session["agent_id"] != agent_id
+        or session["user_id"] != owner_id
+        or session["thread_id"] != task.octop_thread_id
+        or session["channel_type"] != "agentcomputer"
+        or session["chat_type"] != "dm"
+        or session["channel_subject_id"] != task.task_id
+        or session["channel_chat_type"] != "dm"
+        or session["channel_id"] is not None
+    ):
+        raise StorageDataError("task thread or session binding mismatch")
+    try:
+        metadata = json.loads(session["channel_metadata"])
+    except (TypeError, ValueError) as exc:
+        raise StorageDataError("invalid task session metadata") from exc
+    if (
+        not isinstance(metadata, dict)
+        or type(metadata.get("user_id")) is not int
+        or metadata
+        != {"channel_type": "agentcomputer", "user_id": owner_id, "task_id": task.task_id}
+    ):
+        raise StorageDataError("task session metadata mismatch")
+
+
 def task_command_digest(box_id: UUID, command: TaskCreateCommand) -> str:
     return content_digest(
         {
@@ -98,6 +138,12 @@ def _get_task(
     task = services.ac_task_repo.get_in_transaction(conn, str(task_id), owner_id)
     if task is None:
         return None
+    if task.created_at < 0 or task.updated_at < task.created_at:
+        raise StorageDataError("invalid Task timestamps")
+    if task.project_id is None:
+        from octop.infra.agentcomputer.standalone_tasks import standalone_task_view
+
+        return standalone_task_view(services, conn, owner_id, task, box_id)
     if task.schema_version != 1 or task.octop_thread_id is None:
         raise StorageDataError("missing task thread binding")
     try:
@@ -110,44 +156,14 @@ def _get_task(
                 "title": task.title,
                 "taskRevision": task.revision,
                 "preparationState": task.preparation_state,
+                "createdAt": datetime.fromtimestamp(task.created_at / 1000, UTC),
+                "updatedAt": datetime.fromtimestamp(task.updated_at / 1000, UTC),
             }
         )
-    except (ValidationError, ValueError) as exc:
+    except (ValidationError, ValueError, OverflowError, OSError) as exc:
         raise StorageDataError("invalid task projection") from exc
     agent_id = _project_agent(services, conn, owner_id, project_id, box_id)
-    key = ThreadRegistry.task_key(agent_id=agent_id, task_id=str(task_id))
-    thread = services.thread_repo.get_in_transaction(conn, task.octop_thread_id)
-    # Legacy SessionRow decoding can fill missing fields; inspect the stored
-    # binding directly so it cannot repair a damaged Task mapping while reading.
-    session = services.session_repo.get_raw_in_transaction(conn, key)
-    if (
-        thread is None
-        or session is None
-        or thread.agent_id != agent_id
-        or thread.user_id != owner_id
-        or thread.channel_type != "agentcomputer"
-        or thread.session_key != key
-        or session["agent_id"] != agent_id
-        or session["user_id"] != owner_id
-        or session["thread_id"] != task.octop_thread_id
-        or session["channel_type"] != "agentcomputer"
-        or session["chat_type"] != "dm"
-        or session["channel_subject_id"] != str(task_id)
-        or session["channel_chat_type"] != "dm"
-        or session["channel_id"] is not None
-    ):
-        raise StorageDataError("task thread or session binding mismatch")
-    try:
-        metadata = json.loads(session["channel_metadata"])
-    except (TypeError, ValueError) as exc:
-        raise StorageDataError("invalid task session metadata") from exc
-    if (
-        not isinstance(metadata, dict)
-        or type(metadata.get("user_id")) is not int
-        or metadata
-        != {"channel_type": "agentcomputer", "user_id": owner_id, "task_id": str(task_id)}
-    ):
-        raise StorageDataError("task session metadata mismatch")
+    _verify_task_thread(services, conn, owner_id, task, agent_id)
     if include_execution_ready:
         project = services.ac_project_repo.get_in_transaction(conn, task.project_id, owner_id)
         preparation = services.ac_project_preparation_repo.get_in_transaction(

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import Field, StrictBool, StrictStr, ValidationError, field_validator
+from pydantic import Field, StrictBool, StrictStr, ValidationError, field_validator, model_validator
 
 from octop.infra.agentcomputer.commands import (
     CommandAdmissionError,
@@ -79,11 +79,11 @@ class ToolCompletionEvidence(_CompletionEvidenceBase):
 class RunCompletionReceipt(ControlModel):
     """Immutable successful completion, separate from the original queued receipt."""
 
-    schemaVersion: Literal[1]
+    schemaVersion: Literal[1, 2]
     receiptID: UUID
     boxID: UUID
     ownerID: PositiveRevision
-    projectID: UUID
+    projectID: UUID | None
     taskID: UUID
     runID: UUID
     turnID: UUID
@@ -99,6 +99,14 @@ class RunCompletionReceipt(ControlModel):
     evidence: CompletionEvidence | ToolCompletionEvidence
     completedAt: datetime
     replayed: StrictBool
+
+    @model_validator(mode="after")
+    def scope_matches_version(self) -> RunCompletionReceipt:
+        if (self.schemaVersion == 1) != (self.projectID is not None):
+            raise ValueError("completion scope/version mismatch")
+        if self.schemaVersion == 2 and isinstance(self.evidence, ToolCompletionEvidence):
+            raise ValueError("standalone Task cannot complete with a project tool")
+        return self
 
     @field_validator("completedAt")
     @classmethod
@@ -269,7 +277,8 @@ def validate_completion_binding(
         or receipt.replayed
         or receipt.boxID != bound.receipt.boxID
         or receipt.ownerID != run.owner_id
-        or receipt.projectID != UUID(run.project_id)
+        or receipt.schemaVersion != run.schema_version
+        or receipt.projectID != (UUID(run.project_id) if run.project_id is not None else None)
         or receipt.taskID != UUID(run.task_id)
         or receipt.runID != UUID(run.run_id)
         or receipt.turnID != UUID(run.turn_id)
@@ -327,14 +336,19 @@ def validate_completion_binding(
     ):
         raise StorageDataError("natural completion event mismatch")
     task = services.ac_task_repo.get_in_transaction(conn, run.task_id, run.owner_id)
-    project = services.ac_project_repo.get_in_transaction(conn, run.project_id, run.owner_id)
-    if (
-        task is None
-        or project is None
-        or task.active_run_id == run.run_id
-        or project.active_run_id == run.run_id
-    ):
+    if task is None or task.active_run_id == run.run_id:
         raise StorageDataError("natural completion retained an active lane")
+    if run.project_id is None:
+        if task.project_id is not None or task.standalone_box_id != str(receipt.boxID):
+            raise StorageDataError("natural completion Task scope mismatch")
+    else:
+        project = services.ac_project_repo.get_in_transaction(conn, run.project_id, run.owner_id)
+        if (
+            project is None
+            or task.project_id != run.project_id
+            or project.active_run_id == run.run_id
+        ):
+            raise StorageDataError("natural completion retained an active lane")
     return receipt
 
 
@@ -380,6 +394,8 @@ def complete_run(
                 raise CommandAdmissionError("revisionConflict")
             return existing.model_copy(update={"replayed": True})
         run = bound.run
+        if run.project_id is None and isinstance(evidence, ToolCompletionEvidence):
+            raise CommandAdmissionError("revisionConflict")
         tool_record = (
             _validated_tool_effect(services, conn, invocation, evidence)
             if isinstance(evidence, ToolCompletionEvidence)
@@ -418,6 +434,7 @@ def complete_run(
                 run.restore_epoch,
                 run.execution_epoch,
                 updated_at=timestamp,
+                box_id=str(identity.boxID),
             )
         else:
             succeeded = services.ac_run_repo.mark_succeeded_with_read_effect(
@@ -433,7 +450,7 @@ def complete_run(
         if succeeded is None:
             raise CommandAdmissionError("revisionConflict")
         receipt = RunCompletionReceipt(
-            schemaVersion=1,
+            schemaVersion=1 if run.project_id is not None else 2,
             receiptID=uuid4(),
             boxID=identity.boxID,
             ownerID=run.owner_id,
@@ -474,7 +491,9 @@ def complete_run(
         _event(services, conn, bound, "run.finished", _payload(receipt), timestamp)
         if not services.ac_task_repo.release_run(
             conn, run.task_id, run.owner_id, run.run_id, updated_at=timestamp
-        ) or not services.ac_project_repo.release_run(
+        ):
+            raise CommandAdmissionError("activeRunConflict")
+        if run.project_id is not None and not services.ac_project_repo.release_run(
             conn, run.project_id, run.owner_id, run.run_id, updated_at=timestamp
         ):
             raise CommandAdmissionError("activeRunConflict")

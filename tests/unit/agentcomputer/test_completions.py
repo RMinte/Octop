@@ -286,7 +286,7 @@ def test_missing_v26_table_repairs_only_without_completed_run(tmp_path):
             conn.execute("DROP TABLE ac_run_terminals")
         run_migrations(pool)
         with pool.connect() as conn:
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 26
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 32
             assert conn.execute("SELECT COUNT(*) FROM ac_run_terminals").fetchone()[0] == 0
     finally:
         pool.close()

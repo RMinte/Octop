@@ -69,6 +69,8 @@ def validate_document_filename(path: object) -> str:
 
 def _workspace(registry: AgentManager, invocation: EngineInvocation) -> BackendWorkspace:
     intent = invocation.intent
+    if intent.projectID is None:
+        raise CommandAdmissionError("accessDenied", reason="documentPathNotAllowed")
     row = registry.get_row(intent.snapshot.agentID)
     if row is None or row.user_id != intent.ownerID:
         raise CommandAdmissionError("accessDenied", reason="engineContextMismatch")

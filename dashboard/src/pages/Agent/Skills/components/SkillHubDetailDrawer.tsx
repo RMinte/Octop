@@ -34,6 +34,7 @@ interface SkillHubDetailDrawerProps {
   onInstall: (skill: SkillHubSkill) => void;
   installing: boolean;
   isInstalled: boolean;
+  pickMode?: boolean;
 }
 
 function requiresApiKey(skill: SkillHubSkill): boolean {
@@ -115,6 +116,7 @@ export function SkillHubDetailDrawer({
   onInstall,
   installing,
   isInstalled,
+  pickMode = false,
 }: SkillHubDetailDrawerProps) {
   const { t } = useTranslation();
 
@@ -198,11 +200,17 @@ export function SkillHubDetailDrawer({
           size="large"
           icon={isInstalled ? <RefreshCw size={14} /> : <Download size={14} />}
           loading={installing}
-          disabled={installing}
+          disabled={installing || (pickMode && isInstalled)}
           onClick={() => onInstall(skill)}
           style={{ width: "100%" }}
         >
-          {installing
+          {pickMode
+            ? t(
+                isInstalled
+                  ? "experts.skillAlreadySelected"
+                  : "experts.pickSkill",
+              )
+            : installing
             ? t("skills.installing")
             : isInstalled
             ? t("skills.reinstall")
@@ -223,7 +231,13 @@ export function SkillHubDetailDrawer({
           <Tag bordered={false} style={{ background: "var(--fn-bg-tertiary)" }}>
             {t("skills.skillVersion")} {skill.version || "—"}
           </Tag>
-          {isInstalled && <Tag color="green">{t("skills.installed")}</Tag>}
+          {isInstalled && (
+            <Tag color="green">
+              {t(
+                pickMode ? "experts.skillAlreadySelected" : "skills.installed",
+              )}
+            </Tag>
+          )}
           {requiresApiKey(skill) && (
             <Tag color="orange">{t("skills.requiresApiKey")}</Tag>
           )}

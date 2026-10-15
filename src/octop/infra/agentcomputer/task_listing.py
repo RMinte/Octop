@@ -24,13 +24,12 @@ from octop.infra.agentcomputer.tasks import _get_task
 from octop.infra.db.services import SharedServices
 
 _CURSOR_PATTERN = re.compile(r"[A-Za-z0-9_-]+\Z")
-_CURSOR_FIELDS = {
+_CURSOR_SCOPE_FIELDS = {
     "v",
     "boxID",
     "ownerID",
     "projectID",
     "restoreEpoch",
-    "createdAt",
     "taskID",
 }
 
@@ -43,19 +42,20 @@ def _encode_cursor(
     *,
     box_id: UUID,
     owner_id: int,
-    project_id: UUID,
+    project_id: UUID | None,
     restore_epoch: int,
-    created_at: int,
+    sort_at: int,
     task_id: UUID,
 ) -> str:
+    sort_field = "updatedAt" if project_id is None else "createdAt"
     payload = canonical_json(
         {
-            "v": 1,
+            "v": 2 if project_id is None else 1,
             "boxID": str(box_id),
             "ownerID": owner_id,
-            "projectID": str(project_id),
+            "projectID": str(project_id) if project_id is not None else None,
             "restoreEpoch": restore_epoch,
-            "createdAt": created_at,
+            sort_field: sort_at,
             "taskID": str(task_id),
         }
     ).encode("utf-8")
@@ -67,39 +67,39 @@ def _decode_cursor(
     *,
     box_id: UUID,
     owner_id: int,
-    project_id: UUID,
+    project_id: UUID | None,
     restore_epoch: int,
 ) -> tuple[int, str]:
     if not 1 <= len(cursor) <= 512 or _CURSOR_PATTERN.fullmatch(cursor) is None:
         raise InvalidTaskListCursor("invalid cursor encoding")
+    sort_field = "updatedAt" if project_id is None else "createdAt"
     try:
         raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
         if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != cursor:
             raise InvalidTaskListCursor("non-canonical cursor encoding")
         payload = json.loads(raw.decode("utf-8"))
-        if type(payload) is not dict or set(payload) != _CURSOR_FIELDS:
+        if type(payload) is not dict or set(payload) != _CURSOR_SCOPE_FIELDS | {sort_field}:
             raise InvalidTaskListCursor("invalid cursor fields")
         if canonical_json(payload).encode("utf-8") != raw:
             raise InvalidTaskListCursor("non-canonical cursor payload")
         task_id = payload["taskID"]
         if (
             type(payload["v"]) is not int
-            or payload["v"] != 1
+            or payload["v"] != (2 if project_id is None else 1)
             or type(payload["ownerID"]) is not int
             or payload["ownerID"] != owner_id
             or type(payload["restoreEpoch"]) is not int
             or payload["restoreEpoch"] != restore_epoch
             or type(payload["boxID"]) is not str
             or payload["boxID"] != str(box_id)
-            or type(payload["projectID"]) is not str
-            or payload["projectID"] != str(project_id)
-            or type(payload["createdAt"]) is not int
-            or not 0 <= payload["createdAt"] <= 2**63 - 1
+            or payload["projectID"] != (str(project_id) if project_id is not None else None)
+            or type(payload[sort_field]) is not int
+            or not 0 <= payload[sort_field] <= 2**63 - 1
             or type(task_id) is not str
             or str(UUID(task_id)) != task_id
         ):
             raise InvalidTaskListCursor("cursor scope or sorting key mismatch")
-        return payload["createdAt"], task_id
+        return payload[sort_field], task_id
     except (binascii.Error, UnicodeError, ValueError, TypeError) as exc:
         raise InvalidTaskListCursor("invalid cursor") from exc
 
@@ -107,20 +107,23 @@ def _decode_cursor(
 def list_tasks(
     services: SharedServices,
     owner_id: int,
-    project_id: UUID,
+    project_id: UUID | None,
     limit: int,
     cursor: str | None,
 ) -> TaskListResponse | None:
     """Return one verified page, or None for a project outside this user's scope."""
     try:
         with services.db.transaction() as conn:
-            project = services.ac_project_repo.get_in_transaction(conn, str(project_id), owner_id)
-            if project is None:
-                return None
             identity = get_or_create_identity(services.paths.agentcomputer_identity)
-            if project.box_id != str(identity.boxID):
-                raise StorageDataError("task project installation mismatch")
-            _project_view(services, conn, owner_id, project)
+            if project_id is not None:
+                project = services.ac_project_repo.get_in_transaction(
+                    conn, str(project_id), owner_id
+                )
+                if project is None:
+                    return None
+                if project.box_id != str(identity.boxID):
+                    raise StorageDataError("task project installation mismatch")
+                _project_view(services, conn, owner_id, project)
             after = (
                 _decode_cursor(
                     cursor,
@@ -133,7 +136,11 @@ def list_tasks(
                 else None
             )
             rows = services.ac_task_repo.list_page_in_transaction(
-                conn, str(project_id), owner_id, after=after, limit=limit + 1
+                conn,
+                str(project_id) if project_id is not None else None,
+                owner_id,
+                after=after,
+                limit=limit + 1,
             )
             items: list[TaskListItem] = []
             for row in rows[:limit]:
@@ -157,7 +164,8 @@ def list_tasks(
                 if latest is not None:
                     if (
                         latest.task_id != row.task_id
-                        or latest.project_id != str(project_id)
+                        or latest.project_id
+                        != (str(project_id) if project_id is not None else None)
                         or latest.owner_id != owner_id
                     ):
                         raise StorageDataError("latest Run scope mismatch")
@@ -182,7 +190,7 @@ def list_tasks(
                     owner_id=owner_id,
                     project_id=project_id,
                     restore_epoch=identity.restoreEpoch,
-                    created_at=last.created_at,
+                    sort_at=last.updated_at if project_id is None else last.created_at,
                     task_id=items[-1].task.taskID,
                 )
             return TaskListResponse(items=items, nextCursor=next_cursor)

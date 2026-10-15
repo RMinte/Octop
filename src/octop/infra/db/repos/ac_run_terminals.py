@@ -15,7 +15,7 @@ class AcRunTerminalRow:
     run_id: str
     turn_id: str
     task_id: str
-    project_id: str
+    project_id: str | None
     owner_id: int
     dispatch_id: str
     engine_request_id: str
@@ -35,7 +35,7 @@ class AcRunTerminalRow:
             run_id=str(row["run_id"]),
             turn_id=str(row["turn_id"]),
             task_id=str(row["task_id"]),
-            project_id=str(row["project_id"]),
+            project_id=str(row["project_id"]) if row["project_id"] is not None else None,
             owner_id=strict_int(row["owner_id"]),
             dispatch_id=str(row["dispatch_id"]),
             engine_request_id=str(row["engine_request_id"]),
@@ -65,7 +65,7 @@ class AcRunTerminalRepo:
         run_id: str,
         turn_id: str,
         task_id: str,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         dispatch_id: str,
         engine_request_id: str,

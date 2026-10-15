@@ -157,10 +157,6 @@ export const routeConfigs: RouteConfig[] = [
   { path: "/tasks", element: <CronJobsPage /> },
   { path: "/box-projects", element: <BoxProjectsPage /> },
   { path: "/box-projects/:projectID", element: <BoxProjectsPage /> },
-  {
-    path: "/box-projects/:projectID/tasks/:taskID",
-    element: <BoxProjectsPage />,
-  },
   { path: "/connectors", element: <ConnectorsPage /> },
   { path: "/skill-packages", element: <SkillPackagesPage /> },
   { path: "/knowledge-bases", element: <KnowledgeBasesPage /> },

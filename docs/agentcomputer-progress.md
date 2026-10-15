@@ -1,8 +1,66 @@
 # AgentComputer 盒子集成进度
 
+
+## 2026-10-15 AgentComputer 专用协议边界修正
+
+用户确认：保留 `/api/agentcomputer/v1` 专用入口，改接独立项目与多轮任务服务，与网页共用同一份数据。此前把“共享底层服务”错误落实为“App 直接改用网页接口并删除整个 v1”，该方向撤销。
+
+- 网页仍使用 `/api/projects`、`/api/project-tasks`；AgentComputer 使用 `/api/agentcomputer/v1/projects`、`/tasks`。15 个专用操作及对应 Bridge 转发共同调用独立模型，不恢复旧专家绑定、UUID 准备回执、Run/事件/文档协议。
+- 专用认证仅接受 Bearer 请求头；沿用协议错误信封、禁止缓存、65,536 字节变更体上限和 HTTP 操作关闭等待。创建幂等 key 与任务 request_id 跨网页/专用入口共用；项目编辑冲突保留，客户端目录仍只存路径。
+- `/capabilities` 声明 `contract=independent-project-tasks`、`contractVersion=1`，返回原安装身份、服务端时区与实际模型/worker 可用性；未接入的事件、文件、审批、问题、旧命令回执明确为 false。
+- 基线仍为 `feature/agentcomputer-foundation@c34f5b73`。本轮仅修改 Octop，未提交、未推送，未修改原生 App、生产数据或重启现有 8088；旧客户端仍需适配新独立模型契约。
+
+验证：独立项目/任务、专用协议、Bridge、隧道策略、OpenAPI、认证和异常处理定向 **75 passed**；严格 mypy 8 个相关源文件、Ruff 检查与 13 个文件的格式检查通过，`git diff --check` 通过。隔离实例 `/api/docs` 返回 200，OpenAPI 中网页与专用协议分组、15 个专用操作和对应 Bridge 都已核对。用例使用本地模拟模型，不调用真实供应商；本轮不将自动化结果计为客户端或 Ubuntu 实机验收。按约定未跑完整 `make all`。
+
+复核命令：
+
+```bash
+uv run pytest tests/integration/test_project_api_contract.py tests/integration/test_bridge_agentcomputer_api.py tests/integration/test_projects.py tests/integration/test_project_tasks.py tests/unit/bridge/test_tunnel_policy.py tests/unit/api/test_openapi_meta.py tests/unit/api/test_jwt_auth_middleware.py tests/unit/api/test_exception_handlers.py -q
+```
+
+以下“接口收敛”记录保留当时过程，其删除整个专用协议的决定已被本节取代。
+
+## 2026-10-15 项目任务接口收敛与安全编辑
+
+本轮只落实接口 review 的第 1、2 项，基线仍为 `feature/agentcomputer-foundation@c34f5b73`；未提交、未推送，没有修改 AgentComputer 原生客户端。
+
+- 网页与 App 的唯一项目/任务业务契约为 `/api/projects`、`/api/project-tasks`，共用独立服务和数据表。旧 `/api/agentcomputer/v1/*`（含旧能力查询）、对应 Bridge 转发和隧道白名单已退出公开入口；旧文字 worker 不再自动启动。旧 `ac_*` 和专家数据保留，不迁移、不删除。历史领域实现/单元测试仍保留，原公开 HTTP 测试由退役检查替代，不把旧协议当成当前能力。
+- 新增 `PATCH /api/projects/{project_id}`：未提交字段不变，目录 null 解除关联，Skill/MCP 的 [] 清空；文字/列表不接受 null。`expected_revision` 冲突返回 409。完整 PUT 必须显式提交全部字段，缺失返回 422。
+- `POST /api/projects` 必须携带 `Idempotency-Key`。项目与创建回执同事务写入；同账号相同 key/内容返回最初 201 响应，不因项目后来改名或目录不可用而重复创建；换内容返回 `PROJECT_REQUEST_CONFLICT`，失败不消耗 key。网页改用 PATCH，保存失败后复用本次创建 key；没有增加测试页面。
+- schema 升到 32，增加 `project_create_requests`，SQLite/PostgreSQL 迁移成对提供。8088 已更新，升级前数据库备份与工作区快照位于 `/private/tmp/octop-before-api-unification-20261015-133656/`。升级后 2 个项目、5 个独立任务、6 轮对话和全部旧 `ac_projects/ac_tasks/ac_runs` 内容摘要均与备份一致；专家 ID 集合不变，仅正常启动刷新 `updated_at`。SQLite quick_check=ok、外键问题 0。
+
+验证：新项目/任务、接口退役/OpenAPI、Bridge 隧道策略定向 55 项通过；正式网页 11 项通过（包含创建丢失响应后复用 key）；i18n 用例通过；严格 mypy 625 个源文件通过，Ruff、目标 ESLint、前端类型检查与 `make build-frontend` 通过。实际 `/api/docs#tag/projects` 已看到 PATCH 和新的创建契约，旧 agentcomputer 分组已消失。
+
+扩展数据库/备份/完成检查得到 528 passed、6 failed；6 项均已在本轮开工前代码快照复现，涉及旧 v23/v24 fixture 缺 `standalone_box_id`，以及旧 PostgreSQL SQL 断言。它们不是本轮新增回归，也没有以跳过或改产品代码掩盖。按用户约定未运行完整 `make all`，不宣称全套门禁通过。后续 review 的取消目标、分页/事件流、会话状态和新能力声明仍未实施。
+
+> 以下为历史交付记录，当前契约以上方“专用协议边界修正”为准。
+
+## 2026-10-15 独立项目任务会话已接通
+
+本轮基线为 `feature/agentcomputer-foundation@c34f5b73`，未提交或推送；仅修改 Octop 正式页面、接口和任务运行域，没有修改 AgentComputer 原生客户端。
+
+当前切片进度：`[✓ 独立项目  ✓ 创建任务  ✓ 连续追问  ✓ 历史恢复  ✓ 配置继承  ✓ 本机 GLM]`。这是当前独立模型的交付状态，下面旧 M0–M5 表格和托管专家/Bridge 叙述仅作历史记录，不代表新模型需要它们。
+
+项目详情默认展示任务列表与会话：第一条消息原子创建任务和首轮，后续消息继续同一任务；支持无项目任务、幂等重试、忙碌保护、停止回复、工具进度、用户隔离、后台持久化与失效 worker 恢复。每轮冻结项目配置版本，使用服务端目录、行动指南、所选 Skill/MCP；客户端目录仍只记录路径。任务不创建或关联专家。
+
+8088 正式页面点验：项目 `proj_01M4YT3G8Q5VNQ261M9SVED1G2` 的任务 `task_01M4YX2AW334VMHB54P46PYM9H`，GLM-5 首轮回复“已记住海星-73142”，第二轮仅询问暗号，回复“海星-73142”；刷新后两轮仍在，状态均为 completed。无项目任务 `task_01M4YX53MRCRC1138WMYQZKCVE` 返回“无项目任务可用”。早期两次点验失败记录保留：一次默认模型选择不符合现有 GLM-5 配置，一次旧用量表要求专家外键；已修复模型选择与独立任务记账，没有改写失败历史。
+
+数据库现为 v31，新增独立任务、轮次和轮次 Token 用量；用量纳入用户累计配额，原专家 Token 统计页面暂未合并展示。升级前备份分别为 `/private/tmp/octop-before-task-conversations-20261015-122002/octop.sqlite`（v29）和 `/private/tmp/octop-before-task-usage-20261015-122639/octop.sqlite`（v30），仅本机受限权限保存，不纳入提交。已有两个项目的所有字段保持不变。
+
+验证：任务集成 8 项通过（含真实 Harness、项目文件读取、模拟 MCP 调用、技能/指南提示及 Token 记账）；项目/任务页面 10 项通过；数据库迁移与 i18n 108 项通过；现有用量/用户配额相关 33 项通过；严格 mypy、目标 ESLint、前端类型检查和构建通过。按用户约定未重复运行完整 `make all`。
+
+当前限制：浏览器/桌面/附件、审批恢复、原生客户端适配新独立接口、真实 MCP 供应商和 Ubuntu 盒子尚未交付或实机验证。取消不回滚已发生的工具操作，也不等于证明远端模型停止计费。接口用途见 [独立项目和任务 API](api.md)。
+
+
+> 当前最新交付见上方独立任务会话记录。以下是历史路线与验收记录。
+
 更新于 2026-10-15。这里按阶段退出标准计数，不按代码提交或迭代轮数推算百分比。`●` 表示整个阶段已验收，`◐` 表示只有部分可复核证据，`○` 表示阶段尚未开始。
 
 **整体进度：`[◐ ◐ ◐ ○ ○ ○]`，0/6 阶段完整验收；M0、M1、M2 进行中。** 当前可用切片已覆盖本地项目内直建并关联盒子项目、项目页的远端资料与 Task 目录、独立远端 Task 会话页的历史及同 Task 追问、项目首屏 Task 的离线只读目录，以及原生窗口中“本地项目小文本资料 → 盒子文档 → GLM Task 受控读取”的完整路径。Octop 网页会话页也已接入 Run 文字快照与项目文档读取摘要；这不改变整阶段的验收计数。
+
+**产品模型校正：**AgentComputer 的 Task 就是用户可见的会话，同一 Task 内的后续消息形成 Turn，各 Turn 的处理形成 Run；内部 session/thread 只是该 Task 的一对一实现映射。Task 可以关联真实项目，也可以不关联项目。当前开发树已为无项目 Task 增加独立的持久作用域、受控 Agent、工作区、Thread/Session，以及本人创建、读取、发送和执行接口；`projectID=null` 是真实的无项目关系，不使用隐藏项目。8088 已按原数据目录备份并升级至 v27，网页登录页面使用既有 GLM 完成同 Task 双轮问答；AgentComputer 原生 New Task 的无项目入口、目录和多轮会话也已构建并通过定向测试，真实 8088 的原生窗口登录点验尚未做。目标路径是 AgentComputer 直连一个 Octop，读取和写入这个 Octop 自己的 Task 数据；本机 8088→8090 Bridge 仅是历史联调手段，不是部署依赖。
+
+**2026-10-15 原生页面收敛：**项目与最近 Task 目录只投影当前认证盒子的完整列表。macOS/iOS 项目行进入沿用原工作区骨架的正式项目详情，项目加号打开正式创建弹窗；New Task 使用原欢迎页布局，无项目 Task 打开沿用原会话视觉的多轮页面。新建无项目 Task 在准备就绪后自动发送首轮文字，重开最近 Task 不重复发送，失败时保留原命令供恢复。旧“盒子项目/盒子任务”验收页面已从原生主流程移除，服务端接口由正式页面消费。macOS 与 iOS Simulator 构建及相关定向测试已通过；这一版尚未在真实 8088 登录的原生窗口做人工交互复验，完整门禁仍后置。
 
 | 阶段 | 状态 | 已有可复核结果 | 尚缺的退出条件 |
 |---|---|---|---|
@@ -17,7 +75,7 @@
 
 后续[启动只读对账](agentcomputer-native-history.md#启动时的只读历史对账)已把 ACK 后的归档缺失、Turn 缺失、归属不符、六种历史状态和初始消息落盘窗口纳入内部恢复报告及无身份信息的汇总警告日志。它只做诊断：即使历史为 `complete`，Run 仍保守中断并保留双活动占用；不会因为这项证据开放执行。定向恢复测试 37 passed；最终完整 `make all` 的 Ruff、严格 mypy（600 个源文件）和非 live 全套通过，5342 passed / 23 skipped。
 
-**当前用户可见的切片**位于 AgentComputer“设置 → 连接”、“盒子项目”和 App 主项目列表：macOS 本机可输入 `http://127.0.0.1:8090`，使用独立实验实例的 `local-admin` 账号创建 GLM 项目与 Task，并查看 Run 状态和回答。盒子项目可独立加入主列表；已有本地项目也可从项目页直接创建并关联盒子项目，或显式关联一个已核验的盒子项目。本地项目保持自己的目录授权、Task、Composer 与调度。已关联项目在本机 Composer 旁标明“本机执行”，另有“在盒子创建纯文本任务”：仅将当前文字草稿带入独立盒子表单，需在表单中再确认创建；附件及本机执行设置不传到盒子。本机草稿不会因打开盒子表单而清空。从本机移除远端专用入口或解除关联不会删除盒子上的项目。项目名称和状态仅在当前账号、盒子恢复代次及精确项目查询通过后展示。实验密码仅保存在本机忽略文件 `.runtime/agentcomputer/local-credentials.json`，不与 8088 的 `fangyuan` 账号共用；iOS 真机需要可访问的 HTTPS 盒子地址。旧项目的 `modelRef=local/qwen` 仍是 `failed/providerUnavailable`，应创建固定 GLM 模型的新项目。这里使用用户会话，尚无设备配对。Octop 网页新增独立的“盒子项目”入口，原有 `/chat` 会话仍按专家组织。
+**当前开发树的用户切片**是 Octop 网页 `/box-projects` 直接读取本实例项目与 Task，创建无项目 Task，在同一 Task 发送和展示多轮消息。此改动已部署到原 8088 数据目录并完成真实网页登录点验。AgentComputer 原生客户端仍保留早期“设置 → 连接”、盒子项目、关联本地项目和项目内 Task 会话的既有能力；New Task 无项目远端 Task 的可见入口、目录、会话及多轮发送已接入，但尚未在真实 8088 登录的原生实包中点验。以下按日期保留的 8090 独立实例、Bridge 和原生 GLM 点验是历史实验记录，不是当前单 Octop 产品结构或新的验收结论。用户会话认证仍在使用，设备配对未完成。
 
 第二十六轮[自然完成内核](agentcomputer-run-completion.md)已把无工具真实 Harness 流的严格历史/持久检查点证明、完成收据、`run.finished` 和双占用释放串起来；取消造成的正常 EOF、空回答或缺证据仍保守对账。当轮 schema 升至 26，公开 HTTP 和能力开关尚未放行，8090 实例也尚未升级；本页下方记录了后续本机文本 Task 升级与实测。
 
@@ -85,6 +143,18 @@
 
 **客户端验收边界：**本机原生窗口已点验首轮纯文本 Task、远端 Task 发现、普通项目下直达 Task、同 Task 追问与五轮历史展示、本地项目显式关联和关联项目的新 Run，并完成在线客户端进程冷重开、盒子服务进程平滑重启后的在线刷新、同进程断线只读浏览，以及最近一个 Task 正文和项目首屏 Task 目录的离线冷启动与重连。本地项目资料的实际文件选择、远端创建及受控 Task 读取已用合成 Markdown 在原生窗口与认证 API 双重核对；本机 Composer 文字草稿带入盒子表单、返回保留及再进入后运行也已在原生窗口点验；从已选文档一键起草并运行 Task 也已在新实包点验。单次只读文档工具摘要已接入，通用工具过程与正式成果尚未接入。真实第二设备、盒子异常断电、iOS 真机离线正文、目标 Ubuntu 盒子和设备配对仍未验。先前跳过的 7 项测试不计作通过。
 
-**下一步按依赖推进：**先补齐独立会话页的通用执行过程、审批与正式成果入口，让项目和 Task 的主要远端工作流可用；随后在真实第二设备上验证重新发现、历史读取和身份变化后的对账，再验 Ubuntu 盒子部署与已交接停止证明。完整阶段退出标准没有因本机试用而降低。
+**2026-10-15 无项目 Task 当前实现：**数据库 v27 允许 `ac_tasks.project_id=NULL`，并将 Turn、Run、派发及完成记录关联到 Task；无项目 Task 持有唯一盒子、工作区、Agent 和配置快照，受控 Agent 只能绑定一个 Task 或一个项目。本人 `POST/GET /api/agentcomputer/v1/tasks`、`GET /tasks/{taskID}`、`POST /tasks/{taskID}/turns` 与原命令收据查询已接入。准备完成且固定模型可用时显示 `ready/executionReady=true`；临时准备失败可复用原命令与 Task 身份重试。公开 HTTP 加本地 worker 的两轮纯文字测试已读回 Run 结果、Turn 历史、Task 快照及事件，项目表保持空；旧 Task revision 返回 409。`/box-projects` 默认显示本 Octop 的无项目 Task，也可选项目内 Task；历史 Bridge 连接选择已从该页移除。创建无项目 Task 要求配置 `agentcomputer_text_model_ref`，可使用已有 GLM Provider；默认空配置下返回 `executionUnavailable`。原 8088 数据目录已先完整备份，再配置原有 GLM Provider 并升级到 v27；启动后健康检查、外键检查和数据库完整性检查通过，原用户和 Agent 数量未变。
+
+**2026-10-15 8088 网页实测：**在已登录的 8088 `/box-projects` 页面创建无项目 Task“单实例 GLM 会话验收”（`c21bc229-03d4-4a31-ae47-4b25b8dbe3f4`），首轮发送“请只回复：无项目会话已接通。”，页面收到同句；第二轮要求原样重复上一轮回复，仍得到“无项目会话已接通。”。刷新该 Task 页面后，两轮提问和回答仍完整显示，列表标记“已成功”。该测试仅覆盖本机单 Octop、已有账号、已有 GLM 的无工具会话；原生实包对 8088 的登录点验、异常恢复、目标 Ubuntu 盒子和设备配对仍未验。升级前完整备份位于忽略目录 `.runtime/backups/one-octop-pre-v27-20261015T003950Z`，含敏感本机数据，不提交。完整 `make all` 按用户快速迭代要求后置。
+
+**2026-10-15 项目关联回归：**仍在原 8088 的已登录页面创建项目“单实例项目验收”（`b6854fc9-f650-4e15-84b1-d0fe86c1ac07`）和其 Task“项目关联会话验收”（`72e41f76-de38-4f8f-954d-a41a24919370`）。首轮 GLM 返回“项目关联会话已接通。”；新增合成文档 `integration-smoke.md` 后，第二轮只给文件名，GLM 经 `read_project_document` 返回文档中的 `PROJECT-DOC-20261015`，工具摘要显示 `documents/integration-smoke.md`、已读取、执行成功。刷新页面后历史仍在。四轮执行完成后的只读数据库核查：v27、1 项项目、1 条无项目 Task、1 条项目 Task、4 条 Turn/Run，`foreign_key_check=0`、`quick_check=ok`。
+
+**2026-10-15 原生入口与接口说明：**AgentComputer 的 macOS/iOS New Task 已接入“盒子任务”，可创建真正 `projectID=null` 的远端会话、打开历史并在同一 Task 内继续发送；原命令及收据支持响应丢失后的恢复。无项目定向 Swift 测试 3/3、macOS 与 iOS Simulator 构建通过；真实 8088 原生窗口尚未登录点验，离线会话快照未完成。8088 的 `/api/docs#tag/agentcomputer` 已补全 25 条接口的中文用途速查和中文操作标题，实际 OpenAPI 25/25 覆盖核对通过。
+
+**2026-10-15 接口验证状态：**`/api/docs#tag/agentcomputer` 的 25 条接口现逐条标注验证层级。25 条均有本地 HTTP 自动化覆盖；其中 14 条还被当前 8088 已登录网页的项目、无项目 Task、多轮 GLM 和项目文档流程调用，另外 11 条没有逐项 8088 实测记录。暂停、审批、提问只是只读查询，取消能力未开放，不能把路由存在或夹具测试等同于完整用户能力。聚焦集成回归首轮 262 passed / 5 failed，5 项均为新增中文摘要和独立 Task 收据造成的旧 OpenAPI 断言；同步断言后复跑这 5 项及文档元数据单测为 6 passed。目标 Ubuntu、真实原生客户端直连 8088 和完整 `make all` 仍待验收。
+
+**2026-10-15 Task 最近活动排序（开发树）：**无项目 `GET /api/agentcomputer/v1/tasks` 现按持久 `updatedAt`、Task UUID 倒序，让最近有活动的会话排在前面；项目内 Task 列表仍按 `createdAt`、Task UUID 倒序。Task view 的 `createdAt`/`updatedAt` 是可选 UTC 字段，本版从已有非空数据库时间戳填充；客户端应按可选字段解码。静态数据集上的同毫秒分页、跨用户/作用域游标与 HTTP 读取已覆盖，相关测试 27/27、Ruff、严格 mypy 与差异检查通过。8088 已使用原 `OCTOP_HOME` 短重启；实机 OpenAPI 的 TaskView 已包含两个时间字段，`/api/docs` 返回 200。认证后实际 Task 列表排序尚未单独点验，完整 `make all` 后置。分页期间 Task 更新前移不构成严格历史快照。
+
+**下一步按依赖推进：**在已登录的 AgentComputer 原生实包中直连这个 8088，完成无项目会话双轮点验。随后补通用执行过程、审批、正式成果、第二设备及 Ubuntu 盒子部署。完整阶段退出标准没有因本机试用而降低。
 
 当前实施分支是 `feature/agentcomputer-foundation`，交付目标为 [RMinte/Octop](https://github.com/RMinte/Octop)。每轮在主[集成记录](agentcomputer-integration.md)中注明基线、改动、验证与剩余门禁。

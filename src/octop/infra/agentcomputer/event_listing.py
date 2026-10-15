@@ -266,7 +266,8 @@ def list_task_events(
             if task is None:
                 return None
             row = services.ac_task_repo.get_in_transaction(conn, str(task_id), owner_id)
-            if row is None or row.next_sequence < 1 or row.project_id != str(task.projectID):
+            project_key = str(task.projectID) if task.projectID is not None else None
+            if row is None or row.next_sequence < 1 or row.project_id != project_key:
                 raise StorageDataError("invalid Task event watermark")
             after, after_event_id, through = (
                 _decode_cursor(

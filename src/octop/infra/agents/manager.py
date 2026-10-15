@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from uuid import UUID
 
 from octop_harness import HarnessAgent, HarnessAgentConfig, HarnessAgentManager
 from octop_harness.registry import AgentEntry
@@ -89,7 +90,10 @@ if TYPE_CHECKING:
     from octop_harness.backends.workspace import BackendWorkspace
 
     from octop.config import OctopConfig
-    from octop.infra.agentcomputer.models import ProjectPreparationIntent
+    from octop.infra.agentcomputer.models import (
+        ProjectConfiguration,
+        ProjectPreparationIntent,
+    )
     from octop.infra.agents.experts.catalog import ExpertCatalog
     from octop.infra.agents.plugins.manager import PluginManager
     from octop.infra.cron.manager import CronManager
@@ -616,7 +620,10 @@ class AgentManager:
     ) -> ProjectPreparationIntent:
         from octop.infra.agentcomputer.commands import content_digest
         from octop.infra.agentcomputer.identity import get_or_create_identity
-        from octop.infra.agentcomputer.models import ProjectConfiguration, ProjectPreparationIntent
+        from octop.infra.agentcomputer.models import (
+            ProjectConfiguration,
+            ProjectPreparationIntent,
+        )
 
         journal = self._repos.ac_project_preparation_repo.get(project_id, owner_id)
         project = self._repos.ac_project_repo.get(project_id, owner_id)
@@ -656,12 +663,50 @@ class AgentManager:
         self._check_preparation_path(Path(intent.serverRoot))
         return intent
 
-    async def create_stopped(self, spec: AgentCreateSpec, *, project_id: str) -> AgentRow:
-        """Register a reserved, disabled project expert without a runtime or background work."""
-        async with self._lock:
-            return await asyncio.to_thread(self._create_stopped, spec, project_id)
+    def _task_preparation_configuration(
+        self, agent_id: str, task_id: str, owner_id: int
+    ) -> tuple[ProjectConfiguration, Path]:
+        from octop.infra.agentcomputer.commands import content_digest
+        from octop.infra.agentcomputer.identity import get_or_create_identity
+        from octop.infra.agentcomputer.models import ProjectConfiguration
 
-    def _create_stopped(self, spec: AgentCreateSpec, project_id: str) -> AgentRow:
+        task = self._repos.ac_task_repo.get(task_id, owner_id)
+        if (
+            task is None
+            or task.project_id is not None
+            or task.standalone_box_id is None
+            or task.standalone_workspace_id is None
+            or task.standalone_agent_id != agent_id
+            or task.standalone_config_json is None
+            or task.standalone_config_digest is None
+        ):
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
+            )
+        try:
+            workspace_id = UUID(task.standalone_workspace_id)
+            configuration = ProjectConfiguration.model_validate_json(task.standalone_config_json)
+        except ValueError as exc:
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
+            ) from exc
+        if (
+            str(workspace_id) != task.standalone_workspace_id
+            or configuration.model_fields_set != set(ProjectConfiguration.model_fields)
+            or task.standalone_box_id
+            != str(get_or_create_identity(self._paths.agentcomputer_identity).boxID)
+            or task.standalone_config_digest
+            != content_digest(configuration.model_dump(mode="json"))
+        ):
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
+            )
+        root = self._paths.root.resolve() / "agentcomputer-task-workspaces" / str(workspace_id)
+        self._check_preparation_path(root)
+        return configuration, root
+
+    @staticmethod
+    def _check_preparation_spec(spec: AgentCreateSpec) -> None:
         if (
             not spec.agent_id
             or spec.user_id is None
@@ -677,6 +722,15 @@ class AgentManager:
             raise OctopError.localized(
                 ErrorCode.FORBIDDEN, details={"reason": "invalidPreparationSpec"}
             )
+
+    async def create_stopped(self, spec: AgentCreateSpec, *, project_id: str) -> AgentRow:
+        """Register a reserved, disabled project expert without a runtime or background work."""
+        async with self._lock:
+            return await asyncio.to_thread(self._create_stopped, spec, project_id)
+
+    def _create_stopped(self, spec: AgentCreateSpec, project_id: str) -> AgentRow:
+        self._check_preparation_spec(spec)
+        assert spec.agent_id is not None and spec.user_id is not None
         validate_custom_agent_id(spec.agent_id)
         intent = self._project_preparation_intent(spec.agent_id, project_id, spec.user_id)
         from octop.infra.agentcomputer.models import ProjectConfiguration
@@ -736,6 +790,69 @@ class AgentManager:
         assert row is not None
         return row
 
+    async def create_task_stopped(self, spec: AgentCreateSpec, *, task_id: str) -> AgentRow:
+        """Register a disabled expert bound to one project-free AgentComputer Task."""
+        async with self._lock:
+            return await asyncio.to_thread(self._create_task_stopped, spec, task_id)
+
+    def _create_task_stopped(self, spec: AgentCreateSpec, task_id: str) -> AgentRow:
+        self._check_preparation_spec(spec)
+        assert spec.agent_id is not None and spec.user_id is not None
+        validate_custom_agent_id(spec.agent_id)
+        configuration, root = self._task_preparation_configuration(
+            spec.agent_id, task_id, spec.user_id
+        )
+        if (
+            spec.default_model != configuration.modelRef
+            or spec.system_prompt != configuration.instructions
+        ):
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
+            )
+        backend = {"type": "filesystem", "root_dir": str(root), "virtual_mode": True}
+        virtual_workspace = f"/.octop/workspaces/{spec.agent_id}"
+        if spec.config != {"backend": backend, "workspace_dir": virtual_workspace}:
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
+            )
+        from octop.infra.users.resource_policy import (
+            assert_agent_quota_available,
+            raise_if_backend_outside_user_root,
+        )
+
+        if self.get_row(spec.agent_id) is not None:
+            raise OctopError(ErrorCode.AGENT_ID_TAKEN, spec.agent_id)
+        self._assert_agent_name_available(spec.user_id, spec.name)
+        assert_agent_quota_available(
+            self._repos.user_policy_repo, self._repos.agent_repo, spec.user_id
+        )
+        raise_if_backend_outside_user_root(self._repos.user_policy_repo, spec.user_id, backend)
+        workspace_dir = root / ".octop" / "workspaces" / spec.agent_id
+        self._check_preparation_path(workspace_dir)
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        self._check_preparation_path(workspace_dir)
+        config = dict(spec.config)
+        config["system_files_path"] = ".octop"
+        self._repos.agent_repo.create(
+            agent_id=spec.agent_id,
+            user_id=spec.user_id,
+            name=spec.name,
+            description=spec.description,
+            default_model=spec.default_model,
+            system_prompt=spec.system_prompt,
+            config_json=dumps_config(config),
+            skill_package_ids=dump_id_list([]),
+            knowledge_base_ids=dump_id_list([]),
+            mcp_servers=dump_id_list([]),
+            enabled=False,
+            last_state="stopped",
+            managed_by="agentcomputer",
+            managed_task_id=task_id,
+        )
+        row = self.get_row(spec.agent_id)
+        assert row is not None
+        return row
+
     def workspace_for_project_preparation(self, agent_id: str, project_id: str) -> BackendWorkspace:
         """Return only the exact reserved local workspace; never use host-path fallback."""
         row = self.get_row(agent_id)
@@ -770,6 +887,59 @@ class AgentManager:
                 ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
             )
         root = Path(intent.serverRoot)
+        workspace_dir = root / ".octop" / "workspaces" / agent_id
+        self._check_preparation_path(workspace_dir)
+        cfg = parse_config_json(row.config_json)
+        expected_config = {
+            "backend": {"type": "filesystem", "root_dir": str(root), "virtual_mode": True},
+            "workspace_dir": f"/.octop/workspaces/{agent_id}",
+            "system_files_path": ".octop",
+        }
+        if cfg != expected_config:
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
+            )
+        workspace = self._backend_workspace_for_row(row, cfg=cfg, workspace_dir=workspace_dir)
+        if (
+            Path(workspace.workspace_dir) != workspace_dir
+            or Path(workspace.resolve_path("/")) != root
+            or workspace.system_files_path != ".octop"
+        ):
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
+            )
+        self._check_preparation_path(workspace_dir)
+        return cast("BackendWorkspace", workspace)
+
+    def workspace_for_task_preparation(self, agent_id: str, task_id: str) -> BackendWorkspace:
+        """Return only the exact reserved workspace for a project-free Task."""
+        row = self.get_row(agent_id)
+        if (
+            row is None
+            or row.user_id is None
+            or not is_managed_agent(row)
+            or row.managed_project_id is not None
+            or row.managed_task_id != task_id
+            or row.enabled
+            or row.last_state != "stopped"
+        ):
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
+            )
+        configuration, root = self._task_preparation_configuration(agent_id, task_id, row.user_id)
+        if (
+            row.default_model != configuration.modelRef
+            or row.system_prompt != configuration.instructions
+            or row.kind != "expert"
+            or row.is_shared
+            or row.template_name
+            or row.skill_package_ids not in (None, "[]")
+            or row.knowledge_base_ids not in (None, "[]")
+            or row.mcp_servers not in (None, "[]")
+        ):
+            raise OctopError.localized(
+                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
+            )
         workspace_dir = root / ".octop" / "workspaces" / agent_id
         self._check_preparation_path(workspace_dir)
         cfg = parse_config_json(row.config_json)

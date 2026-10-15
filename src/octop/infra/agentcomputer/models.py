@@ -18,6 +18,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -47,7 +48,7 @@ class ControlModel(BaseModel):
 
 
 class ProjectConfiguration(ControlModel):
-    """Small fixed configuration used by the initial admission kernel."""
+    """Text configuration for the original execution kernel."""
 
     schemaVersion: Literal[1] = 1
     instructions: Annotated[StrictStr, Field(max_length=8192)]
@@ -69,6 +70,21 @@ class NewMessageCommand(ControlModel):
     permissionMode: PermissionMode
 
 
+class StandaloneNewMessageCommand(ControlModel):
+    """A new message in a Task-owned conversation, with no project precondition."""
+
+    commandID: UUID
+    idempotencyKey: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    expectedRestoreEpoch: PositiveRevision
+    contextMode: Literal["newMessage"]
+    userMessageID: UUID
+    expectedTaskRevision: PositiveRevision
+    prompt: Annotated[StrictStr, Field(min_length=1)]
+    inputArtifactIDs: tuple[UUID, ...] = ()
+    selectedSkillIDs: tuple[StrictStr, ...] = ()
+    permissionMode: PermissionMode
+
+
 class NewMessageRequestSnapshot(ControlModel):
     """All original business fields are required in a persisted snapshot."""
 
@@ -76,6 +92,17 @@ class NewMessageRequestSnapshot(ControlModel):
     contextMode: Literal["newMessage"]
     userMessageID: UUID
     expectedProjectRevision: PositiveRevision
+    prompt: Annotated[StrictStr, Field(min_length=1)]
+    inputArtifactIDs: tuple[UUID, ...]
+    selectedSkillIDs: tuple[StrictStr, ...]
+    permissionMode: PermissionMode
+
+
+class StandaloneNewMessageRequestSnapshot(ControlModel):
+    expectedRestoreEpoch: PositiveRevision
+    contextMode: Literal["newMessage"]
+    userMessageID: UUID
+    expectedTaskRevision: PositiveRevision
     prompt: Annotated[StrictStr, Field(min_length=1)]
     inputArtifactIDs: tuple[UUID, ...]
     selectedSkillIDs: tuple[StrictStr, ...]
@@ -97,9 +124,45 @@ class TurnSnapshot(ControlModel):
     @field_validator("projectConfiguration")
     @classmethod
     def complete_configuration(cls, value: ProjectConfiguration) -> ProjectConfiguration:
+        if value.model_fields_set != set(type(value).model_fields):
+            raise ValueError("incomplete original configuration")
+        return value
+
+
+class StandaloneTurnSnapshot(ControlModel):
+    """Versioned original facts for a Task-owned, projectless Turn."""
+
+    schemaVersion: Literal[2]
+    taskID: UUID
+    taskRevision: PositiveRevision
+    workspaceID: UUID
+    agentID: StrictStr
+    octopThreadID: StrictStr
+    executionConfiguration: ProjectConfiguration
+    request: StandaloneNewMessageRequestSnapshot
+
+    @field_validator("executionConfiguration")
+    @classmethod
+    def complete_configuration(cls, value: ProjectConfiguration) -> ProjectConfiguration:
         if value.model_fields_set != set(ProjectConfiguration.model_fields):
             raise ValueError("incomplete original configuration")
         return value
+
+
+AnyTurnSnapshot = TurnSnapshot | StandaloneTurnSnapshot
+_TURN_SNAPSHOT_ADAPTER: TypeAdapter[AnyTurnSnapshot] = TypeAdapter(AnyTurnSnapshot)
+
+
+def parse_turn_snapshot(raw: str) -> AnyTurnSnapshot:
+    return _TURN_SNAPSHOT_ADAPTER.validate_json(raw)
+
+
+def execution_configuration(snapshot: AnyTurnSnapshot) -> ProjectConfiguration:
+    return (
+        snapshot.executionConfiguration
+        if isinstance(snapshot, StandaloneTurnSnapshot)
+        else snapshot.projectConfiguration
+    )
 
 
 class CommandReceipt(ControlModel):
@@ -244,6 +307,23 @@ class TaskCreateCommand(ControlModel):
         return value
 
 
+class StandaloneTaskCreateCommand(ControlModel):
+    """Register a Task that owns its Agent and workspace without a project."""
+
+    commandID: UUID
+    idempotencyKey: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+    expectedRestoreEpoch: PositiveRevision
+    taskID: UUID
+    title: Annotated[StrictStr, Field(min_length=1, max_length=256)]
+
+    @field_validator("title")
+    @classmethod
+    def plain_title(cls, value: str) -> str:
+        if not value.strip() or any(unicodedata.category(char) == "Cc" for char in value):
+            raise ValueError("title must contain printable text")
+        return value
+
+
 class TaskCreateReceipt(ControlModel):
     """Immutable completed database mapping, without a model execution claim."""
 
@@ -276,9 +356,36 @@ class TaskCreateReceipt(ControlModel):
         return value
 
 
+class StandaloneTaskCreateReceipt(ControlModel):
+    protocolVersion: Literal[1] = 1
+    operation: Literal["task.createStandalone"] = "task.createStandalone"
+    boxID: UUID
+    commandID: UUID
+    receiptRevision: Literal[1] = 1
+    accepted: Literal[True] = True
+    replayed: StrictBool = False
+    acceptedAt: datetime
+    restoreEpoch: PositiveRevision
+    projectID: None = None
+    taskID: UUID
+    sessionID: UUID
+    taskRevision: PositiveRevision
+    preparationStateAtAcceptance: Literal["pending"] = "pending"
+    executionReady: Literal[False] = False
+
+    @field_validator("acceptedAt")
+    @classmethod
+    def utc_acceptance_time(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("acceptedAt must be UTC")
+        return value
+
+
 class TaskView(ControlModel):
     taskID: UUID
-    projectID: UUID
+    projectID: UUID | None = Field(
+        description="Null when the Task owns its workspace without a project."
+    )
     sessionID: UUID
     title: Annotated[StrictStr, Field(min_length=1, max_length=256)]
     taskRevision: PositiveRevision
@@ -287,6 +394,19 @@ class TaskView(ControlModel):
         default=False,
         description="Current eligibility for the configured text-only execution mode.",
     )
+    createdAt: datetime | None = Field(
+        default=None, description="UTC Task creation time when supplied by the server."
+    )
+    updatedAt: datetime | None = Field(
+        default=None, description="UTC time of the latest persisted Task activity."
+    )
+
+    @field_validator("createdAt", "updatedAt")
+    @classmethod
+    def utc_task_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() != timedelta(0):
+            raise ValueError("Task timestamps must be UTC")
+        return value
 
 
 class RunView(ControlModel):
@@ -295,7 +415,7 @@ class RunView(ControlModel):
     runID: UUID
     turnID: UUID
     taskID: UUID
-    projectID: UUID
+    projectID: UUID | None
     state: Literal[
         "queued",
         "running",
@@ -347,7 +467,7 @@ class TaskListResponse(ControlModel):
 class DispatchIntent(ControlModel):
     """Complete immutable input to the dedicated engine entry, never client configuration."""
 
-    schemaVersion: Literal[1]
+    schemaVersion: Literal[1, 2]
     boxID: UUID
     ownerID: PositiveRevision
     dispatchID: UUID
@@ -355,13 +475,24 @@ class DispatchIntent(ControlModel):
     runID: UUID
     turnID: UUID
     taskID: UUID
-    projectID: UUID
+    projectID: UUID | None
     restoreEpoch: PositiveRevision
     executionEpoch: PositiveRevision
     userMessageID: UUID
     assistantMessageID: UUID
     snapshotDigest: StrictStr
-    snapshot: TurnSnapshot
+    snapshot: AnyTurnSnapshot
+
+    @model_validator(mode="after")
+    def scope_matches_snapshot(self) -> Self:
+        if (
+            (self.schemaVersion == 1 and self.projectID is None)
+            or (self.schemaVersion == 2 and self.projectID is not None)
+            or (self.schemaVersion == 1 and not isinstance(self.snapshot, TurnSnapshot))
+            or (self.schemaVersion == 2 and not isinstance(self.snapshot, StandaloneTurnSnapshot))
+        ):
+            raise ValueError("dispatch scope and snapshot mismatch")
+        return self
 
 
 class EngineEntryReceipt(ControlModel):

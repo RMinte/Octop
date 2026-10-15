@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from octop.infra.auth.sso.service import SsoService
     from octop.infra.db.services import SharedServices
     from octop.infra.history.trajectory.service import TrajectoryService
+    from octop.infra.projects.runtime import ProjectTaskWorker
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,7 @@ class OctopServer:
         self.agentcomputer_active_runs = ActiveRunRegistry()
         self.agentcomputer_http_operations = HttpOperationRegistry()
         self.agentcomputer_text_worker: LocalTextTaskWorker | None = None
+        self.project_task_worker: ProjectTaskWorker | None = None
         self._stop_task: asyncio.Task[None] | None = None
 
     # Backward compat: expose user_manager directly
@@ -475,20 +477,12 @@ class OctopServer:
             if self._agentcomputer_bootstrap is not None:
                 await self._agentcomputer_bootstrap.recover(self.services)
             await self._construct_runtime(config, cleanup)
-            if config.agentcomputer_text_enabled and self.app_runtime is not None:
-                archive = self.app_runtime.history_archive
-                if archive is not None:
-                    from octop.infra.agentcomputer.text_worker import LocalTextTaskWorker
+            from octop.infra.projects.runtime import ProjectTaskWorker
 
-                    worker = LocalTextTaskWorker(
-                        self.services,
-                        self.app_runtime.agent_registry,
-                        archive,
-                        self.agentcomputer_active_runs,
-                    )
-                    self.agentcomputer_text_worker = worker
-                    cleanup.push_async_callback(worker.close)
-                    await worker.start()
+            project_worker = ProjectTaskWorker(self.services)
+            self.project_task_worker = project_worker
+            cleanup.push_async_callback(project_worker.close)
+            await project_worker.start()
         except BaseException:
             try:
                 await settle_task(asyncio.create_task(cleanup.aclose()))
@@ -740,6 +734,9 @@ class OctopServer:
         # HTTP work may outlive a cancelled request; let its DB transaction and
         # cancellation signal settle before stopping dispatches and closing DB.
         await self.agentcomputer_http_operations.drain()
+        if self.project_task_worker is not None:
+            await self.project_task_worker.close()
+            self.project_task_worker = None
         if self.agentcomputer_text_worker is not None:
             await self.agentcomputer_text_worker.close()
             self.agentcomputer_text_worker = None

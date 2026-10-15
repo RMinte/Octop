@@ -48,6 +48,9 @@ from octop.infra.agentcomputer.models import (
     RunPauseDecisionReceipt,
     RunPauseStatus,
     RunView,
+    StandaloneNewMessageCommand,
+    StandaloneTaskCreateCommand,
+    StandaloneTaskCreateReceipt,
     TaskCreateCommand,
     TaskCreateReceipt,
     TaskListResponse,
@@ -57,6 +60,7 @@ from octop.infra.agentcomputer.pauses import get_pause_status, get_run_pause_sta
 from octop.infra.agentcomputer.projects import create_project, get_project, list_projects
 from octop.infra.agentcomputer.results import RunResult, get_run_result
 from octop.infra.agentcomputer.runs import get_run
+from octop.infra.agentcomputer.standalone_tasks import create_standalone_task
 from octop.infra.agentcomputer.submission import submit_new_message
 from octop.infra.agentcomputer.task_listing import InvalidTaskListCursor, list_tasks
 from octop.infra.agentcomputer.task_snapshot import TaskControlSnapshot, get_task_control_snapshot
@@ -81,7 +85,9 @@ logger = logging.getLogger(__name__)
         "Requires an Octop user Bearer token in the Authorization header. "
         "User-session authentication does not bind a client device. "
         "Local project intent registration, task metadata queries, and receipt queries are implemented. "
-        "Task creation and message submission reject unavailable execution. "
+        "Project Task creation and message submission reject unavailable execution. "
+        "Projectless Task registration requires a configured text model reference; "
+        "its Turn and Run execution also requires the local text execution gate. "
         "Unavailable capabilities must not enable task execution in the client."
     ),
     responses={
@@ -122,6 +128,7 @@ async def capabilities(
         CommandReceipt
         | ProjectCreateReceipt
         | TaskCreateReceipt
+        | StandaloneTaskCreateReceipt
         | CancelRunReceipt
         | RunPauseDecisionReceipt
     ),
@@ -154,6 +161,7 @@ async def command_receipt(
     CommandReceipt
     | ProjectCreateReceipt
     | TaskCreateReceipt
+    | StandaloneTaskCreateReceipt
     | CancelRunReceipt
     | RunPauseDecisionReceipt
     | JSONResponse
@@ -179,6 +187,105 @@ async def command_receipt(
     if receipt is None:
         return protocol_error_response("resourceNotFound", 404)
     return receipt
+
+
+@router.post(
+    "/tasks",
+    status_code=201,
+    response_model=StandaloneTaskCreateReceipt,
+    summary="Create a Task without a project and prepare its own stopped Agent",
+    description=(
+        "Requires an Octop user Bearer token. The Task owns a private workspace, managed Agent, "
+        "thread and session. Its immutable receipt records pending acceptance; GET /tasks/{taskID} "
+        "shows current preparation. Same-key retries return the original receipt. This endpoint "
+        "does not start a model. Send a Turn after preparation when text execution is available."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        409: {
+            "model": ProtocolErrorEnvelope,
+            "description": "Command, restore epoch, or resource conflict",
+        },
+        413: {"model": ProtocolErrorEnvelope, "description": "Command body exceeds 65536 bytes"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid typed Task command"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Runtime or storage unavailable"},
+    },
+)
+async def register_standalone_task(
+    body: StandaloneTaskCreateCommand,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> StandaloneTaskCreateReceipt | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    if server.app_runtime is None:
+        return protocol_error_response("runtimeUnavailable", 503, reason="runtimeNotReady")
+    services = server.services
+    agent_registry = server.app_runtime.agent_registry
+    try:
+        return await server.agentcomputer_http_operations.run_async(
+            lambda: create_standalone_task(services, agent_registry, owner_id=user.id, command=body)
+        )
+    except CommandAdmissionError as exc:
+        return admission_error_response(exc)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during standalone Task registration")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored standalone Task data is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="taskInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer standalone Task storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+
+
+@router.get(
+    "/tasks",
+    response_model=TaskListResponse,
+    summary="List the authenticated user's Tasks without projects",
+    description=(
+        "Returns only projectless Tasks owned by the authenticated user. Pages use a box, owner, "
+        "restore epoch, and projectless-scope bound cursor. Tasks are ordered by latest persisted "
+        "activity and public Task UUID, both descending. Each item contains creation and activity "
+        "times, a current Task view, and its latest verified Run, or null if no message was sent."
+    ),
+    responses={
+        401: {"model": ProtocolErrorEnvelope, "description": "Authentication required or expired"},
+        403: {"model": ProtocolErrorEnvelope, "description": "User access denied"},
+        422: {"model": ProtocolErrorEnvelope, "description": "Invalid limit or cursor"},
+        503: {"model": ProtocolErrorEnvelope, "description": "Task storage unavailable"},
+    },
+)
+async def standalone_task_list(
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> TaskListResponse | JSONResponse:
+    require_database(server)
+    assert server.services is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        listing = await server.agentcomputer_http_operations.run_thread(
+            list_tasks, server.services, user.id, None, limit, cursor
+        )
+    except InvalidTaskListCursor:
+        return protocol_error_response("invalidRequest", 422)
+    except IdentityError:
+        logger.error("AgentComputer identity is invalid during standalone Task listing")
+        return protocol_error_response("storageUnavailable", 503, reason="identityInvalid")
+    except StorageDataError:
+        logger.error("AgentComputer stored standalone Task listing is invalid")
+        return protocol_error_response("storageUnavailable", 503, reason="taskInvalid")
+    except (OSError, StorageUnavailableError):
+        logger.error("AgentComputer standalone Task listing storage is unavailable")
+        return protocol_error_response("storageUnavailable", 503, retryable=True)
+    assert listing is not None
+    return listing
 
 
 @router.post(
@@ -465,8 +572,7 @@ async def create_task(
         "Requires a user Bearer token. Returns only the authenticated user's task; "
         "missing and other users' tasks return the same 404, including for admins. "
         "The preparation state describes a stored session/thread mapping. "
-        "executionReady reflects the current text execution gate and the project's fixed model. "
-        "Task creation and model execution remain capability gated. "
+        "executionReady reflects the current text execution gate for this Task. "
         "Internal thread/agent IDs and host paths are omitted."
     ),
     responses={
@@ -692,7 +798,8 @@ async def task_events(
         "Requires a user Bearer token and an existing owned Task. "
         "When text execution admission is unavailable, new commands return 503 "
         "runtimeUnavailable/executionUnavailable without registering a Turn or Run. "
-        "Only newMessage is accepted by this schema; nonempty artifacts or selected skills "
+        "A project Task requires expectedProjectRevision; a Task without a project requires "
+        "expectedTaskRevision. Only newMessage is accepted by these schemas; nonempty artifacts or selected skills "
         "remain unsupported. A successful admission returns the original durable queued receipt "
         "with status 201, including same-key replays. The server schedules an available background "
         "worker after registration; the receipt alone does not prove execution. "
@@ -722,7 +829,7 @@ async def task_events(
     },
 )
 async def new_message_turn(
-    body: NewMessageCommand,
+    body: NewMessageCommand | StandaloneNewMessageCommand,
     response: Response,
     task_id: UUID = Path(alias="taskID", description="Existing public Task UUID."),
     server: OctopServer = Depends(get_server),
@@ -765,7 +872,7 @@ async def new_message_turn(
         "dispatching means a handoff may have started. engineAccepted proves an application-owned "
         "intake receipt before model execution, not running or completed execution. "
         "The daemon's conservative pre-runtime scan tightens unresolved claimed/dispatching/engineAccepted "
-        "facts to interrupted with reconciliationRequired=true and keeps both lanes. "
+        "facts to interrupted with reconciliationRequired=true and keeps their active lanes. "
         "An embedded server without the text opt-in skips this scan by default. "
         "Tightening does not request user cancellation, "
         "prove an older process or model stopped, or authorize re-execution. "

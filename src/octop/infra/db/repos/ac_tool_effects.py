@@ -17,7 +17,7 @@ class AcToolEffectRow:
     run_id: str
     turn_id: str
     task_id: str
-    project_id: str
+    project_id: str | None
     owner_id: int
     dispatch_id: str
     engine_request_id: str
@@ -50,7 +50,7 @@ class AcToolEffectRow:
             run_id=str(r["run_id"]),
             turn_id=str(r["turn_id"]),
             task_id=str(r["task_id"]),
-            project_id=str(r["project_id"]),
+            project_id=str(r["project_id"]) if r["project_id"] is not None else None,
             owner_id=strict_int(r["owner_id"]),
             dispatch_id=str(r["dispatch_id"]),
             engine_request_id=str(r["engine_request_id"]),
@@ -179,7 +179,7 @@ class AcToolEffectRepo:
         run_id: str,
         turn_id: str,
         task_id: str,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         dispatch_id: str,
         engine_request_id: str,

@@ -17,6 +17,7 @@ from tests.unit.db.test_agentcomputer_dispatch import (
     _claim,
     _graph,
     _id,
+    _legacy_claim,
     _users,
     _version,
 )
@@ -98,7 +99,7 @@ def _terminal() -> dict[str, Any]:
 
 
 def _facts(conn: Any) -> dict[str, list[dict[str, Any]]]:
-    return {
+    facts = {
         table: [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY id")]
         for table in (
             "users",
@@ -111,6 +112,17 @@ def _facts(conn: Any) -> dict[str, list[dict[str, Any]]]:
             "ac_run_dispatches",
         )
     }
+    for task in facts["ac_tasks"]:
+        for column in (
+            "standalone_box_id",
+            "standalone_workspace_id",
+            "standalone_agent_id",
+            "standalone_config_json",
+            "standalone_config_digest",
+        ):
+            if task.get(column) is None:
+                task.pop(column, None)
+    return facts
 
 
 def test_v23_upgrade_preserves_all_original_facts(tmp_path: Path) -> None:
@@ -118,11 +130,11 @@ def test_v23_upgrade_preserves_all_original_facts(tmp_path: Path) -> None:
     try:
         with pool.transaction() as conn:
             graph = _graph(conn)
-            _claim(conn, graph)
+            _legacy_claim(conn, graph)
             before = _facts(conn)
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             assert _facts(conn) == before
             assert conn.execute("SELECT COUNT(*) FROM ac_tool_effects").fetchone()[0] == 0
@@ -137,11 +149,11 @@ def test_watermark_repair_does_not_invent_effects(tmp_path: Path, watermark: int
     try:
         with pool.transaction() as conn:
             graph = _graph(conn)
-            _claim(conn, graph)
+            _legacy_claim(conn, graph)
             before = _facts(conn)
             conn.execute("UPDATE _schema_version SET version = ?", (watermark,))
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             assert _facts(conn) == before
             assert conn.execute("SELECT COUNT(*) FROM ac_tool_effects").fetchone()[0] == 0
@@ -162,7 +174,7 @@ def test_legacy_v8_user_survives_effect_migration(tmp_path: Path) -> None:
                 "INSERT INTO users VALUES(1,'legacy','original','user','Legacy',0,1);"
             )
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             assert (
                 conn.execute("SELECT password_hash FROM users WHERE id=1").fetchone()[0]
@@ -221,7 +233,7 @@ def test_v24_ddl_failure_rolls_back_table_indexes_and_watermark(
                 == []
             )
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
     finally:
         pool.close()
 

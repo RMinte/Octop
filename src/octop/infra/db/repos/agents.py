@@ -50,6 +50,7 @@ class AgentRow:
     kind: str = "expert"
     managed_by: str | None = None
     managed_project_id: str | None = None
+    managed_task_id: str | None = None
 
     @classmethod
     def from_row(cls, r: DbRow) -> AgentRow:
@@ -93,6 +94,7 @@ class AgentRow:
             kind=kind,
             managed_by=_opt_str(r, "managed_by"),
             managed_project_id=_opt_str(r, "managed_project_id"),
+            managed_task_id=_opt_str(r, "managed_task_id"),
         )
 
 
@@ -126,6 +128,7 @@ class AgentRepo:
         last_state: str | None = None,
         managed_by: str | None = None,
         managed_project_id: str | None = None,
+        managed_task_id: str | None = None,
     ) -> str:
         ts = now_ts()
         agent_kind = kind if kind in {"expert", "team"} else "expert"
@@ -135,8 +138,9 @@ class AgentRepo:
                 "persona_mbti, default_model, system_prompt, enabled, config_json, icon, "
                 "template_name, color, icon_name, icon_url, skill_package_ids, "
                 "published_expert_id, welcome_message, knowledge_base_ids, mcp_servers, "
-                "kind, created_at, updated_at, last_state, managed_by, managed_project_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "kind, created_at, updated_at, last_state, managed_by, managed_project_id, "
+                "managed_task_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     agent_id,
                     user_id,
@@ -163,6 +167,7 @@ class AgentRepo:
                     last_state,
                     managed_by,
                     managed_project_id,
+                    managed_task_id,
                 ),
             )
         return agent_id

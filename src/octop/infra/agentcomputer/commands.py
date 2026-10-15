@@ -24,8 +24,12 @@ from octop.infra.agentcomputer.models import (
     ProjectConfiguration,
     ProjectCreateReceipt,
     RunPauseDecisionReceipt,
+    StandaloneNewMessageCommand,
+    StandaloneTaskCreateReceipt,
+    StandaloneTurnSnapshot,
     TaskCreateReceipt,
     TurnSnapshot,
+    parse_turn_snapshot,
 )
 from octop.infra.db.services import SharedServices
 
@@ -74,7 +78,9 @@ def content_digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def command_digest(*, box_id: UUID, task_id: UUID, command: NewMessageCommand) -> str:
+def command_digest(
+    *, box_id: UUID, task_id: UUID, command: NewMessageCommand | StandaloneNewMessageCommand
+) -> str:
     # Transport identities do not alter the semantic request. Epoch, target and
     # revision preconditions do: changing them is a new decision, not a retry.
     payload = command.model_dump(mode="json", exclude={"commandID", "idempotencyKey"})
@@ -157,6 +163,21 @@ def validate_turn_receipt_binding(
             or event is None
         ):
             raise StorageDataError("missing or inconsistent turn receipt binding")
+        if task.project_id is None:
+            _validate_standalone_turn_receipt_binding(
+                services,
+                conn,
+                owner_id=owner_id,
+                receipt=receipt,
+                row=row,
+                task=task,
+                turn=turn,
+                run=run,
+                event=event,
+                accepted_events=accepted_events,
+                timestamp=timestamp,
+            )
+            return
         project = services.ac_project_repo.get_in_transaction(conn, task.project_id, owner_id)
         thread = services.thread_repo.get_in_transaction(conn, task.octop_thread_id or "")
         if project is None:
@@ -197,7 +218,7 @@ def validate_turn_receipt_binding(
                 snapshot.model_fields_set != set(TurnSnapshot.model_fields)
                 or snapshot.request.model_fields_set != set(type(snapshot.request).model_fields)
                 or snapshot.projectConfiguration.model_fields_set
-                != set(ProjectConfiguration.model_fields)
+                != set(type(snapshot.projectConfiguration).model_fields)
             ):
                 raise StorageDataError("incomplete original snapshot")
             snapshot_data = snapshot.model_dump(mode="json")
@@ -258,12 +279,111 @@ def validate_turn_receipt_binding(
         raise StorageDataError("invalid stored turn receipt value") from exc
 
 
+def _validate_standalone_turn_receipt_binding(
+    services: SharedServices,
+    conn: Any,
+    *,
+    owner_id: int,
+    receipt: CommandReceipt,
+    row: AcCommandRow,
+    task: Any,
+    turn: Any,
+    run: Any,
+    event: Any,
+    accepted_events: list[Any],
+    timestamp: int,
+) -> None:
+    from octop.infra.agentcomputer.standalone_tasks import _task_binding, standalone_task_view
+
+    workspace_id, _, agent_id, configuration = _task_binding(
+        services, task, owner_id, receipt.boxID
+    )
+    if task.preparation_state != "ready":
+        raise StorageDataError("standalone Turn Task is not ready")
+    standalone_task_view(services, conn, owner_id, task, receipt.boxID)
+    try:
+        snapshot = parse_turn_snapshot(turn.snapshot_json)
+        payload = json.loads(event.payload_json)
+    except (ValidationError, ValueError) as exc:
+        raise StorageDataError("invalid standalone Turn snapshot or event") from exc
+    if not isinstance(snapshot, StandaloneTurnSnapshot):
+        raise StorageDataError("standalone Turn has project snapshot")
+    if (
+        snapshot.model_fields_set != set(StandaloneTurnSnapshot.model_fields)
+        or snapshot.request.model_fields_set != set(type(snapshot.request).model_fields)
+        or snapshot.executionConfiguration.model_fields_set
+        != set(ProjectConfiguration.model_fields)
+    ):
+        raise StorageDataError("incomplete standalone Turn snapshot")
+    snapshot_digest = content_digest(snapshot.model_dump(mode="json"))
+    if (
+        task.schema_version != 1
+        or task.owner_id != owner_id
+        or task.revision < receipt.taskRevision
+        or task.next_sequence <= receipt.acceptedSequence
+        or turn.schema_version != 2
+        or turn.owner_id != owner_id
+        or turn.context_mode != "newMessage"
+        or turn.task_id != task.task_id
+        or turn.project_id is not None
+        or turn.user_message_id != str(receipt.userMessageID)
+        or turn.assistant_message_id != str(receipt.assistantMessageID)
+        or turn.created_at != timestamp
+        or turn.snapshot_digest != snapshot_digest
+        or run.schema_version != 2
+        or run.owner_id != owner_id
+        or run.task_id != task.task_id
+        or run.project_id is not None
+        or run.turn_id != turn.turn_id
+        or run.restore_epoch != receipt.restoreEpoch
+        or run.created_at != timestamp
+        or snapshot.taskID != receipt.taskID
+        or snapshot.taskRevision + 1 != receipt.taskRevision
+        or snapshot.workspaceID != workspace_id
+        or snapshot.agentID != agent_id
+        or snapshot.octopThreadID != task.octop_thread_id
+        or snapshot.executionConfiguration != configuration
+        or snapshot.request.expectedTaskRevision != snapshot.taskRevision
+        or snapshot.request.expectedRestoreEpoch != receipt.restoreEpoch
+        or snapshot.request.userMessageID != receipt.userMessageID
+        or snapshot.request.permissionMode != "askForApproval"
+        or snapshot.request.inputArtifactIDs
+        or snapshot.request.selectedSkillIDs
+        or _request_digest(
+            box_id=receipt.boxID,
+            task_id=receipt.taskID,
+            payload=snapshot.request.model_dump(mode="json"),
+        )
+        != row.payload_digest
+        or event.event_type != "run.accepted"
+        or event.task_id != task.task_id
+        or event.owner_id != owner_id
+        or event.sequence != receipt.acceptedSequence
+        or event.payload_version != 1
+        or event.schema_version != 1
+        or event.run_id != str(receipt.runID)
+        or event.turn_id != str(receipt.turnID)
+        or event.created_at != timestamp
+        or len(accepted_events) != 1
+        or accepted_events[0].event_id != event.event_id
+    ):
+        raise StorageDataError("standalone Turn acceptance binding mismatch")
+    expected_payload = {
+        **receipt.model_dump(mode="json", exclude={"replayed"}),
+        "configDigest": content_digest(snapshot.executionConfiguration.model_dump(mode="json")),
+        "inputSnapshotDigest": snapshot_digest,
+    }
+    if canonical_json(payload) != canonical_json(expected_payload):
+        raise StorageDataError("standalone Turn event payload mismatch")
+
+
 def get_command_receipt(
     services: SharedServices, owner_id: int, command_id: UUID
 ) -> (
     CommandReceipt
     | ProjectCreateReceipt
     | TaskCreateReceipt
+    | StandaloneTaskCreateReceipt
     | CancelRunReceipt
     | RunPauseDecisionReceipt
     | None
@@ -327,6 +447,26 @@ def get_command_receipt(
                     raise StorageDataError("inconsistent task receipt metadata")
                 validate_task_receipt_binding(services, owner_id, task_receipt, conn=conn)
                 return task_receipt
+            if row.operation == "task.createStandalone":
+                from octop.infra.agentcomputer.standalone_tasks import (
+                    decode_standalone_task_receipt,
+                    validate_standalone_task_receipt,
+                )
+
+                standalone_receipt = decode_standalone_task_receipt(
+                    row.receipt_json,
+                    command_id=row.command_id,
+                    box_id=identity.boxID,
+                    epoch=row.restore_epoch,
+                )
+                if (
+                    row.schema_version != 1
+                    or row.target_id != str(standalone_receipt.taskID)
+                    or row.created_at != int(standalone_receipt.acceptedAt.timestamp() * 1000)
+                ):
+                    raise StorageDataError("inconsistent standalone Task receipt metadata")
+                validate_standalone_task_receipt(services, owner_id, standalone_receipt, conn=conn)
+                return standalone_receipt
             if row.operation == "project.create":
                 project_receipt = decode_project_receipt(
                     row.receipt_json,
@@ -445,7 +585,11 @@ def validate_project_receipt_binding(
 
 
 def admit_new_message(
-    services: SharedServices, *, owner_id: int, task_id: UUID, command: NewMessageCommand
+    services: SharedServices,
+    *,
+    owner_id: int,
+    task_id: UUID,
+    command: NewMessageCommand | StandaloneNewMessageCommand,
 ) -> CommandReceipt:
     """Internal registration wrapper; no engine or production execution gate is implied."""
     identity = get_or_create_identity(services.paths.agentcomputer_identity)
@@ -476,7 +620,7 @@ def admit_new_message_in_transaction(
     *,
     owner_id: int,
     task_id: UUID,
-    command: NewMessageCommand,
+    command: NewMessageCommand | StandaloneNewMessageCommand,
     identity: ControlIdentity,
 ) -> CommandReceipt:
     """Register using the caller's transaction, verified epoch and locked owner.
@@ -527,6 +671,21 @@ def admit_new_message_in_transaction(
         task = services.ac_task_repo.get_in_transaction(conn, str(task_id), owner_id)
         if task is None:
             raise CommandAdmissionError("resourceNotFound")
+        if task.project_id is None:
+            if not isinstance(command, StandaloneNewMessageCommand):
+                raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
+            return _admit_standalone_new_message_in_transaction(
+                services,
+                conn,
+                owner_id=owner_id,
+                task_id=task_id,
+                task=task,
+                command=command,
+                identity=identity,
+                digest=digest,
+            )
+        if not isinstance(command, NewMessageCommand):
+            raise CommandAdmissionError("capabilityUnsupported")
         project = services.ac_project_repo.get_in_transaction(conn, task.project_id, owner_id)
     except StorageDataError:
         raise
@@ -684,5 +843,134 @@ def admit_new_message_in_transaction(
         created_at=timestamp,
     )
     if not inserted:
+        raise CommandAdmissionError("idempotencyConflict")
+    return receipt
+
+
+def _admit_standalone_new_message_in_transaction(
+    services: SharedServices,
+    conn: Any,
+    *,
+    owner_id: int,
+    task_id: UUID,
+    task: Any,
+    command: StandaloneNewMessageCommand,
+    identity: ControlIdentity,
+    digest: str,
+) -> CommandReceipt:
+    """Commit a Task-owned Turn without fabricating project facts or a project lock."""
+    from octop.infra.agentcomputer.standalone_tasks import _task_binding, standalone_task_view
+
+    if task.preparation_state != "ready":
+        raise CommandAdmissionError("runtimeUnavailable", reason="preparationIncomplete")
+    workspace_id, _, agent_id, configuration = _task_binding(
+        services, task, owner_id, identity.boxID
+    )
+    standalone_task_view(services, conn, owner_id, task, identity.boxID)
+    if task.revision != command.expectedTaskRevision:
+        raise CommandAdmissionError("revisionConflict")
+    if services.ac_turn_repo.has_user_message(
+        conn, task.task_id, owner_id, str(command.userMessageID)
+    ):
+        raise CommandAdmissionError("idempotencyConflict", reason="userMessageAlreadyRegistered")
+    if task.active_run_id is not None:
+        active = services.ac_run_repo.get_in_transaction(conn, task.active_run_id, owner_id)
+        if active is None or active.task_id != task.task_id:
+            raise StorageDataError("invalid standalone active Run binding")
+        raise CommandAdmissionError(
+            "reconciliationRequired" if active.reconciliation_required else "activeRunConflict"
+        )
+    now = datetime.now(UTC)
+    timestamp = int(now.timestamp() * 1000)
+    turn_id, run_id, assistant_id, event_id = (str(uuid4()) for _ in range(4))
+    snapshot = {
+        "schemaVersion": 2,
+        "taskID": task.task_id,
+        "taskRevision": task.revision,
+        "workspaceID": str(workspace_id),
+        "agentID": agent_id,
+        "octopThreadID": task.octop_thread_id,
+        "executionConfiguration": configuration.model_dump(mode="json"),
+        "request": command.model_dump(mode="json", exclude={"commandID", "idempotencyKey"}),
+    }
+    services.ac_turn_repo.insert(
+        conn,
+        turn_id=turn_id,
+        task_id=task.task_id,
+        project_id=None,
+        owner_id=owner_id,
+        user_message_id=str(command.userMessageID),
+        assistant_message_id=assistant_id,
+        context_mode="newMessage",
+        schema_version=2,
+        snapshot_json=canonical_json(snapshot),
+        snapshot_digest=content_digest(snapshot),
+        created_at=timestamp,
+    )
+    services.ac_run_repo.insert(
+        conn,
+        run_id=run_id,
+        turn_id=turn_id,
+        task_id=task.task_id,
+        project_id=None,
+        owner_id=owner_id,
+        state="queued",
+        dispatch_phase="notDispatched",
+        execution_epoch=0,
+        restore_epoch=identity.restoreEpoch,
+        revision=1,
+        schema_version=2,
+        reconciliation_required=False,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    if not services.ac_task_repo.acquire_run(
+        conn, task.task_id, owner_id, run_id, updated_at=timestamp
+    ):
+        raise CommandAdmissionError("activeRunConflict")
+    receipt = CommandReceipt(
+        boxID=identity.boxID,
+        commandID=command.commandID,
+        acceptedAt=now,
+        restoreEpoch=identity.restoreEpoch,
+        taskID=task_id,
+        turnID=UUID(turn_id),
+        runID=UUID(run_id),
+        userMessageID=command.userMessageID,
+        assistantMessageID=UUID(assistant_id),
+        taskRevision=task.revision + 1,
+        acceptedSequence=task.next_sequence,
+    )
+    services.ac_event_repo.insert(
+        conn,
+        event_id=event_id,
+        task_id=task.task_id,
+        owner_id=owner_id,
+        sequence=task.next_sequence,
+        run_id=run_id,
+        turn_id=turn_id,
+        event_type="run.accepted",
+        payload_version=1,
+        payload_json=canonical_json(
+            {
+                **receipt.model_dump(mode="json", exclude={"replayed"}),
+                "configDigest": task.standalone_config_digest,
+                "inputSnapshotDigest": content_digest(snapshot),
+            }
+        ),
+        created_at=timestamp,
+    )
+    if not services.ac_command_repo.insert(
+        conn,
+        command_id=str(command.commandID),
+        owner_id=owner_id,
+        idempotency_key=command.idempotencyKey,
+        operation="turn.newMessage",
+        target_id=task.task_id,
+        payload_digest=digest,
+        restore_epoch=identity.restoreEpoch,
+        receipt_json=receipt.model_dump_json(),
+        created_at=timestamp,
+    ):
         raise CommandAdmissionError("idempotencyConflict")
     return receipt

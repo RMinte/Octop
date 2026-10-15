@@ -240,6 +240,15 @@ def _ensure_column(db: DatabasePool, table: str, column: str, definition: str) -
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _ensure_project_client_directory_schema(db: DatabasePool) -> None:
+    """Add nullable client metadata without touching server paths or project data."""
+    _ensure_column(db, "projects", "client_directory", "TEXT")
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE _schema_version SET version = CASE WHEN version < 29 THEN 29 ELSE version END"
+        )
+
+
 _AGENT_PROFILE_COLUMNS = (
     "color",
     "icon_name",
@@ -1985,6 +1994,193 @@ def _ensure_agentcomputer_completion_schema(db: DatabasePool) -> None:
                 conn.execute(stmt)
 
 
+_AGENTCOMPUTER_STANDALONE_TASK_COLUMNS = {
+    "standalone_box_id",
+    "standalone_workspace_id",
+    "standalone_agent_id",
+    "standalone_config_json",
+    "standalone_config_digest",
+}
+
+_AGENTCOMPUTER_EXECUTION_SCOPE_TABLES = (
+    "ac_turns",
+    "ac_runs",
+    "ac_run_dispatches",
+    "ac_tool_effects",
+    "ac_run_pauses",
+    "ac_run_cancellations",
+    "ac_run_terminals",
+)
+
+
+def _agentcomputer_base_task_scope_ready(db: DatabasePool) -> bool:
+    if not _table_exists(db, "ac_tasks") or not _table_exists(db, "agents"):
+        return False
+    if not _table_columns(db, "ac_tasks") >= _AGENTCOMPUTER_STANDALONE_TASK_COLUMNS:
+        return False
+    if "managed_task_id" not in _table_columns(db, "agents"):
+        return False
+    with db.connect() as conn:
+        if db.dialect == "postgresql":
+            row = conn.execute(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'ac_tasks' "
+                "AND column_name = 'project_id'"
+            ).fetchone()
+            constraints = {
+                item["constraint_name"]
+                for item in conn.execute(
+                    "SELECT constraint_name FROM information_schema.table_constraints "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name IN ('ac_tasks', 'agents')"
+                )
+            }
+            return (
+                row is not None
+                and row["is_nullable"] == "YES"
+                and {
+                    "ac_tasks_scope_shape",
+                    "agents_managed_scope_pair",
+                    "agents_managed_task_fk",
+                }
+                <= constraints
+            )
+        rows = conn.execute("PRAGMA table_info(ac_tasks)").fetchall()
+        task_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ac_tasks'"
+        ).fetchone()[0]
+        agent_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'"
+        ).fetchone()[0]
+        return (
+            any(row["name"] == "project_id" and row["notnull"] == 0 for row in rows)
+            and "ac_tasks_scope_shape" in task_sql
+            and "agents_managed_scope_pair" in agent_sql
+        )
+
+
+def _agentcomputer_execution_scope_ready(db: DatabasePool) -> bool:
+    if any(not _table_exists(db, table) for table in _AGENTCOMPUTER_EXECUTION_SCOPE_TABLES):
+        return False
+    with db.connect() as conn:
+        if db.dialect == "postgresql":
+            rows = conn.execute(
+                "SELECT table_name, is_nullable FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND column_name = 'project_id' "
+                "AND table_name IN ('ac_turns', 'ac_runs', 'ac_run_dispatches', "
+                "'ac_tool_effects', 'ac_run_pauses', 'ac_run_cancellations', 'ac_run_terminals')"
+            ).fetchall()
+            nullable = {row["table_name"] for row in rows if row["is_nullable"] == "YES"}
+            constraints = {
+                row["constraint_name"]
+                for row in conn.execute(
+                    "SELECT constraint_name FROM information_schema.table_constraints "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name IN ('ac_turns', 'ac_runs', 'ac_tool_effects', "
+                    "'ac_run_pauses', 'ac_run_terminals')"
+                )
+            }
+            return (
+                nullable == set(_AGENTCOMPUTER_EXECUTION_SCOPE_TABLES)
+                and {
+                    "ac_turns_task_owner_fk",
+                    "ac_runs_task_owner_fk",
+                    "ac_runs_turn_task_owner_fk",
+                    "ac_tool_effects_dispatch_task_owner_fk",
+                    "ac_run_pauses_dispatch_task_owner_fk",
+                    "ac_run_terminals_dispatch_task_owner_fk",
+                }
+                <= constraints
+            )
+        for table in _AGENTCOMPUTER_EXECUTION_SCOPE_TABLES:
+            columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            if not any(row["name"] == "project_id" and row["notnull"] == 0 for row in columns):
+                return False
+        turn_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ac_turns'"
+        ).fetchone()[0]
+        run_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ac_runs'"
+        ).fetchone()[0]
+        task_dispatch_fk = "FOREIGN KEY (dispatch_id, run_id, turn_id, task_id, owner_id,"
+        for table in ("ac_tool_effects", "ac_run_pauses", "ac_run_terminals"):
+            table_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()[0]
+            if task_dispatch_fk not in table_sql:
+                return False
+        return (
+            "FOREIGN KEY (task_id, owner_id)" in turn_sql
+            and "FOREIGN KEY (task_id, owner_id)" in run_sql
+            and "FOREIGN KEY (turn_id, task_id, owner_id)" in run_sql
+            and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' "
+                "AND name='idx_ac_run_dispatches_effect_binding_task'"
+            ).fetchone()
+            is not None
+        )
+
+
+def _agentcomputer_task_scope_ready(db: DatabasePool) -> bool:
+    return _agentcomputer_base_task_scope_ready(db) and _agentcomputer_execution_scope_ready(db)
+
+
+def _ensure_agentcomputer_optional_task_project_schema(db: DatabasePool) -> None:
+    """Apply v27 without weakening existing Task/Turn/Run foreign keys."""
+    if _agentcomputer_task_scope_ready(db):
+        with db.connect() as conn:
+            if db.dialect == "postgresql":
+                conn.execute("UPDATE _schema_version SET version = %s", (27,))
+            else:
+                conn.execute("UPDATE _schema_version SET version = ?", (27,))
+        return
+    base_ready = _agentcomputer_base_task_scope_ready(db)
+    if not base_ready and (
+        _table_columns(db, "ac_tasks") & _AGENTCOMPUTER_STANDALONE_TASK_COLUMNS
+        or "managed_task_id" in _table_columns(db, "agents")
+    ):
+        raise RuntimeError("Incomplete AgentComputer task-scope schema")
+    path = next(path for version, path in _discover(db.dialect) if version == 27)
+    sql = path.read_text(encoding="utf-8")
+    if db.dialect == "postgresql":
+        with db.transaction() as conn:
+            _apply_postgresql_migration(conn, sql)
+        return
+    if base_ready:
+        sql = sql.split("-- V27_EXECUTION_SCOPE_BEGIN\n", 1)[1]
+    with db.connect() as conn:
+        if base_ready:
+            # A repaired missing dispatch table loses its UNIQUE indexes. Restore
+            # the task-scoped parent key before checking existing child FKs.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_ac_run_dispatches_effect_binding_task "
+                "ON ac_run_dispatches(dispatch_id, run_id, turn_id, task_id, owner_id, "
+                "restore_epoch, execution_epoch, claimant_id, engine_request_id)"
+            )
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("Cannot rebuild AgentComputer Tasks with broken foreign keys")
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for stmt in _split_pg_sql(sql):
+                if stmt.rstrip(";").strip().upper() in {
+                    "PRAGMA FOREIGN_KEYS = OFF",
+                    "PRAGMA FOREIGN_KEYS = ON",
+                    "BEGIN IMMEDIATE",
+                    "COMMIT",
+                }:
+                    continue
+                conn.execute(stmt)
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise RuntimeError("AgentComputer Task rebuild violated foreign keys")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+
+
 def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
     """Clamp develop DBs that applied split 005–009 down to the consolidated max.
 
@@ -2271,6 +2467,9 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
     if version == 26:
         _ensure_agentcomputer_completion_schema(db)
         return
+    if version == 27:
+        _ensure_agentcomputer_optional_task_project_schema(db)
+        return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
         conn.executescript(sql)
@@ -2306,6 +2505,12 @@ def run_migrations(db: DatabasePool) -> None:
             continue
         if version == 26:
             _ensure_agentcomputer_completion_schema(db)
+            continue
+        if version in {28, 29, 30, 31, 32}:
+            continue
+        if version == 27:
+            # Defer the table rebuild until missing legacy columns/journals
+            # have been repaired below, including skipped-watermark restores.
             continue
         if db.dialect == "postgresql":
             sql = path.read_text(encoding="utf-8")
@@ -2384,3 +2589,48 @@ def run_migrations(db: DatabasePool) -> None:
         or not _table_columns(db, "ac_run_terminals") >= _AGENTCOMPUTER_TERMINAL_COLUMNS
     ):
         _ensure_agentcomputer_completion_schema(db)
+    if _max_discovered_version(db.dialect) >= 27 and (
+        _current_version(db) < 27 or not _agentcomputer_task_scope_ready(db)
+    ):
+        _ensure_agentcomputer_optional_task_project_schema(db)
+    if _max_discovered_version(db.dialect) >= 28 and _current_version(db) < 28:
+        path = next(path for version, path in _discover(db.dialect) if version == 28)
+        if db.dialect == "postgresql":
+            with db.transaction() as conn:
+                _apply_postgresql_migration(conn, path.read_text(encoding="utf-8"))
+        else:
+            _apply_sqlite_migration(db, 28, path)
+    if _max_discovered_version(db.dialect) >= 29 and (
+        _current_version(db) < 29 or "client_directory" not in _table_columns(db, "projects")
+    ):
+        _ensure_project_client_directory_schema(db)
+
+    if _max_discovered_version(db.dialect) >= 30 and (
+        _current_version(db) < 30
+        or not _table_exists(db, "project_tasks")
+        or not _table_exists(db, "project_task_turns")
+    ):
+        path = next(path for version, path in _discover(db.dialect) if version == 30)
+        if db.dialect == "postgresql":
+            with db.transaction() as conn:
+                _apply_postgresql_migration(conn, path.read_text(encoding="utf-8"))
+        else:
+            _apply_sqlite_migration(db, 30, path)
+
+    if _max_discovered_version(db.dialect) >= 31:
+        _ensure_column(db, "project_task_turns", "input_tokens", "BIGINT NOT NULL DEFAULT 0")
+        _ensure_column(db, "project_task_turns", "output_tokens", "BIGINT NOT NULL DEFAULT 0")
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE _schema_version SET version = CASE WHEN version < 31 THEN 31 ELSE version END"
+            )
+
+    if _max_discovered_version(db.dialect) >= 32 and (
+        _current_version(db) < 32 or not _table_exists(db, "project_create_requests")
+    ):
+        path = next(path for version, path in _discover(db.dialect) if version == 32)
+        if db.dialect == "postgresql":
+            with db.transaction() as conn:
+                _apply_postgresql_migration(conn, path.read_text(encoding="utf-8"))
+        else:
+            _apply_sqlite_migration(db, 32, path)

@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from octop.api.agentcomputer import (
     API_PREFIX,
+    admission_error_response,
     is_agentcomputer_path,
     octop_error_response,
     protocol_error_response,
@@ -86,6 +87,14 @@ def _mount_routers(app: FastAPI, mounts: Sequence[_RouterMount]) -> None:
 
 
 def _install_exception_handlers(app: FastAPI) -> None:
+    from octop.infra.agentcomputer.commands import CommandAdmissionError
+
+    @app.exception_handler(CommandAdmissionError)
+    async def _agentcomputer_admission(
+        request: Request, exc: CommandAdmissionError
+    ) -> JSONResponse:
+        return admission_error_response(exc)
+
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request, exc: RequestValidationError) -> Response:
         if is_agentcomputer_path(request.url.path):
@@ -199,10 +208,8 @@ def build_app(server: OctopServer) -> FastAPI:
         admin,
         agent_files,
         agent_tools,
-        agentcomputer,
-        agentcomputer_activity,
-        agentcomputer_documents,
-        agentcomputer_output,
+        agentcomputer_project_bridge,
+        agentcomputer_projects,
         agents,
         auth,
         auth_ldap,
@@ -233,6 +240,7 @@ def build_app(server: OctopServer) -> FastAPI:
         plugins,
         preferences,
         proactive_care,
+        projects,
         providers,
         search,
         settings,
@@ -265,10 +273,10 @@ def build_app(server: OctopServer) -> FastAPI:
         [
             _RouterMount(setup.router, "/api", ["setup"]),
             _RouterMount(auth.router, "/api/auth", ["auth"]),
-            _RouterMount(agentcomputer.router, API_PREFIX, ["agentcomputer"]),
-            _RouterMount(agentcomputer_activity.router, API_PREFIX, ["agentcomputer"]),
-            _RouterMount(agentcomputer_documents.router, API_PREFIX, ["agentcomputer"]),
-            _RouterMount(agentcomputer_output.router, API_PREFIX, ["agentcomputer"]),
+            _RouterMount(agentcomputer_projects.router, API_PREFIX, ["agentcomputer"]),
+            _RouterMount(agentcomputer_project_bridge.router, "/api", ["agentcomputer"]),
+            _RouterMount(projects.router, "/api", ["projects"]),
+            _RouterMount(projects.task_router, "/api", ["projects"]),
             _RouterMount(auth_oidc.router, "/api/auth", ["auth"]),
             _RouterMount(auth_oauth.router, "/api/auth", ["auth"]),
             _RouterMount(auth_ldap.router, "/api/auth", ["auth"]),

@@ -34,6 +34,7 @@ from octop.infra.agentcomputer.models import (
     EngineEntryResult,
     EngineInvocation,
     RunClaim,
+    execution_configuration,
 )
 from octop.infra.agentcomputer.runs import BoundRun, load_bound_run
 from octop.infra.db.services import SharedServices
@@ -84,13 +85,23 @@ def _active(services: SharedServices, conn: Any, bound: BoundRun, claim: RunClai
     if validate_cancellation_binding(services, conn, bound, claim) is not None:
         raise CommandAdmissionError("revisionConflict")
     task = services.ac_task_repo.get_in_transaction(conn, run.task_id, run.owner_id)
-    project = services.ac_project_repo.get_in_transaction(conn, run.project_id, run.owner_id)
-    if task is None or project is None:
+    if task is None:
         raise StorageDataError("missing dispatch lane")
-    if task.active_run_id != run.run_id or project.active_run_id != run.run_id:
+    if task.active_run_id != run.run_id:
         raise CommandAdmissionError("activeRunConflict")
-    if task.preparation_state != "ready" or project.preparation_state != "ready":
+    if task.preparation_state != "ready":
         raise CommandAdmissionError("runtimeUnavailable", reason="preparationIncomplete")
+    if run.project_id is None:
+        if task.project_id is not None or task.standalone_box_id != str(bound.receipt.boxID):
+            raise StorageDataError("standalone dispatch lane mismatch")
+    else:
+        project = services.ac_project_repo.get_in_transaction(conn, run.project_id, run.owner_id)
+        if project is None or task.project_id != run.project_id:
+            raise StorageDataError("missing dispatch project lane")
+        if project.active_run_id != run.run_id:
+            raise CommandAdmissionError("activeRunConflict")
+        if project.preparation_state != "ready":
+            raise CommandAdmissionError("runtimeUnavailable", reason="preparationIncomplete")
     if run.reconciliation_required or run.state != "queued":
         raise CommandAdmissionError("reconciliationRequired")
 
@@ -135,7 +146,8 @@ def validate_dispatch_binding(
         or str(intent.runID) != run.run_id
         or str(intent.turnID) != run.turn_id
         or str(intent.taskID) != run.task_id
-        or str(intent.projectID) != run.project_id
+        or (str(intent.projectID) if intent.projectID is not None else None) != run.project_id
+        or intent.schemaVersion != run.schema_version
         or intent.restoreEpoch != run.restore_epoch
         or intent.executionEpoch != run.execution_epoch
         or intent.userMessageID != bound.receipt.userMessageID
@@ -279,18 +291,23 @@ def claim_run(
         _active(services, conn, bound, current)
         if current is not None:
             raise CommandAdmissionError("revisionConflict")
-        if not text_task_available(
-            services, model_ref=bound.snapshot.projectConfiguration.modelRef
-        ):
+        configuration = execution_configuration(bound.snapshot)
+        if not text_task_available(services, model_ref=configuration.modelRef):
             raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
         now = int(datetime.now(UTC).timestamp() * 1000)
         run = services.ac_run_repo.claim(
-            conn, str(run_id), owner_id, expected_revision, identity.restoreEpoch, updated_at=now
+            conn,
+            str(run_id),
+            owner_id,
+            expected_revision,
+            identity.restoreEpoch,
+            updated_at=now,
+            box_id=str(identity.boxID),
         )
         if run is None:
             raise CommandAdmissionError("revisionConflict")
         intent = DispatchIntent(
-            schemaVersion=1,
+            schemaVersion=1 if run.project_id is not None else 2,
             boxID=identity.boxID,
             ownerID=owner_id,
             dispatchID=uuid4(),
@@ -298,7 +315,7 @@ def claim_run(
             runID=run_id,
             turnID=bound.receipt.turnID,
             taskID=bound.receipt.taskID,
-            projectID=UUID(run.project_id),
+            projectID=UUID(run.project_id) if run.project_id is not None else None,
             restoreEpoch=run.restore_epoch,
             executionEpoch=run.execution_epoch,
             userMessageID=bound.receipt.userMessageID,
@@ -569,14 +586,17 @@ def interrupt_startup_run(
         if bound.run.dispatch_phase not in {"claimed", "dispatching", "engineAccepted"}:
             raise StorageDataError("invalid startup dispatch phase")
         task = services.ac_task_repo.get_in_transaction(conn, bound.run.task_id, owner_id)
-        project = services.ac_project_repo.get_in_transaction(conn, bound.run.project_id, owner_id)
-        if (
-            task is None
-            or project is None
-            or task.active_run_id != bound.run.run_id
-            or project.active_run_id != bound.run.run_id
-        ):
+        if task is None or task.active_run_id != bound.run.run_id:
             raise StorageDataError("invalid startup recovery lane")
+        if bound.run.project_id is None:
+            if task.project_id is not None or task.standalone_box_id != str(box_id):
+                raise StorageDataError("invalid standalone startup recovery lane")
+        else:
+            project = services.ac_project_repo.get_in_transaction(
+                conn, bound.run.project_id, owner_id
+            )
+            if project is None or project.active_run_id != bound.run.run_id:
+                raise StorageDataError("invalid project startup recovery lane")
         _tighten_dispatch(services, conn, bound, current, "restartExecutionOwnerUnknown")
         return True
 

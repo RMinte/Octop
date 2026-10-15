@@ -11,6 +11,7 @@ from tests.unit.db.test_agentcomputer_dispatch import (
     _claim,
     _graph,
     _id,
+    _legacy_claim,
     _users,
     _version,
 )
@@ -61,13 +62,13 @@ def test_v24_upgrade_and_repair_preserve_existing_graph(tmp_path: Path) -> None:
     try:
         with pool.transaction() as conn:
             graph = _graph(conn)
-            _claim(conn, graph)
+            _legacy_claim(conn, graph)
             before = tuple(
                 tuple(row) for row in conn.execute("SELECT * FROM ac_run_dispatches ORDER BY id")
             )
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             assert (
                 tuple(
@@ -83,7 +84,7 @@ def test_v24_upgrade_and_repair_preserve_existing_graph(tmp_path: Path) -> None:
             conn.execute("DROP TABLE ac_run_pauses")
             conn.execute("UPDATE _schema_version SET version=999")
         migrate.run_migrations(pool)
-        assert _version(pool) == 26
+        assert _version(pool) == 32
         with pool.connect() as conn:
             assert conn.execute("SELECT COUNT(*) FROM ac_run_pauses").fetchone()[0] == 0
     finally:

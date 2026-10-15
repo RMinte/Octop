@@ -144,6 +144,8 @@ def rebind_control_plane(server: OctopServer) -> None:
         logger.exception("failed closing previous database pool during rebind")
 
     server.services = new_services
+    if server.project_task_worker is not None:
+        server.project_task_worker.services = new_services
     if server.app_runtime is not None:
         server.app_runtime.replace_services(new_services, config)
     server._ensure_jwt_secret()  # noqa: SLF001 — re-seed secrets on empty DB

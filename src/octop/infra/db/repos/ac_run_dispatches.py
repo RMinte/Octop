@@ -16,7 +16,7 @@ class AcRunDispatchRow:
     run_id: str
     turn_id: str
     task_id: str
-    project_id: str
+    project_id: str | None
     owner_id: int
     execution_epoch: int
     restore_epoch: int
@@ -46,7 +46,7 @@ class AcRunDispatchRow:
             run_id=str(r["run_id"]),
             turn_id=str(r["turn_id"]),
             task_id=str(r["task_id"]),
-            project_id=str(r["project_id"]),
+            project_id=str(r["project_id"]) if r["project_id"] is not None else None,
             owner_id=strict_int(r["owner_id"]),
             execution_epoch=strict_int(r["execution_epoch"]),
             restore_epoch=strict_int(r["restore_epoch"]),
@@ -102,7 +102,7 @@ class AcRunDispatchRepo:
         run_id: str,
         turn_id: str,
         task_id: str,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         execution_epoch: int,
         restore_epoch: int,

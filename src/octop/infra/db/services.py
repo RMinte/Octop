@@ -29,6 +29,9 @@ from octop.infra.db.repos.cron import CronJobRepo
 from octop.infra.db.repos.invites import InviteRepo
 from octop.infra.db.repos.knowledge import KnowledgeRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
+from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRepo
+from octop.infra.db.repos.project_tasks import ProjectTaskRepo
+from octop.infra.db.repos.projects import ProjectRepo
 from octop.infra.db.repos.providers import ProviderRepo
 from octop.infra.db.repos.published_experts import PublishedExpertRepo
 from octop.infra.db.repos.secrets import SecretRepo
@@ -63,6 +66,9 @@ class RepoBundle:
     ac_command_repo: AcCommandRepo
     ac_event_repo: AcEventRepo
 
+    project_task_repo: ProjectTaskRepo
+    project_task_turn_repo: ProjectTaskTurnRepo
+    project_repo: ProjectRepo
     user_repo: UserRepo
     user_policy_repo: UserPolicyRepo
     invite_repo: InviteRepo
@@ -105,6 +111,9 @@ class RepoBundle:
             ac_tool_effect_repo=AcToolEffectRepo(db),
             ac_command_repo=AcCommandRepo(db),
             ac_event_repo=AcEventRepo(db),
+            project_task_repo=ProjectTaskRepo(db),
+            project_task_turn_repo=ProjectTaskTurnRepo(db),
+            project_repo=ProjectRepo(db),
             user_repo=UserRepo(db),
             user_policy_repo=UserPolicyRepo(db),
             invite_repo=InviteRepo(db),
@@ -142,6 +151,18 @@ class SharedServices:
     @property
     def db(self) -> DatabasePool:
         return self.repos.db
+
+    @property
+    def project_task_repo(self) -> ProjectTaskRepo:
+        return self.repos.project_task_repo
+
+    @property
+    def project_task_turn_repo(self) -> ProjectTaskTurnRepo:
+        return self.repos.project_task_turn_repo
+
+    @property
+    def project_repo(self) -> ProjectRepo:
+        return self.repos.project_repo
 
     @property
     def ac_project_repo(self) -> AcProjectRepo:

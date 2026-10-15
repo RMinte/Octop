@@ -17,13 +17,22 @@ from octop.infra.agentcomputer.commands import (
     content_digest,
 )
 from octop.infra.agentcomputer.identity import get_or_create_identity
-from octop.infra.agentcomputer.models import CommandReceipt, NewMessageCommand, ProjectConfiguration
+from octop.infra.agentcomputer.models import (
+    CommandReceipt,
+    NewMessageCommand,
+    ProjectConfiguration,
+    StandaloneNewMessageCommand,
+)
 from octop.infra.agentcomputer.tasks import _get_task
 from octop.infra.db.services import SharedServices
 
 
 def submit_new_message(
-    services: SharedServices, *, owner_id: int, task_id: UUID, command: NewMessageCommand
+    services: SharedServices,
+    *,
+    owner_id: int,
+    task_id: UUID,
+    command: NewMessageCommand | StandaloneNewMessageCommand,
 ) -> CommandReceipt:
     """Validate owned managed bindings and availability before new registration.
 
@@ -59,6 +68,31 @@ def submit_new_message(
                     command=command,
                     identity=identity,
                 )
+            if task.projectID is None:
+                if not isinstance(command, StandaloneNewMessageCommand):
+                    raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
+                stored = services.ac_task_repo.get_in_transaction(conn, str(task_id), owner_id)
+                if stored is None:
+                    raise StorageDataError("missing standalone submission Task")
+                from octop.infra.agentcomputer.standalone_tasks import _task_configuration
+
+                configuration = _task_configuration(stored)
+                if not text_task_available(services, model_ref=configuration.modelRef):
+                    raise CommandAdmissionError("runtimeUnavailable", reason="executionUnavailable")
+                if command.permissionMode not in profile.supportedPermissionModes:
+                    raise CommandAdmissionError(
+                        "capabilityUnsupported", reason="permissionModeUnsupported"
+                    )
+                return admit_new_message_in_transaction(
+                    services,
+                    conn,
+                    owner_id=owner_id,
+                    task_id=task_id,
+                    command=command,
+                    identity=identity,
+                )
+            if not isinstance(command, NewMessageCommand):
+                raise CommandAdmissionError("capabilityUnsupported")
             project = services.ac_project_repo.get_in_transaction(
                 conn, str(task.projectID), owner_id
             )

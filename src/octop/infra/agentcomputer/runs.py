@@ -19,7 +19,13 @@ from octop.infra.agentcomputer.commands import (
     validate_turn_receipt_binding,
 )
 from octop.infra.agentcomputer.identity import get_or_create_identity
-from octop.infra.agentcomputer.models import CommandReceipt, RunView, TurnSnapshot
+from octop.infra.agentcomputer.models import (
+    AnyTurnSnapshot,
+    CommandReceipt,
+    RunView,
+    StandaloneTurnSnapshot,
+    parse_turn_snapshot,
+)
 from octop.infra.agentcomputer.tasks import _get_task
 from octop.infra.db.services import SharedServices
 
@@ -31,7 +37,7 @@ if TYPE_CHECKING:
 class BoundRun:
     run: AcRunRow
     receipt: CommandReceipt
-    snapshot: TurnSnapshot
+    snapshot: AnyTurnSnapshot
 
 
 def load_bound_run(
@@ -68,8 +74,16 @@ def load_bound_run(
     turn = services.ac_turn_repo.get_in_transaction(conn, str(receipt.turnID), owner_id)
     if turn is None:
         raise StorageDataError("missing original turn")
-    snapshot = TurnSnapshot.model_validate_json(turn.snapshot_json)
-    if run.schema_version != 1 or run.updated_at < run.created_at:
+    try:
+        snapshot = parse_turn_snapshot(turn.snapshot_json)
+    except ValidationError as exc:
+        raise StorageDataError("invalid original Run snapshot") from exc
+    if (
+        run.schema_version not in (1, 2)
+        or run.schema_version != turn.schema_version
+        or (run.project_id is None) != isinstance(snapshot, StandaloneTurnSnapshot)
+        or run.updated_at < run.created_at
+    ):
         raise StorageDataError("invalid run schema or timestamps")
     # Validate row fields before the worker acts; get_run supplies the journal-derived flag.
     run_view(run, cancel_requested=False)

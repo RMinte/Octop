@@ -145,6 +145,9 @@ def test_postgresql_scans_keep_scope_keyset_and_placeholders_without_real_databa
     ]
     sql, parameters = driver.calls[1]
     assert "p.owner_id = r.owner_id" in sql and "p.project_id = r.project_id" in sql
-    assert "p.box_id = %s AND r.id > %s AND r.id <= %s" in sql
+    assert "WHERE r.id > %s AND r.id <= %s" in sql
+    assert "t.task_id=r.task_id AND t.owner_id=r.owner_id" in sql
+    assert "t.project_id=r.project_id AND p.box_id=%s" in sql
+    assert "t.project_id IS NULL AND t.standalone_box_id=%s" in sql
     assert "ORDER BY r.id LIMIT 100" in sql
-    assert parameters == (_id(9), 1, 4)
+    assert parameters == (1, 4, _id(9), _id(9))

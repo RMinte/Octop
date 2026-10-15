@@ -7,9 +7,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
-from octop.api.agentcomputer import API_PREFIX
 from octop.api.deps import is_jwt_exempt_path
-from octop.infra.agentcomputer.capabilities import AgentComputerCapabilitiesResponse
 
 API_DESCRIPTION = """\
 **Octop** is a smarter, self-hosted AI assistant for multiple users and agents. All routes are served under `/api`.
@@ -61,23 +59,19 @@ HITL resume still uses `POST /api/agents/{agent_id}/chat/hitl/resume` (SSE).
 
 OPENAPI_TAGS: list[dict[str, str]] = [
     {
+        "name": "agentcomputer",
+        "description": "AgentComputer 专用版本化协议：/api/agentcomputer/v1。contract=independent-project-tasks，与网页共享独立项目、多轮任务服务和数据；仅接受 Bearer 请求头，使用协议错误信封。提供项目配置、首条消息建任务、追问、历史、增量回复与停止；旧专家绑定、Run、事件与文档协议未接入。Bridge 仅转发这组明确的资源与方法。",
+    },
+    {
+        "name": "projects",
+        "description": "独立项目和任务：管理项目自己的目录、Skill、MCP 与行动指南；发送首条消息创建任务，在同一任务内继续多轮对话。支持持久历史、增量回复和停止。无需专家。",
+    },
+    {
         "name": "setup",
         "description": "First-run wizard: create the admin user and optional LLM provider.",
     },
     {"name": "auth", "description": "Sign in, sign out, and manage the current user profile."},
     {"name": "health", "description": "Liveness probe for load balancers and monitoring."},
-    {
-        "name": "agentcomputer",
-        "description": (
-            "Versioned AgentComputer discovery, project and Task creation, Turn admission, Run status, "
-            "verified text results, and immutable receipt queries. Requires a user Bearer token. "
-            "Opt-in loopback SQLite mode runs tool-free text Tasks using one configured model. "
-            "Receipts preserve original admission facts; dispatch phases describe stored handoff facts. "
-            "Daemon bootstrap conservatively fences unresolved dispatch facts before runtime. "
-            "Device binding, tool execution, approval resume, and full recovery remain unavailable. "
-            "Exact-Run cancellation records durable requests without proving remote model stop."
-        ),
-    },
     {"name": "users", "description": "Admin user management (create, disable, reset passwords)."},
     {
         "name": "agents",
@@ -210,175 +204,6 @@ def configure_openapi(app: FastAPI) -> None:
         )
         components = schema.setdefault("components", {})
         components.setdefault("securitySchemes", {})["BearerAuth"] = _BEARER_SCHEME
-
-        discovery = schema.get("paths", {}).get(f"{API_PREFIX}/capabilities", {}).get("get")
-        if discovery is not None:
-            # FastAPI's schema encoding excludes None recursively, including
-            # null values inside examples. Preserve explicit unknown/unbound fields.
-            example = AgentComputerCapabilitiesResponse.model_json_schema()["examples"][0]
-            discovery["responses"]["200"]["content"]["application/json"]["example"] = example
-
-        receipt = schema.get("paths", {}).get(f"{API_PREFIX}/commands/{{commandID}}", {}).get("get")
-        if receipt is not None:
-            receipt["responses"]["200"]["content"]["application/json"]["example"] = {
-                "protocolVersion": 1,
-                "boxID": "11111111-1111-4111-8111-111111111111",
-                "commandID": "22222222-2222-4222-8222-222222222222",
-                "receiptRevision": 1,
-                "accepted": True,
-                "replayed": False,
-                "acceptedAt": "2026-10-12T00:00:00Z",
-                "restoreEpoch": 1,
-                "taskID": "33333333-3333-4333-8333-333333333333",
-                "turnID": "44444444-4444-4444-8444-444444444444",
-                "runID": "55555555-5555-4555-8555-555555555555",
-                "userMessageID": "66666666-6666-4666-8666-666666666666",
-                "assistantMessageID": "77777777-7777-4777-8777-777777777777",
-                "runState": "queued",
-                "taskRevision": 2,
-                "acceptedSequence": 1,
-            }
-
-        project_receipt = {
-            "protocolVersion": 1,
-            "operation": "project.create",
-            "boxID": "11111111-1111-4111-8111-111111111111",
-            "commandID": "22222222-2222-4222-8222-222222222222",
-            "receiptRevision": 1,
-            "accepted": True,
-            "replayed": False,
-            "acceptedAt": "2026-10-12T00:00:00Z",
-            "restoreEpoch": 1,
-            "projectID": "33333333-3333-4333-8333-333333333333",
-            "workspaceID": "44444444-4444-4444-8444-444444444444",
-            "preparationID": "55555555-5555-4555-8555-555555555555",
-            "projectRevision": 1,
-            "preparationStateAtAcceptance": "pending",
-        }
-        create_project = schema.get("paths", {}).get(f"{API_PREFIX}/projects", {}).get("post")
-        if create_project is not None:
-            create_project["responses"]["201"]["content"]["application/json"]["example"] = (
-                project_receipt
-            )
-        project = schema.get("paths", {}).get(f"{API_PREFIX}/projects/{{projectID}}", {}).get("get")
-        if project is not None:
-            project["responses"]["200"]["content"]["application/json"]["example"] = {
-                "projectID": project_receipt["projectID"],
-                "workspaceID": project_receipt["workspaceID"],
-                "preparationID": project_receipt["preparationID"],
-                "name": "Local project",
-                "projectRevision": 1,
-                "configDigest": "sha256:" + "0" * 64,
-                "preparationRevision": 4,
-                "preparationState": "failed",
-                "steps": {"agent": "verified", "workspace": "verified"},
-                "reasonCode": "providerUnavailable",
-                "retryable": True,
-                "executionReady": False,
-            }
-
-        task = schema.get("paths", {}).get(f"{API_PREFIX}/tasks/{{taskID}}", {}).get("get")
-        if task is not None:
-            task["responses"]["200"]["content"]["application/json"]["example"] = {
-                "taskID": "66666666-6666-4666-8666-666666666666",
-                "projectID": project_receipt["projectID"],
-                "sessionID": "77777777-7777-4777-8777-777777777777",
-                "title": "Registered metadata",
-                "taskRevision": 1,
-                "preparationState": "ready",
-                "executionReady": False,
-            }
-
-        turn = schema.get("paths", {}).get(f"{API_PREFIX}/tasks/{{taskID}}/turns", {}).get("post")
-        if turn is not None:
-            turn["requestBody"]["content"]["application/json"]["example"] = {
-                "commandID": "22222222-2222-4222-8222-222222222222",
-                "idempotencyKey": "new-message-example",
-                "expectedRestoreEpoch": 1,
-                "contextMode": "newMessage",
-                "userMessageID": "66666666-6666-4666-8666-666666666666",
-                "expectedProjectRevision": 1,
-                "prompt": "A new text message for the opt-in local Task worker.",
-                "inputArtifactIDs": [],
-                "selectedSkillIDs": [],
-                "permissionMode": "askForApproval",
-            }
-            if receipt is not None:
-                turn["responses"]["201"]["content"]["application/json"]["example"] = receipt[
-                    "responses"
-                ]["200"]["content"]["application/json"]["example"]
-
-        run = schema.get("paths", {}).get(f"{API_PREFIX}/runs/{{runID}}", {}).get("get")
-        if run is not None:
-            run_example = {
-                "runID": "55555555-5555-4555-8555-555555555555",
-                "turnID": "44444444-4444-4444-8444-444444444444",
-                "taskID": "33333333-3333-4333-8333-333333333333",
-                "projectID": "88888888-8888-4888-8888-888888888888",
-                "state": "queued",
-                "dispatchPhase": "notDispatched",
-                "executionEpoch": 0,
-                "restoreEpoch": 1,
-                "revision": 1,
-                "reconciliationRequired": False,
-                "cancelRequested": False,
-                "createdAt": "2026-10-12T00:00:00Z",
-                "updatedAt": "2026-10-12T00:00:00Z",
-            }
-            run["responses"]["200"]["content"]["application/json"]["examples"] = {
-                "notDispatched": {
-                    "summary": "Durable registration; no engine handoff",
-                    "value": run_example,
-                },
-                "claimed": {
-                    "summary": "Worker reserved; no model start",
-                    "value": {
-                        **run_example,
-                        "dispatchPhase": "claimed",
-                        "executionEpoch": 1,
-                        "revision": 2,
-                    },
-                },
-                "dispatching": {
-                    "summary": "Handoff may have started; no intake confirmation",
-                    "value": {
-                        **run_example,
-                        "dispatchPhase": "dispatching",
-                        "executionEpoch": 1,
-                        "revision": 3,
-                    },
-                },
-                "engineAccepted": {
-                    "summary": "Application intake recorded; model start unproven",
-                    "value": {
-                        **run_example,
-                        "dispatchPhase": "engineAccepted",
-                        "executionEpoch": 1,
-                        "revision": 4,
-                    },
-                },
-                "cancelRequested": {
-                    "summary": "Cancellation accepted for a claimed Run; engine stop unproven",
-                    "value": {
-                        **run_example,
-                        "dispatchPhase": "claimed",
-                        "executionEpoch": 1,
-                        "revision": 3,
-                        "cancelRequested": True,
-                    },
-                },
-                "interrupted": {
-                    "summary": "Uncertain handoff; Task and project lanes remain held",
-                    "value": {
-                        **run_example,
-                        "state": "interrupted",
-                        "dispatchPhase": "dispatching",
-                        "executionEpoch": 1,
-                        "revision": 4,
-                        "reconciliationRequired": True,
-                    },
-                },
-            }
 
         for path, path_item in schema.get("paths", {}).items():
             if not path.startswith("/api/") or is_jwt_exempt_path(path):

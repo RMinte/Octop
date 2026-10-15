@@ -16,7 +16,7 @@ class AcRunRow:
     run_id: str
     turn_id: str
     task_id: str
-    project_id: str
+    project_id: str | None
     owner_id: int
     state: str
     dispatch_phase: str
@@ -39,7 +39,7 @@ class AcRunRow:
             run_id=str(r["run_id"]),
             turn_id=str(r["turn_id"]),
             task_id=str(r["task_id"]),
-            project_id=str(r["project_id"]),
+            project_id=str(r["project_id"]) if r["project_id"] is not None else None,
             owner_id=strict_int(r["owner_id"]),
             state=str(r["state"]),
             dispatch_phase=str(r["dispatch_phase"]),
@@ -101,15 +101,17 @@ class AcRunRepo:
         conn: Any, box_id: str, *, after_pk: int, through_pk: int
     ) -> list[AcRunRecoveryCandidate]:
         rows = conn.execute(
-            "SELECT r.id, r.run_id, r.owner_id FROM ac_runs r JOIN ac_projects p "
+            "SELECT r.id, r.run_id, r.owner_id FROM ac_runs r LEFT JOIN ac_projects p "
             "ON p.project_id=r.project_id AND p.owner_id=r.owner_id "
             "JOIN ac_tasks t ON t.task_id=r.task_id AND t.owner_id=r.owner_id "
-            "WHERE p.box_id=? AND r.id>? AND r.id<=? AND r.state='queued' "
+            "WHERE r.id>? AND r.id<=? AND r.state='queued' "
             "AND r.dispatch_phase='notDispatched' AND r.execution_epoch=0 "
-            "AND r.reconciliation_required=0 AND p.preparation_state='ready' "
-            "AND t.preparation_state='ready' AND p.active_run_id=r.run_id "
-            "AND t.active_run_id=r.run_id ORDER BY r.id LIMIT 100",
-            (box_id, after_pk, through_pk),
+            "AND r.reconciliation_required=0 AND t.preparation_state='ready' "
+            "AND t.active_run_id=r.run_id AND ((r.project_id IS NOT NULL "
+            "AND t.project_id=r.project_id AND p.box_id=? AND p.preparation_state='ready' "
+            "AND p.active_run_id=r.run_id) OR (r.project_id IS NULL AND t.project_id IS NULL "
+            "AND t.standalone_box_id=?)) ORDER BY r.id LIMIT 100",
+            (after_pk, through_pk, box_id, box_id),
         ).fetchall()
         return [AcRunRecoveryCandidate.from_row(row) for row in rows]
 
@@ -157,13 +159,16 @@ class AcRunRepo:
         conn: Any, box_id: str, *, after_pk: int, through_pk: int
     ) -> list[AcRunRecoveryCandidate]:
         rows = conn.execute(
-            "SELECT r.id, r.run_id, r.owner_id FROM ac_runs r JOIN ac_projects p "
+            "SELECT r.id, r.run_id, r.owner_id FROM ac_runs r LEFT JOIN ac_projects p "
             "ON p.project_id = r.project_id AND p.owner_id = r.owner_id "
-            "WHERE p.box_id = ? AND r.id > ? AND r.id <= ? "
+            "JOIN ac_tasks t ON t.task_id=r.task_id AND t.owner_id=r.owner_id "
+            "WHERE r.id > ? AND r.id <= ? "
             "AND r.state IN ('queued', 'running', 'waitingApproval', 'waitingInput') "
             "AND r.dispatch_phase IN ('claimed', 'dispatching', 'engineAccepted') "
-            "AND r.reconciliation_required = 0 ORDER BY r.id LIMIT 100",
-            (box_id, after_pk, through_pk),
+            "AND r.reconciliation_required = 0 AND ((r.project_id IS NOT NULL "
+            "AND t.project_id=r.project_id AND p.box_id=?) OR (r.project_id IS NULL "
+            "AND t.project_id IS NULL AND t.standalone_box_id=?)) ORDER BY r.id LIMIT 100",
+            (after_pk, through_pk, box_id, box_id),
         ).fetchall()
         return [AcRunRecoveryCandidate.from_row(row) for row in rows]
 
@@ -176,6 +181,7 @@ class AcRunRepo:
         restore_epoch: int,
         *,
         updated_at: int,
+        box_id: str | None = None,
     ) -> AcRunRow | None:
         row = conn.execute(
             "UPDATE ac_runs SET dispatch_phase = 'claimed', execution_epoch = execution_epoch + 1, "
@@ -184,12 +190,14 @@ class AcRunRepo:
             "AND state = 'queued' AND dispatch_phase = 'notDispatched' "
             "AND execution_epoch = 0 AND reconciliation_required = 0 "
             "AND EXISTS (SELECT 1 FROM ac_tasks t WHERE t.task_id = ac_runs.task_id "
-            "AND t.project_id = ac_runs.project_id AND t.owner_id = ac_runs.owner_id "
-            "AND t.preparation_state = 'ready' AND t.active_run_id = ac_runs.run_id) "
-            "AND EXISTS (SELECT 1 FROM ac_projects p WHERE p.project_id = ac_runs.project_id "
-            "AND p.owner_id = ac_runs.owner_id AND p.preparation_state = 'ready' "
-            "AND p.active_run_id = ac_runs.run_id) RETURNING *",
-            (updated_at, run_id, owner_id, expected_revision, restore_epoch),
+            "AND t.owner_id = ac_runs.owner_id AND t.preparation_state = 'ready' "
+            "AND t.active_run_id = ac_runs.run_id AND ((ac_runs.project_id IS NOT NULL "
+            "AND t.project_id=ac_runs.project_id AND EXISTS (SELECT 1 FROM ac_projects p "
+            "WHERE p.project_id=ac_runs.project_id AND p.owner_id=ac_runs.owner_id "
+            "AND p.preparation_state='ready' AND p.active_run_id=ac_runs.run_id)) "
+            "OR (ac_runs.project_id IS NULL AND t.project_id IS NULL "
+            "AND t.standalone_box_id=?))) RETURNING *",
+            (updated_at, run_id, owner_id, expected_revision, restore_epoch, box_id),
         ).fetchone()
         return AcRunRow.from_row(row) if row is not None else None
 
@@ -284,6 +292,7 @@ class AcRunRepo:
         execution_epoch: int,
         *,
         updated_at: int,
+        box_id: str | None = None,
     ) -> AcRunRow | None:
         """Complete only the unchanged accepted Run with both lanes and no side work."""
         row = conn.execute(
@@ -292,9 +301,12 @@ class AcRunRepo:
             "AND execution_epoch=? AND execution_epoch>0 AND state='queued' "
             "AND dispatch_phase='engineAccepted' AND reconciliation_required=0 "
             "AND EXISTS (SELECT 1 FROM ac_tasks t WHERE t.task_id=ac_runs.task_id "
-            "AND t.owner_id=ac_runs.owner_id AND t.active_run_id=ac_runs.run_id) "
+            "AND t.owner_id=ac_runs.owner_id AND t.active_run_id=ac_runs.run_id "
+            "AND ((ac_runs.project_id IS NOT NULL AND t.project_id=ac_runs.project_id "
             "AND EXISTS (SELECT 1 FROM ac_projects p WHERE p.project_id=ac_runs.project_id "
-            "AND p.owner_id=ac_runs.owner_id AND p.active_run_id=ac_runs.run_id) "
+            "AND p.owner_id=ac_runs.owner_id AND p.active_run_id=ac_runs.run_id)) "
+            "OR (ac_runs.project_id IS NULL AND t.project_id IS NULL "
+            "AND t.standalone_box_id=?))) "
             "AND NOT EXISTS (SELECT 1 FROM ac_run_cancellations c WHERE c.run_id=ac_runs.run_id) "
             "AND NOT EXISTS (SELECT 1 FROM ac_tool_effects e WHERE e.run_id=ac_runs.run_id) "
             "AND NOT EXISTS (SELECT 1 FROM ac_run_pauses a WHERE a.run_id=ac_runs.run_id) "
@@ -306,6 +318,7 @@ class AcRunRepo:
                 expected_revision,
                 restore_epoch,
                 execution_epoch,
+                box_id,
             ),
         ).fetchone()
         return AcRunRow.from_row(row) if row is not None else None
@@ -415,7 +428,7 @@ class AcRunRepo:
         run_id: str,
         turn_id: str,
         task_id: str,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         state: str,
         dispatch_phase: str,

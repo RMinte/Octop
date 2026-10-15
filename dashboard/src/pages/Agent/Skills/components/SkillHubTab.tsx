@@ -482,6 +482,7 @@ export default function SkillHubTab({
                       <Download size={14} />
                     )
                   }
+                  disabled={!!onPick && isInstalled(skill.slug)}
                   loading={installingSlug === skill.slug}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -507,6 +508,7 @@ export default function SkillHubTab({
         skill={selectedSkill}
         onClose={() => setDrawerOpen(false)}
         onInstall={(skill) => void handleInstall(skill)}
+        pickMode={!!onPick}
         installing={installingSlug === selectedSkill?.slug}
         isInstalled={!!selectedSkill && isInstalled(selectedSkill.slug)}
       />

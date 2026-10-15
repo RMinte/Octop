@@ -50,38 +50,19 @@ _ACP_GLOBAL = re.compile(r"^/api/acp(?:/[^/]+)?$")
 _CRON_SETTINGS = re.compile(r"^/api/cron/settings$")
 _CONNECTOR_INSTANCES_LIST = re.compile(r"^/api/connector-instances$")
 
-# AgentComputer exposes a separate, owner-scoped project/Task protocol. Only
-# the endpoints needed by the remote project and conversation pages may cross
-# a Bridge. Keep write methods and resource shapes explicit: this is not an
-# escape hatch into the rest of the peer's control plane.
-_AC_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+# Only the independent project/task contract can cross this protocol boundary.
+_AC_PROJECT = r"proj_[A-Za-z0-9]+"
+_AC_TASK = r"task_[A-Za-z0-9]+"
 _AGENTCOMPUTER_READ = re.compile(
-    rf"^/api/agentcomputer/v1/(?:"
-    rf"capabilities|projects|projects/{_AC_UUID}|projects/{_AC_UUID}/documents|"
-    rf"projects/{_AC_UUID}/tasks|"
-    rf"tasks/{_AC_UUID}|tasks/{_AC_UUID}/turns|"
-    rf"runs/{_AC_UUID}|runs/{_AC_UUID}/result|runs/{_AC_UUID}/output|"
-    rf"runs/{_AC_UUID}/tool-activity|commands/{_AC_UUID}"
-    rf")$"
+    rf"^/api/agentcomputer/v1/(?:capabilities|projects|projects/resources|"
+    rf"projects/{_AC_PROJECT}|projects/{_AC_PROJECT}/tasks|tasks|"
+    rf"tasks/{_AC_TASK}|tasks/{_AC_TASK}/turns)$"
 )
-_AGENTCOMPUTER_WRITE = re.compile(
-    rf"^/api/agentcomputer/v1/(?:projects|projects/{_AC_UUID}/tasks|tasks/{_AC_UUID}/turns)$"
+_AGENTCOMPUTER_CREATE = re.compile(
+    rf"^/api/agentcomputer/v1/(?:projects|projects/{_AC_PROJECT}/tasks|tasks|"
+    rf"tasks/{_AC_TASK}/(?:turns|cancel))$"
 )
-_AGENTCOMPUTER_DOCUMENT = re.compile(
-    rf"^/api/agentcomputer/v1/projects/{_AC_UUID}/documents/(?P<filename>[^/]+)$"
-)
-
-
-def _allowed_document_filename(filename: str) -> bool:
-    # Mirror the peer's single-file text-document contract. Never let a
-    # general workspace path or percent-encoded separator enter the tunnel.
-    return (
-        1 <= len(filename) <= 128
-        and filename == filename.strip()
-        and not filename.startswith(".")
-        and filename.endswith((".md", ".txt"))
-        and all(character.isalnum() or character in "._-" for character in filename)
-    )
+_AGENTCOMPUTER_EDIT = re.compile(rf"^/api/agentcomputer/v1/projects/{_AC_PROJECT}$")
 
 
 def is_tunnel_path_allowed(method: str, path: str) -> bool:
@@ -129,9 +110,6 @@ def is_tunnel_path_allowed(method: str, path: str) -> bool:
 
     if _AGENTCOMPUTER_READ.fullmatch(raw) and verb == "GET":
         return True
-
-    document = _AGENTCOMPUTER_DOCUMENT.fullmatch(raw)
-    if document is not None and verb in {"GET", "PUT"}:
-        return _allowed_document_filename(document.group("filename"))
-
-    return bool(_AGENTCOMPUTER_WRITE.fullmatch(raw) and verb == "POST")
+    if _AGENTCOMPUTER_EDIT.fullmatch(raw) and verb in {"PATCH", "PUT"}:
+        return True
+    return verb == "POST" and _AGENTCOMPUTER_CREATE.fullmatch(raw) is not None

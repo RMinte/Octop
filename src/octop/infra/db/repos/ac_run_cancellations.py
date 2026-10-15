@@ -16,7 +16,7 @@ class AcRunCancellationRow:
     run_id: str
     turn_id: str
     task_id: str
-    project_id: str
+    project_id: str | None
     owner_id: int
     command_id: str
     restore_epoch: int
@@ -34,7 +34,7 @@ class AcRunCancellationRow:
             run_id=str(row["run_id"]),
             turn_id=str(row["turn_id"]),
             task_id=str(row["task_id"]),
-            project_id=str(row["project_id"]),
+            project_id=str(row["project_id"]) if row["project_id"] is not None else None,
             owner_id=strict_int(row["owner_id"]),
             command_id=str(row["command_id"]),
             restore_epoch=strict_int(row["restore_epoch"]),
@@ -75,7 +75,7 @@ class AcRunCancellationRepo:
         run_id: str,
         turn_id: str,
         task_id: str,
-        project_id: str,
+        project_id: str | None,
         owner_id: int,
         command_id: str,
         restore_epoch: int,
