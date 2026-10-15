@@ -106,7 +106,8 @@ class ProjectTaskRepo:
     def insert(conn: Any, row: ProjectTaskRow) -> None:
         conn.execute(
             "INSERT INTO project_tasks(task_id, owner_id, project_id, title, request_id, "
-            "active_turn_id, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "active_turn_id, created_at, updated_at, status, title_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional')",
             (
                 row.task_id,
                 row.owner_id,
@@ -160,15 +161,19 @@ class ProjectTaskRepo:
 
     @staticmethod
     def update_metadata(
-        conn: Any, row: ProjectTaskRow, expected_revision: int
+        conn: Any, row: ProjectTaskRow, expected_revision: int, *, manual_title: bool = False
     ) -> ProjectTaskRow | None:
         result = conn.execute(
-            "UPDATE project_tasks SET title=?, archived=?, updated_at=?, list_revision=list_revision+1 "
+            "UPDATE project_tasks SET title=?, archived=?, updated_at=?, list_revision=list_revision+1, "
+            "title_source=CASE WHEN ?=1 THEN 'manual' ELSE title_source END, "
+            "title_revision=title_revision+? "
             "WHERE task_id=? AND owner_id=? AND list_revision=? RETURNING *",
             (
                 row.title,
                 int(row.archived),
                 row.updated_at,
+                int(manual_title),
+                int(manual_title),
                 row.task_id,
                 row.owner_id,
                 expected_revision,
@@ -181,6 +186,23 @@ class ProjectTaskRepo:
             conn, updated.owner_id, task_scope(updated.project_id), updated.task_id, updated
         )
         return updated
+
+    @staticmethod
+    def apply_generated_title(
+        conn: Any, task_id: str, owner_id: int, title_revision: int, title: str
+    ) -> bool:
+        result = conn.execute(
+            "UPDATE project_tasks SET title=?, title_source='generated', "
+            "title_revision=title_revision+1, list_revision=list_revision+1 "
+            "WHERE task_id=? AND owner_id=? AND title_source='provisional' "
+            "AND title_revision=? RETURNING *",
+            (title, task_id, owner_id, title_revision),
+        ).fetchone()
+        if result is None:
+            return False
+        row = ProjectTaskRow.from_row(result)
+        record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
+        return True
 
     def runtime_owner(self, task_id: str) -> int | None:
         with self._db.connect() as conn:

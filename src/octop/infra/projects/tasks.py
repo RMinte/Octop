@@ -28,6 +28,7 @@ from octop.infra.projects.models import (
 )
 from octop.infra.projects.service import _validate, get_project
 from octop.infra.projects.service import resources as project_resources
+from octop.infra.projects.title_policy import provisional_title
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.ulid import new_ulid
 
@@ -449,7 +450,7 @@ def send(
                     task_id,
                     owner_id,
                     project_id,
-                    body.prompt[:80],
+                    provisional_title(body.prompt),
                     body.request_id,
                     turn_id,
                     now,
@@ -475,6 +476,7 @@ def send(
                     now,
                 ),
             )
+            services.project_task_title_repo.enqueue(conn, task_id)
     assert task_id is not None
     return detail(services, owner_id, task_id)
 
@@ -528,12 +530,15 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
         archived = body.archived if body.archived is not None else current.archived
         if archived and not current.archived and current.active_turn_id:
             raise OctopError.localized(ErrorCode.TASK_BUSY)
-        if title != current.title or archived != current.archived:
+        if body.title is not None or archived != current.archived:
             updated = repo.update_metadata(
                 conn,
                 replace(current, title=title, archived=archived, updated_at=now_ms()),
                 body.expected_revision,
+                manual_title=body.title is not None,
             )
             if updated is None:
                 raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+            if body.title is not None:
+                services.project_task_title_repo.skip_pending(conn, task_id)
     return detail(services, owner_id, task_id)

@@ -186,8 +186,17 @@ def patch_harness(fake_agent: Any | None = None):
             providers=kw.get("providers"),
         )
 
-    with patch(
-        "octop.infra.agents.manager.HarnessAgentManager",
-        side_effect=_constructor,
+    with (
+        patch(
+            "octop.infra.agents.manager.HarnessAgentManager",
+            side_effect=_constructor,
+        ),
+        patch("octop.infra.projects.title.ChatModelFactory") as title_factory,
     ):
+        from langchain_core.messages import AIMessage
+
+        title_model = title_factory.return_value.get_chat_model.return_value
+        title_model._harness_max_output_tokens = 8_192
+        title_model.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        title_factory.return_value.aclose = AsyncMock()
         yield agent

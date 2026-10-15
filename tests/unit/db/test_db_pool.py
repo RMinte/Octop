@@ -149,6 +149,7 @@ def test_run_migrations_creates_tables(db: SqlitePool):
         "project_tasks",
         "project_task_turns",
         "project_task_tool_calls",
+        "project_task_titles",
         "project_create_requests",
         "project_sync_scopes",
         "project_sync_changes",
@@ -214,7 +215,7 @@ def test_v20_database_receives_independent_tables_without_changing_existing_sche
         run_migrations(pool)
         run_migrations(pool)
         with pool.connect() as conn:
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 35
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 36
             assert conn.execute("SELECT username FROM users").fetchone()[0] == "preserved-user"
             after = {
                 tuple(row)
@@ -229,6 +230,7 @@ def test_v20_database_receives_independent_tables_without_changing_existing_sche
                 "project_tasks",
                 "project_task_turns",
                 "project_task_tool_calls",
+                "project_task_titles",
                 "project_create_requests",
                 "project_sync_scopes",
                 "project_sync_changes",
@@ -303,7 +305,7 @@ def test_retired_agentcomputer_schema_and_data_are_preserved(
                 )
             }
             assert names == {"ac_projects", "ac_tasks"}
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 35
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 36
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -329,7 +331,7 @@ def test_high_watermark_repairs_missing_independent_tables(tmp_path: Path, monke
     run_migrations(pool)
     run_migrations(pool)
     with pool.connect() as conn:
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 35
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 36
         names = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -365,7 +367,7 @@ def test_run_migrations_idempotent(db: SqlitePool):
         sso_indexes = {
             r["name"] for r in conn.execute("PRAGMA index_list(sso_providers)").fetchall()
         }
-    assert v == 35
+    assert v == 36
     assert "login_failed_count" in cols
     assert "login_locked_until" in cols
     assert "preferences_json" in cols
@@ -447,7 +449,7 @@ def test_migration_002_idempotent_when_column_already_present(tmp_path: Path) ->
     with pool.connect() as conn:
         v = conn.execute("SELECT version FROM _schema_version").fetchone()[0]
         cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)").fetchall()}
-    assert v == 35
+    assert v == 36
     assert "mcp_servers" in cron_cols
     assert "skill_packages" in {
         r["name"]
@@ -586,7 +588,7 @@ def test_stuck_version_6_without_permissions_column_is_repaired(tmp_path: Path) 
     with pool.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         version = conn.execute("SELECT version FROM _schema_version").fetchone()[0]
-    assert version == 35
+    assert version == 36
     assert "permissions" in cols
 
 
@@ -611,7 +613,7 @@ def test_schema_v10_without_projection_tables_is_repaired(tmp_path: Path) -> Non
         }
         kb_cols = {r["name"] for r in conn.execute("PRAGMA table_info(knowledge_bases)").fetchall()}
         cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)").fetchall()}
-    assert version == 35
+    assert version == 36
     assert {"thread_messages", "thread_history_projection", "trajectory_events"}.issubset(
         table_names
     )
@@ -646,7 +648,7 @@ def test_ahead_of_max_schema_version_clamps_to_max(tmp_path: Path) -> None:
             r["name"]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-    assert version == 35
+    assert version == 36
     assert "skill_package_id" in pkg_cols
     assert "published_expert_id" in pub_cols
     assert "user_invites" in invite_tables
@@ -729,7 +731,7 @@ def test_pre_squash_schema_version_clamped_and_knowledge_tables_filled(
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-    assert version == 35
+    assert version == 36
     assert "permissions" in user_cols
     assert {
         "published_experts",
@@ -935,7 +937,7 @@ def test_v14_to_v15_adds_sso_provider_kind_without_rebuilding(tmp_path: Path) ->
         bound = conn.execute(
             "SELECT sso_provider_id FROM users WHERE username = 'sso-admin'"
         ).fetchone()[0]
-    assert version == 35
+    assert version == 36
     assert int(row["id"]) == int(provider_id)
     assert row["kind"] == "oidc"
     assert row["extra"] == "{}"
@@ -1045,7 +1047,7 @@ def test_project_client_directory_upgrade_preserves_existing_project(
             after = dict(conn.execute("SELECT * FROM projects").fetchone())
             assert after.pop("client_directory") is None
             assert after == before
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 35
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 36
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -1104,6 +1106,9 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
                 assert after_task.pop("list_revision") == 1
             if "archived" not in before_task:
                 assert after_task.pop("archived") == 0
+            assert after_task.pop("title_source") == "manual"
+            assert after_task.pop("title_revision") == 1
+            assert conn.execute("SELECT COUNT(*) FROM project_task_titles").fetchone()[0] == 0
             assert after_task.pop("status") == turn_status
             assert "idx_project_tasks_archive_page" in {
                 r["name"] for r in conn.execute("PRAGMA index_list(project_tasks)")
@@ -1111,7 +1116,53 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
             assert after_task == before_task
             assert dict(conn.execute("SELECT * FROM project_task_turns").fetchone()) == before_turn
             assert conn.execute("SELECT COUNT(*) FROM project_sync_changes").fetchone()[0] == 0
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 35
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 36
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        pool.close()
+
+
+@pytest.mark.parametrize("direct_sql", [False, True])
+def test_v35_title_upgrade_preserves_existing_titles(tmp_path, monkeypatch, direct_sql):
+    import shutil
+
+    from octop.infra.db import migrate
+
+    old_migrations = tmp_path / "v35-migrations"
+    old_migrations.mkdir()
+    for version, source in migrate._discover("sqlite"):
+        if version <= 35:
+            shutil.copy2(source, old_migrations / source.name)
+    pool = SqlitePool(tmp_path / "v35-title-upgrade.db")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
+            run_migrations(pool)
+        with pool.transaction() as conn:
+            owner = conn.execute(
+                "INSERT INTO users(username,password_hash,role,created_at) "
+                "VALUES('title-owner','x','user',1) RETURNING id"
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO project_tasks(task_id,owner_id,title,request_id,created_at,updated_at) "
+                "VALUES('task_existing',?,'User chosen title','existing-request',123,456)",
+                (owner,),
+            )
+            before = dict(conn.execute("SELECT * FROM project_tasks").fetchone())
+        if direct_sql:
+            with pool.connect() as conn:
+                conn.executescript(
+                    (migrate._MIGRATIONS_DIR / "036_task_titles.sql").read_text(encoding="utf-8")
+                )
+        run_migrations(pool)
+        run_migrations(pool)
+        with pool.connect() as conn:
+            after = dict(conn.execute("SELECT * FROM project_tasks").fetchone())
+            assert after.pop("title_source") == "manual"
+            assert after.pop("title_revision") == 1
+            assert after == before
+            assert conn.execute("SELECT COUNT(*) FROM project_task_titles").fetchone()[0] == 0
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 36
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()

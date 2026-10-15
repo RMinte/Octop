@@ -32,6 +32,7 @@ from octop.infra.projects.client_tools import ClientToolBroker
 from octop.infra.projects.models import ProjectFields, SkillBinding
 from octop.infra.projects.service import _validate
 from octop.infra.projects.tasks import now_ms
+from octop.infra.projects.title import TaskTitleWorker
 from octop.infra.skills.install import prepare_skillhub_package
 from octop.infra.skills.skill_package_store import SkillPackageStore
 from octop.infra.skills.skillhub_market import download_skillhub_package_files
@@ -238,16 +239,20 @@ class ProjectTaskWorker:
         self._wake = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
         self._current: asyncio.Task[None] | None = None
+        self.title_worker = TaskTitleWorker(services)
 
     async def start(self) -> None:
         self._loop_task = asyncio.create_task(self._loop())
+        await self.title_worker.start()
 
     def wake(self) -> None:
         self._wake.set()
+        self.title_worker.wake()
 
     async def close(self) -> None:
         self.closing = True
         self._wake.set()
+        await self.title_worker.close()
         if self._loop_task:
             await self._loop_task
 

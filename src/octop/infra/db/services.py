@@ -18,6 +18,7 @@ from octop.infra.db.repos.invites import InviteRepo
 from octop.infra.db.repos.knowledge import KnowledgeRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
 from octop.infra.db.repos.project_sync import ProjectSyncRepo
+from octop.infra.db.repos.project_task_titles import ProjectTaskTitleRepo
 from octop.infra.db.repos.project_task_tool_calls import ProjectTaskToolCallRepo
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRepo
 from octop.infra.db.repos.project_tasks import ProjectTaskRepo
@@ -45,6 +46,7 @@ class RepoBundle:
 
     project_sync_repo: ProjectSyncRepo
     project_task_repo: ProjectTaskRepo
+    project_task_title_repo: ProjectTaskTitleRepo
     project_task_tool_call_repo: ProjectTaskToolCallRepo
     project_task_turn_repo: ProjectTaskTurnRepo
     project_repo: ProjectRepo
@@ -80,6 +82,7 @@ class RepoBundle:
             db=db,
             project_sync_repo=ProjectSyncRepo(),
             project_task_repo=ProjectTaskRepo(db),
+            project_task_title_repo=ProjectTaskTitleRepo(db),
             project_task_turn_repo=ProjectTaskTurnRepo(db),
             project_task_tool_call_repo=ProjectTaskToolCallRepo(),
             project_repo=ProjectRepo(db),
@@ -128,6 +131,10 @@ class SharedServices:
     @property
     def project_task_repo(self) -> ProjectTaskRepo:
         return self.repos.project_task_repo
+
+    @property
+    def project_task_title_repo(self) -> ProjectTaskTitleRepo:
+        return self.repos.project_task_title_repo
 
     @property
     def project_task_tool_call_repo(self) -> ProjectTaskToolCallRepo:
