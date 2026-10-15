@@ -58,8 +58,6 @@ class TaskSyncPage(ProjectModel):
 
 
 class _Cursor(ProjectModel):
-    context: str
-    kind: Literal["sync", "history", "delta"]
     position: int = Field(default=0, ge=0)
     cutoff: int = Field(default=0, ge=0)
     after: str = Field(default="", max_length=256)
@@ -75,30 +73,51 @@ class _Codec:
     context: str
     key: bytes
 
+    def _signature(self, kind: str, raw: bytes) -> bytes:
+        # Bind scope and purpose without carrying either in the URL.
+        message = self.context.encode() + b"\0" + kind.encode() + b"\0" + raw
+        return hmac.new(self.key, message, hashlib.sha256).digest()[: 8 if kind == "sync" else 16]
+
     def encode(self, kind: Literal["sync", "history", "delta"], **values: int | str) -> str:
-        raw = (
-            _Cursor.model_validate({"context": self.context, "kind": kind, **values})
-            .model_dump_json()
-            .encode()
-        )
-        data = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-        signature = hmac.new(self.key, data.encode(), hashlib.sha256).hexdigest()
-        return data + "." + signature
+        cursor = _Cursor.model_validate(values)
+        if kind == "sync":
+            raw = cursor.position.to_bytes(max(1, (cursor.position.bit_length() + 7) // 8), "big")
+        elif kind == "history":
+            raw = cursor.updated_at.to_bytes(8, "big") + cursor.after.encode()
+        else:
+            raw = (
+                cursor.position.to_bytes(8, "big")
+                + cursor.cutoff.to_bytes(8, "big")
+                + cursor.after.encode()
+            )
+        return base64.urlsafe_b64encode(raw + self._signature(kind, raw)).decode().rstrip("=")
 
     def decode(self, token: str, kind: Literal["sync", "history", "delta"]) -> _Cursor:
         try:
             if len(token) > 4096:
                 raise ValueError("cursor too long")
-            data, signature = token.split(".")
-            expected = hmac.new(self.key, data.encode(), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(signature, expected):
+            data = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+            if base64.urlsafe_b64encode(data).decode().rstrip("=") != token:
+                raise ValueError("cursor encoding")
+            signature_size = 8 if kind == "sync" else 16
+            raw, signature = data[:-signature_size], data[-signature_size:]
+            if not hmac.compare_digest(signature, self._signature(kind, raw)):
                 raise ValueError("cursor signature")
-            cursor = _Cursor.model_validate_json(
-                base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+            if kind == "sync":
+                if not 1 <= len(raw) <= 8 or (len(raw) > 1 and raw[0] == 0):
+                    raise ValueError("cursor size")
+                return _Cursor(position=int.from_bytes(raw, "big"))
+            offset = 8 if kind == "history" else 16
+            if len(raw) < offset:
+                raise ValueError("cursor size")
+            after = raw[offset:].decode()
+            if kind == "history":
+                return _Cursor(updated_at=int.from_bytes(raw[:8], "big"), after=after)
+            return _Cursor(
+                position=int.from_bytes(raw[:8], "big"),
+                cutoff=int.from_bytes(raw[8:16], "big"),
+                after=after,
             )
-            if cursor.context != self.context or cursor.kind != kind:
-                raise ValueError("cursor scope")
-            return cursor
         except (ValueError, TypeError, ValidationError, binascii.Error) as exc:
             raise _reset() from exc
 
@@ -111,8 +130,8 @@ def _codec(services: SharedServices, owner_id: int, scope: str) -> _Codec:
     secret = services.secret_repo.get("jwt")
     assert secret is not None
     return _Codec(
-        context=f"v1:{identity.boxID}:{identity.restoreEpoch}:{owner_id}:{scope}",
-        key=hmac.new(secret, b"octop-list-sync-v1", hashlib.sha256).digest(),
+        context=f"v2:{identity.boxID}:{identity.restoreEpoch}:{owner_id}:{scope}",
+        key=hmac.new(secret, b"octop-list-sync-v2", hashlib.sha256).digest(),
     )
 
 

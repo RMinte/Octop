@@ -454,6 +454,7 @@ async def test_task_cursor_scope_tamper_and_transaction_rollback(env):
     owner = await resolve_user_id(client, auth, "admin")
     first = (await client.get("/api/project-tasks", headers=auth)).json()
     assert first["items"] == [] and first["sync_cursor"]
+    assert len(first["sync_cursor"]) <= 16
     with pytest.raises(RuntimeError), server.services.db.transaction() as conn:
         server.services.project_task_repo.insert(
             conn,

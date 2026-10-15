@@ -106,7 +106,7 @@ export default function TaskConversations({
     void refresh();
     const timer = window.setInterval(() => {
       if (!document.hidden && !inFlight.current) void refresh();
-    }, 1000);
+    }, 30_000);
     const visible = () => {
       if (!document.hidden) void refresh();
     };
