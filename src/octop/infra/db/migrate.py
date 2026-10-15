@@ -1927,9 +1927,11 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
             _ensure_column(db, "project_task_turns", "input_tokens", "BIGINT NOT NULL DEFAULT 0")
             _ensure_column(db, "project_task_turns", "output_tokens", "BIGINT NOT NULL DEFAULT 0")
         elif version in {33, 34}:
+            status_missing = False
             if version == 33:
                 _ensure_column(db, "project_tasks", "list_revision", "BIGINT NOT NULL DEFAULT 1")
             else:
+                status_missing = "status" not in _table_columns(db, "project_tasks")
                 _ensure_column(
                     db,
                     "project_tasks",
@@ -1938,7 +1940,15 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
                 )
             with db.transaction() as conn:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
-                    if not stmt.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
+                    if stmt.startswith(
+                        (
+                            "ALTER TABLE project_tasks ADD COLUMN status ",
+                            "UPDATE project_tasks SET status=",
+                        )
+                    ):
+                        if status_missing:
+                            conn.execute(stmt)
+                    elif not stmt.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
                         conn.execute(stmt)
         elif any(not _table_exists(db, table) for table in tables[version]):
             with db.transaction() as conn:

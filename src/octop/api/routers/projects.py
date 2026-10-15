@@ -125,7 +125,7 @@ async def sync_projects(
     "/{project_id}/tasks/sync",
     response_model=sync.TaskSyncPage,
     summary="同步任务列表最终状态",
-    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。也返回移出当前归档筛选的摘要，调用方应按 archived 字段更新显示范围。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+    description="只返回该列表基线之后变化的任务摘要，包含任务 status 和 list_revision，同一任务合并为最终状态，不包含正文。也返回移出当前归档筛选的摘要，调用方应按 archived 字段更新显示范围。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
 )
 async def sync_project_tasks(
     project_id: str,
@@ -213,7 +213,7 @@ async def update_project(
     "/{project_id}/tasks",
     response_model=sync.TaskListPage,
     summary="列出项目任务",
-    description="按最近活动位置分页，默认 50 条。仅首页返回独立同步基线，不读取任务正文。",
+    description="按最近活动位置分页，包含每个任务的 status 和 list_revision，无需逐个读取详情。默认 50 条；仅首页返回独立同步基线，不读取任务正文。",
 )
 async def list_project_tasks(
     project_id: str,
@@ -277,7 +277,7 @@ task_router = APIRouter(prefix="/project-tasks")
     "",
     response_model=sync.TaskListPage,
     summary="列出无项目任务",
-    description="按最近活动位置分页读取本人无项目任务摘要，默认 50 条；仅首页返回同步基线。",
+    description="按最近活动位置分页读取本人无项目任务摘要，包含每个任务的 status 和 list_revision，无需逐个读取详情。默认 50 条；仅首页返回同步基线。",
 )
 async def list_standalone_tasks(
     response: Response,
@@ -329,7 +329,7 @@ async def create_task(
     "/sync",
     response_model=sync.TaskSyncPage,
     summary="同步任务列表最终状态",
-    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。也返回移出当前归档筛选的摘要，调用方应按 archived 字段更新显示范围。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+    description="只返回该列表基线之后变化的任务摘要，包含任务 status 和 list_revision，同一任务合并为最终状态，不包含正文。也返回移出当前归档筛选的摘要，调用方应按 archived 字段更新显示范围。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
 )
 async def sync_standalone_tasks(
     response: Response,

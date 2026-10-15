@@ -61,7 +61,9 @@ def task_page(
     page_cursor: str | None = None,
     archived: bool = False,
 ) -> TaskListPage:
-    codec = cursor_codec(services, owner_id, task_scope(project_id) + f":archive-v1:{archived}")
+    codec = cursor_codec(
+        services, owner_id, task_scope(project_id) + f":archive-v1:{archived}:status-v1"
+    )
     cursor = codec.decode(page_cursor, "history") if page_cursor is not None else None
     boundary = (cursor.updated_at, cursor.after) if cursor else None
     with services.db.read_snapshot() as conn:
@@ -188,7 +190,7 @@ def task_sync(
     archived: bool = False,
 ) -> TaskSyncPage:
     scope = task_scope(project_id)
-    codec = cursor_codec(services, owner_id, scope + f":archive-v1:{archived}")
+    codec = cursor_codec(services, owner_id, scope + f":archive-v1:{archived}:status-v1")
     rows, next_sync, next_page = _delta(
         services,
         owner_id,

@@ -143,6 +143,9 @@ class TaskSummary(ProjectModel):
     project_id: str | None
     title: str
     archived: bool
+    status: TurnStatus = Field(
+        description="任务当前或最近一轮的执行状态；追问重新进入 queued，开始执行变为 running。列表直接返回，无需读取正文。"
+    )
     active_turn_id: str | None
     list_revision: int = Field(description="任务摘要版本；仅列表字段变化时递增。")
     created_at: datetime
@@ -179,6 +182,7 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
         project_id=row.project_id,
         title=row.title,
         archived=row.archived,
+        status=cast(TurnStatus, row.status),
         active_turn_id=row.active_turn_id,
         list_revision=row.list_revision,
         created_at=_datetime(row.created_at),

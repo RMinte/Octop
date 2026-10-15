@@ -185,8 +185,9 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
   "project_id": "proj_example",
   "title": "请先概括项目目标，再列出下一步。",
   "archived": false,
+  "status": "completed",
   "active_turn_id": null,
-  "list_revision": 2,
+  "list_revision": 3,
   "created_at": "2026-10-15T05:01:00Z",
   "updated_at": "2026-10-15T05:01:05Z",
   "next_page_cursor": null,
@@ -215,7 +216,9 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-任务列表返回 `{items: TaskSummary[], next_page_cursor: string|null, sync_cursor: string|null}`；摘要为上例移除 `turns`、`next_page_cursor` 和 `event_cursor` 后的字段，另有单调递增的 `list_revision`，详情和写入响应也携带此版本。摘要没有 `status` 或最近回复正文，要展示某轮完整状态和正文仍需读详情。仅第一页返回同步基线，后续历史分页不推进同步位置。
+任务列表返回 `{items: TaskSummary[], next_page_cursor: string|null, sync_cursor: string|null}`；摘要为上例移除 `turns`、`next_page_cursor` 和 `event_cursor` 后的字段，包含任务级 `status` 和单调递增的 `list_revision`，详情和写入响应也携带这两个字段。`status` 表示当前或最近一轮的状态，取值与下表一致；首条消息或追问进入 `queued`，开始执行变为 `running`，结束后更新为对应结果。服务端持久保存摘要，每次状态变化与版本递增、列表增量记录原子提交。正文、工具活动、用量和租约心跳不递增列表版本。
+
+每页直接批量返回所有任务状态，客户端用列表缓存绘制侧栏，通过现有 `/tasks/sync` 或 `/project-tasks/sync` 获取变化；加载一页只需一次列表请求，禁止逐个读取详情补状态。打开任务才读取正文详情。仅第一页返回同步基线，后续历史分页不推进同步位置。
 
 | 轮次状态 | 含义 | 当前客户端处理 |
 | --- | --- | --- |
@@ -259,7 +262,7 @@ model_ref 省略或 null 使用发送时的默认选择；显式指定不可用�
 
 `GET /api/project-tasks/resources` 返回可用 models（model_ref/name）、default_model_ref，以及共享 Skill 与本人 MCP 引用，不包含凭据。网页“本轮设置”在成功发送后恢复继承状态；网络失败保留选择和发送标识。同一 request_id 必须重传相同的原选项，项目后来修改不会影响幂等回放。手动重试采用该次请求的 options，未指定时使用当前项目配置，不隐式复制失败轮次的覆盖项。返回的 turns[].options 是该轮实际采用的模型、Skill 和 MCP，project_revision 仍记录发送时项目版本。
 
-数据库 schema 34 只增加归档标记和分页索引，已有任务默认未归档。SQLite 从 schema 32/33 升级的定向用例验证了任务、轮次和正文保留；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
+未发布的数据库 schema 34 包含归档标记、分页索引和任务状态摘要。已有任务默认未归档，状态从活动轮次或最近一轮初始化；本地已记录 schema 34 但缺少状态列的库也会补齐。任务、轮次和正文保留。任务列表游标及网页任务缓存版本随状态字段更新，旧游标返回 `PROJECT_SYNC_RESET`，客户端重建第一页；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
 
 ### 实时状态续接
 

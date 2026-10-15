@@ -187,7 +187,7 @@ export function useProjectList() {
 
 export function useTaskList(projectID: string | null, archived = false) {
   const { cache, publish, current } = useCache<TaskSummary>(
-    `tasks:${projectID ?? ""}:${archived}`,
+    `tasks:status-v1:${projectID ?? ""}:${archived}`,
   );
   const listPage = useCallback(
     (page?: string | null) =>
@@ -277,6 +277,7 @@ export function useTaskList(projectID: string | null, archived = false) {
         project_id,
         title,
         archived,
+        status,
         active_turn_id,
         list_revision,
         created_at,
@@ -288,6 +289,7 @@ export function useTaskList(projectID: string | null, archived = false) {
           project_id,
           title,
           archived,
+          status,
           active_turn_id,
           list_revision,
           created_at,

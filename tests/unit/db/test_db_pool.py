@@ -1049,9 +1049,10 @@ def test_project_client_directory_upgrade_preserves_existing_project(
         pool.close()
 
 
-@pytest.mark.parametrize("previous_schema", [32, 33])
+@pytest.mark.parametrize("previous_schema", [32, 33, 34])
+@pytest.mark.parametrize("turn_status", ["queued", "running", "completed", "failed", "cancelled"])
 def test_task_list_sync_upgrade_preserves_existing_conversations(
-    tmp_path, monkeypatch, previous_schema
+    tmp_path, monkeypatch, previous_schema, turn_status
 ):
     import shutil
 
@@ -1061,7 +1062,16 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
     old_migrations.mkdir()
     for version, source in migrate._discover("sqlite"):
         if version <= previous_schema:
-            shutil.copy2(source, old_migrations / source.name)
+            if version == 34:
+                # The earlier local v34 added archive metadata, without task status.
+                sql = source.read_text(encoding="utf-8").split(
+                    "ALTER TABLE project_tasks ADD COLUMN status", 1
+                )[0]
+                (old_migrations / source.name).write_text(
+                    sql + "UPDATE _schema_version SET version=34;\n", encoding="utf-8"
+                )
+            else:
+                shutil.copy2(source, old_migrations / source.name)
     pool = SqlitePool(tmp_path / f"v{previous_schema}-tasks.db")
     try:
         with monkeypatch.context() as patch:
@@ -1077,8 +1087,11 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
             )
             conn.execute(
                 "INSERT INTO project_task_turns(turn_id,task_id,request_id,prompt,reply,status,configuration_json,model_ref,created_at,updated_at) "
-                "VALUES('turn_old','task_old','old-request','Keep prompt','Keep reply','completed','{}','fixture/model',123,456)"
+                "VALUES('turn_old','task_old','old-request','Keep prompt','Keep reply',?,'{}','fixture/model',123,456)",
+                (turn_status,),
             )
+            if turn_status in {"queued", "running"}:
+                conn.execute("UPDATE project_tasks SET active_turn_id='turn_old'")
             before_task = dict(conn.execute("SELECT * FROM project_tasks").fetchone())
             before_turn = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
         run_migrations(pool)
@@ -1087,7 +1100,9 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
             after_task = dict(conn.execute("SELECT * FROM project_tasks").fetchone())
             if "list_revision" not in before_task:
                 assert after_task.pop("list_revision") == 1
-            assert after_task.pop("archived") == 0
+            if "archived" not in before_task:
+                assert after_task.pop("archived") == 0
+            assert after_task.pop("status") == turn_status
             assert "idx_project_tasks_archive_page" in {
                 r["name"] for r in conn.execute("PRAGMA index_list(project_tasks)")
             }

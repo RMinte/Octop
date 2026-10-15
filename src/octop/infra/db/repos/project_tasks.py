@@ -22,6 +22,7 @@ class ProjectTaskRow:
     updated_at: int
     list_revision: int = 1
     archived: bool = False
+    status: str = "queued"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -36,6 +37,7 @@ class ProjectTaskRow:
             strict_int(row["updated_at"]),
             strict_int(row["list_revision"]),
             bool(row["archived"]),
+            str(row["status"]),
         )
 
 
@@ -104,7 +106,7 @@ class ProjectTaskRepo:
     def insert(conn: Any, row: ProjectTaskRow) -> None:
         conn.execute(
             "INSERT INTO project_tasks(task_id, owner_id, project_id, title, request_id, "
-            "active_turn_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "active_turn_id, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.task_id,
                 row.owner_id,
@@ -114,6 +116,7 @@ class ProjectTaskRepo:
                 row.active_turn_id,
                 row.created_at,
                 row.updated_at,
+                row.status,
             ),
         )
         record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
@@ -121,7 +124,8 @@ class ProjectTaskRepo:
     @staticmethod
     def activate(conn: Any, task_id: str, turn_id: str, now: int) -> bool:
         result = conn.execute(
-            "UPDATE project_tasks SET active_turn_id=?, updated_at=?, list_revision=list_revision+1 "
+            "UPDATE project_tasks SET active_turn_id=?, status='queued', updated_at=?, "
+            "list_revision=list_revision+1 "
             "WHERE task_id=? AND active_turn_id IS NULL RETURNING *",
             (turn_id, now, task_id),
         ).fetchone()
@@ -132,11 +136,23 @@ class ProjectTaskRepo:
         return True
 
     @staticmethod
+    def start(conn: Any, task_id: str, turn_id: str, now: int) -> None:
+        result = conn.execute(
+            "UPDATE project_tasks SET status='running', updated_at=?, list_revision=list_revision+1 "
+            "WHERE task_id=? AND active_turn_id=? AND status='queued' RETURNING *",
+            (now, task_id, turn_id),
+        ).fetchone()
+        if result is not None:
+            row = ProjectTaskRow.from_row(result)
+            record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
+
+    @staticmethod
     def finish(conn: Any, task_id: str, turn_id: str, now: int) -> None:
         result = conn.execute(
-            "UPDATE project_tasks SET active_turn_id=NULL, updated_at=?, list_revision=list_revision+1 "
+            "UPDATE project_tasks SET status=(SELECT status FROM project_task_turns WHERE turn_id=?), "
+            "active_turn_id=NULL, updated_at=?, list_revision=list_revision+1 "
             "WHERE task_id=? AND active_turn_id=? RETURNING *",
-            (now, task_id, turn_id),
+            (turn_id, now, task_id, turn_id),
         ).fetchone()
         if result is not None:
             row = ProjectTaskRow.from_row(result)

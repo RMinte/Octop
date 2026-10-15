@@ -82,11 +82,18 @@ export const projectsApi = {
     }),
 };
 
+export type TaskStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 export interface TaskSummary {
   task_id: string;
   project_id: string | null;
   title: string;
   archived: boolean;
+  status: TaskStatus;
   active_turn_id: string | null;
   list_revision: number;
   created_at: string;
@@ -98,7 +105,7 @@ export interface TaskTurn {
   request_id: string;
   prompt: string;
   reply: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  status: TaskStatus;
   error_code: string;
   activity: string;
   model_ref: string;

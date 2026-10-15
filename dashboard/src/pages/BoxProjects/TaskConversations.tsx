@@ -396,9 +396,9 @@ export default function TaskConversations({
             <span>
               <strong>{task.title}</strong>
               <small>
-                {task.active_turn_id
-                  ? t("projects.tasks.running")
-                  : formatServerIsoDateTime(task.updated_at, timeZone)}
+                {t(`projects.tasks.status.${task.status}`)}
+                {" · "}
+                {formatServerIsoDateTime(task.updated_at, timeZone)}
               </small>
             </span>
           </button>

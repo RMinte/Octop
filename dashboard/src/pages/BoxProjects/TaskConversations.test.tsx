@@ -9,7 +9,11 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import zh from "../../locales/zh.json";
-import { projectTasksApi, type TaskDetail } from "../../api/modules/projects";
+import {
+  projectTasksApi,
+  type TaskDetail,
+  type TaskStatus,
+} from "../../api/modules/projects";
 import TaskConversations from "./TaskConversations";
 
 vi.mock("../../api/modules/projects", () => ({
@@ -47,6 +51,7 @@ const fixture: TaskDetail = {
   project_id: "proj_a",
   title: "第一项任务",
   archived: false,
+  status: "completed",
   active_turn_id: null,
   list_revision: 1,
   created_at: "2026-10-15T00:00:00Z",
@@ -194,6 +199,57 @@ it("选择任务沿用已加载列表，后续只请求增量", async () => {
   );
 });
 
+it("一页任务直接显示列表状态，增量更新无需逐个读取详情", async () => {
+  const statuses: TaskStatus[] = [
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+  ];
+  const items = statuses.map((status) => ({
+    ...fixture,
+    task_id: `task_${status}`,
+    title: `任务 ${status}`,
+    status,
+    active_turn_id:
+      status === "queued" || status === "running" ? `turn_${status}` : null,
+  }));
+  api.list.mockResolvedValue({
+    items,
+    next_page_cursor: null,
+    sync_cursor: "sync_first",
+  });
+  const running = { ...items[0], status: "running" as const, list_revision: 2 };
+  api.sync.mockResolvedValue({
+    base_sync_cursor: "sync_first",
+    next_sync_cursor: "sync_next",
+    next_page_cursor: null,
+    changes: [
+      {
+        operation: "upsert",
+        task_id: running.task_id,
+        list_revision: 2,
+        data: running,
+      },
+    ],
+  });
+  mount();
+  for (const status of statuses) {
+    expect(
+      await screen.findByRole("button", {
+        name: new RegExp(`任务 ${status} ${zh.projects.tasks.status[status]}`),
+      }),
+    ).toBeInTheDocument();
+  }
+  expect(api.list).toHaveBeenCalledTimes(1);
+  expect(api.get).not.toHaveBeenCalled();
+  expect(api.events).not.toHaveBeenCalled();
+  fireEvent(document, new Event("visibilitychange"));
+  await screen.findByRole("button", { name: /任务 queued 回复中/ });
+  expect(api.get).not.toHaveBeenCalled();
+});
+
 it("历史分页晚到不会覆盖增量更新的摘要", async () => {
   let resolvePage!: (
     value: Awaited<ReturnType<typeof projectTasksApi.list>>,
@@ -209,7 +265,12 @@ it("历史分页晚到不会覆盖增量更新的摘要", async () => {
         resolvePage = resolve;
       }),
   );
-  const updated = { ...fixture, title: "新的任务标题", list_revision: 3 };
+  const updated = {
+    ...fixture,
+    title: "新的任务标题",
+    status: "failed" as const,
+    list_revision: 3,
+  };
   api.sync.mockResolvedValue({
     base_sync_cursor: "sync_first",
     next_sync_cursor: "sync_next",
@@ -245,7 +306,7 @@ it("历史分页晚到不会覆盖增量更新的摘要", async () => {
   );
   expect(
     screen.getByRole("button", { name: /新的任务标题/ }),
-  ).toBeInTheDocument();
+  ).toHaveTextContent("执行失败");
   expect(
     screen.getByRole("button", { name: /更早的任务/ }),
   ).toBeInTheDocument();

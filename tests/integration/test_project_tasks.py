@@ -88,6 +88,7 @@ async def test_task_multi_turn_idempotency_and_latest_project_configuration(task
     done = await settled(client, auth, task["task_id"])
     assert done["turns"][0]["reply"] == "Reply 1"
     assert done["turns"][0]["status"] == "completed"
+    assert done["status"] == "completed"
     conflict = await client.post(base, headers=auth, json={**first, "prompt": "different"})
     assert conflict.status_code == 409
     assert len(calls) == 1
@@ -184,6 +185,7 @@ async def test_busy_cancel_and_continue_preserve_history(task_env, monkeypatch):
     ).status_code == 200
     done = await settled(client, auth, task["task_id"])
     assert done["turns"][0]["status"] == "cancelled"
+    assert done["status"] == "cancelled"
     assert done["turns"][0]["reply"] == "Partial reply"
 
     async def next_run(services, owner, turn, history):
@@ -222,6 +224,7 @@ async def test_failure_hides_raw_provider_secrets(task_env, monkeypatch):
     ).json()
     done = await settled(client, auth, task["task_id"])
     assert done["turns"][0]["status"] == "failed"
+    assert done["status"] == "failed"
     assert done["turns"][0]["error_code"] == "TASK_EXECUTION_FAILED"
     assert "private-test-key" not in json.dumps(done)
 
@@ -237,15 +240,15 @@ async def test_queued_cancel_and_abandoned_worker_recovery(task_env):
         headers=auth,
         json={"turn_id": task.active_turn_id},
     )
-    assert (await client.get(f"/api/project-tasks/{task.task_id}", headers=auth)).json()["turns"][
-        0
-    ]["status"] == "cancelled"
+    cancelled = (await client.get(f"/api/project-tasks/{task.task_id}", headers=auth)).json()
+    assert cancelled["turns"][0]["status"] == cancelled["status"] == "cancelled"
     task = send(services, owner, TaskMessage(request_id="lost-worker", prompt="Work"))
     claimed = services.project_task_turn_repo.claim("dead-process", now_ms() - 100_000)
     assert claimed is not None
     worker._recover()
     done = (await client.get(f"/api/project-tasks/{task.task_id}", headers=auth)).json()
     assert done["active_turn_id"] is None and done["turns"][0]["error_code"] == "TASK_INTERRUPTED"
+    assert done["status"] == "failed"
     assert calls == []  # Recovery does not rerun possibly effective tools.
 
 
@@ -395,6 +398,130 @@ async def test_model_selection_prefers_global_pin_then_existing_text_model(task_
     assert _configuration(configured, owner, None, TaskExecutionOptions())[1] == "preferred/glm"
 
 
+@pytest.mark.parametrize("in_project", [False, True])
+@pytest.mark.parametrize("result_status", ["completed", "failed", "cancelled"])
+async def test_task_status_is_in_list_and_deltas_through_follow_up(
+    task_env, monkeypatch, in_project, result_status
+):
+    from octop.infra.projects import tasks
+
+    client, server, auth, _ = task_env
+    worker, services = server.project_task_worker, server.services
+    await worker.close()
+    owner = await resolve_user_id(client, auth, "admin")
+    project_id = None
+    if in_project:
+        project_id = (
+            await client.post(
+                "/api/projects",
+                headers={**auth, "Idempotency-Key": str(uuid4())},
+                json={"name": "Status summaries"},
+            )
+        ).json()["project_id"]
+    base = f"/api/projects/{project_id}/tasks" if project_id else "/api/project-tasks"
+    task = send(
+        services,
+        owner,
+        TaskMessage(request_id="status-first", prompt="Work"),
+        project_id=project_id,
+    )
+    assert task.status == "queued" and task.list_revision == 1
+    cursor = None
+
+    def forbid_conversation_reads(*args, **kwargs):
+        pytest.fail("List status must not read per-task conversation details")
+
+    async def check_list(status, revision):
+        nonlocal cursor
+        with monkeypatch.context() as patch:
+            patch.setattr(tasks, "detail", forbid_conversation_reads)
+            for method in ("page", "list", "list_in_transaction", "get", "get_in_transaction"):
+                patch.setattr(services.project_task_turn_repo, method, forbid_conversation_reads)
+            response = await client.get(base, headers=auth)
+            assert response.status_code == 200, response.text
+            page = response.json()
+            assert len(page["items"]) == 1
+            item = page["items"][0]
+            assert item["task_id"] == task.task_id
+            assert item["status"] == status and item["list_revision"] == revision
+            assert "turns" not in item and "reply" not in item
+            if cursor:
+                response = await client.get(
+                    base + "/sync", headers=auth, params={"sync_cursor": cursor}
+                )
+                assert response.status_code == 200, response.text
+                changes = response.json()["changes"]
+                assert len(changes) == 1 and changes[0]["data"] == item
+                assert changes[0]["list_revision"] == revision
+            cursor = page["sync_cursor"]
+        return item
+
+    await check_list("queued", 1)
+    claimed = services.project_task_turn_repo.claim(worker.worker_id, now_ms())
+    assert claimed is not None
+    await check_list("running", 2)
+    # Text, tool progress and lease heartbeats stay out of the list change stream.
+    services.project_task_turn_repo.progress(
+        claimed.turn_id, worker.worker_id, "Partial", "read_file", now_ms()
+    )
+    unchanged = await client.get(base + "/sync", headers=auth, params={"sync_cursor": cursor})
+    assert unchanged.json()["changes"] == []
+    if result_status == "cancelled":
+        tasks.cancel(services, owner, task.task_id, claimed.turn_id)
+    worker._finish(claimed, "failed" if result_status == "failed" else "completed", "Result", "")
+    item = await check_list(result_status, 3)
+    assert item["active_turn_id"] is None
+    follow_up = send(
+        services,
+        owner,
+        TaskMessage(request_id="status-follow-up", prompt="Continue"),
+        task_id=task.task_id,
+    )
+    assert follow_up.status == "queued" and follow_up.task_id == task.task_id
+    await check_list("queued", 4)
+    claimed = services.project_task_turn_repo.claim(worker.worker_id, now_ms())
+    await check_list("running", 5)
+    worker._finish(claimed, "completed", "Continued", "")
+    await check_list("completed", 6)
+
+
+async def test_task_status_delta_pagination_preserves_cutoff(task_env):
+    client, server, auth, _ = task_env
+    worker, services = server.project_task_worker, server.services
+    await worker.close()
+    owner = await resolve_user_id(client, auth, "admin")
+    baseline = (await client.get("/api/project-tasks", headers=auth)).json()["sync_cursor"]
+    first = send(services, owner, TaskMessage(request_id="cutoff-first", prompt="First"))
+    second = send(services, owner, TaskMessage(request_id="cutoff-second", prompt="Second"))
+    params = {"sync_cursor": baseline, "limit": 1}
+    response = await client.get("/api/project-tasks/sync", headers=auth, params=params)
+    assert response.status_code == 200, response.text
+    page = response.json()
+    assert page["changes"][0]["data"]["status"] == "queued"
+    assert page["next_page_cursor"] and page["next_sync_cursor"] is None
+    for _ in range(2):
+        assert services.project_task_turn_repo.claim(worker.worker_id, now_ms()) is not None
+    response = await client.get(
+        "/api/project-tasks/sync",
+        headers=auth,
+        params={**params, "page_cursor": page["next_page_cursor"]},
+    )
+    assert response.status_code == 200, response.text
+    last = response.json()
+    assert last["changes"][0]["data"]["status"] == "queued"
+    assert last["changes"][0]["list_revision"] == 1
+    assert last["next_page_cursor"] is None and last["next_sync_cursor"]
+    response = await client.get(
+        "/api/project-tasks/sync",
+        headers=auth,
+        params={"sync_cursor": last["next_sync_cursor"]},
+    )
+    assert response.status_code == 200, response.text
+    changes = response.json()["changes"]
+    assert {c["task_id"] for c in changes} == {first.task_id, second.task_id}
+    assert all(c["data"]["status"] == "running" and c["list_revision"] == 2 for c in changes)
+
+
 async def test_task_cursor_pages_are_bounded_and_sync_promotes_unloaded_tasks(env):
     from octop.infra.db.repos.project_tasks import ProjectTaskRow
 
@@ -425,6 +552,11 @@ async def test_task_cursor_pages_are_bounded_and_sync_promotes_unloaded_tasks(en
     assert all("turns" not in row and "prompt" not in row for row in first["items"])
     with server.services.db.transaction() as conn:
         assert repo.activate(conn, "task_seed_000", "turn_test", 2000)
+        conn.execute(
+            "INSERT INTO project_task_turns(turn_id,task_id,request_id,prompt,status,"
+            "configuration_json,model_ref,created_at,updated_at) "
+            "VALUES('turn_test','task_seed_000','test-request','Test','completed','{}','test/model',2000,2001)"
+        )
         repo.finish(conn, "task_seed_000", "turn_test", 2001)
     delta = await client.get(
         "/api/project-tasks/sync", headers=auth, params={"sync_cursor": first["sync_cursor"]}
@@ -434,6 +566,7 @@ async def test_task_cursor_pages_are_bounded_and_sync_promotes_unloaded_tasks(en
     assert len(changes) == 1
     assert changes[0]["task_id"] == "task_seed_000"
     assert changes[0]["data"]["active_turn_id"] is None
+    assert changes[0]["data"]["status"] == "completed"
     assert changes[0]["list_revision"] == 3
     empty = await client.get(
         "/api/project-tasks/sync",
@@ -464,12 +597,24 @@ async def test_task_cursor_pages_are_bounded_and_sync_promotes_unloaded_tasks(en
 
 async def test_task_cursor_scope_tamper_and_transaction_rollback(env):
     from octop.infra.db.repos.project_tasks import ProjectTaskRow
+    from octop.infra.projects.cursors import cursor_codec
 
     client, server, auth = env
     owner = await resolve_user_id(client, auth, "admin")
     first = (await client.get("/api/project-tasks", headers=auth)).json()
     assert first["items"] == [] and first["sync_cursor"]
     assert len(first["sync_cursor"]) <= 16
+    legacy = cursor_codec(server.services, owner, "tasks::archive-v1:False")
+    for path, params in (
+        ("/api/project-tasks/sync", {"sync_cursor": legacy.encode("sync", position=0)}),
+        (
+            "/api/project-tasks",
+            {"page_cursor": legacy.encode("history", updated_at=1000, after="task_old")},
+        ),
+    ):
+        outdated = await client.get(path, headers=auth, params=params)
+        assert outdated.status_code == 409
+        assert outdated.json()["error"]["code"] == "PROJECT_SYNC_RESET"
     with pytest.raises(RuntimeError), server.services.db.transaction() as conn:
         server.services.project_task_repo.insert(
             conn,

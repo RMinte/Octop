@@ -8,6 +8,7 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, strict_int
+from octop.infra.db.repos.project_tasks import ProjectTaskRepo
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,11 @@ class ProjectTaskTurnRepo:
                 "WHERE turn_id=? AND status='queued' RETURNING *",
                 (worker_id, now, row["turn_id"]),
             ).fetchone()
-            return ProjectTaskTurnRow.from_row(r) if r else None
+            if r is None:
+                return None
+            turn = ProjectTaskTurnRow.from_row(r)
+            ProjectTaskRepo.start(conn, turn.task_id, turn.turn_id, now)
+            return turn
 
     def progress(self, turn_id: str, worker_id: str, reply: str, activity: str, now: int) -> bool:
         with self._db.connect() as conn:
