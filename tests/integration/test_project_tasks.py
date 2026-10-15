@@ -55,9 +55,9 @@ async def test_tasks_require_model_without_creating_empty_tasks_or_experts(env):
     )
     assert result.status_code == 409
     assert result.json()["error"]["code"] == "TASK_MODEL_UNAVAILABLE"
-    assert (
-        await client.get(f"/api/projects/{project['project_id']}/tasks", headers=auth)
-    ).json() == []
+    assert (await client.get(f"/api/projects/{project['project_id']}/tasks", headers=auth)).json()[
+        "items"
+    ] == []
     assert server.services.agent_repo.list_all() == before
 
 
@@ -117,7 +117,7 @@ async def test_task_multi_turn_idempotency_and_latest_project_configuration(task
         )
     ).status_code == 202
     assert len(calls) == 2
-    assert len((await client.get(base, headers=auth)).json()) == 1
+    assert len((await client.get(base, headers=auth)).json()["items"]) == 1
     assert server.services.agent_repo.list_all() == before
     assert done == (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()
 
@@ -135,11 +135,11 @@ async def test_standalone_tasks_and_owner_isolation(task_env):
     assert task["project_id"] is None
     await settled(client, auth, task["task_id"])
     assert [
-        t["task_id"] for t in (await client.get("/api/project-tasks", headers=auth)).json()
+        t["task_id"] for t in (await client.get("/api/project-tasks", headers=auth)).json()["items"]
     ] == [task["task_id"]]
     alice = await create_user(client, auth, username="alice")
     base = f"/api/project-tasks/{task['task_id']}"
-    assert (await client.get("/api/project-tasks", headers=alice)).json() == []
+    assert (await client.get("/api/project-tasks", headers=alice)).json()["items"] == []
     assert (await client.get(base, headers=alice)).status_code == 404
     assert (
         await client.post(
@@ -378,3 +378,173 @@ async def test_model_selection_prefers_global_pin_then_existing_text_model(task_
     assert _configuration(configured, owner, None)[1] == "openai/gpt-4o"
     services.settings_repo.set_active_model("missing", "unavailable")
     assert _configuration(configured, owner, None)[1] == "preferred/glm"
+
+
+async def test_task_cursor_pages_are_bounded_and_sync_promotes_unloaded_tasks(env):
+    from octop.infra.db.repos.project_tasks import ProjectTaskRow
+
+    client, server, auth = env
+    owner = await resolve_user_id(client, auth, "admin")
+    repo = server.services.project_task_repo
+    with server.services.db.transaction() as conn:
+        for index in range(125):
+            repo.insert(
+                conn,
+                ProjectTaskRow(
+                    f"task_seed_{index:03d}",
+                    owner,
+                    None,
+                    f"Task {index}",
+                    f"request-{index}",
+                    None,
+                    1000,
+                    1000,
+                ),
+            )
+    response = await client.get("/api/project-tasks", headers=auth)
+    assert response.status_code == 200, response.text
+    first = response.json()
+    assert len(first["items"]) == 50
+    assert first["items"][0]["task_id"] == "task_seed_124"
+    assert first["next_page_cursor"] and first["sync_cursor"]
+    assert all("turns" not in row and "prompt" not in row for row in first["items"])
+    with server.services.db.transaction() as conn:
+        assert repo.activate(conn, "task_seed_000", "turn_test", 2000)
+        repo.finish(conn, "task_seed_000", "turn_test", 2001)
+    delta = await client.get(
+        "/api/project-tasks/sync", headers=auth, params={"sync_cursor": first["sync_cursor"]}
+    )
+    assert delta.status_code == 200, delta.text
+    changes = delta.json()["changes"]
+    assert len(changes) == 1
+    assert changes[0]["task_id"] == "task_seed_000"
+    assert changes[0]["data"]["active_turn_id"] is None
+    assert changes[0]["list_revision"] == 3
+    empty = await client.get(
+        "/api/project-tasks/sync",
+        headers=auth,
+        params={"sync_cursor": delta.json()["next_sync_cursor"]},
+    )
+    assert empty.json()["changes"] == []
+    ids = {row["task_id"] for row in first["items"]} | {"task_seed_000"}
+    page_cursor = first["next_page_cursor"]
+    while page_cursor:
+        page = await client.get(
+            "/api/project-tasks", headers=auth, params={"page_cursor": page_cursor}
+        )
+        assert page.status_code == 200, page.text
+        body = page.json()
+        assert body["sync_cursor"] is None
+        assert len(body["items"]) <= 50
+        ids.update(row["task_id"] for row in body["items"])
+        page_cursor = body["next_page_cursor"]
+    assert len(ids) == 125
+    with server.services.db.connect() as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM project_tasks WHERE owner_id=? AND project_id IS NULL ORDER BY updated_at DESC, task_id DESC LIMIT 51",
+            (owner,),
+        ).fetchall()
+    assert any("idx_project_tasks_scope_page" in str(tuple(row)) for row in plan)
+
+
+async def test_task_cursor_scope_tamper_and_transaction_rollback(env):
+    from octop.infra.db.repos.project_tasks import ProjectTaskRow
+
+    client, server, auth = env
+    owner = await resolve_user_id(client, auth, "admin")
+    first = (await client.get("/api/project-tasks", headers=auth)).json()
+    assert first["items"] == [] and first["sync_cursor"]
+    with pytest.raises(RuntimeError), server.services.db.transaction() as conn:
+        server.services.project_task_repo.insert(
+            conn,
+            ProjectTaskRow(
+                "task_rollback",
+                owner,
+                None,
+                "Rollback",
+                "rollback-request",
+                None,
+                1000,
+                1000,
+            ),
+        )
+        raise RuntimeError("abort")
+    delta = await client.get(
+        "/api/project-tasks/sync", headers=auth, params={"sync_cursor": first["sync_cursor"]}
+    )
+    assert delta.json()["changes"] == []
+    assert delta.json()["next_sync_cursor"] == first["sync_cursor"]
+    other = await create_user(client, auth, username="sync-other")
+    for token in (first["sync_cursor"] + "x", "bad.游标"):
+        result = await client.get(
+            "/api/project-tasks/sync", headers=auth, params={"sync_cursor": token}
+        )
+        assert result.status_code == 409
+        assert result.json()["error"]["code"] == "PROJECT_SYNC_RESET"
+    cross_user = await client.get(
+        "/api/project-tasks/sync", headers=other, params={"sync_cursor": first["sync_cursor"]}
+    )
+    assert cross_user.status_code == 409
+    project_cursor = (await client.get("/api/projects/sync", headers=auth)).json()[
+        "next_sync_cursor"
+    ]
+    wrong_kind = await client.get(
+        "/api/project-tasks/sync", headers=auth, params={"sync_cursor": project_cursor}
+    )
+    assert wrong_kind.status_code == 409
+    wrong_use = await client.get(
+        "/api/project-tasks", headers=auth, params={"page_cursor": first["sync_cursor"]}
+    )
+    assert wrong_use.status_code == 409
+    assert (await client.get("/api/project-tasks?limit=101", headers=auth)).status_code == 422
+
+
+async def test_task_list_sync_is_scoped_per_project_and_restore_epoch(env):
+    from octop.infra.agentcomputer.identity import get_or_create_identity
+    from octop.infra.db.repos.project_tasks import ProjectTaskRow
+
+    client, server, auth = env
+    owner = await resolve_user_id(client, auth, "admin")
+    project_ids = []
+    for name in ("Scoped A", "Scoped B"):
+        response = await client.post(
+            "/api/projects", headers={**auth, "Idempotency-Key": str(uuid4())}, json={"name": name}
+        )
+        project_ids.append(response.json()["project_id"])
+    bases = [f"/api/projects/{project_id}/tasks" for project_id in project_ids]
+    first = [(await client.get(base, headers=auth)).json() for base in bases]
+    with server.services.db.transaction() as conn:
+        server.services.project_task_repo.insert(
+            conn,
+            ProjectTaskRow(
+                "task_scoped",
+                owner,
+                project_ids[0],
+                "Scoped task",
+                "scope-request",
+                None,
+                1000,
+                1000,
+            ),
+        )
+    for index, base in enumerate(bases):
+        response = await client.get(
+            base + "/sync", headers=auth, params={"sync_cursor": first[index]["sync_cursor"]}
+        )
+        assert response.status_code == 200
+        assert len(response.json()["changes"]) == (1 if index == 0 else 0)
+    cross_scope = await client.get(
+        bases[1] + "/sync", headers=auth, params={"sync_cursor": first[0]["sync_cursor"]}
+    )
+    assert cross_scope.status_code == 409
+    path = server.paths.agentcomputer_identity
+    identity = get_or_create_identity(path)
+    path.write_text(
+        identity.model_copy(update={"restoreEpoch": identity.restoreEpoch + 1}).model_dump_json()
+    )
+    old_epoch = await client.get(
+        bases[0] + "/sync", headers=auth, params={"sync_cursor": first[0]["sync_cursor"]}
+    )
+    assert old_epoch.status_code == 409
+    rebuilt = await client.get(bases[0], headers=auth)
+    assert rebuilt.status_code == 200 and rebuilt.json()["items"][0]["task_id"] == "task_scoped"

@@ -16,13 +16,13 @@ import {
   projectTasksApi,
   type TaskDetail,
   type TaskMessage,
-  type TaskSummary,
 } from "../../api/modules/projects";
 import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { apiErrorMessage } from "../../utils/apiError";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import styles from "./index.module.less";
+import { useTaskList } from "./useProjectLists";
 
 export default function TaskConversations({
   projectID,
@@ -33,7 +33,14 @@ export default function TaskConversations({
   const timeZone = useServerTimezone();
   const [params, setParams] = useSearchParams();
   const taskID = params.get("task");
-  const [list, setList] = useState<TaskSummary[]>([]);
+  const {
+    items: list,
+    refresh: refreshList,
+    loadMore,
+    hasMore,
+    loadingMore,
+    upsert: upsertTask,
+  } = useTaskList(projectID);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -41,6 +48,8 @@ export default function TaskConversations({
   const alive = useRef(true);
   const selectedTaskID = useRef(taskID);
   selectedTaskID.current = taskID;
+  const selectedProjectID = useRef(projectID);
+  selectedProjectID.current = projectID;
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -56,26 +65,36 @@ export default function TaskConversations({
   const end = useRef<HTMLDivElement>(null);
   const busy = !!detail?.active_turn_id;
 
-  const refresh = useCallback(async () => {
-    const version = ++generation.current.version;
-    try {
-      const [items, selected] = await Promise.all([
-        projectTasksApi.list(projectID),
-        taskID ? projectTasksApi.get(taskID) : Promise.resolve(null),
-      ]);
-      if (version !== generation.current.version) return;
-      if (selected && selected.project_id !== projectID)
-        throw new Error(t("projects.tasks.wrongProject"));
-      setList(items);
-      setDetail(selected);
-      setLoadError("");
-    } catch (err) {
-      if (version === generation.current.version)
-        setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
-    } finally {
-      if (version === generation.current.version) setLoading(false);
-    }
-  }, [projectID, taskID, t]);
+  const refreshing = useRef<{ key: string; promise: Promise<void> } | null>(
+    null,
+  );
+  const refresh = useCallback(() => {
+    const key = `${projectID ?? ""}:${taskID ?? ""}`;
+    if (refreshing.current?.key === key) return refreshing.current.promise;
+    const promise = (async () => {
+      const version = ++generation.current.version;
+      try {
+        const [, selected] = await Promise.all([
+          refreshList(),
+          taskID ? projectTasksApi.get(taskID) : Promise.resolve(null),
+        ]);
+        if (version !== generation.current.version) return;
+        if (selected && selected.project_id !== projectID)
+          throw new Error(t("projects.tasks.wrongProject"));
+        setDetail(selected);
+        setLoadError("");
+      } catch (err) {
+        if (version === generation.current.version)
+          setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+      } finally {
+        if (version === generation.current.version) setLoading(false);
+      }
+    })().finally(() => {
+      if (refreshing.current?.promise === promise) refreshing.current = null;
+    });
+    refreshing.current = { key, promise };
+    return promise;
+  }, [projectID, taskID, t, refreshList]);
 
   useEffect(() => {
     const current = generation.current;
@@ -92,10 +111,12 @@ export default function TaskConversations({
       if (!document.hidden) void refresh();
     };
     document.addEventListener("visibilitychange", visible);
+    window.addEventListener("online", visible);
     return () => {
       current.version++;
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", visible);
+      window.removeEventListener("online", visible);
     };
   }, [refresh]);
 
@@ -132,16 +153,22 @@ export default function TaskConversations({
       const result = taskID
         ? await projectTasksApi.send(taskID, pending.current.body)
         : await projectTasksApi.create(projectID, pending.current.body);
-      if (!alive.current || selectedTaskID.current !== taskID) return;
+      if (
+        !alive.current ||
+        selectedTaskID.current !== taskID ||
+        selectedProjectID.current !== projectID
+      )
+        return;
       generation.current.version++;
+      upsertTask(result);
       setDetail(result);
       setDraft("");
       pending.current = null;
       if (!taskID) selectTask(result.task_id);
-      void projectTasksApi
-        .list(projectID)
-        .then(setList)
-        .catch(() => {});
+      void refreshList().catch((err) => {
+        if (alive.current && selectedProjectID.current === projectID)
+          setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+      });
     } catch (err) {
       setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
     } finally {
@@ -155,8 +182,14 @@ export default function TaskConversations({
     setStopping(true);
     try {
       const result = await projectTasksApi.cancel(taskID);
-      if (!alive.current || selectedTaskID.current !== taskID) return;
+      if (
+        !alive.current ||
+        selectedTaskID.current !== taskID ||
+        selectedProjectID.current !== projectID
+      )
+        return;
       generation.current.version++;
+      upsertTask(result);
       setDetail(result);
     } catch (err) {
       setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
@@ -206,6 +239,20 @@ export default function TaskConversations({
             </span>
           </button>
         ))}
+        {hasMore && (
+          <Button
+            loading={loadingMore}
+            onClick={() =>
+              void loadMore().catch((err) =>
+                setLoadError(
+                  apiErrorMessage(err, t("projects.tasks.failure"), t),
+                ),
+              )
+            }
+          >
+            {t("projects.tasks.loadMore")}
+          </Button>
+        )}
       </div>
       <div className={styles.conversation}>
         {(error || loadError) && (

@@ -14,6 +14,9 @@ from octop.infra.projects.tasks import resolve_model_ref
 
 
 class ProjectTaskFeatures(ProjectModel):
+    projectListSync: Literal[True] = True
+    taskListPagination: Literal[True] = True
+    taskListSync: Literal[True] = True
     projects: Literal[True] = True
     taskConversations: Literal[True] = True
     incrementalReplies: Literal[True] = True
@@ -29,7 +32,7 @@ class ProjectTaskFeatures(ProjectModel):
 class ProjectTaskCapabilities(ProjectModel):
     protocolVersion: Literal[1] = 1
     contract: Literal["independent-project-tasks"] = "independent-project-tasks"
-    contractVersion: Literal[1] = 1
+    contractVersion: Literal[2] = 2
     boxID: UUID
     restoreEpoch: int
     octopVersion: str

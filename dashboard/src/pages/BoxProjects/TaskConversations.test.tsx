@@ -1,4 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +15,7 @@ import TaskConversations from "./TaskConversations";
 vi.mock("../../api/modules/projects", () => ({
   projectTasksApi: {
     list: vi.fn(),
+    sync: vi.fn(),
     get: vi.fn(),
     create: vi.fn(),
     send: vi.fn(),
@@ -35,6 +42,7 @@ const fixture: TaskDetail = {
   project_id: "proj_a",
   title: "第一项任务",
   active_turn_id: null,
+  list_revision: 1,
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
   turns: [
@@ -55,7 +63,17 @@ const fixture: TaskDetail = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
-  api.list.mockResolvedValue([fixture]);
+  api.list.mockResolvedValue({
+    items: [fixture],
+    next_page_cursor: null,
+    sync_cursor: "sync_first",
+  });
+  api.sync.mockResolvedValue({
+    base_sync_cursor: "sync_first",
+    next_sync_cursor: "sync_next",
+    next_page_cursor: null,
+    changes: [],
+  });
   api.get.mockResolvedValue(fixture);
   api.create.mockResolvedValue(fixture);
   api.send.mockResolvedValue(fixture);
@@ -132,4 +150,88 @@ describe("项目任务对话", () => {
     expect(api.cancel).toHaveBeenCalledWith("task_a");
     expect(await screen.findByText("已记住蓝鸟")).toBeInTheDocument();
   });
+});
+
+it("选择任务沿用已加载列表，后续只请求增量", async () => {
+  const user = userEvent.setup();
+  mount();
+  await user.click(await screen.findByRole("button", { name: /第一项任务/ }));
+  expect(await screen.findByText("已记住蓝鸟")).toBeInTheDocument();
+  expect(api.list).toHaveBeenCalledTimes(1);
+  expect(api.sync).toHaveBeenCalledWith("proj_a", "sync_first", null);
+});
+
+it("历史分页晚到不会覆盖增量更新的摘要", async () => {
+  let resolvePage!: (
+    value: Awaited<ReturnType<typeof projectTasksApi.list>>,
+  ) => void;
+  api.list.mockResolvedValueOnce({
+    items: [fixture],
+    next_page_cursor: "history_next",
+    sync_cursor: "sync_first",
+  });
+  api.list.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolvePage = resolve;
+      }),
+  );
+  const updated = { ...fixture, title: "新的任务标题", list_revision: 3 };
+  api.sync.mockResolvedValue({
+    base_sync_cursor: "sync_first",
+    next_sync_cursor: "sync_next",
+    next_page_cursor: null,
+    changes: [
+      {
+        operation: "upsert",
+        task_id: updated.task_id,
+        list_revision: 3,
+        data: updated,
+      },
+    ],
+  });
+  const user = userEvent.setup();
+  mount();
+  await user.click(
+    await screen.findByRole("button", { name: "加载更早的任务" }),
+  );
+  await waitFor(() =>
+    expect(api.list).toHaveBeenCalledWith("proj_a", "history_next"),
+  );
+  fireEvent(document, new Event("visibilitychange"));
+  await screen.findByRole("button", { name: /新的任务标题/ });
+  await act(async () =>
+    resolvePage({
+      items: [
+        fixture,
+        { ...fixture, task_id: "task_old", title: "更早的任务" },
+      ],
+      next_page_cursor: null,
+      sync_cursor: null,
+    }),
+  );
+  expect(
+    screen.getByRole("button", { name: /新的任务标题/ }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: /更早的任务/ }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /第一项任务/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "加载更早的任务" }),
+  ).not.toBeInTheDocument();
+});
+
+it("增量游标失效只重取第一页", async () => {
+  api.sync.mockRejectedValueOnce(
+    new Error('409 - {"error":{"code":"PROJECT_SYNC_RESET"}}'),
+  );
+  const view = mount();
+  await screen.findByRole("button", { name: /第一项任务/ });
+  fireEvent(document, new Event("visibilitychange"));
+  await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  expect(api.list.mock.calls).toEqual([["proj_a"], ["proj_a"]]);
+  view.unmount();
 });

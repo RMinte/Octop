@@ -108,7 +108,31 @@ beforeEach(() => {
           description: "科学育儿",
         },
       ] as never;
-    if (url.endsWith("/tasks") || url === "/project-tasks") return [] as never;
+    if (url.startsWith("/projects/sync"))
+      return {
+        mode: "snapshot",
+        base_sync_cursor: null,
+        next_sync_cursor: "projects_next",
+        next_page_cursor: null,
+        changes: rows.map((data) => ({
+          operation: "upsert",
+          project_id: data.project_id,
+          data,
+        })),
+      } as never;
+    if (url.includes("/tasks/sync") || url.startsWith("/project-tasks/sync"))
+      return {
+        base_sync_cursor: "tasks_first",
+        next_sync_cursor: "tasks_next",
+        next_page_cursor: null,
+        changes: [],
+      } as never;
+    if (url.endsWith("/tasks") || url === "/project-tasks")
+      return {
+        items: [],
+        next_page_cursor: null,
+        sync_cursor: "tasks_first",
+      } as never;
     if (url === "/projects/resources")
       return { skills: [], mcp_servers: [], directory_roots: [] } as never;
     if (url === "/projects" && init?.method === "POST") {
@@ -157,7 +181,7 @@ describe("独立项目正式页面", () => {
     ).toBe(false);
   });
 
-  it("creates a project and fetches the updated list and detail", async () => {
+  it("creates a project and updates the list through synchronization", async () => {
     const user = userEvent.setup();
     mount("/box-projects");
     await screen.findByRole("button", { name: /我的项目/ });
@@ -179,10 +203,10 @@ describe("独立项目正式页面", () => {
       (sent![1]!.headers as Record<string, string>)["Idempotency-Key"],
     ).toBeTruthy();
     expect(
-      api.mock.calls.filter(([url]) => url === "/projects").length,
+      api.mock.calls.filter(([url]) => url.startsWith("/projects/sync")).length,
     ).toBeGreaterThan(1);
     expect(api.mock.calls.some(([url]) => url === "/projects/proj_new")).toBe(
-      true,
+      false,
     );
   });
 
@@ -213,7 +237,7 @@ describe("独立项目正式页面", () => {
     expect(sends[1][1]!.body).toEqual(sends[0][1]!.body);
   });
 
-  it("edits with the loaded revision and rereads the saved project", async () => {
+  it("edits with the loaded revision and synchronizes the saved project", async () => {
     const user = userEvent.setup();
     mount("/box-projects/proj_a");
     await user.click(await screen.findByRole("button", { name: "修改项目" }));
@@ -224,8 +248,9 @@ describe("独立项目正式页面", () => {
     await screen.findByRole("heading", { name: "项目已修改" });
     await waitFor(() =>
       expect(
-        api.mock.calls.filter(([url]) => url === "/projects/proj_a").length,
-      ).toBeGreaterThan(2),
+        api.mock.calls.filter(([url]) => url.startsWith("/projects/sync"))
+          .length,
+      ).toBeGreaterThan(1),
     );
     const sent = api.mock.calls.find(
       ([url, init]) => url === "/projects/proj_a" && init?.method === "PATCH",

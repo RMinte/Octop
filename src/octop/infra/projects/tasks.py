@@ -55,6 +55,7 @@ class TaskSummary(ProjectModel):
     project_id: str | None
     title: str
     active_turn_id: str | None
+    list_revision: int = Field(description="任务摘要版本；仅列表字段变化时递增。")
     created_at: datetime
     updated_at: datetime
 
@@ -77,6 +78,7 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
         project_id=row.project_id,
         title=row.title,
         active_turn_id=row.active_turn_id,
+        list_revision=row.list_revision,
         created_at=_datetime(row.created_at),
         updated_at=_datetime(row.updated_at),
     )
@@ -110,14 +112,6 @@ def detail(services: SharedServices, owner_id: int, task_id: str) -> TaskDetail:
             for t in turns
         ],
     )
-
-
-def list_tasks(
-    services: SharedServices, owner_id: int, project_id: str | None
-) -> list[TaskSummary]:
-    if project_id is not None:
-        get_project(services, owner_id, project_id)
-    return [summary(row) for row in services.project_task_repo.list(owner_id, project_id)]
 
 
 def _configuration(

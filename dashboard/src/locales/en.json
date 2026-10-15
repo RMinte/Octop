@@ -209,6 +209,7 @@
     "TEAM_NOT_SHAREABLE": "Teams cannot be shared in this version.",
     "SKILL_PACKAGE_COPY_DENIED": "The creator of this skill package has disabled copying its skills.",
     "SKILL_PACKAGE_LOCKED": "This skill was copied from a locked skill package and cannot be edited in the workspace.",
+    "PROJECT_SYNC_RESET": "The sync cursor is invalid. Reload the list.",
     "PROJECT_NAME_TAKEN": "A project with this name already exists.",
     "PROJECT_REQUEST_CONFLICT": "This creation key was used with different project details. Use a new key.",
     "PROJECT_REVISION_CONFLICT": "The project has changed. Refresh it before editing.",
@@ -6552,6 +6553,7 @@
     "clientDirectoryPlaceholder": "e.g. /Users/name/Projects/demo or C:\\Projects\\demo",
     "noClientDirectory": "No client working directory linked",
     "tasks": {
+      "loadMore": "Load earlier tasks",
       "title": "Tasks",
       "new": "New task",
       "emptyList": "No tasks yet",

@@ -7,6 +7,7 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, strict_int
+from octop.infra.db.repos.project_sync import record_change
 
 
 @dataclass(frozen=True)
@@ -50,17 +51,25 @@ class ProjectRepo:
 
     def list_for_owner(self, owner_id: int) -> list[ProjectRow]:
         with self._db.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM projects WHERE owner_id=? ORDER BY updated_at DESC, project_id DESC",
-                (owner_id,),
-            ).fetchall()
+            return self.list_in_transaction(conn, owner_id)
+
+    @staticmethod
+    def list_in_transaction(conn: Any, owner_id: int) -> list[ProjectRow]:
+        rows = conn.execute(
+            "SELECT * FROM projects WHERE owner_id=? ORDER BY updated_at DESC, project_id DESC",
+            (owner_id,),
+        ).fetchall()
         return [ProjectRow.from_row(row) for row in rows]
 
     def get(self, project_id: str, owner_id: int) -> ProjectRow | None:
         with self._db.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM projects WHERE project_id=? AND owner_id=?", (project_id, owner_id)
-            ).fetchone()
+            return self.get_in_transaction(conn, project_id, owner_id)
+
+    @staticmethod
+    def get_in_transaction(conn: Any, project_id: str, owner_id: int) -> ProjectRow | None:
+        row = conn.execute(
+            "SELECT * FROM projects WHERE project_id=? AND owner_id=?", (project_id, owner_id)
+        ).fetchone()
         return ProjectRow.from_row(row) if row is not None else None
 
     def lock_owner(self, conn: Any, owner_id: int) -> bool:
@@ -112,7 +121,9 @@ class ProjectRepo:
             ),
         ).fetchone()
         assert result is not None
-        return ProjectRow.from_row(result)
+        saved = ProjectRow.from_row(result)
+        record_change(conn, saved.owner_id, "projects", saved.project_id, saved)
+        return saved
 
     def update(self, row: ProjectRow, expected_revision: int) -> ProjectRow | None:
         with self._db.transaction() as conn:
@@ -134,4 +145,8 @@ class ProjectRepo:
                     expected_revision,
                 ),
             ).fetchone()
-        return ProjectRow.from_row(result) if result is not None else None
+            if result is None:
+                return None
+            saved = ProjectRow.from_row(result)
+            record_change(conn, saved.owner_id, "projects", saved.project_id, saved)
+            return saved

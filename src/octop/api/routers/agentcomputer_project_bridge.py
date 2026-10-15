@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter, ValidationError
 
@@ -16,7 +17,7 @@ from octop.api.agentcomputer import (
 from octop.api.deps import current_bearer_user, get_server
 from octop.api.routers.bridge import _bridge
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import tasks
+from octop.infra.projects import sync, tasks
 from octop.infra.projects.discovery import ProjectTaskCapabilities
 from octop.infra.projects.models import (
     ProjectFields,
@@ -60,6 +61,13 @@ async def _relay(
             path=API_PREFIX + resource,
             headers=headers,
             body=body,
+            query=urlencode(
+                [
+                    (key, value)
+                    for key, value in request.query_params.multi_items()
+                    if request.method == "GET" and key in {"limit", "page_cursor", "sync_cursor"}
+                ]
+            ),
         )
     except OctopError as exc:
         if exc.code == ErrorCode.BRIDGE_TUNNEL_FAILED:
@@ -168,6 +176,52 @@ async def create_project(
 
 
 @router.get(
+    "/projects/sync",
+    response_model=sync.ProjectSyncPage,
+    summary="读取远端列表增量同步",
+    description="仅转发当前用户连接的列表同步请求，校验分页参数；项目和任务使用独立同步游标。",
+)
+async def sync_projects(
+    request: Request,
+    connection_id: str,
+    sync_cursor: str | None = Query(default=None, max_length=4096),
+    page_cursor: str | None = Query(default=None, max_length=4096),
+    limit: int = Query(default=50, ge=1, le=100),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> JSONResponse:
+    return await _relay(
+        request, server, user, connection_id, "/projects/sync", sync.ProjectSyncPage
+    )
+
+
+@router.get(
+    "/projects/{project_id}/tasks/sync",
+    response_model=sync.TaskSyncPage,
+    summary="读取远端列表增量同步",
+    description="仅转发当前用户连接的列表同步请求，校验分页参数；项目和任务使用独立同步游标。",
+)
+async def sync_project_tasks(
+    request: Request,
+    connection_id: str,
+    project_id: str,
+    sync_cursor: str = Query(min_length=1, max_length=4096),
+    page_cursor: str | None = Query(default=None, max_length=4096),
+    limit: int = Query(default=50, ge=1, le=100),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> JSONResponse:
+    return await _relay(
+        request,
+        server,
+        user,
+        connection_id,
+        f"/projects/{project_id}/tasks/sync",
+        sync.TaskSyncPage,
+    )
+
+
+@router.get(
     "/projects/{project_id}",
     response_model=ProjectView,
     status_code=200,
@@ -228,7 +282,7 @@ async def update_project(
 
 @router.get(
     "/projects/{project_id}/tasks",
-    response_model=list[tasks.TaskSummary],
+    response_model=sync.TaskListPage,
     status_code=200,
     summary="列出远端项目任务",
     description="仅转发到当前用户拥有的 Bridge 连接；远端仍按连接账号授权。使用 AgentComputer 独立项目/多轮任务契约，不转发调用方凭据或任意路径。",
@@ -237,6 +291,8 @@ async def project_tasks(
     request: Request,
     connection_id: str,
     project_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    page_cursor: str | None = Query(default=None, max_length=4096),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_bearer_user),
 ) -> JSONResponse:
@@ -246,7 +302,7 @@ async def project_tasks(
         user,
         connection_id,
         f"/projects/{project_id}/tasks",
-        list[tasks.TaskSummary],
+        sync.TaskListPage,
     )
 
 
@@ -272,7 +328,7 @@ async def create_project_task(
 
 @router.get(
     "/tasks",
-    response_model=list[tasks.TaskSummary],
+    response_model=sync.TaskListPage,
     status_code=200,
     summary="列出远端无项目任务",
     description="仅转发到当前用户拥有的 Bridge 连接；远端仍按连接账号授权。使用 AgentComputer 独立项目/多轮任务契约，不转发调用方凭据或任意路径。",
@@ -280,10 +336,12 @@ async def create_project_task(
 async def standalone_tasks(
     request: Request,
     connection_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    page_cursor: str | None = Query(default=None, max_length=4096),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_bearer_user),
 ) -> JSONResponse:
-    return await _relay(request, server, user, connection_id, "/tasks", list[tasks.TaskSummary])
+    return await _relay(request, server, user, connection_id, "/tasks", sync.TaskListPage)
 
 
 @router.post(
@@ -301,6 +359,24 @@ async def create_task(
     user: User = Depends(current_bearer_user),
 ) -> JSONResponse:
     return await _relay(request, server, user, connection_id, "/tasks", tasks.TaskDetail)
+
+
+@router.get(
+    "/tasks/sync",
+    response_model=sync.TaskSyncPage,
+    summary="读取远端列表增量同步",
+    description="仅转发当前用户连接的列表同步请求，校验分页参数；项目和任务使用独立同步游标。",
+)
+async def sync_standalone_tasks(
+    request: Request,
+    connection_id: str,
+    sync_cursor: str = Query(min_length=1, max_length=4096),
+    page_cursor: str | None = Query(default=None, max_length=4096),
+    limit: int = Query(default=50, ge=1, le=100),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> JSONResponse:
+    return await _relay(request, server, user, connection_id, "/tasks/sync", sync.TaskSyncPage)
 
 
 @router.get(

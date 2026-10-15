@@ -54,8 +54,8 @@ _CONNECTOR_INSTANCES_LIST = re.compile(r"^/api/connector-instances$")
 _AC_PROJECT = r"proj_[A-Za-z0-9]+"
 _AC_TASK = r"task_[A-Za-z0-9]+"
 _AGENTCOMPUTER_READ = re.compile(
-    rf"^/api/agentcomputer/v1/(?:capabilities|projects|projects/resources|"
-    rf"projects/{_AC_PROJECT}|projects/{_AC_PROJECT}/tasks|tasks|"
+    rf"^/api/agentcomputer/v1/(?:capabilities|projects|projects/resources|projects/sync|"
+    rf"projects/{_AC_PROJECT}|projects/{_AC_PROJECT}/tasks(?:/sync)?|tasks|tasks/sync|"
     rf"tasks/{_AC_TASK}|tasks/{_AC_TASK}/turns)$"
 )
 _AGENTCOMPUTER_CREATE = re.compile(

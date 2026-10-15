@@ -17,6 +17,7 @@ from octop.infra.db.repos.cron import CronJobRepo
 from octop.infra.db.repos.invites import InviteRepo
 from octop.infra.db.repos.knowledge import KnowledgeRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
+from octop.infra.db.repos.project_sync import ProjectSyncRepo
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRepo
 from octop.infra.db.repos.project_tasks import ProjectTaskRepo
 from octop.infra.db.repos.projects import ProjectRepo
@@ -41,6 +42,7 @@ from octop.infra.utils.paths import PathLayout
 class RepoBundle:
     db: DatabasePool
 
+    project_sync_repo: ProjectSyncRepo
     project_task_repo: ProjectTaskRepo
     project_task_turn_repo: ProjectTaskTurnRepo
     project_repo: ProjectRepo
@@ -74,6 +76,7 @@ class RepoBundle:
     def from_pool(cls, db: DatabasePool) -> RepoBundle:
         return cls(
             db=db,
+            project_sync_repo=ProjectSyncRepo(),
             project_task_repo=ProjectTaskRepo(db),
             project_task_turn_repo=ProjectTaskTurnRepo(db),
             project_repo=ProjectRepo(db),
@@ -114,6 +117,10 @@ class SharedServices:
     @property
     def db(self) -> DatabasePool:
         return self.repos.db
+
+    @property
+    def project_sync_repo(self) -> ProjectSyncRepo:
+        return self.repos.project_sync_repo
 
     @property
     def project_task_repo(self) -> ProjectTaskRepo:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Depends, Header, Query, Response
 from fastapi.responses import JSONResponse
 
 from octop.api.agentcomputer import ProtocolErrorEnvelope, protocol_error_response
@@ -12,7 +12,7 @@ from octop.api.deps import current_bearer_user, get_server, require_database
 from octop.infra.agentcomputer.identity import IdentityError
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import service, tasks
+from octop.infra.projects import service, sync, tasks
 from octop.infra.projects.discovery import ProjectTaskCapabilities, get_capabilities
 from octop.infra.projects.models import (
     ProjectFields,
@@ -126,6 +126,64 @@ async def create_project(
 
 
 @router.get(
+    "/projects/sync",
+    response_model=sync.ProjectSyncPage,
+    summary="同步项目最终状态",
+    description="不带同步游标返回完整项目快照；之后只返回变过的项目，游标与任务独立。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+)
+async def sync_projects(
+    response: Response,
+    sync_cursor: str | None = Query(
+        default=None, max_length=4096, description="已有项目同步位置；首次可省略。"
+    ),
+    page_cursor: str | None = Query(
+        default=None, max_length=4096, description="本批变更下一页游标。"
+    ),
+    limit: int = Query(default=50, ge=1, le=100),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> sync.ProjectSyncPage:
+    response.headers["Cache-Control"] = "no-store"
+    return await server.agentcomputer_http_operations.run_thread(
+        sync.project_sync,
+        _services(server, response),
+        user.id,
+        sync_cursor=sync_cursor,
+        page_cursor=page_cursor,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/tasks/sync",
+    response_model=sync.TaskSyncPage,
+    summary="同步任务列表最终状态",
+    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+)
+async def sync_project_tasks(
+    project_id: str,
+    response: Response,
+    sync_cursor: str = Query(min_length=1, max_length=4096, description="任务首页返回的增量基线。"),
+    page_cursor: str | None = Query(
+        default=None, max_length=4096, description="本批变更下一页游标。"
+    ),
+    limit: int = Query(default=50, ge=1, le=100),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> sync.TaskSyncPage:
+    response.headers["Cache-Control"] = "no-store"
+    return await server.agentcomputer_http_operations.run_thread(
+        sync.task_sync,
+        _services(server, response),
+        user.id,
+        project_id,
+        sync_cursor=sync_cursor,
+        page_cursor=page_cursor,
+        limit=limit,
+    )
+
+
+@router.get(
     "/projects/{project_id}",
     response_model=ProjectView,
     summary="读取 AgentComputer 项目配置",
@@ -180,18 +238,27 @@ async def update_project(
 
 @router.get(
     "/projects/{project_id}/tasks",
-    response_model=list[tasks.TaskSummary],
+    response_model=sync.TaskListPage,
     summary="列出 AgentComputer 项目任务",
-    description="按最近活动排序返回本人项目的多轮任务，与网页共享历史。",
+    description="按最近活动位置分页返回本人项目任务摘要；默认 50 条，仅首页返回独立同步基线。",
 )
 async def project_tasks(
     project_id: str,
     response: Response,
+    limit: int = Query(default=50, ge=1, le=100, description="每页摘要数量，默认 50，最多 100。"),
+    page_cursor: str | None = Query(
+        default=None, max_length=4096, description="历史任务下一页游标。"
+    ),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_bearer_user),
-) -> list[tasks.TaskSummary]:
+) -> sync.TaskListPage:
     return await server.agentcomputer_http_operations.run_thread(
-        tasks.list_tasks, _services(server, response), user.id, project_id
+        sync.task_page,
+        _services(server, response),
+        user.id,
+        project_id,
+        limit=limit,
+        page_cursor=page_cursor,
     )
 
 
@@ -219,17 +286,26 @@ async def create_project_task(
 
 @router.get(
     "/tasks",
-    response_model=list[tasks.TaskSummary],
+    response_model=sync.TaskListPage,
     summary="列出 AgentComputer 无项目任务",
-    description="仅列出本人无项目任务；项目内任务使用项目任务列表。",
+    description="按最近活动位置分页读取本人无项目任务摘要；默认 50 条，不包含正文。",
 )
 async def standalone_tasks(
     response: Response,
+    limit: int = Query(default=50, ge=1, le=100, description="每页摘要数量，默认 50，最多 100。"),
+    page_cursor: str | None = Query(
+        default=None, max_length=4096, description="历史任务下一页游标。"
+    ),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_bearer_user),
-) -> list[tasks.TaskSummary]:
+) -> sync.TaskListPage:
     return await server.agentcomputer_http_operations.run_thread(
-        tasks.list_tasks, _services(server, response), user.id, None
+        sync.task_page,
+        _services(server, response),
+        user.id,
+        None,
+        limit=limit,
+        page_cursor=page_cursor,
     )
 
 
@@ -252,6 +328,34 @@ async def create_task(
     )
     worker.wake()
     return result
+
+
+@router.get(
+    "/tasks/sync",
+    response_model=sync.TaskSyncPage,
+    summary="同步任务列表最终状态",
+    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+)
+async def sync_standalone_tasks(
+    response: Response,
+    sync_cursor: str = Query(min_length=1, max_length=4096, description="任务首页返回的增量基线。"),
+    page_cursor: str | None = Query(
+        default=None, max_length=4096, description="本批变更下一页游标。"
+    ),
+    limit: int = Query(default=50, ge=1, le=100),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_bearer_user),
+) -> sync.TaskSyncPage:
+    response.headers["Cache-Control"] = "no-store"
+    return await server.agentcomputer_http_operations.run_thread(
+        sync.task_sync,
+        _services(server, response),
+        user.id,
+        None,
+        sync_cursor=sync_cursor,
+        page_cursor=page_cursor,
+        limit=limit,
+    )
 
 
 @router.get(

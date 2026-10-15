@@ -209,7 +209,9 @@ async def test_bridge_task_conversations_use_shared_worker_and_history(
         task = await done(task_id)
         assert task["project_id"] is None and task["turns"][0]["reply"] == "Reply 1"
         assert (await client.get("/api/project-tasks/" + task_id, headers=auth)).json() == task
-        assert (await client.get(PREFIX + "/tasks", headers=auth)).json()[0]["task_id"] == task_id
+        assert (await client.get(PREFIX + "/tasks", headers=auth)).json()["items"][0][
+            "task_id"
+        ] == task_id
         next_turn = {"request_id": "bridge-second-message", "prompt": "Which bird?"}
         response = await client.post(
             PREFIX + "/tasks/" + task_id + "/turns", headers=auth, json=next_turn
@@ -226,3 +228,69 @@ async def test_bridge_task_conversations_use_shared_worker_and_history(
         cancelled = await client.post(PREFIX + "/tasks/" + task_id + "/cancel", headers=auth)
         assert cancelled.status_code == 200 and cancelled.json() == task
     assert server.services.agent_repo.list_all() == before
+
+
+async def test_bridge_forwards_only_list_paging_and_sync_query_parameters(env):
+    from urllib.parse import parse_qs
+
+    from octop.infra.db.repos.project_tasks import ProjectTaskRow
+
+    client, server, auth = env
+    manager = await connection(client, server, auth)
+    owner = await resolve_user_id(client, auth, "admin")
+    token = auth["Authorization"].split(" ", 1)[1]
+    session = MagicMock()
+
+    async def local_peer(**kwargs):
+        return await execute_local_http(app=client._octop_app, access_token=token, **kwargs)
+
+    session.tunnel_request = AsyncMock(side_effect=local_peer)
+    with server.services.db.transaction() as conn:
+        for index in range(3):
+            server.services.project_task_repo.insert(
+                conn,
+                ProjectTaskRow(
+                    f"task_0{index}",
+                    owner,
+                    None,
+                    f"Task {index}",
+                    f"bridge-seed-{index}",
+                    None,
+                    1000,
+                    1000,
+                ),
+            )
+    with patch.object(manager, "require_session", return_value=session):
+        response = await client.get(
+            PREFIX + "/tasks", headers=auth, params={"limit": 1, "ignored": "private"}
+        )
+        assert response.status_code == 200, response.text
+        first = response.json()
+        assert len(first["items"]) == 1 and first["items"][0]["task_id"] == "task_02"
+        assert parse_qs(session.tunnel_request.await_args.kwargs["query"]) == {"limit": ["1"]}
+        page = await client.get(
+            PREFIX + "/tasks",
+            headers=auth,
+            params={"limit": 1, "page_cursor": first["next_page_cursor"]},
+        )
+        assert page.status_code == 200 and page.json()["items"][0]["task_id"] == "task_01"
+        with server.services.db.transaction() as conn:
+            server.services.project_task_repo.activate(conn, "task_00", "turn_bridge", 2000)
+        delta = await client.get(
+            PREFIX + "/tasks/sync", headers=auth, params={"sync_cursor": first["sync_cursor"]}
+        )
+        assert delta.status_code == 200, delta.text
+        assert delta.json()["changes"][0]["task_id"] == "task_00"
+        assert parse_qs(session.tunnel_request.await_args.kwargs["query"]) == {
+            "sync_cursor": [first["sync_cursor"]]
+        }
+        projects = await client.get(PREFIX + "/projects/sync", headers=auth)
+        assert projects.status_code == 200 and projects.json()["mode"] == "snapshot"
+        wrong = await client.get(
+            PREFIX + "/tasks/sync",
+            headers=auth,
+            params={"sync_cursor": projects.json()["next_sync_cursor"]},
+        )
+        assert wrong.status_code == 409
+        assert wrong.json()["error"]["code"] == "reconciliationRequired"
+        assert wrong.json()["error"]["reasonCode"] == "PROJECT_SYNC_RESET"

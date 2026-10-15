@@ -32,6 +32,7 @@ import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import RootDirSelect from "../Experts/components/RootDirSelect";
 import styles from "./index.module.less";
 import TaskConversations from "./TaskConversations";
+import { useProjectList } from "./useProjectLists";
 import ProjectSkillsField, { projectSkillKey } from "./ProjectSkillsField";
 
 const EMPTY: ProjectFields = {
@@ -52,8 +53,13 @@ export default function BoxProjectsPage() {
   const timeZone = useServerTimezone();
   const [searchParams] = useSearchParams();
   const standalone = !projectID && searchParams.get("view") === "tasks";
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [selected, setSelected] = useState<Project | null>(null);
+  const {
+    items: projects,
+    refresh: refreshProjects,
+    upsert: upsertProject,
+  } = useProjectList();
+  const selected =
+    projects.find((item) => item.project_id === projectID) ?? null;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Project | "new" | null>(null);
@@ -68,37 +74,31 @@ export default function BoxProjectsPage() {
 
   const refresh = useCallback(async () => {
     const current = ++generation.current.version;
-    setLoading(true);
     setError("");
     try {
-      const [list, detail] = await Promise.all([
-        projectsApi.list(),
-        projectID ? projectsApi.get(projectID) : Promise.resolve(null),
-      ]);
-      if (current !== generation.current.version) return;
-      setProjects(list);
-      setSelected(detail);
+      await refreshProjects();
     } catch (cause) {
       if (current === generation.current.version)
         setError(apiErrorMessage(cause, t("projects.loadFailed"), t));
     } finally {
       if (current === generation.current.version) setLoading(false);
     }
-  }, [projectID, t]);
+  }, [refreshProjects, t]);
 
   useEffect(() => {
     const pendingRequests = generation.current;
-    setSelected(null);
     void refresh();
     const onVisible = () => {
       if (document.visibilityState === "visible") void refresh();
     };
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onVisible);
     return () => {
       pendingRequests.version++;
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onVisible);
     };
-  }, [refresh]);
+  }, [refresh, projectID]);
 
   const loadResources = useCallback(async () => {
     setResourceError("");
@@ -156,6 +156,7 @@ export default function BoxProjectsPage() {
               ...fields,
               expected_revision: editing.revision,
             });
+      upsertProject(result);
       setEditing(null);
       void message.success(t("projects.saved"));
       if (projectID === result.project_id) await refresh();

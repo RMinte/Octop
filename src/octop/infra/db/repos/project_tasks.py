@@ -7,6 +7,7 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, strict_int
+from octop.infra.db.repos.project_sync import record_change, task_scope
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class ProjectTaskRow:
     active_turn_id: str | None
     created_at: int
     updated_at: int
+    list_revision: int = 1
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -31,6 +33,7 @@ class ProjectTaskRow:
             str(row["active_turn_id"]) if row["active_turn_id"] is not None else None,
             strict_int(row["created_at"]),
             strict_int(row["updated_at"]),
+            strict_int(row["list_revision"]),
         )
 
 
@@ -38,15 +41,32 @@ class ProjectTaskRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
 
-    def list(self, owner_id: int, project_id: str | None) -> list[ProjectTaskRow]:
-        with self._db.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM project_tasks WHERE owner_id=? AND "
-                + ("project_id IS NULL" if project_id is None else "project_id=?")
-                + " ORDER BY updated_at DESC, task_id DESC",
-                (owner_id,) if project_id is None else (owner_id, project_id),
-            ).fetchall()
-        return [ProjectTaskRow.from_row(r) for r in rows]
+    @staticmethod
+    def page(
+        conn: Any,
+        owner_id: int,
+        project_id: str | None,
+        limit: int,
+        boundary: tuple[int, str] | None = None,
+    ) -> list[ProjectTaskRow]:
+        params: list[Any] = [owner_id]
+        scope = "project_id IS NULL"
+        if project_id is not None:
+            scope = "project_id=?"
+            params.append(project_id)
+        position = ""
+        if boundary is not None:
+            position = " AND (updated_at, task_id)<(?, ?)"
+            params.extend(boundary)
+        params.append(limit)
+        rows = conn.execute(
+            "SELECT * FROM project_tasks WHERE owner_id=? AND "
+            + scope
+            + position
+            + " ORDER BY updated_at DESC, task_id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [ProjectTaskRow.from_row(row) for row in rows]
 
     def get(self, task_id: str, owner_id: int) -> ProjectTaskRow | None:
         with self._db.connect() as conn:
@@ -91,25 +111,31 @@ class ProjectTaskRepo:
                 row.updated_at,
             ),
         )
+        record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
 
     @staticmethod
     def activate(conn: Any, task_id: str, turn_id: str, now: int) -> bool:
-        return bool(
-            conn.execute(
-                "UPDATE project_tasks SET active_turn_id=?, updated_at=? "
-                "WHERE task_id=? AND active_turn_id IS NULL",
-                (turn_id, now, task_id),
-            ).rowcount
-            == 1
-        )
+        result = conn.execute(
+            "UPDATE project_tasks SET active_turn_id=?, updated_at=?, list_revision=list_revision+1 "
+            "WHERE task_id=? AND active_turn_id IS NULL RETURNING *",
+            (turn_id, now, task_id),
+        ).fetchone()
+        if result is None:
+            return False
+        row = ProjectTaskRow.from_row(result)
+        record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
+        return True
 
     @staticmethod
     def finish(conn: Any, task_id: str, turn_id: str, now: int) -> None:
-        conn.execute(
-            "UPDATE project_tasks SET active_turn_id=NULL, updated_at=? "
-            "WHERE task_id=? AND active_turn_id=?",
+        result = conn.execute(
+            "UPDATE project_tasks SET active_turn_id=NULL, updated_at=?, list_revision=list_revision+1 "
+            "WHERE task_id=? AND active_turn_id=? RETURNING *",
             (now, task_id, turn_id),
-        )
+        ).fetchone()
+        if result is not None:
+            row = ProjectTaskRow.from_row(result)
+            record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
 
     def runtime_owner(self, task_id: str) -> int | None:
         with self._db.connect() as conn:

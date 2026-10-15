@@ -209,6 +209,7 @@
     "TEAM_NOT_SHAREABLE": "当前版本不支持分享团队。",
     "SKILL_PACKAGE_COPY_DENIED": "该技能包的创建者已禁止复制其中的技能。",
     "SKILL_PACKAGE_LOCKED": "此技能复制自锁定策略的技能包，无法在工作区编辑。",
+    "PROJECT_SYNC_RESET": "同步位置已失效，请重新加载列表。",
     "PROJECT_NAME_TAKEN": "已存在同名项目。",
     "PROJECT_REQUEST_CONFLICT": "该创建标识已用于其他项目内容，请使用新的标识。",
     "PROJECT_REVISION_CONFLICT": "项目已被修改，请刷新后重新编辑。",
@@ -6552,6 +6553,7 @@
     "clientDirectoryPlaceholder": "例如 /Users/name/Projects/demo 或 C:\\Projects\\demo",
     "noClientDirectory": "尚未关联客户端工作目录",
     "tasks": {
+      "loadMore": "加载更早的任务",
       "title": "任务",
       "new": "新任务",
       "emptyList": "还没有任务",

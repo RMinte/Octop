@@ -29,7 +29,7 @@ Octop 网页使用 `/api/projects` 与 `/api/project-tasks`；AgentComputer 使�
 
 项目通过“添加技能”打开与专家复用的技能目录：提供为你推荐、近期飙升、下载热榜、最近上新、搜索、详情和已安装技能选择。榜单复用 `GET /api/skills/hub/rankings?type=all`，搜索复用 `GET /api/skills/hub/search`。SkillHub 选择项以 `{source: "skillhub", slug, name, description}` 保存，已安装项使用 `{package_id, slug}`。两种来源可多选并回显；失败显示重试入口。保存 SkillHub 引用不会下载或执行技能，也不会创建专家。
 
-页面每次进入、恢复到前台和手动刷新时获取服务端数据；创建或修改成功后重新获取列表和详情。项目详情默认打开任务会话，可直接输入需求创建任务、在同一任务内追问、打开历史和停止回复。项目配置保留在同名页签中。
+页面每次进入先展示当前账号在本标签页保存的列表缓存，再通过项目独立同步游标获取变化；恢复前台、恢复网络和手动刷新也会同步。创建或修改成功后先应用写入响应，再同步补齐其他变化，不重复获取完整列表和详情。项目详情默认打开任务会话，可直接输入需求创建任务、在同一任务内追问、打开历史和停止回复。项目配置保留在同名页签中。
 
 
 ### 任务对话接口（独立项目模型）
@@ -56,6 +56,18 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 验证：任务 HTTP/持久化/多轮/幂等/用户隔离/取消/崩溃恢复集成用例通过；真实 Harness 配合本地模拟模型完成项目文件读取及模拟 MCP 调用，并验证 Skill/行动指南进入提示。8088 已登录正式页面使用现有 GLM-5 完成项目内首轮、同 Task 追问及刷新后历史恢复；无项目任务同样返回真实回复。真实 MCP 供应商连接、PostgreSQL 与 Ubuntu 盒子尚未实机点验。
 
+### 项目同步和任务列表分页
+
+网页新增 `GET /api/projects/sync`、`GET /api/projects/{project_id}/tasks/sync`、`GET /api/project-tasks/sync`，AgentComputer 使用下一节对应专用路径。项目和各任务列表分别维护游标，不能跨账号、列表、实例或用途复用。协议版本为 2，任务列表响应已改为分页对象；本轮不修改原生客户端 UI。
+
+项目首次不带 `sync_cursor`，返回 `mode=snapshot`、完整项目 `changes` 和 `next_sync_cursor`；之后带上游标只返回期间变化过的项目最终状态。任务首次只获取一页摘要，默认 50 条、最多 100 条；返回 `items`、`next_page_cursor` 和 `sync_cursor`，不预读全部历史或正文。后续以 `page_cursor` 加载更早任务，按 `updated_at DESC, task_id DESC` 续取；历史下一页不产生新同步基线。
+
+任务首页返回的 `sync_cursor` 可立即请求对应 `/sync`，不必等历史读完。即使未加载的旧任务发生新活动，也通过增量进入近期列表。增量返回 `base_sync_cursor`、`changes`、`next_page_cursor`、`next_sync_cursor`；同一对象多次修改合并为截止版本的完整状态，中间页不返回可提交的新同步位置。收齐本批后再一起保存对象和游标。历史分页游标和增量分页游标用途不同，客户端分开保存。
+
+分页与增量响应交错时，使用 `list_revision` 保留较新的任务摘要；项目使用 `revision`。自己写入成功也不能跳过期间其他变化，直接推进同步位置。无效游标返回 HTTP 409 `PROJECT_SYNC_RESET`，重新建立项目快照或对应任务第一页即可。后台任务完成、取消和中断恢复的摘要更新与变更记录同事务提交；回复正文和心跳不产生列表变更。当前没有删除入口和自动历史清理，备份恢复流程仍需可靠推进 `restoreEpoch` 后才能使旧游标失效。
+
+网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
+
 ### AgentComputer 专用协议与接入顺序
 
 AgentComputer 直连运行 Octop 的盒子/主机，统一使用 `/api/agentcomputer/v1` 前缀。下面的路径均相对此前缀；网页仍使用上文的 `/api/projects`、`/api/project-tasks`。共享的是服务和数据库，不要求 App 改用网页入口。
@@ -64,6 +76,9 @@ AgentComputer 直连运行 Octop 的盒子/主机，统一使用 `/api/agentcomp
 | --- | --- | --- |
 | GET | `/capabilities` | 确认盒子身份、协议契约、当前功能和执行可用性 |
 | GET / POST | `/projects` | 列出 / 创建同一份独立项目；创建需要 `Idempotency-Key` |
+| GET | `/projects/sync` | 项目首次快照及独立增量同步 |
+| GET | `/projects/{project_id}/tasks/sync` | 项目任务摘要增量同步 |
+| GET | `/tasks/sync` | 无项目任务摘要增量同步 |
 | GET | `/projects/resources` | 读取项目可选目录、Skill、MCP |
 | GET / PATCH / PUT | `/projects/{project_id}` | 读取 / 局部修改 / 完整替换项目配置 |
 | GET / POST | `/projects/{project_id}/tasks` | 项目任务列表 / 首条消息创建任务 |
@@ -72,16 +87,16 @@ AgentComputer 直连运行 Octop 的盒子/主机，统一使用 `/api/agentcomp
 | GET / POST | `/tasks/{task_id}/turns` | 读取全部轮次 / 同一任务发送下一轮 |
 | POST | `/tasks/{task_id}/cancel` | 停止当前排队或运行中的回复 |
 
-共 15 个方法与路径组合，均有类型化请求/响应和 OpenAPI 说明。项目、任务、轮次请求与响应使用上文的共享模型；项目列表、任务列表和历史轮次直接返回数组。发送体为 `{"request_id":"每次发送唯一的UUID","prompt":"用户消息"}`，创建 `/tasks` 可另传 `project_id`。
+共 18 个方法与路径组合，均有类型化请求/响应和 OpenAPI 说明。项目、任务、轮次请求与响应使用上文的共享模型；普通项目列表和历史轮次仍返回数组，任务列表返回游标分页对象。发送体为 `{"request_id":"每次发送唯一的UUID","prompt":"用户消息"}`，创建 `/tasks` 可另传 `project_id`。
 
 1. 使用一个 Octop 地址登录，保存该实例返回的用户 token。所有专用协议请求携带 `Authorization: Bearer <access_token>`；禁止 `access_token` 查询参数。收到 `X-Octop-Access-Token` 时更新本地令牌。
-2. 先读取 `/capabilities`，确认 `contract="independent-project-tasks"`、`contractVersion=1`，再按本节契约解析；不能继续使用旧准备专家/Run 回执模型。
-3. App 打开或回前台读取 `/projects`，进入项目读取详情及 `/projects/{project_id}/tasks`。最近无项目任务读取 `/tasks`，不是全部项目任务汇总。
+2. 先读取 `/capabilities`，确认 `contract="independent-project-tasks"`、`contractVersion=2`，再按本节契约解析；不能继续使用旧准备专家/Run 回执模型。
+3. 项目使用 `/projects/sync` 建立完整快照并单独保存同步游标，之后携带 `sync_cursor` 获取变更。进入项目时读取 `/projects/{project_id}/tasks` 第一页；无项目任务读取 `/tasks`，不是全部项目任务汇总。历史使用 `page_cursor` 按需翻页，第一页的 `sync_cursor` 用于对应任务列表 `/sync` 的后续增量请求。
 4. 新建项目为本次创建生成 `Idempotency-Key`；网络重试复用原标识与内容。编辑读取最新 `revision`，PATCH 携带 `expected_revision`；版本冲突先读取再处理。
 5. 首条消息创建任务，后续 POST `/tasks/{task_id}/turns` 继续相同任务。每条新消息生成新的 `request_id`，网络重试复用原标识和原消息。
 6. 轮询 `/tasks/{task_id}` 恢复增量正文和当前状态；打开历史只读取，不重新发送。时间字段为 UTC ISO 8601，界面使用能力响应中的服务端 `timezone`。
 
-`/capabilities` 保留稳定 `boxID`、`restoreEpoch` 和服务端时区；`executionAvailable` 根据共享服务实际选用的模型与 worker 状态计算。缺模型或 worker 未就绪分别给出 `unavailableReason=modelUnavailable/runtimeUnavailable`，实际发送还会校验本人配额和项目资源。`capabilities.projects/taskConversations/incrementalReplies/cancellation=true` 表示结构支持；`events/files/approvals/questions/commandReceipts/runs=false`，不表示旧 Run、文件或审批能力开放。
+`/capabilities` 保留稳定 `boxID`、`restoreEpoch` 和服务端时区；`executionAvailable` 根据共享服务实际选用的模型与 worker 状态计算。缺模型或 worker 未就绪分别给出 `unavailableReason=modelUnavailable/runtimeUnavailable`，实际发送还会校验本人配额和项目资源。`capabilities.projectListSync/taskListPagination/taskListSync/projects/taskConversations/incrementalReplies/cancellation=true` 表示结构支持；`events/files/approvals/questions/commandReceipts/runs=false`，不表示旧 Run、文件或审批能力开放。
 
 专用错误格式为 `{"error":{"code":"revisionConflict","retryable":false,"reasonCode":"PROJECT_REVISION_CONFLICT"}}`。`code` 使用专用协议的稳定错误分类；独立项目/任务业务原因放在 `reasonCode`，不返回原始异常或请求内容。版本冲突为 `revisionConflict`，标识冲突为 `idempotencyConflict`，任务忙为 `activeRunConflict`，缺模型为 `runtimeUnavailable`。HTTP 状态沿用业务状态（例如缺模型 409），客户端应同时读取 code/reasonCode，不能只看状态。变更请求上限为 65,536 字节。
 
@@ -202,6 +217,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
   "project_id": "proj_example",
   "title": "请先概括项目目标，再列出下一步。",
   "active_turn_id": null,
+  "list_revision": 2,
   "created_at": "2026-10-15T05:01:00Z",
   "updated_at": "2026-10-15T05:01:05Z",
   "turns": [
@@ -224,7 +240,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-任务列表返回 `TaskSummary[]`，即上例移除 `turns` 后的字段；没有 `status` 或最近回复摘要。要展示某轮完整状态和正文，当前必须读详情。
+任务列表返回 `{items: TaskSummary[], next_page_cursor: string|null, sync_cursor: string|null}`；摘要为上例移除 `turns` 后的字段，另有单调递增的 `list_revision`，详情和写入响应也携带此版本。摘要没有 `status` 或最近回复正文，要展示某轮完整状态和正文仍需读详情。仅第一页返回同步基线，后续历史分页不推进同步位置。
 
 | 轮次状态 | 含义 | 当前客户端处理 |
 | --- | --- | --- |
@@ -277,10 +293,10 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | --- | --- |
 | 项目创建/读取/修改、PATCH 保留未提交字段、空值规则、版本冲突 | 服务端定向自动化通过 |
 | 同 key 并发创建、不同内容冲突、用户隔离、首次响应回放、失败不消耗 key | 服务端定向自动化通过；创建回执持久化在数据库 |
-| AgentComputer 专用协议和 Bridge | 15 个专用操作及对应受限转发已接共享服务；旧专家绑定/Run/文档协议未挂载；定向 HTTP/OpenAPI 验证，未部署到 8088 |
+| AgentComputer 专用协议和 Bridge | 18 个专用操作及对应受限转发已接共享服务；旧专家绑定/Run/文档协议未挂载；8088 已部署，项目同步、任务分页和专用协议只读验证通过 |
 | 项目与无项目任务、首轮和追问、幂等发送、历史恢复、取消基础行为 | 现有新模型自动化通过；本轮未改精确取消语义 |
-| 正式网页创建重试复用 key、改用 PATCH、保存后重新读取 | 前端自动化通过 |
-| 本机 8088 | 已更新到 schema 32；升级前已备份，既有项目/任务/轮次及旧 ac_* 数据核对保留；真实 GLM 双轮记录来自前一轮 |
+| 正式网页创建重试复用 key、改用 PATCH、保存后增量同步 | 前端自动化通过 |
+| 本机 8088 | 已更新到 schema 33 并重启后端；升级前已备份，2 个项目、5 个任务、6 个轮次和历史 ac_* 数据逐表摘要一致，数据库完整性及新同步接口验证通过；真实 GLM 双轮记录来自前一轮 |
 | 当前原生 AgentComputer App | 本轮未修改，尚未验收新独立接口适配 |
 | PostgreSQL、目标 Ubuntu 盒子、真实 MCP 供应商 | 迁移文件/接口实现不等于实机验证，目前未验收 |
 

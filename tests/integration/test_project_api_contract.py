@@ -44,9 +44,14 @@ async def test_dedicated_and_web_contracts_are_both_documented(env):
     assert "/api/projects" in schema["paths"]
     assert "/api/project-tasks" in schema["paths"]
     direct = {path: value for path, value in schema["paths"].items() if path.startswith(AC)}
-    assert sum(len(value) for value in direct.values()) == 15
+    assert sum(len(value) for value in direct.values()) == 18
     assert AC + "/capabilities" in direct
     assert AC + "/tasks/{task_id}/turns" in direct
+    assert direct[AC + "/tasks"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["$ref"].endswith("/TaskListPage")
+    assert AC + "/projects/sync" in direct
+    assert AC + "/tasks/sync" in direct
     assert not any("/runs/" in path or "/documents" in path for path in direct)
     for path, item in direct.items():
         for operation in item.values():
@@ -188,10 +193,10 @@ async def test_shared_tasks_multi_turn_configuration_and_retries(task_env):
     ]
     assert json.loads(calls[1][0].configuration_json)["instructions"] == "Updated"
     assert (await client.get(f"{AC}/tasks/{task_id}/turns", headers=auth)).json() == done["turns"]
-    assert (await client.get(f"{AC}/projects/{project_id}/tasks", headers=auth)).json()[0][
+    assert (await client.get(f"{AC}/projects/{project_id}/tasks", headers=auth)).json()["items"][0][
         "task_id"
     ] == task_id
-    assert (await client.get(AC + "/tasks", headers=auth)).json() == []
+    assert (await client.get(AC + "/tasks", headers=auth)).json()["items"] == []
     conflict = await client.post(
         f"{AC}/tasks/{task_id}/turns", headers=auth, json={**second, "prompt": "Different"}
     )
@@ -219,7 +224,7 @@ async def test_projectless_cancel_and_isolation(task_env, monkeypatch):
     try:
         await asyncio.wait_for(entered.wait(), 5)
         assert task["project_id"] is None
-        assert (await client.get("/api/project-tasks", headers=auth)).json()[0][
+        assert (await client.get("/api/project-tasks", headers=auth)).json()["items"][0][
             "task_id"
         ] == task_id
         busy = await client.post(

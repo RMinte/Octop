@@ -96,6 +96,7 @@ def octop_error_response(error: OctopError) -> JSONResponse:
 
 
 PROJECT_TASK_ERROR_CODES: dict[ErrorCode, ProtocolErrorCode] = {
+    ErrorCode.PROJECT_SYNC_RESET: "reconciliationRequired",
     ErrorCode.PROJECT_NAME_TAKEN: "resourceConflict",
     ErrorCode.PROJECT_REQUEST_CONFLICT: "idempotencyConflict",
     ErrorCode.PROJECT_REVISION_CONFLICT: "revisionConflict",

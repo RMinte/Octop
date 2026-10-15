@@ -35,7 +35,30 @@ export interface ProjectResources {
   }[];
   directory_roots: string[];
 }
+export interface ProjectSyncPage {
+  mode: "snapshot" | "delta";
+  base_sync_cursor: string | null;
+  next_sync_cursor: string | null;
+  next_page_cursor: string | null;
+  changes: { operation: "upsert"; project_id: string; data: Project }[];
+}
+const query = (values: Record<string, string | null | undefined>) => {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value != null) params.set(key, value);
+  }
+  const text = params.toString();
+  return text ? `?${text}` : "";
+};
 export const projectsApi = {
+  sync: (syncCursor?: string | null, pageCursor?: string | null) =>
+    request<ProjectSyncPage>(
+      `/projects/sync${query({
+        sync_cursor: syncCursor,
+        page_cursor: pageCursor,
+      })}`,
+      { cache: "no-store" },
+    ),
   list: () => request<Project[]>("/projects", { cache: "no-store" }),
   get: (id: string) =>
     request<Project>(`/projects/${encodeURIComponent(id)}`, {
@@ -64,6 +87,7 @@ export interface TaskSummary {
   project_id: string | null;
   title: string;
   active_turn_id: string | null;
+  list_revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -88,12 +112,42 @@ export interface TaskMessage {
   prompt: string;
 }
 const taskPath = (id: string) => `/project-tasks/${encodeURIComponent(id)}`;
+export interface TaskListPage {
+  items: TaskSummary[];
+  next_page_cursor: string | null;
+  sync_cursor: string | null;
+}
+export interface TaskSyncPage {
+  base_sync_cursor: string;
+  next_sync_cursor: string | null;
+  next_page_cursor: string | null;
+  changes: {
+    operation: "upsert";
+    task_id: string;
+    list_revision: number;
+    data: TaskSummary;
+  }[];
+}
+const taskListPath = (projectID: string | null) =>
+  projectID
+    ? `/projects/${encodeURIComponent(projectID)}/tasks`
+    : "/project-tasks";
 export const projectTasksApi = {
-  list: (projectID: string | null) =>
-    request<TaskSummary[]>(
-      projectID
-        ? `/projects/${encodeURIComponent(projectID)}/tasks`
-        : "/project-tasks",
+  list: (projectID: string | null, pageCursor?: string | null) =>
+    request<TaskListPage>(
+      `${taskListPath(projectID)}${query({ page_cursor: pageCursor })}`,
+      { cache: "no-store" },
+    ),
+  sync: (
+    projectID: string | null,
+    syncCursor: string,
+    pageCursor?: string | null,
+  ) =>
+    request<TaskSyncPage>(
+      `${taskListPath(projectID)}/sync${query({
+        sync_cursor: syncCursor,
+        page_cursor: pageCursor,
+      })}`,
       { cache: "no-store" },
     ),
   get: (id: string) => request<TaskDetail>(taskPath(id), { cache: "no-store" }),

@@ -512,3 +512,64 @@ async def test_failed_creation_does_not_consume_key_and_key_is_required(env, tmp
     directory.rmdir()
     # A lost-response retry is a receipt read, not a second resource validation or creation.
     assert (await client.post("/api/projects", headers=headers, json=fields)).status_code == 201
+
+
+async def test_project_sync_coalesces_and_freezes_delta_pages(env):
+    client, server, auth = env
+    base = (await client.get("/api/projects/sync", headers=auth)).json()
+    assert base["mode"] == "snapshot" and base["changes"] == []
+    created = []
+    for name in ("Sync A", "Sync B", "Sync C"):
+        key = str(uuid4())
+        response = await client.post(
+            "/api/projects", headers={**auth, "Idempotency-Key": key}, json={"name": name}
+        )
+        assert response.status_code == 201
+        created.append(response.json())
+        assert (
+            await client.post(
+                "/api/projects", headers={**auth, "Idempotency-Key": key}, json={"name": name}
+            )
+        ).json() == response.json()
+    params = {"sync_cursor": base["next_sync_cursor"], "limit": 1}
+    first = (await client.get("/api/projects/sync", headers=auth, params=params)).json()
+    assert len(first["changes"]) == 1 and first["next_sync_cursor"] is None
+    assert first["next_page_cursor"]
+    last = max(created, key=lambda row: row["project_id"])
+    for revision in (1, 2):
+        result = await client.patch(
+            f"/api/projects/{last['project_id']}",
+            headers=auth,
+            json={"expected_revision": revision, "description": f"Version {revision + 1}"},
+        )
+        assert result.status_code == 200
+    changes = list(first["changes"])
+    page = first
+    while page["next_page_cursor"]:
+        response = await client.get(
+            "/api/projects/sync",
+            headers=auth,
+            params={**params, "page_cursor": page["next_page_cursor"]},
+        )
+        assert response.status_code == 200, response.text
+        page = response.json()
+        changes.extend(page["changes"])
+    assert len(changes) == 3
+    assert all(change["data"]["revision"] == 1 for change in changes)
+    delta = (
+        await client.get(
+            "/api/projects/sync", headers=auth, params={"sync_cursor": page["next_sync_cursor"]}
+        )
+    ).json()
+    assert len(delta["changes"]) == 1
+    assert delta["changes"][0]["data"]["revision"] == 3
+    assert delta["changes"][0]["data"]["description"] == "Version 3"
+    empty = (
+        await client.get(
+            "/api/projects/sync", headers=auth, params={"sync_cursor": delta["next_sync_cursor"]}
+        )
+    ).json()
+    assert empty["changes"] == []
+    # Journal and business writes share the same transaction; retries made no extra entries.
+    with server.services.db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM project_sync_changes").fetchone()[0] == 5
