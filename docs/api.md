@@ -40,9 +40,11 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | POST | `/api/projects/{project_id}/tasks` | 在项目中发送首条消息，原子创建任务和首轮，返回 202 |
 | GET | `/api/project-tasks` | 列出无项目任务 |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
-| GET | `/api/project-tasks/{task_id}` | 读取全部消息、增量回复、当前工具名称和执行状态 |
+| GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
+| GET | `/api/project-tasks/{task_id}/events` | 订阅实时轮次状态，支持游标或 Last-Event-ID 续接 |
 | POST | `/api/project-tasks/{task_id}/messages` | 发送下一轮消息，继续相同任务 |
-| POST | `/api/project-tasks/{task_id}/cancel` | 停止排队或运行中的回复，保留已有正文 |
+| POST | `/api/project-tasks/{task_id}/cancel` | 指定 turn_id 停止对应回复，保留已有正文 |
+| POST | `/api/project-tasks/{task_id}/turns/{turn_id}/retry` | 重新尝试最后一个失败或取消轮次，创建新轮次 |
 
 发送体：`{"request_id":"每次发送唯一的UUID","prompt":"用户消息"}`。通用创建接口另接受 `project_id`。网络重试必须复用 `request_id` 和同一条消息；标识与内容冲突返回 409。执行中发送新消息返回 `TASK_BUSY`，停止或结束后可继续。所有读写均按当前登录用户隔离；其他用户的资源返回 404。读取带 `Cache-Control: no-store`。
 
@@ -50,7 +52,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 当前使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。需要审批的工具当前会结束本轮并提示失败，不绕过审批；本轮提供文字对话、项目文件/脚本、Skill 和所选 MCP；浏览器、桌面、审批恢复和附件上传未接入。
 
-状态为 `queued/running/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页约每 30 秒读取当前状态，进入页面、切换任务及恢复前台或网络时立即刷新。已完成轮次的用户消息和回复用作后续上下文，不自动重放工具操作。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
+状态为 `queued/running/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 SSE 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的用户消息和已输出正文用作后续上下文；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
 
 验证：任务 HTTP/持久化/多轮/幂等/用户隔离/取消/崩溃恢复集成用例通过；真实 Harness 配合本地模拟模型完成项目文件读取及模拟 MCP 调用，并验证 Skill/行动指南进入提示。8088 已登录正式页面使用现有 GLM-5 完成项目内首轮、同 Task 追问及刷新后历史恢复；无项目任务同样返回真实回复。真实 MCP 供应商连接、PostgreSQL 与 Ubuntu 盒子尚未实机点验。
 
@@ -173,7 +175,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 
 消息只支持文字：`prompt` 去首尾空白后为 1–32768 字符，`request_id` 为 8–128 位字母、数字、短横线或下划线。当前请求不接受附件、模型选择、权限模式或临时 Skill/MCP 字段；任务继承发送时的项目配置和当前模型选择规则。
 
-通过 `GET /api/project-tasks/task_example` 读取 `TaskDetail`。以下是单轮已完成时的示意，创建响应的轮次通常处于 queued：
+通过 `GET /api/project-tasks/task_example` 读取 `TaskDetail`，默认最近 50 轮。`limit` 为 1–100；使用 `next_page_cursor` 作为下一次的 `page_cursor` 读取更早轮次，每页内部按创建顺序正序排列。首屏与实时基线来自同一数据库快照，历史页的 `event_cursor=null`，不能用历史页推进实时位置。以下是单轮已完成时的示意，创建响应的轮次通常处于 queued：
 
 ```json
 {
@@ -184,8 +186,11 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
   "list_revision": 2,
   "created_at": "2026-10-15T05:01:00Z",
   "updated_at": "2026-10-15T05:01:05Z",
+  "next_page_cursor": null,
+  "event_cursor": "opaque_event_cursor",
   "turns": [
     {
+      "sequence": 1,
       "turn_id": "turn_example",
       "request_id": "9fca322b-4884-4acd-bdfd-67428aeac735",
       "prompt": "请先概括项目目标，再列出下一步。",
@@ -194,6 +199,8 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
       "error_code": "",
       "activity": "",
       "model_ref": "provider/model",
+      "cancel_requested": false,
+      "retry_of_turn_id": null,
       "input_tokens": 120,
       "output_tokens": 80,
       "project_revision": 1,
@@ -204,19 +211,29 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-任务列表返回 `{items: TaskSummary[], next_page_cursor: string|null, sync_cursor: string|null}`；摘要为上例移除 `turns` 后的字段，另有单调递增的 `list_revision`，详情和写入响应也携带此版本。摘要没有 `status` 或最近回复正文，要展示某轮完整状态和正文仍需读详情。仅第一页返回同步基线，后续历史分页不推进同步位置。
+任务列表返回 `{items: TaskSummary[], next_page_cursor: string|null, sync_cursor: string|null}`；摘要为上例移除 `turns`、`next_page_cursor` 和 `event_cursor` 后的字段，另有单调递增的 `list_revision`，详情和写入响应也携带此版本。摘要没有 `status` 或最近回复正文，要展示某轮完整状态和正文仍需读详情。仅第一页返回同步基线，后续历史分页不推进同步位置。
 
 | 轮次状态 | 含义 | 当前客户端处理 |
 | --- | --- | --- |
-| `queued` | 已保存，等待执行 | 显示排队，继续读取详情 |
+| `queued` | 已保存，等待执行 | 显示排队，继续订阅状态 |
 | `running` | 正在生成回复或调用工具 | 使用已保存的 reply 和 activity 展示进度 |
-| `completed` | 本轮完成 | 停止本轮轮询，可以继续发送下一条消息 |
+| `completed` | 本轮完成 | 可以继续发送下一条消息，保留任务状态订阅 |
 | `failed` | 本轮失败或中断 | 保留已存正文，读取 error_code，不自动重发工具操作 |
 | `cancelled` | 本轮已取消 | 保留历史，可以继续发送消息 |
 
 `active_turn_id=null` 表示当前没有活动轮次，不等于该任务永久结束。Task 仍是一段可以继续的会话。`activity` 只是当前工具名，结束后会清空，不能用它生成完整工具历史。
 
-停止使用 `POST /api/project-tasks/{task_id}/cancel`，当前无请求体，返回 HTTP 200 和任务详情；请求停止后应继续读取状态，直到活动轮次结束。它目前按任务的当前轮次取消，尚未加入目标 turn_id 校验；客户端不能给延迟到达或跨轮次的取消请求做自动重试。精确取消仍是后续改造项。
+停止使用 `POST /api/project-tasks/{task_id}/cancel`，必须提交 `{"turn_id":"turn_example"}`。返回 HTTP 200 和任务详情；运行轮次先置 `cancel_requested=true`，继续订阅直到进入终态。重复或迟到的请求只作用于指定轮次，该轮已结束时不影响下一轮；缺少请求体返回 422，其他任务的轮次返回 404。
+
+重新尝试使用 `POST /api/project-tasks/{task_id}/turns/{turn_id}/retry`，提交 `{"request_id":"new-retry-request"}`。只允许最后一个失败或取消轮次，活动任务返回 `TASK_BUSY`，不符合条件返回 `TASK_RETRY_UNAVAILABLE`。新轮次沿用原始消息，采用当前项目配置和模型，`retry_of_turn_id` 指向原轮次；原正文和状态不覆盖。同一重试标识重传不会重复执行。重试可能再次执行之前发生过的操作，网页在按钮旁明确提示；不自动重试失败轮次。
+
+### 实时状态续接
+
+首屏取得 `event_cursor` 后，通过带 Bearer token 的 `GET /api/project-tasks/{task_id}/events?cursor=…` 连接 SSE；也可以用 `Last-Event-ID` 请求头携带位置。不要把 token 放进 URL。每个 `turn` 事件的 `data` 为 `{task: TaskSummary, turn: TaskTurn, cursor: string}`，SSE `id` 与 cursor 相同。应用事件后保存游标，按 turn_id 合并该轮完整状态，以轮次 sequence 稳定排序（序号可能不连续），并以 list_revision 防止旧摘要覆盖新状态。
+
+连接断开不会停止任务。重连会补齐上次位置之后各轮次的最新持久状态，包括离线期间的完成和后续轮次；同一轮的中间 token 和工具名称变化可以合并，不提供完整工具事件账本。无游标连接先发送最近一页 `snapshot`（TaskDetail）。游标绑定实例、恢复代次、用户、任务和用途，不能与列表/历史分页游标混用；失效时返回 HTTP 409 `PROJECT_SYNC_RESET`，连接建立后的失效通过 `error` 事件返回相同错误信封。此时重新读取最近一页并替换原加载范围。
+
+服务端约每 0.5 秒检查持久状态，纯租约心跳不推送正文；空闲时发送 SSE 注释心跳。连接约 25 秒后正常结束，客户端以最后游标重连以重新校验登录态，并处理滑动续期令牌。网页切换任务、进入后台或离线时关闭连接；回到前台或联网时续接。加载更早轮次不推进实时游标，迟到的历史页或写入响应不能覆盖已经收到的终态。
 
 ### 错误和网络重试
 
@@ -245,6 +262,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 422 / `PROJECT_DIRECTORY_INVALID` | 服务端目录不存在或不可访问 | 重新选择有权限的服务端目录 |
 | 422 / `PROJECT_RESOURCE_INVALID` | Skill/MCP 引用不存在或无权使用 | 刷新资源目录后重新选择 |
 | 409 / `TASK_BUSY` | 任务已有活动轮次 | 读取当前任务，等待结束或由用户停止 |
+| 409 / `TASK_RETRY_UNAVAILABLE` | 指定轮次不是最后一个失败/取消轮次 | 刷新会话，不重试旧轮次 |
 | 409 / `TASK_REQUEST_CONFLICT` | 消息标识已用于不同内容或作用域 | 核对原发送结果，禁止换内容复用标识 |
 | 409 / `TASK_MODEL_UNAVAILABLE` | 没有可用模型 | 保留草稿，配置模型后重新发送；不会创建空任务 |
 | 409 / `CONTROL_PLANE_BUSY` | 任务 worker 尚不可受理 | 保留发送标识和草稿，待服务恢复后重试 |
@@ -258,7 +276,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 项目创建/读取/修改、PATCH 保留未提交字段、空值规则、版本冲突 | 服务端定向自动化通过 |
 | 同 key 并发创建、不同内容冲突、用户隔离、首次响应回放、失败不消耗 key | 服务端定向自动化通过；创建回执持久化在数据库 |
 | 专用协议和项目任务 Bridge | 已从代码移除，当前只提供本机项目和任务接口；已有数据保留 |
-| 项目与无项目任务、首轮和追问、幂等发送、历史恢复、取消基础行为 | 现有新模型自动化通过；本轮未改精确取消语义 |
+| 项目与无项目任务、首轮和追问、幂等发送、历史恢复、取消基础行为 | 定向自动化通过；包含指定轮次取消、迟到取消不影响下一轮、手动重试和未完成上下文 |
 | 正式网页创建重试复用 key、改用 PATCH、保存后增量同步 | 前端自动化通过 |
 | 本机 8088 | 已更新到 schema 33 并重启后端；升级前已备份，2 个项目、5 个任务、6 个轮次和历史 ac_* 数据逐表摘要一致，数据库完整性及新同步接口验证通过；真实 GLM 双轮记录来自前一轮 |
 | 当前原生 AgentComputer App | 本轮未修改，尚未验收新独立接口适配 |
@@ -266,7 +284,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 
 此前专用协议和 Bridge 的验证记录仅反映历史实现，不代表现行可用接口。当前路由契约验证覆盖标准项目/任务入口，以及已移除地址不可用、不触发转发的边界。完整 `make all` 按约定后置。
 
-后续仍需改造：按目标轮次精确取消、项目/任务分页及摘要、分页消息与可续接事件流、失败/取消后的上下文与重试语义、任务执行选项、任务改名和归档、附件产物与审批。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
+本轮已补齐会话历史分页、可续接轮次状态流、精确取消和失败/取消后的继续及手动重试。任务列表分页和摘要同步已有实现。后续仍需改造：任务执行选项、任务改名和归档、附件产物与审批。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
 
 当前实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
 

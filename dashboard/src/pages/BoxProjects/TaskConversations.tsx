@@ -12,17 +12,14 @@ import {
 import { MessageSquare, Plus, Send, Square } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
-import {
-  projectTasksApi,
-  type TaskDetail,
-  type TaskMessage,
-} from "../../api/modules/projects";
+import { projectTasksApi, type TaskMessage } from "../../api/modules/projects";
 import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { apiErrorMessage } from "../../utils/apiError";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import styles from "./index.module.less";
 import { useTaskList } from "./useProjectLists";
+import { useTaskConversation } from "./useTaskConversation";
 
 export default function TaskConversations({
   projectID,
@@ -41,8 +38,16 @@ export default function TaskConversations({
     loadingMore,
     upsert: upsertTask,
   } = useTaskList(projectID);
-  const [detail, setDetail] = useState<TaskDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const {
+    detail,
+    loading,
+    error: detailError,
+    reconnecting,
+    loadingHistory,
+    refresh: refreshDetail,
+    applyWrite,
+    loadHistory,
+  } = useTaskConversation(taskID, projectID);
   const [error, setError] = useState("");
   const [loadError, setLoadError] = useState("");
   const alive = useRef(true);
@@ -59,71 +64,73 @@ export default function TaskConversations({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const generation = useRef({ version: 0 });
   const inFlight = useRef(false);
   const pending = useRef<{ target: string; body: TaskMessage } | null>(null);
   const end = useRef<HTMLDivElement>(null);
-  const busy = !!detail?.active_turn_id;
-
-  const refreshing = useRef<{ key: string; promise: Promise<void> } | null>(
+  const followOutput = useRef(true);
+  const retryRequest = useRef<{ turnID: string; requestID: string } | null>(
     null,
   );
-  const refresh = useCallback(() => {
-    const key = `${projectID ?? ""}:${taskID ?? ""}`;
-    if (refreshing.current?.key === key) return refreshing.current.promise;
-    const promise = (async () => {
-      const version = ++generation.current.version;
-      try {
-        const [, selected] = await Promise.all([
-          refreshList(),
-          taskID ? projectTasksApi.get(taskID) : Promise.resolve(null),
-        ]);
-        if (version !== generation.current.version) return;
-        if (selected && selected.project_id !== projectID)
-          throw new Error(t("projects.tasks.wrongProject"));
-        setDetail(selected);
-        setLoadError("");
-      } catch (err) {
-        if (version === generation.current.version)
-          setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
-      } finally {
-        if (version === generation.current.version) setLoading(false);
-      }
-    })().finally(() => {
-      if (refreshing.current?.promise === promise) refreshing.current = null;
-    });
-    refreshing.current = { key, promise };
-    return promise;
-  }, [projectID, taskID, t, refreshList]);
+  const busy = !!detail?.active_turn_id;
+  const listSummary = useRef("");
+
+  const refresh = useCallback(async () => {
+    try {
+      await Promise.all([refreshList(), refreshDetail()]);
+      setLoadError("");
+    } catch (err) {
+      if (alive.current)
+        setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+    }
+  }, [refreshList, refreshDetail, t]);
 
   useEffect(() => {
-    const current = generation.current;
-    setDetail(null);
     setError("");
     setDraft("");
     pending.current = null;
-    setLoading(true);
-    void refresh();
-    const timer = window.setInterval(() => {
-      if (!document.hidden && !inFlight.current) void refresh();
-    }, 30_000);
-    const visible = () => {
-      if (!document.hidden) void refresh();
+    retryRequest.current = null;
+    followOutput.current = true;
+  }, [taskID, projectID]);
+
+  useEffect(() => {
+    let disposed = false;
+    const updateList = () => {
+      void refreshList()
+        .then(() => {
+          if (!disposed) setLoadError("");
+        })
+        .catch((err) => {
+          if (!disposed)
+            setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+        });
     };
+    updateList();
+    const visible = () => {
+      if (!document.hidden) updateList();
+    };
+    const timer = window.setInterval(visible, 30_000);
     document.addEventListener("visibilitychange", visible);
     window.addEventListener("online", visible);
     return () => {
-      current.version++;
+      disposed = true;
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", visible);
       window.removeEventListener("online", visible);
     };
-  }, [refresh]);
+  }, [refreshList, t]);
+
+  useEffect(() => {
+    const key = detail ? `${detail.task_id}:${detail.list_revision}` : "";
+    if (detail && listSummary.current !== key) upsertTask(detail);
+    listSummary.current = key;
+  }, [detail, upsertTask]);
 
   const latestReply = detail?.turns.at(-1)?.reply;
+  const latestTurnID = detail?.turns.at(-1)?.turn_id;
   useEffect(() => {
-    end.current?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
-  }, [latestReply, detail?.turns.length]);
+    if (followOutput.current)
+      end.current?.scrollIntoView?.({ block: "nearest" });
+  }, [latestReply, latestTurnID]);
 
   const selectTask = (id: string | null) => {
     const next = new URLSearchParams(params);
@@ -159,9 +166,8 @@ export default function TaskConversations({
         selectedProjectID.current !== projectID
       )
         return;
-      generation.current.version++;
       upsertTask(result);
-      setDetail(result);
+      applyWrite(result);
       setDraft("");
       pending.current = null;
       if (!taskID) selectTask(result.task_id);
@@ -170,7 +176,12 @@ export default function TaskConversations({
           setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
       });
     } catch (err) {
-      setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+      if (
+        alive.current &&
+        selectedTaskID.current === taskID &&
+        selectedProjectID.current === projectID
+      )
+        setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
     } finally {
       inFlight.current = false;
       setSending(false);
@@ -178,23 +189,64 @@ export default function TaskConversations({
   };
 
   const stop = async () => {
-    if (!taskID || stopping) return;
+    if (!taskID || !detail?.active_turn_id || stopping) return;
     setStopping(true);
     try {
-      const result = await projectTasksApi.cancel(taskID);
+      const result = await projectTasksApi.cancel(
+        taskID,
+        detail.active_turn_id,
+      );
       if (
         !alive.current ||
         selectedTaskID.current !== taskID ||
         selectedProjectID.current !== projectID
       )
         return;
-      generation.current.version++;
       upsertTask(result);
-      setDetail(result);
+      applyWrite(result);
     } catch (err) {
-      setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+      if (
+        alive.current &&
+        selectedTaskID.current === taskID &&
+        selectedProjectID.current === projectID
+      )
+        setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
     } finally {
       setStopping(false);
+    }
+  };
+
+  const retry = async (turnID: string) => {
+    if (!taskID || busy || sending || inFlight.current) return;
+    if (retryRequest.current?.turnID !== turnID)
+      retryRequest.current = { turnID, requestID: crypto.randomUUID() };
+    inFlight.current = true;
+    setSending(true);
+    setError("");
+    try {
+      const result = await projectTasksApi.retry(
+        taskID,
+        turnID,
+        retryRequest.current.requestID,
+      );
+      if (
+        !alive.current ||
+        selectedTaskID.current !== taskID ||
+        selectedProjectID.current !== projectID
+      )
+        return;
+      applyWrite(result);
+      retryRequest.current = null;
+    } catch (err) {
+      if (
+        alive.current &&
+        selectedTaskID.current === taskID &&
+        selectedProjectID.current === projectID
+      )
+        setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+    } finally {
+      inFlight.current = false;
+      setSending(false);
     }
   };
 
@@ -255,11 +307,16 @@ export default function TaskConversations({
         )}
       </div>
       <div className={styles.conversation}>
-        {(error || loadError) && (
+        {reconnecting && (
+          <Typography.Text type="secondary">
+            {t("projects.tasks.reconnecting")}
+          </Typography.Text>
+        )}
+        {(error || loadError || detailError) && (
           <Alert
             type="error"
             showIcon
-            message={error || loadError}
+            message={error || loadError || detailError}
             action={
               <Button size="small" onClick={() => void refresh()}>
                 {t("projects.refresh")}
@@ -269,6 +326,11 @@ export default function TaskConversations({
         )}
         <div
           className={styles.messages}
+          onScroll={(event) => {
+            const { scrollTop, clientHeight, scrollHeight } =
+              event.currentTarget;
+            followOutput.current = scrollHeight - scrollTop - clientHeight < 80;
+          }}
           role="log"
           aria-label={t("projects.tasks.history")}
         >
@@ -282,6 +344,14 @@ export default function TaskConversations({
           ) : (
             <>
               <Typography.Title level={5}>{detail.title}</Typography.Title>
+              {detail.next_page_cursor && (
+                <Button
+                  loading={loadingHistory}
+                  onClick={() => void loadHistory()}
+                >
+                  {t("projects.tasks.loadHistory")}
+                </Button>
+              )}
               {detail.turns.map((turn) => (
                 <div className={styles.turn} key={turn.turn_id}>
                   <div className={styles.userMessage}>
@@ -295,7 +365,15 @@ export default function TaskConversations({
                       <Typography.Text type="secondary">
                         {t("projects.tasks.assistant")}
                       </Typography.Text>
-                      <Tag>{t(`projects.tasks.status.${turn.status}`)}</Tag>
+                      <Tag>
+                        {t(
+                          turn.cancel_requested &&
+                            (turn.status === "queued" ||
+                              turn.status === "running")
+                            ? "projects.tasks.stopping"
+                            : `projects.tasks.status.${turn.status}`,
+                        )}
+                      </Tag>
                     </Space>
                     {turn.reply && (
                       <LazyMarkdown
@@ -315,6 +393,22 @@ export default function TaskConversations({
                         message={t(`apiErrors.${turn.error_code}`)}
                       />
                     )}
+                    {!busy &&
+                      turn.turn_id === latestTurnID &&
+                      (turn.status === "failed" ||
+                        turn.status === "cancelled") && (
+                        <Space direction="vertical" size="small">
+                          <Typography.Text type="secondary">
+                            {t("projects.tasks.retryHint")}
+                          </Typography.Text>
+                          <Button
+                            loading={sending}
+                            onClick={() => void retry(turn.turn_id)}
+                          >
+                            {t("projects.tasks.retry")}
+                          </Button>
+                        </Space>
+                      )}
                   </div>
                 </div>
               ))}
@@ -358,6 +452,11 @@ export default function TaskConversations({
               <Button
                 icon={<Square size={15} />}
                 loading={stopping}
+                disabled={detail?.turns.some(
+                  (turn) =>
+                    turn.turn_id === detail.active_turn_id &&
+                    turn.cancel_requested,
+                )}
                 onClick={() => void stop()}
               >
                 {t("projects.tasks.stop")}

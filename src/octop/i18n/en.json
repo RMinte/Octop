@@ -504,6 +504,7 @@
     "PROJECT_REVISION_CONFLICT": "The project has changed. Refresh it before editing.",
     "PROJECT_RESOURCE_INVALID": "A selected Skill or MCP connection is unavailable. Please select again.",
     "PROJECT_DIRECTORY_INVALID": "The directory is missing, inaccessible, or outside your allowed root.",
+    "TASK_RETRY_UNAVAILABLE": "Only the latest failed or stopped turn can be retried. Refresh the task.",
     "TASK_BUSY": "The task is running. Wait for completion or stop it before sending.",
     "TASK_REQUEST_CONFLICT": "This request ID was used for a different message. Refresh and try again.",
     "TASK_MODEL_UNAVAILABLE": "No chat model is available. Configure a model in settings first.",
@@ -887,6 +888,7 @@
     }
   },
   "projects": {
+    "task_incomplete_context": "[This turn did not complete. Any text above is partial, not a completed result. Tool actions may already have taken effect; check the current state before continuing or retrying to avoid duplicate actions.]",
     "task_prompt": "You are a project task assistant. Help the user complete their work and retain conversation context. Follow the project instructions below. The client directory is metadata only and is not synced to this server; do not claim to have accessed its files. Use tools when required by the request, and never invent tool results."
   }
 }

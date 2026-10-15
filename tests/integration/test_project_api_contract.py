@@ -21,6 +21,15 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
     assert "/api/projects/{project_id}/tasks/sync" in project_paths
     assert "/api/project-tasks/sync" in project_paths
     assert "/api/project-tasks/{task_id}/messages" in project_paths
+    assert "/api/project-tasks/{task_id}/events" in project_paths
+    assert "/api/project-tasks/{task_id}/turns/{turn_id}/retry" in project_paths
+    assert (
+        "text/event-stream"
+        in paths["/api/project-tasks/{task_id}/events"]["get"]["responses"]["200"]["content"]
+    )
+    cancel_schema = paths["/api/project-tasks/{task_id}/cancel"]["post"]["requestBody"]
+    assert cancel_schema["required"]
+    assert schema["components"]["schemas"]["TaskCancel"]["required"] == ["turn_id"]
     for item in project_paths.values():
         for operation in item.values():
             assert operation["summary"] and operation["tags"] == ["projects"]

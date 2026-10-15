@@ -11,6 +11,7 @@ from octop.infra.utils.locale import Locale, normalize_locale
 
 
 class ErrorCode(StrEnum):
+    TASK_RETRY_UNAVAILABLE = "TASK_RETRY_UNAVAILABLE"
     TASK_BUSY = "TASK_BUSY"
     TASK_REQUEST_CONFLICT = "TASK_REQUEST_CONFLICT"
     TASK_MODEL_UNAVAILABLE = "TASK_MODEL_UNAVAILABLE"
@@ -165,6 +166,7 @@ _DEFAULT_STATUS: dict[ErrorCode, int] = {
     ErrorCode.BACKUP_IN_PROGRESS: 409,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.NOT_FOUND: 404,
+    ErrorCode.TASK_RETRY_UNAVAILABLE: 409,
     ErrorCode.TASK_BUSY: 409,
     ErrorCode.TASK_REQUEST_CONFLICT: 409,
     ErrorCode.TASK_MODEL_UNAVAILABLE: 409,

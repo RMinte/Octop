@@ -296,12 +296,21 @@ class ProjectTaskWorker:
             if task is None:
                 raise OctopError.localized(ErrorCode.FORBIDDEN)
             rows = await asyncio.to_thread(self.services.project_task_turn_repo.list, turn.task_id)
-            history = [
-                {"role": role, "content": content}
-                for previous in rows
-                if previous.status == "completed"
-                for role, content in (("user", previous.prompt), ("assistant", previous.reply))
-            ]
+            user = await asyncio.to_thread(self.services.user_repo.get, task)
+            locale = normalize_locale(user.locale if user else "zh")
+            history: list[dict[str, Any]] = []
+            for previous in rows:
+                if previous.status not in {"completed", "failed", "cancelled"}:
+                    continue
+                reply_text = previous.reply
+                if previous.status != "completed":
+                    reply_text += "\n\n" + tr("projects.task_incomplete_context", locale)
+                history.extend(
+                    [
+                        {"role": "user", "content": previous.prompt},
+                        {"role": "assistant", "content": reply_text},
+                    ]
+                )
             async for event in run_turn(self.services, task, turn, history):
                 if event["type"] == "token":
                     reply += event["content"]

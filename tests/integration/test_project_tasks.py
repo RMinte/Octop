@@ -146,7 +146,11 @@ async def test_standalone_tasks_and_owner_isolation(task_env):
             base + "/messages", headers=alice, json={"request_id": "other-user", "prompt": "Steal"}
         )
     ).status_code == 404
-    assert (await client.post(base + "/cancel", headers=alice)).status_code == 404
+    assert (
+        await client.post(
+            base + "/cancel", headers=alice, json={"turn_id": task["turns"][0]["turn_id"]}
+        )
+    ).status_code == 404
     assert len(calls) == 1 and server.services.agent_repo.list_all() == before
 
 
@@ -173,13 +177,20 @@ async def test_busy_cancel_and_continue_preserve_history(task_env, monkeypatch):
         base + "/messages", headers=auth, json={"request_id": "while-busy", "prompt": "another"}
     )
     assert result.status_code == 409 and result.json()["error"]["code"] == "TASK_BUSY"
-    assert (await client.post(base + "/cancel", headers=auth)).status_code == 200
+    assert (
+        await client.post(
+            base + "/cancel", headers=auth, json={"turn_id": task["turns"][0]["turn_id"]}
+        )
+    ).status_code == 200
     done = await settled(client, auth, task["task_id"])
     assert done["turns"][0]["status"] == "cancelled"
     assert done["turns"][0]["reply"] == "Partial reply"
 
     async def next_run(services, owner, turn, history):
-        assert history == []  # Incomplete actions are never replayed.
+        assert history[0] == {"role": "user", "content": "Work"}
+        assert history[1]["role"] == "assistant"
+        assert history[1]["content"].startswith("Partial reply")
+        assert "未完成" in history[1]["content"] or "did not complete" in history[1]["content"]
         yield {"type": "token", "content": "Continued"}
 
     monkeypatch.setattr(runtime, "run_turn", next_run)
@@ -221,7 +232,11 @@ async def test_queued_cancel_and_abandoned_worker_recovery(task_env):
     await worker.close()  # Direct domain submission below tests restart recovery without a race.
     owner = await resolve_user_id(client, auth, "admin")
     task = send(services, owner, TaskMessage(request_id="queued-request", prompt="Work"))
-    await client.post(f"/api/project-tasks/{task.task_id}/cancel", headers=auth)
+    await client.post(
+        f"/api/project-tasks/{task.task_id}/cancel",
+        headers=auth,
+        json={"turn_id": task.active_turn_id},
+    )
     assert (await client.get(f"/api/project-tasks/{task.task_id}", headers=auth)).json()["turns"][
         0
     ]["status"] == "cancelled"
@@ -549,3 +564,240 @@ async def test_task_list_sync_is_scoped_per_project_and_restore_epoch(env):
     assert old_epoch.status_code == 409
     rebuilt = await client.get(bases[0], headers=auth)
     assert rebuilt.status_code == 200 and rebuilt.json()["items"][0]["task_id"] == "task_scoped"
+
+
+async def test_conversation_history_pages_are_bounded_and_scoped(task_env, monkeypatch):
+    from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
+    from octop.infra.projects import tasks
+
+    client, server, auth, _ = task_env
+    await server.project_task_worker.close()
+    services = server.services
+    owner = await resolve_user_id(client, auth, "admin")
+    task = send(services, owner, TaskMessage(request_id="history-first", prompt="First"))
+    with services.db.transaction() as conn:
+        first = services.project_task_turn_repo.get_in_transaction(conn, task.active_turn_id)
+        for number in range(1, 125):
+            services.project_task_turn_repo.insert(
+                conn,
+                ProjectTaskTurnRow(
+                    f"turn_history_{number:04d}",
+                    task.task_id,
+                    f"history-{number}",
+                    str(number),
+                    "",
+                    "queued",
+                    "",
+                    "",
+                    first.configuration_json,
+                    first.model_ref,
+                    "",
+                    False,
+                    first.created_at,
+                    first.created_at,
+                ),
+            )
+        conn.execute(
+            "UPDATE project_task_turns SET status='completed', reply=prompt WHERE task_id=?",
+            (task.task_id,),
+        )
+        services.project_task_repo.finish(conn, task.task_id, task.active_turn_id, now_ms())
+
+    def forbid_full_scan(*args):
+        pytest.fail("Conversation reads must not load the complete history")
+
+    monkeypatch.setattr(services.project_task_turn_repo, "list_in_transaction", forbid_full_scan)
+    base = f"/api/project-tasks/{task.task_id}"
+    page = (await client.get(base, headers=auth)).json()
+    assert len(page["turns"]) == 50 and page["next_page_cursor"] and page["event_cursor"]
+    assert page["turns"][0]["prompt"] == "75" and page["turns"][-1]["prompt"] == "124"
+    cursor = page["next_page_cursor"]
+    seen = {t["turn_id"] for t in page["turns"]}
+    while cursor:
+        page = (await client.get(base, headers=auth, params={"page_cursor": cursor})).json()
+        assert len(page["turns"]) <= 50 and page["event_cursor"] is None
+        assert not seen.intersection(t["turn_id"] for t in page["turns"])
+        seen.update(t["turn_id"] for t in page["turns"])
+        cursor = page["next_page_cursor"]
+    assert len(seen) == 125
+    # Catch up a disconnected reader over multiple bounded stream batches.
+    event_cursor = task.event_cursor
+    replayed = []
+    while batch := tasks.updates(services, owner, task.task_id, event_cursor):
+        replayed.extend(update.turn.turn_id for update in batch)
+        event_cursor = batch[-1].cursor
+    assert len(replayed) == len(set(replayed)) == 125
+    for params in ({"limit": 101}, {"limit": 0}, {"page_cursor": ""}):
+        assert (await client.get(base, headers=auth, params=params)).status_code == 422
+    other = send(services, owner, TaskMessage(request_id="history-other", prompt="Other"))
+    other_cursor = tasks.detail(services, owner, other.task_id).event_cursor
+    for token in (other_cursor, "tampered"):
+        response = await client.get(base, headers=auth, params={"page_cursor": token})
+        assert response.status_code == 409
+    assert (
+        tasks.updates(
+            services, owner, task.task_id, tasks.detail(services, owner, task.task_id).event_cursor
+        )
+        == []
+    )
+
+
+async def test_precise_cancel_does_not_stop_the_next_turn_or_other_tasks(task_env):
+    client, server, auth, _ = task_env
+    await server.project_task_worker.close()
+    services = server.services
+    server.project_task_worker = runtime.ProjectTaskWorker(services)
+    owner = await resolve_user_id(client, auth, "admin")
+    first = send(services, owner, TaskMessage(request_id="precise-first", prompt="First"))
+    base = f"/api/project-tasks/{first.task_id}"
+    body = {"turn_id": first.active_turn_id}
+    assert (await client.post(base + "/cancel", headers=auth)).status_code == 422
+    for _ in range(2):
+        assert (await client.post(base + "/cancel", headers=auth, json=body)).status_code == 200
+    next_turn = (
+        await client.post(
+            base + "/messages", headers=auth, json={"request_id": "precise-next", "prompt": "Next"}
+        )
+    ).json()
+    delayed = (await client.post(base + "/cancel", headers=auth, json=body)).json()
+    assert delayed["active_turn_id"] == next_turn["active_turn_id"]
+    assert delayed["turns"][-1]["status"] == "queued"
+    assert delayed["turns"][-1]["cancel_requested"] is False
+    other = send(services, owner, TaskMessage(request_id="precise-other", prompt="Other"))
+    assert (
+        await client.post(base + "/cancel", headers=auth, json={"turn_id": other.active_turn_id})
+    ).status_code == 404
+
+
+async def test_retry_preserves_failed_text_uses_current_configuration_and_is_idempotent(
+    task_env, monkeypatch
+):
+    client, server, auth, calls = task_env
+
+    async def failing(*args):
+        yield {"type": "token", "content": "Saved partial result"}
+        raise RuntimeError("do not expose this")
+
+    monkeypatch.setattr(runtime, "run_turn", failing)
+    project = (
+        await client.post(
+            "/api/projects",
+            headers={**auth, "Idempotency-Key": str(uuid4())},
+            json={"name": "Retry project", "instructions": "Initial"},
+        )
+    ).json()
+    first = (
+        await client.post(
+            "/api/project-tasks",
+            headers=auth,
+            json={
+                "project_id": project["project_id"],
+                "request_id": "retry-original",
+                "prompt": "Original prompt",
+            },
+        )
+    ).json()
+    failed = await settled(client, auth, first["task_id"])
+    original = failed["turns"][0]
+    assert original["status"] == "failed" and original["reply"] == "Saved partial result"
+    await client.patch(
+        f"/api/projects/{project['project_id']}",
+        headers=auth,
+        json={"expected_revision": 1, "instructions": "Updated"},
+    )
+    observed = []
+
+    async def succeeding(services, owner, turn, history):
+        observed.append((turn, history))
+        yield {"type": "token", "content": "Recovered"}
+
+    monkeypatch.setattr(runtime, "run_turn", succeeding)
+    base = f"/api/project-tasks/{first['task_id']}"
+    url = base + f"/turns/{original['turn_id']}/retry"
+    request = {"request_id": "retry-new-round"}
+    response = await client.post(url, headers=auth, json=request)
+    assert response.status_code == 202, response.text
+    done = await settled(client, auth, first["task_id"])
+    assert len(done["turns"]) == 2 and done["turns"][0] == original
+    retried = done["turns"][1]
+    assert retried["retry_of_turn_id"] == original["turn_id"]
+    assert retried["prompt"] == original["prompt"] and retried["project_revision"] == 2
+    assert json.loads(observed[0][0].configuration_json)["instructions"] == "Updated"
+    assert observed[0][1][0] == {"role": "user", "content": "Original prompt"}
+    assert observed[0][1][1]["content"].startswith("Saved partial result")
+    assert "do not expose this" not in json.dumps(observed[0][1])
+    assert (await client.post(url, headers=auth, json=request)).status_code == 202
+    assert len(observed) == 1
+    response = await client.post(url, headers=auth, json={"request_id": "retry-too-old"})
+    assert (
+        response.status_code == 409 and response.json()["error"]["code"] == "TASK_RETRY_UNAVAILABLE"
+    )
+    response = await client.post(
+        base + "/messages",
+        headers=auth,
+        json={"request_id": request["request_id"], "prompt": "Original prompt"},
+    )
+    assert response.status_code == 409
+
+
+async def test_task_sse_resumes_persisted_state_and_rejects_foreign_cursors(task_env, monkeypatch):
+    from octop.api.routers import projects as routes
+    from octop.infra.projects import tasks
+
+    client, server, auth, _ = task_env
+    await server.project_task_worker.close()
+    services = server.services
+    owner = await resolve_user_id(client, auth, "admin")
+    first = send(services, owner, TaskMessage(request_id="stream-first", prompt="Stream"))
+    cursor = first.event_cursor
+    claimed = services.project_task_turn_repo.claim("stream-worker", now_ms())
+    services.project_task_turn_repo.progress(
+        claimed.turn_id, "stream-worker", "Live partial", "read_file", now_ms()
+    )
+    # The route still uses its real auth, cursor validation and SSE generator.
+    monkeypatch.setattr(routes, "_TASK_STREAM_SECONDS", 0.01)
+    base = f"/api/project-tasks/{first.task_id}"
+    response = await client.get(base + "/events", headers=auth, params={"cursor": cursor})
+    assert response.status_code == 200 and response.headers["content-type"].startswith(
+        "text/event-stream"
+    )
+    assert response.headers["x-accel-buffering"] == "no"
+    assert "event: turn" in response.text
+    data = json.loads(
+        next(line[6:] for line in response.text.splitlines() if line.startswith("data: "))
+    )
+    assert data["turn"]["reply"] == "Live partial" and data["turn"]["activity"] == "read_file"
+    cursor = data["cursor"]
+    services.project_task_turn_repo.progress(
+        claimed.turn_id, "stream-worker", "Live partial", "read_file", now_ms() + 1
+    )
+    assert (
+        tasks.updates(services, owner, first.task_id, cursor) == []
+    )  # Lease heartbeat is not an event.
+    with services.db.transaction() as conn:
+        services.project_task_turn_repo.finish(
+            conn, claimed.turn_id, "stream-worker", "completed", "Live final", "", now_ms()
+        )
+        services.project_task_repo.finish(conn, first.task_id, claimed.turn_id, now_ms())
+    # Resume after a disconnected completion, including a subsequently queued round.
+    send(
+        services,
+        owner,
+        TaskMessage(request_id="stream-second", prompt="Follow up"),
+        task_id=first.task_id,
+    )
+    response = await client.get(base + "/events", headers={**auth, "Last-Event-ID": cursor})
+    payloads = [
+        json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
+    ]
+    assert [p["turn"]["status"] for p in payloads] == ["completed", "queued"]
+    assert payloads[0]["turn"]["reply"] == "Live final"
+    assert tasks.updates(services, owner, first.task_id, payloads[-1]["cursor"]) == []
+    snapshot = await client.get(base + "/events", headers=auth)
+    assert "event: snapshot" in snapshot.text
+    other = send(services, owner, TaskMessage(request_id="stream-other", prompt="Other"))
+    for token in (other.event_cursor, first.next_page_cursor or "bad", cursor + "x"):
+        invalid = await client.get(base + "/events", headers=auth, params={"cursor": token})
+        assert invalid.status_code == 409
+    alice = await create_user(client, auth, username="stream-alice")
+    assert (await client.get(base + "/events", headers=alice)).status_code == 404

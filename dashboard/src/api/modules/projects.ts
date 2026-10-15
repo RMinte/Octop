@@ -1,4 +1,4 @@
-import { request } from "../request";
+import { request, requestStream } from "../request";
 
 export interface PackageProjectSkill {
   package_id: string;
@@ -92,6 +92,7 @@ export interface TaskSummary {
   updated_at: string;
 }
 export interface TaskTurn {
+  sequence: number;
   turn_id: string;
   request_id: string;
   prompt: string;
@@ -101,12 +102,73 @@ export interface TaskTurn {
   activity: string;
   model_ref: string;
   project_revision: number | null;
+  retry_of_turn_id: string | null;
+  cancel_requested: boolean;
   created_at: string;
   updated_at: string;
 }
 export interface TaskDetail extends TaskSummary {
   turns: TaskTurn[];
+  next_page_cursor: string | null;
+  event_cursor: string | null;
 }
+export interface TaskUpdate {
+  task: TaskSummary;
+  turn: TaskTurn;
+  cursor: string;
+}
+export type TaskEvent =
+  | { type: "turn"; data: TaskUpdate }
+  | { type: "snapshot"; data: TaskDetail };
+
+async function readTaskEvents(
+  id: string,
+  cursor: string,
+  onEvent: (event: TaskEvent) => void,
+  signal: AbortSignal,
+  onOpen?: () => void,
+): Promise<void> {
+  const { body } = await requestStream(
+    `${taskPath(id)}/events${query({ cursor })}`,
+    { signal, cache: "no-store", headers: { Accept: "text/event-stream" } },
+  );
+  onOpen?.();
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // Normalize complete SSE lines, including CRLF split across network chunks.
+      buffer = buffer.replace(/\r\n/g, "\n");
+      let boundary: number;
+      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const lines = frame.split("\n");
+        const type = lines
+          .find((line) => line.startsWith("event:"))
+          ?.slice(6)
+          .trim();
+        const data = lines
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (type === "error") throw new Error(data);
+        if (type === "turn")
+          onEvent({ type, data: JSON.parse(data) as TaskUpdate });
+        if (type === "snapshot")
+          onEvent({ type, data: JSON.parse(data) as TaskDetail });
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 export interface TaskMessage {
   request_id: string;
   prompt: string;
@@ -150,7 +212,12 @@ export const projectTasksApi = {
       })}`,
       { cache: "no-store" },
     ),
-  get: (id: string) => request<TaskDetail>(taskPath(id), { cache: "no-store" }),
+  get: (id: string, pageCursor?: string | null) =>
+    request<TaskDetail>(
+      `${taskPath(id)}${query({ page_cursor: pageCursor })}`,
+      { cache: "no-store" },
+    ),
+  events: readTaskEvents,
   create: (projectID: string | null, body: TaskMessage) =>
     request<TaskDetail>("/project-tasks", {
       method: "POST",
@@ -161,6 +228,17 @@ export const projectTasksApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  cancel: (id: string) =>
-    request<TaskDetail>(`${taskPath(id)}/cancel`, { method: "POST" }),
+  cancel: (id: string, turnID: string) =>
+    request<TaskDetail>(`${taskPath(id)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ turn_id: turnID }),
+    }),
+  retry: (id: string, turnID: string, requestID: string) =>
+    request<TaskDetail>(
+      `${taskPath(id)}/turns/${encodeURIComponent(turnID)}/retry`,
+      {
+        method: "POST",
+        body: JSON.stringify({ request_id: requestID }),
+      },
+    ),
 };

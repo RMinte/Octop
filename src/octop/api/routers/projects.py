@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Header, Query, Response
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi.responses import StreamingResponse
 
 from octop.api.deps import current_user, get_server, require_database
 from octop.infra.db.services import SharedServices
@@ -20,6 +24,9 @@ from octop.infra.projects.models import (
 from octop.infra.projects.runtime import ProjectTaskWorker
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
+from octop.infra.utils.locale import resolve_request_locale
+
+_TASK_STREAM_SECONDS = 25.0
 
 router = APIRouter(prefix="/projects")
 
@@ -328,16 +335,20 @@ async def sync_standalone_tasks(
     "/{task_id}",
     response_model=tasks.TaskDetail,
     summary="读取任务对话和执行状态",
-    description="返回全部用户消息、已保存的模型回复、排队/运行/终态及工具名称。可轮询观察增量回复；不返回凭据、工具参数或客户端文件内容。其他用户的任务返回 404。",
+    description="返回最近一页轮次及任务摘要，默认 50 轮、最多 100；page_cursor 读取更早记录。首页 event_cursor 可用于订阅实时状态，不返回凭据或工具参数。其他用户的任务返回 404。",
 )
 async def task_detail(
     task_id: str,
     response: Response,
+    limit: int = Query(default=50, ge=1, le=100),
+    page_cursor: str | None = Query(default=None, min_length=1, max_length=4096),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
 ) -> tasks.TaskDetail:
     response.headers["Cache-Control"] = "no-store"
-    return await asyncio.to_thread(tasks.detail, _services(server), user.id, task_id)
+    return await asyncio.to_thread(
+        tasks.detail, _services(server), user.id, task_id, limit=limit, page_cursor=page_cursor
+    )
 
 
 @task_router.post(
@@ -345,7 +356,7 @@ async def task_detail(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="继续任务对话",
-    description="在同一任务中发送下一轮消息，保留已完成对话上下文，使用最新项目配置。任务执行中返回 409；同一 request_id 的相同消息返回原任务，不重复执行。",
+    description="在同一任务中发送下一轮消息，保留成功历史和标记为未完成的失败/取消正文，使用最新项目配置。任务执行中返回 409；同一 request_id 的相同消息返回原任务，不重复执行。",
 )
 async def send_task_message(
     task_id: str,
@@ -365,13 +376,103 @@ async def send_task_message(
     "/{task_id}/cancel",
     response_model=tasks.TaskDetail,
     summary="停止当前回复",
-    description="取消排队中的消息或请求停止当前运行。已保存的回复和历史保留，已发生的工具操作不会回滚；之后可继续发送消息。重复取消不会产生新执行。",
+    description="必须指定 turn_id，仅取消该轮排队或执行。该轮已结束时幂等返回，不会停止后续轮次；其他任务的轮次返回 404。已保存正文保留，工具操作不回滚。",
 )
 async def cancel_task(
     task_id: str,
+    body: tasks.TaskCancel,
     response: Response,
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
 ) -> tasks.TaskDetail:
     response.headers["Cache-Control"] = "no-store"
-    return await asyncio.to_thread(tasks.cancel, _services(server), user.id, task_id)
+    return await asyncio.to_thread(tasks.cancel, _services(server), user.id, task_id, body.turn_id)
+
+
+@task_router.post(
+    "/{task_id}/turns/{turn_id}/retry",
+    response_model=tasks.TaskDetail,
+    status_code=202,
+    summary="重新尝试最后一个失败或停止的轮次",
+    description="使用原消息和当前项目配置创建新一轮，保留原记录。仅允许重试最后一个失败/取消轮次；同一 request_id 重传不重复执行。之前工具操作不会回滚，重试可能再次执行操作。",
+)
+async def retry_task_turn(
+    task_id: str,
+    turn_id: str,
+    body: tasks.TaskRetry,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    worker = _task_worker(server)
+    response.headers["Cache-Control"] = "no-store"
+    result = await asyncio.to_thread(
+        tasks.send, _services(server), user.id, body, task_id=task_id, retry_of_turn_id=turn_id
+    )
+    worker.wake()
+    return result
+
+
+async def _task_events(
+    request: Request,
+    services: SharedServices,
+    owner_id: int,
+    task_id: str,
+    cursor: str,
+    pending: list[tasks.TaskUpdate],
+    snapshot: tasks.TaskDetail | None = None,
+) -> AsyncIterator[str]:
+    started = time.monotonic()
+    heartbeat = started
+    if snapshot is not None:
+        yield f"id: {cursor}\nevent: snapshot\ndata: {snapshot.model_dump_json()}\n\n"
+    # Rotate connections to recheck authentication and apply renewed access tokens.
+    while time.monotonic() - started < _TASK_STREAM_SECONDS:
+        if await request.is_disconnected():
+            return
+        for update in pending:
+            cursor = update.cursor
+            yield f"id: {cursor}\nevent: turn\ndata: {update.model_dump_json()}\n\n"
+        if time.monotonic() - heartbeat >= 10:
+            yield ": heartbeat\n\n"
+            heartbeat = time.monotonic()
+        await asyncio.sleep(0.5)
+        try:
+            pending = await asyncio.to_thread(tasks.updates, services, owner_id, task_id, cursor)
+        except OctopError as exc:
+            yield (
+                "event: error\ndata: "
+                + json.dumps(exc.to_envelope(locale=resolve_request_locale(request)))
+                + "\n\n"
+            )
+            return
+
+
+@task_router.get(
+    "/{task_id}/events",
+    response_class=StreamingResponse,
+    summary="订阅任务轮次的实时状态",
+    description="Bearer 鉴权的 SSE。使用首页 event_cursor 或 Last-Event-ID 续接；turn 事件的 data 为 {task: TaskSummary, turn: TaskTurn, cursor: string}，SSE id 与 cursor 一致；snapshot 为 TaskDetail。同一轮中间状态可合并。断线后补齐遗漏轮次的最新状态，不重放工具操作。无游标先返回最近一页 snapshot。游标失效返回 409 PROJECT_SYNC_RESET，需重建首页。连接约 25 秒后结束，可用最后游标重连。",
+    responses={200: {"content": {"text/event-stream": {"schema": {"type": "string"}}}}},
+)
+async def task_events(
+    task_id: str,
+    request: Request,
+    cursor: str | None = Query(default=None, min_length=1, max_length=4096),
+    last_event_id: str | None = Header(default=None, max_length=4096),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> StreamingResponse:
+    services = _services(server)
+    position = cursor or last_event_id
+    snapshot = None
+    if position is None:
+        snapshot = await asyncio.to_thread(tasks.detail, services, user.id, task_id)
+        position = snapshot.event_cursor
+    assert position is not None
+    pending = await asyncio.to_thread(tasks.updates, services, user.id, task_id, position)
+    return StreamingResponse(
+        _task_events(request, services, user.id, task_id, position, pending, snapshot),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )

@@ -504,6 +504,7 @@
     "PROJECT_REVISION_CONFLICT": "项目已被修改，请刷新后重新编辑。",
     "PROJECT_RESOURCE_INVALID": "关联的 Skill 或 MCP 不存在或无权使用，请重新选择。",
     "PROJECT_DIRECTORY_INVALID": "目录不存在、不可访问或超出允许范围。",
+    "TASK_RETRY_UNAVAILABLE": "只能重新尝试最后一个失败或已停止的轮次，请刷新任务。",
     "TASK_BUSY": "任务正在回复，请等待完成或停止后再发送。",
     "TASK_REQUEST_CONFLICT": "该发送标识已经用于另一条消息，请刷新后重试。",
     "TASK_MODEL_UNAVAILABLE": "尚无可用的对话模型，请先在模型设置中配置。",
@@ -887,6 +888,7 @@
     }
   },
   "projects": {
+    "task_incomplete_context": "【本轮未完成：以下仅保留已输出的内容，不能视为完成结果。工具操作可能已发生；继续或重试前请核对当前状态，避免重复执行。】",
     "task_prompt": "你是项目中的任务助手。直接帮助用户完成工作，保留多轮对话上下文。遵循下方项目行动指南。客户端目录仅是路径记录，尚未同步到服务端，不能声称已访问其中的文件。只在用户请求需要时使用工具，不得编造工具执行结果。"
   }
 }

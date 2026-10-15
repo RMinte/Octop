@@ -2,22 +2,17 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import hmac
 import json
-from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import Field, ValidationError
+from pydantic import Field
 
-from octop.infra.agentcomputer.identity import IdentityError, get_or_create_identity
 from octop.infra.db.repos.project_sync import ListChange, task_scope
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.repos.projects import ProjectRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.cursors import CursorCodec, cursor_codec, cursor_reset
 from octop.infra.projects.models import ProjectModel, ProjectView
 from octop.infra.projects.service import _view
 from octop.infra.projects.tasks import TaskSummary, summary
@@ -57,84 +52,6 @@ class TaskSyncPage(ProjectModel):
     changes: list[TaskChange]
 
 
-class _Cursor(ProjectModel):
-    position: int = Field(default=0, ge=0)
-    cutoff: int = Field(default=0, ge=0)
-    after: str = Field(default="", max_length=256)
-    updated_at: int = Field(default=0, ge=0)
-
-
-def _reset() -> OctopError:
-    return OctopError.localized(ErrorCode.PROJECT_SYNC_RESET)
-
-
-@dataclass(frozen=True)
-class _Codec:
-    context: str
-    key: bytes
-
-    def _signature(self, kind: str, raw: bytes) -> bytes:
-        # Bind scope and purpose without carrying either in the URL.
-        message = self.context.encode() + b"\0" + kind.encode() + b"\0" + raw
-        return hmac.new(self.key, message, hashlib.sha256).digest()[: 8 if kind == "sync" else 16]
-
-    def encode(self, kind: Literal["sync", "history", "delta"], **values: int | str) -> str:
-        cursor = _Cursor.model_validate(values)
-        if kind == "sync":
-            raw = cursor.position.to_bytes(max(1, (cursor.position.bit_length() + 7) // 8), "big")
-        elif kind == "history":
-            raw = cursor.updated_at.to_bytes(8, "big") + cursor.after.encode()
-        else:
-            raw = (
-                cursor.position.to_bytes(8, "big")
-                + cursor.cutoff.to_bytes(8, "big")
-                + cursor.after.encode()
-            )
-        return base64.urlsafe_b64encode(raw + self._signature(kind, raw)).decode().rstrip("=")
-
-    def decode(self, token: str, kind: Literal["sync", "history", "delta"]) -> _Cursor:
-        try:
-            if len(token) > 4096:
-                raise ValueError("cursor too long")
-            data = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
-            if base64.urlsafe_b64encode(data).decode().rstrip("=") != token:
-                raise ValueError("cursor encoding")
-            signature_size = 8 if kind == "sync" else 16
-            raw, signature = data[:-signature_size], data[-signature_size:]
-            if not hmac.compare_digest(signature, self._signature(kind, raw)):
-                raise ValueError("cursor signature")
-            if kind == "sync":
-                if not 1 <= len(raw) <= 8 or (len(raw) > 1 and raw[0] == 0):
-                    raise ValueError("cursor size")
-                return _Cursor(position=int.from_bytes(raw, "big"))
-            offset = 8 if kind == "history" else 16
-            if len(raw) < offset:
-                raise ValueError("cursor size")
-            after = raw[offset:].decode()
-            if kind == "history":
-                return _Cursor(updated_at=int.from_bytes(raw[:8], "big"), after=after)
-            return _Cursor(
-                position=int.from_bytes(raw[:8], "big"),
-                cutoff=int.from_bytes(raw[8:16], "big"),
-                after=after,
-            )
-        except (ValueError, TypeError, ValidationError, binascii.Error) as exc:
-            raise _reset() from exc
-
-
-def _codec(services: SharedServices, owner_id: int, scope: str) -> _Codec:
-    try:
-        identity = get_or_create_identity(services.paths.agentcomputer_identity)
-    except (IdentityError, OSError) as exc:
-        raise OctopError.localized(ErrorCode.CONTROL_PLANE_BUSY) from exc
-    secret = services.secret_repo.get("jwt")
-    assert secret is not None
-    return _Codec(
-        context=f"v2:{identity.boxID}:{identity.restoreEpoch}:{owner_id}:{scope}",
-        key=hmac.new(secret, b"octop-list-sync-v2", hashlib.sha256).digest(),
-    )
-
-
 def task_page(
     services: SharedServices,
     owner_id: int,
@@ -143,7 +60,7 @@ def task_page(
     limit: int = 50,
     page_cursor: str | None = None,
 ) -> TaskListPage:
-    codec = _codec(services, owner_id, task_scope(project_id))
+    codec = cursor_codec(services, owner_id, task_scope(project_id))
     cursor = codec.decode(page_cursor, "history") if page_cursor is not None else None
     boundary = (cursor.updated_at, cursor.after) if cursor else None
     with services.db.read_snapshot() as conn:
@@ -170,7 +87,7 @@ def _delta(
     services: SharedServices,
     owner_id: int,
     scope: str,
-    codec: _Codec,
+    codec: CursorCodec,
     sync_cursor: str,
     page_cursor: str | None,
     limit: int,
@@ -190,7 +107,7 @@ def _delta(
         head = services.project_sync_repo.head(conn, owner_id, scope)
         cutoff = head if page is None else page.cutoff
         if base.position > cutoff or cutoff > head or (page and page.position != base.position):
-            raise _reset()
+            raise cursor_reset()
         rows = services.project_sync_repo.changes(
             conn,
             owner_id,
@@ -219,10 +136,10 @@ def project_sync(
     page_cursor: str | None = None,
     limit: int = 50,
 ) -> ProjectSyncPage:
-    codec = _codec(services, owner_id, "projects")
+    codec = cursor_codec(services, owner_id, "projects")
     if sync_cursor is None:
         if page_cursor is not None:
-            raise _reset()
+            raise cursor_reset()
         with services.db.read_snapshot() as conn:
             head = services.project_sync_repo.head(conn, owner_id, "projects")
             projects = services.project_repo.list_in_transaction(conn, owner_id)
@@ -267,7 +184,7 @@ def task_sync(
     limit: int = 50,
 ) -> TaskSyncPage:
     scope = task_scope(project_id)
-    codec = _codec(services, owner_id, scope)
+    codec = cursor_codec(services, owner_id, scope)
     rows, next_sync, next_page = _delta(
         services,
         owner_id,

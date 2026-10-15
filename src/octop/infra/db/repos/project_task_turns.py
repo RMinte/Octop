@@ -28,6 +28,7 @@ class ProjectTaskTurnRow:
     updated_at: int
     input_tokens: int = 0
     output_tokens: int = 0
+    pk: int = 0
 
     @classmethod
     def from_row(cls, r: DbRow) -> ProjectTaskTurnRow:
@@ -48,6 +49,7 @@ class ProjectTaskTurnRow:
             updated_at=strict_int(r["updated_at"]),
             input_tokens=strict_int(r["input_tokens"]),
             output_tokens=strict_int(r["output_tokens"]),
+            pk=strict_int(r["id"]),
         )
 
 
@@ -63,6 +65,30 @@ class ProjectTaskTurnRepo:
     def list_in_transaction(conn: Any, task_id: str) -> builtins.list[ProjectTaskTurnRow]:
         rows = conn.execute(
             "SELECT * FROM project_task_turns WHERE task_id=? ORDER BY id", (task_id,)
+        ).fetchall()
+        return [ProjectTaskTurnRow.from_row(r) for r in rows]
+
+    @staticmethod
+    def page(
+        conn: Any, task_id: str, limit: int, before: int | None = None
+    ) -> builtins.list[ProjectTaskTurnRow]:
+        position = " AND id<?" if before is not None else ""
+        params = (task_id, before, limit) if before is not None else (task_id, limit)
+        rows = conn.execute(
+            "SELECT * FROM project_task_turns WHERE task_id=?"
+            + position
+            + " ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [ProjectTaskTurnRow.from_row(r) for r in reversed(rows)]
+
+    @staticmethod
+    def since(
+        conn: Any, task_id: str, position: int, limit: int
+    ) -> builtins.list[ProjectTaskTurnRow]:
+        rows = conn.execute(
+            "SELECT * FROM project_task_turns WHERE task_id=? AND id>=? ORDER BY id LIMIT ?",
+            (task_id, position, limit),
         ).fetchall()
         return [ProjectTaskTurnRow.from_row(r) for r in rows]
 
