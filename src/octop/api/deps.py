@@ -165,15 +165,6 @@ async def current_user(
     return resolve_user_from_token(server, raw)
 
 
-async def current_bearer_user(
-    request: Request,
-    server: OctopServer = Depends(get_server),
-    authorization: str | None = Header(None),
-) -> User:
-    """Header-only authentication, without advertising legacy URL credentials."""
-    return await current_user(request, server, authorization, access_token=None)
-
-
 def require_permission(key: str) -> Callable[..., Awaitable[User]]:
     """Dependency factory: require the module permission ``key``.
 

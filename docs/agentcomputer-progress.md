@@ -1,5 +1,25 @@
 # AgentComputer 盒子集成进度
 
+## 2026-10-15 移除专用协议和项目任务转发
+
+用户确认当前客户端没有使用 AgentComputer 专用接口，项目暂时不需要远程转发。本轮移除 `/api/agentcomputer/v1` 和 `/api/bridge/connections/{connection_id}/agentcomputer/v1` 路由，以及专用鉴权、错误信封、请求体限制、能力查询和 HTTP 操作关闭等待；Bridge 白名单不再允许项目和任务请求。标准 `/api/projects`、`/api/project-tasks` 及其分页、增量同步和多轮会话服务保留，不新增远程替代入口。
+
+开工基线为主目录 `feature/agentcomputer-foundation @ ab1f5172b9f89a21190ec529234e2001f169b727`。修改前已保存当前工作区和暂存区补丁快照。期间主目录推进到 `c1235c0d8a5a519ebde35f75258be9644fe0abb0`，已核对该提交恰好包含开工时的暂存改动；本次移除在此版本上验证。未修改实际数据库、已有项目/任务/历史数据或原生 App，未推送或部署。下文专用协议与旧转发记录仅说明历史实现。
+
+验证：项目/任务、路由契约、原有 Bridge、服务启停、安装锁、OpenAPI、认证与异常处理定向 **85 passed**。隔离 `/api/docs` 返回 200；标准接口仍有类型化说明，专用路由、错误模型和分组均不在 OpenAPI 中。旧 GET 地址返回 404，旧写入地址受现有网页 GET 兜底影响返回 405，均不触发转发。9 个相关源文件严格 mypy、12 个文件 Ruff/格式检查和 `git diff --check` 通过。按约定不跑完整 `make all`；未修改前端源码，因此未重复前端构建。
+
+复核命令：
+
+```bash
+UV_CACHE_DIR=/private/tmp/octop-uv-cache uv run --offline --no-sync pytest \
+  tests/integration/test_projects.py tests/integration/test_project_tasks.py \
+  tests/integration/test_project_api_contract.py tests/integration/test_bridge_api.py \
+  tests/integration/test_server_lifecycle.py tests/integration/test_agentcomputer_bootstrap.py \
+  tests/unit/api/test_openapi_meta.py tests/unit/api/test_jwt_auth_middleware.py \
+  tests/unit/api/test_exception_handlers.py tests/unit/bridge/test_tunnel_policy.py \
+  -q -n 0 --disable-warnings
+```
+
 ## 2026-10-15 独立项目任务数据库收敛
 
 当前数据库初始化只在 main 的 v20 基础上新增 `projects`、`project_tasks`、`project_task_turns`、`project_create_requests` 四张业务表；不再修改 `agents`、`threads`、`sessions` 等原有表的结构。

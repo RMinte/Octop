@@ -16,11 +16,6 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from octop.api.agentcomputer import (
-    is_agentcomputer_path,
-    octop_error_response,
-    protocol_error_response,
-)
 from octop.api.deps import (
     ACCESS_TOKEN_RESPONSE_HEADER,
     authenticate_request,
@@ -48,15 +43,6 @@ def install(app: Any, server: Any) -> None:
         if not path.startswith("/api/") or is_jwt_exempt_request(request):
             return await call_next(request)
 
-        agentcomputer = is_agentcomputer_path(path)
-        if agentcomputer and (
-            "access_token" in request.query_params
-            or not extract_raw_token(authorization=request.headers.get("authorization"))
-        ):
-            return protocol_error_response("authenticationRequired", 401)
-        if agentcomputer and server.agentcomputer_http_operations.closing:
-            return protocol_error_response("runtimeUnavailable", 503)
-
         raw = extract_raw_token(
             authorization=request.headers.get("authorization"),
             access_token=request.query_params.get("access_token"),
@@ -73,12 +59,10 @@ def install(app: Any, server: Any) -> None:
                     exc.message,
                     exc_info=exc,
                 )
-            if agentcomputer:
-                return octop_error_response(exc)
             return JSONResponse(status_code=exc.status, content=exc.to_envelope())
 
         response = await call_next(request)
-        if raw is not None and not (agentcomputer and server.agentcomputer_http_operations.closing):
+        if raw is not None:
             try:
                 renewed = maybe_sliding_renew_token(server, raw, request.state.octop_user)
             except OctopError:

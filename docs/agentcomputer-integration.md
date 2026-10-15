@@ -1,8 +1,10 @@
 # AgentComputer 与 Octop 集成
 
+> 2026-10-15 当前接口收敛：用户确认当前客户端没有使用专用协议，移除 `/api/agentcomputer/v1` 及项目/任务 Bridge 转发，暂不提供远程项目和任务访问。项目与多轮任务仅使用 `/api/projects`、`/api/project-tasks`；已有数据保留。下文专用协议及旧转发的交付记录仅为历史过程，以 [当前接口契约](api.md) 为准。
+
 > 2026-10-15 数据库收敛：新安装仅在 main v20 基础上新增四张独立项目/任务表，不再修改原有专家和会话表；早期 021–027 专家绑定迁移、`ac_*` 仓储及运行实现已移除，已有旧表、字段和数据原样保留。028–032 编号和 schema 水位 32 保留。下文早期专家绑定方案及预检命令为历史记录，当前实现见 [数据库收敛记录](agentcomputer-progress.md#2026-10-15-独立项目任务数据库收敛)。
 
-> 2026-10-15 专用协议边界修正：AgentComputer 继续使用 `/api/agentcomputer/v1`，网页使用 `/api/projects`、`/api/project-tasks`；两组 HTTP 入口共享独立项目/多轮任务服务与数据。专用入口和受限 Bridge 转发已接回，`/capabilities` 以 `contract=independent-project-tasks` 声明新契约。创建项目需要 `Idempotency-Key`，编辑推荐 `PATCH + expected_revision`。旧专家绑定、UUID 准备回执、Run/事件/文档协议不接入新模型，历史数据保留。此前“让 App 直接改用网页接口、删除整个 v1”的方向已撤销。本轮没有修改原生 App、重启 8088 或宣称客户端已经适配。详见 [当前接口契约](api.md#agentcomputer-专用协议与接入顺序)。
+> 历史记录（已被上方接口收敛取代）：2026-10-15 专用协议边界修正：AgentComputer 继续使用 `/api/agentcomputer/v1`，网页使用 `/api/projects`、`/api/project-tasks`；两组 HTTP 入口共享独立项目/多轮任务服务与数据。专用入口和受限 Bridge 转发已接回，`/capabilities` 以 `contract=independent-project-tasks` 声明新契约。创建项目需要 `Idempotency-Key`，编辑推荐 `PATCH + expected_revision`。旧专家绑定、UUID 准备回执、Run/事件/文档协议不接入新模型，历史数据保留。此前“让 App 直接改用网页接口、删除整个 v1”的方向已撤销。本轮没有修改原生 App、重启 8088 或宣称客户端已经适配。历史交付过程见 [进度记录](agentcomputer-progress.md#2026-10-15-agentcomputer-专用协议边界修正)。
 
 > 2026-10-15 最新独立模型：项目与专家无关；正式网页项目与多轮任务已接入 `/api/projects`、`/api/project-tasks`，可选项目或无项目。8088 现有 GLM-5 已完成双轮会话与历史恢复。详见 [当前交付记录](agentcomputer-progress.md#2026-10-15-独立项目任务会话已接通) 和 [现有接口](api.md)。下文原托管专家/Bridge 实现为历史记录，不是新模型依赖。
 

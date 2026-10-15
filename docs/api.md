@@ -2,9 +2,7 @@
 
 ## 独立项目和任务接口（2026-10-15）
 
-本文分别说明 Octop 网页接口与 AgentComputer 专用协议。二者共用独立项目/多轮任务服务和数据，HTTP 入口保持各自职责。原生 App 适配和后续接口改造尚未完成。完整交付证据见 [本轮进度](agentcomputer-progress.md#2026-10-15-agentcomputer-专用协议边界修正)。
-
-Octop 网页使用 `/api/projects` 与 `/api/project-tasks`；AgentComputer 使用专用 `/api/agentcomputer/v1/projects` 与 `/api/agentcomputer/v1/tasks`。专用协议调用同一份 `infra/projects` 服务与数据表，保留请求头 Bearer 认证、协议错误信封、能力查询和受限 Bridge 转发。旧专家绑定、UUID 准备回执、Run、事件、文档与命令回执实现不重新接入新模型；旧文字 worker 不自动派发，历史 `ac_*` 数据保留，不迁移、不兼容。保留专用路径不表示旧客户端已兼容新契约，App 仍需适配字符串 ID、snake_case 项目/任务字段及新的能力声明。
+独立项目和多轮任务统一使用 `/api/projects` 与 `/api/project-tasks`。当前客户端没有使用 AgentComputer 专用协议，因此移除 `/api/agentcomputer/v1` 及其 Bridge 转发；暂不提供远程项目和任务访问。旧专家绑定、Run、事件、文档和命令回执协议不恢复，已有 `ac_*` 数据原样保留，不迁移、不删除。
 
 「项目和任务」页面的项目管理使用 `/api/projects`。项目自己保存配置，没有专家或 Agent 外键。创建项目不要求模型服务，不会创建专家。此前的托管专家项目原型不自动转换、不做兼容同步；已有原型数据保留。
 
@@ -58,7 +56,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 ### 项目同步和任务列表分页
 
-网页新增 `GET /api/projects/sync`、`GET /api/projects/{project_id}/tasks/sync`、`GET /api/project-tasks/sync`，AgentComputer 使用下一节对应专用路径。项目和各任务列表分别维护游标，不能跨账号、列表、实例或用途复用。协议版本为 2，任务列表响应已改为分页对象；本轮不修改原生客户端 UI。
+列表同步使用 `GET /api/projects/sync`、`GET /api/projects/{project_id}/tasks/sync`、`GET /api/project-tasks/sync`。项目和各任务列表分别维护游标，不能跨账号、列表、实例或用途复用。任务列表返回分页对象；本轮不修改原生客户端 UI。
 
 项目首次不带 `sync_cursor`，返回 `mode=snapshot`、完整项目 `changes` 和 `next_sync_cursor`；之后带上游标只返回期间变化过的项目最终状态。任务首次只获取一页摘要，默认 50 条、最多 100 条；返回 `items`、`next_page_cursor` 和 `sync_cursor`，不预读全部历史或正文。后续以 `page_cursor` 加载更早任务，按 `updated_at DESC, task_id DESC` 续取；历史下一页不产生新同步基线。
 
@@ -68,41 +66,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
 
-### AgentComputer 专用协议与接入顺序
-
-AgentComputer 直连运行 Octop 的盒子/主机，统一使用 `/api/agentcomputer/v1` 前缀。下面的路径均相对此前缀；网页仍使用上文的 `/api/projects`、`/api/project-tasks`。共享的是服务和数据库，不要求 App 改用网页入口。
-
-| 方法 | 专用协议路径 | 用途 |
-| --- | --- | --- |
-| GET | `/capabilities` | 确认盒子身份、协议契约、当前功能和执行可用性 |
-| GET / POST | `/projects` | 列出 / 创建同一份独立项目；创建需要 `Idempotency-Key` |
-| GET | `/projects/sync` | 项目首次快照及独立增量同步 |
-| GET | `/projects/{project_id}/tasks/sync` | 项目任务摘要增量同步 |
-| GET | `/tasks/sync` | 无项目任务摘要增量同步 |
-| GET | `/projects/resources` | 读取项目可选目录、Skill、MCP |
-| GET / PATCH / PUT | `/projects/{project_id}` | 读取 / 局部修改 / 完整替换项目配置 |
-| GET / POST | `/projects/{project_id}/tasks` | 项目任务列表 / 首条消息创建任务 |
-| GET / POST | `/tasks` | 无项目任务列表 / 创建任务并发送首条消息，创建体可指定 `project_id` |
-| GET | `/tasks/{task_id}` | 当前任务、全部历史和增量回复 |
-| GET / POST | `/tasks/{task_id}/turns` | 读取全部轮次 / 同一任务发送下一轮 |
-| POST | `/tasks/{task_id}/cancel` | 停止当前排队或运行中的回复 |
-
-共 18 个方法与路径组合，均有类型化请求/响应和 OpenAPI 说明。项目、任务、轮次请求与响应使用上文的共享模型；普通项目列表和历史轮次仍返回数组，任务列表返回游标分页对象。发送体为 `{"request_id":"每次发送唯一的UUID","prompt":"用户消息"}`，创建 `/tasks` 可另传 `project_id`。
-
-1. 使用一个 Octop 地址登录，保存该实例返回的用户 token。所有专用协议请求携带 `Authorization: Bearer <access_token>`；禁止 `access_token` 查询参数。收到 `X-Octop-Access-Token` 时更新本地令牌。
-2. 先读取 `/capabilities`，确认 `contract="independent-project-tasks"`、`contractVersion=2`，再按本节契约解析；不能继续使用旧准备专家/Run 回执模型。
-3. 项目使用 `/projects/sync` 建立完整快照并单独保存同步游标，之后携带 `sync_cursor` 获取变更。进入项目时读取 `/projects/{project_id}/tasks` 第一页；无项目任务读取 `/tasks`，不是全部项目任务汇总。历史使用 `page_cursor` 按需翻页，第一页的 `sync_cursor` 用于对应任务列表 `/sync` 的后续增量请求。
-4. 新建项目为本次创建生成 `Idempotency-Key`；网络重试复用原标识与内容。编辑读取最新 `revision`，PATCH 携带 `expected_revision`；版本冲突先读取再处理。
-5. 首条消息创建任务，后续 POST `/tasks/{task_id}/turns` 继续相同任务。每条新消息生成新的 `request_id`，网络重试复用原标识和原消息。
-6. 轮询 `/tasks/{task_id}` 恢复增量正文和当前状态；打开历史只读取，不重新发送。时间字段为 UTC ISO 8601，界面使用能力响应中的服务端 `timezone`。
-
-`/capabilities` 保留稳定 `boxID`、`restoreEpoch` 和服务端时区；`executionAvailable` 根据共享服务实际选用的模型与 worker 状态计算。缺模型或 worker 未就绪分别给出 `unavailableReason=modelUnavailable/runtimeUnavailable`，实际发送还会校验本人配额和项目资源。`capabilities.projectListSync/taskListPagination/taskListSync/projects/taskConversations/incrementalReplies/cancellation=true` 表示结构支持；`events/files/approvals/questions/commandReceipts/runs=false`，不表示旧 Run、文件或审批能力开放。
-
-专用错误格式为 `{"error":{"code":"revisionConflict","retryable":false,"reasonCode":"PROJECT_REVISION_CONFLICT"}}`。`code` 使用专用协议的稳定错误分类；独立项目/任务业务原因放在 `reasonCode`，不返回原始异常或请求内容。版本冲突为 `revisionConflict`，标识冲突为 `idempotencyConflict`，任务忙为 `activeRunConflict`，缺模型为 `runtimeUnavailable`。HTTP 状态沿用业务状态（例如缺模型 409），客户端应同时读取 code/reasonCode，不能只看状态。变更请求上限为 65,536 字节。
-
-可选 Bridge 路径为 `/api/bridge/connections/{connection_id}/agentcomputer/v1` 加上表中专用路径。仅转发本人连接与表中明确方法，远端仍以连接账号授权；创建项目转发 `Idempotency-Key`，不转发调用方凭据、任意响应头或未声明的错误详情。直接连接盒子不依赖 Bridge。
-
-项目、任务和轮次 ID 都是不透明字符串，例如 `proj_…`、`task_…`、`turn_…`；App 应原样保存、传回，不能转成 UUID。客户端内部 UUID 不能替代服务端 ID。
+项目、任务和轮次 ID 都是不透明字符串，例如 `proj_…`、`task_…`、`turn_…`；调用方应原样保存和传回，不能转成 UUID。时间字段为 UTC ISO 8601，界面使用 `GET /api/settings/timezone` 返回的服务端时区。
 
 ### 项目字段和编辑规则
 
@@ -293,18 +257,18 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | --- | --- |
 | 项目创建/读取/修改、PATCH 保留未提交字段、空值规则、版本冲突 | 服务端定向自动化通过 |
 | 同 key 并发创建、不同内容冲突、用户隔离、首次响应回放、失败不消耗 key | 服务端定向自动化通过；创建回执持久化在数据库 |
-| AgentComputer 专用协议和 Bridge | 18 个专用操作及对应受限转发已接共享服务；旧专家绑定/Run/文档协议未挂载；8088 已部署，项目同步、任务分页和专用协议只读验证通过 |
+| 专用协议和项目任务 Bridge | 已从代码移除，当前只提供本机项目和任务接口；已有数据保留 |
 | 项目与无项目任务、首轮和追问、幂等发送、历史恢复、取消基础行为 | 现有新模型自动化通过；本轮未改精确取消语义 |
 | 正式网页创建重试复用 key、改用 PATCH、保存后增量同步 | 前端自动化通过 |
 | 本机 8088 | 已更新到 schema 33 并重启后端；升级前已备份，2 个项目、5 个任务、6 个轮次和历史 ac_* 数据逐表摘要一致，数据库完整性及新同步接口验证通过；真实 GLM 双轮记录来自前一轮 |
 | 当前原生 AgentComputer App | 本轮未修改，尚未验收新独立接口适配 |
 | PostgreSQL、目标 Ubuntu 盒子、真实 MCP 供应商 | 迁移文件/接口实现不等于实机验证，目前未验收 |
 
-专用协议边界修正：项目/任务、专用协议、Bridge、隧道策略、OpenAPI、认证与异常处理共 75 项通过；严格 mypy 8 个相关源文件和 Ruff/格式检查通过，隔离 `/api/docs` 返回 200。未重启或部署现有 8088，原生 App 未改动。此前网页接口迭代：项目/任务、路由契约、OpenAPI 与隧道策略 55 项通过；正式网页 11 项通过；i18n、严格 mypy、Ruff、目标 ESLint、前端类型检查和构建通过。扩展数据库/备份检查为 528 passed、6 failed，6 项在改造前快照复现；完整 `make all` 按约定后置，不宣称全套通过。
+此前专用协议和 Bridge 的验证记录仅反映历史实现，不代表现行可用接口。当前路由契约验证覆盖标准项目/任务入口，以及已移除地址不可用、不触发转发的边界。完整 `make all` 按约定后置。
 
-后续仍需改造：按目标轮次精确取消、项目/任务分页及摘要、分页消息与可续接事件流、失败/取消后的上下文与重试语义、任务执行选项、任务改名和归档、附件产物与审批。当前 `/api/agentcomputer/v1/capabilities` 明确声明独立模型能力，不能按历史能力结构推断旧 Run/文档/审批协议可用。
+后续仍需改造：按目标轮次精确取消、项目/任务分页及摘要、分页消息与可续接事件流、失败/取消后的上下文与重试语义、任务执行选项、任务改名和归档、附件产物与审批。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
 
-专用协议实现为 [AgentComputer 路由](../src/octop/api/routers/agentcomputer_projects.py)、[Bridge 转发](../src/octop/api/routers/agentcomputer_project_bridge.py)；网页对应实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
+当前实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
 
 
 Every route is mounted under `/api`. JSON unless otherwise noted; SSE
@@ -315,11 +279,11 @@ described in [Chat (WebSocket)](#chat-websocket).
 > `enable_api_docs=true` (or `OCTOP_ENABLE_API_DOCS=1`). The schema
 > is at `/api/openapi.json`.
 
-网页项目和任务接口在 `/api/docs` 的 `projects` 分组中，AgentComputer 专用接口和对应 Bridge 在 `agentcomputer` 分组中。下面独立模型的自动化证据与历史原型测试分开；旧 25 条接口的测试记录不表示当前接口或原生 App 已验收。
+项目和任务接口在 `/api/docs` 的 `projects` 分组中；不再提供 `agentcomputer` 分组。历史原型测试记录不表示当前接口或原生 App 已验收。
 
 ## Authentication
 
-AgentComputer 直接连接一个 Octop，使用 `POST /api/auth/login` 返回的用户 Bearer token 调用 `/api/agentcomputer/v1` 专用接口，不创建专家，也不依赖第二个 Octop。Bridge 是可选转发方式。响应中的 `X-Octop-Access-Token` 是滑动续期令牌，客户端收到后应更新保存的 token。项目和任务 ID 是不透明字符串，不应转换为 UUID。
+调用方使用 `POST /api/auth/login` 返回的用户 Bearer token 访问项目和任务接口。响应中的 `X-Octop-Access-Token` 是滑动续期令牌，收到后应更新保存的 token。项目和任务 ID 是不透明字符串，不应转换为 UUID。
 
 | Header | Value |
 |--------|-------|

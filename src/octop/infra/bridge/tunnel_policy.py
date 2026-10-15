@@ -6,7 +6,7 @@ are fully tunneled; tools / plugins / channels are limited writes (the
 Personalization UI still PATCHes tool-settings and may POST reload);
 skill packages, global ACP, connector admin, and knowledge-base admin stay
 peer-only in the UI even when a matching path would otherwise match.
-The separate AgentComputer project/Task protocol has its own narrow route set.
+Independent projects and tasks are local-only.
 Management / auth / bridge control planes stay local-only.
 """
 
@@ -49,20 +49,6 @@ _SUBAGENT_CATALOG = re.compile(r"^/api/subagent-catalog(?:/.*)?$")
 _ACP_GLOBAL = re.compile(r"^/api/acp(?:/[^/]+)?$")
 _CRON_SETTINGS = re.compile(r"^/api/cron/settings$")
 _CONNECTOR_INSTANCES_LIST = re.compile(r"^/api/connector-instances$")
-
-# Only the independent project/task contract can cross this protocol boundary.
-_AC_PROJECT = r"proj_[A-Za-z0-9]+"
-_AC_TASK = r"task_[A-Za-z0-9]+"
-_AGENTCOMPUTER_READ = re.compile(
-    rf"^/api/agentcomputer/v1/(?:capabilities|projects|projects/resources|projects/sync|"
-    rf"projects/{_AC_PROJECT}|projects/{_AC_PROJECT}/tasks(?:/sync)?|tasks|tasks/sync|"
-    rf"tasks/{_AC_TASK}|tasks/{_AC_TASK}/turns)$"
-)
-_AGENTCOMPUTER_CREATE = re.compile(
-    rf"^/api/agentcomputer/v1/(?:projects|projects/{_AC_PROJECT}/tasks|tasks|"
-    rf"tasks/{_AC_TASK}/(?:turns|cancel))$"
-)
-_AGENTCOMPUTER_EDIT = re.compile(rf"^/api/agentcomputer/v1/projects/{_AC_PROJECT}$")
 
 
 def is_tunnel_path_allowed(method: str, path: str) -> bool:
@@ -108,8 +94,4 @@ def is_tunnel_path_allowed(method: str, path: str) -> bool:
     if _CONNECTOR_INSTANCES_LIST.fullmatch(raw):
         return verb == "GET"
 
-    if _AGENTCOMPUTER_READ.fullmatch(raw) and verb == "GET":
-        return True
-    if _AGENTCOMPUTER_EDIT.fullmatch(raw) and verb in {"PATCH", "PUT"}:
-        return True
-    return verb == "POST" and _AGENTCOMPUTER_CREATE.fullmatch(raw) is not None
+    return False

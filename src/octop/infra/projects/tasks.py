@@ -129,7 +129,7 @@ def _configuration(
 
 
 def resolve_model_ref(services: SharedServices) -> str | None:
-    """Resolve the same current model for discovery and task admission."""
+    """Resolve the current model for task admission."""
     providers = ProviderStore(services.provider_repo)
     provider, model = services.settings_repo.get_active_model()
     ref = f"{provider}/{model}" if provider and model else None

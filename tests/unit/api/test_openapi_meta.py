@@ -30,7 +30,7 @@ async def test_openapi_has_bearer_security_and_descriptions(tmp_octop_home: Path
         me = spec["paths"]["/api/auth/me"]["get"]
         assert "BearerAuth" in me["security"][0]
         tags = {tag["name"]: tag["description"] for tag in spec["tags"]}
-        assert "independent-project-tasks" in tags["agentcomputer"]
+        assert "agentcomputer" not in tags
         assert "projects" in tags
         assert "security" not in spec["paths"]["/api/setup/status"]["get"]
     finally:

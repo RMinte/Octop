@@ -463,7 +463,7 @@ The control plane can also use PostgreSQL — set `database` in `config.json`, o
 
 See [docs/configuration.md](docs/configuration.md) for env vars and `config.json`.
 
-This fork is developing the AgentComputer integration. Authenticated protocol discovery is available at `/api/agentcomputer/v1/capabilities`; task execution and device binding remain unavailable. See [the integration plan and local setup](docs/agentcomputer-integration.md).
+This fork provides independent projects and multi-turn tasks through `/api/projects` and `/api/project-tasks`. The AgentComputer-specific API and project/task Bridge relay have been removed; existing data is preserved. See [the API reference](docs/api.md).
 
 ## 🏗️ Architecture
 

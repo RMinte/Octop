@@ -10,7 +10,7 @@ Navigation guide for AI coding agents working in this repository.
 - 撤销此前不合适的专家绑定配置方案；不增加旧模型兼容、双向同步或自动迁移。保留已有运行数据，删除数据须另行明确授权。
 - 两类目录独立保存：服务端目录在 Octop 主机上校验；客户端目录仅保存用户电脑绝对路径，不在服务端探测、解析、读取或上传文件。
 - 菜单与页面统一使用「项目和任务」，不再使用「项目与 Task」。
-- AgentComputer 保留 `/api/agentcomputer/v1` 专用协议；网页使用 `/api/projects`、`/api/project-tasks`。两组入口调用同一独立项目/多轮任务服务与数据，不要求 App 改用网页入口；保留专用协议不恢复旧专家绑定模型。
+- 项目和任务统一使用 `/api/projects`、`/api/project-tasks`；移除 `/api/agentcomputer/v1` 专用入口及对应 Bridge 转发，暂不提供远程项目/任务访问。保留已有数据，不新增旧协议兼容。
 - AgentComputer 客户端仅用于核对产品与接口；本轮不修改其 Swift/UI，不新增测试或验收页面。
 - 先整体功能再细节，使用有针对性的验证；本轮不重复执行完整门禁，不提交或推送。
 

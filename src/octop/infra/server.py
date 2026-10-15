@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 from octop.config import OctopConfig, load_config
 from octop.infra.agentcomputer.bootstrap import DaemonBootstrap, settle_task
-from octop.infra.agentcomputer.http_operations import HttpOperationRegistry
 from octop.infra.agents.experts.catalog import ExpertCatalog, default_library_root
 from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.plugins.manager import PluginManager
@@ -270,7 +269,6 @@ class OctopServer:
         self._ldap_bind_throttle: LdapBindThrottle | None = None
         self._ldap_bind_throttle_services: SharedServices | None = None
         self._agentcomputer_bootstrap = daemon_bootstrap
-        self.agentcomputer_http_operations = HttpOperationRegistry()
         self.project_task_worker: ProjectTaskWorker | None = None
         self._stop_task: asyncio.Task[None] | None = None
 
@@ -340,10 +338,6 @@ class OctopServer:
             raise RuntimeError("server shutdown is still in progress")
         if self._started:
             return
-        if self.agentcomputer_http_operations.closing:
-            if self.services is not None or self.app_runtime is not None:
-                raise RuntimeError("agentcomputer HTTP drain is still in progress")
-            self.agentcomputer_http_operations = HttpOperationRegistry()
         if self._agentcomputer_bootstrap is not None:
             await self._agentcomputer_bootstrap.acquire()
         try:
@@ -693,9 +687,6 @@ class OctopServer:
             raise asyncio.CancelledError
 
     async def _stop(self) -> None:
-        # HTTP work may outlive a cancelled request; let its DB transaction and
-        # cancellation signal settle before stopping dispatches and closing DB.
-        await self.agentcomputer_http_operations.drain()
         if self.project_task_worker is not None:
             await self.project_task_worker.close()
             self.project_task_worker = None

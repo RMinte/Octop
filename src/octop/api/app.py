@@ -9,21 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from scalar_fastapi import get_scalar_api_reference
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from octop.api.agentcomputer import (
-    API_PREFIX,
-    is_agentcomputer_path,
-    octop_error_response,
-    protocol_error_response,
-)
-from octop.api.middleware.agentcomputer_body_limit import (
-    install as install_agentcomputer_body_limit,
-)
 from octop.api.middleware.jwt_auth import install as install_jwt_auth
 from octop.api.middleware.setup_lockdown import install as install_setup_lockdown
 from octop.api.openapi_meta import API_DESCRIPTION, OPENAPI_TAGS, configure_openapi
@@ -86,15 +75,6 @@ def _mount_routers(app: FastAPI, mounts: Sequence[_RouterMount]) -> None:
 
 
 def _install_exception_handlers(app: FastAPI) -> None:
-    @app.exception_handler(RequestValidationError)
-    async def _validation(request: Request, exc: RequestValidationError) -> Response:
-        if is_agentcomputer_path(request.url.path):
-            return protocol_error_response("invalidRequest", 422)
-        # Keep legacy API validation details; protocol errors never echo input.
-        from fastapi.exception_handlers import request_validation_exception_handler
-
-        return await request_validation_exception_handler(request, exc)
-
     @app.exception_handler(OctopError)
     async def _octop(request: Request, exc: OctopError) -> JSONResponse:
         # Client responses are locale-localized; log the original English message
@@ -107,29 +87,12 @@ def _install_exception_handlers(app: FastAPI) -> None:
                 exc.message,
                 exc_info=exc,
             )
-        if is_agentcomputer_path(request.url.path):
-            return octop_error_response(exc)
         locale = resolve_request_locale(request)
         return JSONResponse(status_code=exc.status, content=exc.to_envelope(locale=locale))
-
-    @app.exception_handler(StarletteHTTPException)
-    async def _http(request: Request, exc: StarletteHTTPException) -> Response:
-        if is_agentcomputer_path(request.url.path):
-            return protocol_error_response(
-                "resourceNotFound" if exc.status_code == 404 else "invalidRequest",
-                exc.status_code,
-                headers=exc.headers,
-            )
-        # Preserve FastAPI's default response for the existing Octop API.
-        from fastapi.exception_handlers import http_exception_handler
-
-        return await http_exception_handler(request, exc)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled exception in %s", request.url.path)
-        if is_agentcomputer_path(request.url.path):
-            return protocol_error_response("internalError", 500)
         locale = resolve_request_locale(request)
         err = OctopError.localized(ErrorCode.INTERNAL_ERROR, locale)
         return JSONResponse(status_code=err.status, content=err.to_envelope())
@@ -171,7 +134,6 @@ def build_app(server: OctopServer) -> FastAPI:
     # Bridge proxy must sit inside JWT auth so ``request.state.octop_user`` is set
     # (Starlette runs the last-added middleware first).
     install_bridge_proxy(app, server)
-    install_agentcomputer_body_limit(app)
     install_jwt_auth(app, server)
     install_setup_lockdown(app, server)
 
@@ -199,8 +161,6 @@ def build_app(server: OctopServer) -> FastAPI:
         admin,
         agent_files,
         agent_tools,
-        agentcomputer_project_bridge,
-        agentcomputer_projects,
         agents,
         auth,
         auth_ldap,
@@ -264,8 +224,6 @@ def build_app(server: OctopServer) -> FastAPI:
         [
             _RouterMount(setup.router, "/api", ["setup"]),
             _RouterMount(auth.router, "/api/auth", ["auth"]),
-            _RouterMount(agentcomputer_projects.router, API_PREFIX, ["agentcomputer"]),
-            _RouterMount(agentcomputer_project_bridge.router, "/api", ["agentcomputer"]),
             _RouterMount(projects.router, "/api", ["projects"]),
             _RouterMount(projects.task_router, "/api", ["projects"]),
             _RouterMount(auth_oidc.router, "/api/auth", ["auth"]),

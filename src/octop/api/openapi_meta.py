@@ -59,10 +59,6 @@ HITL resume still uses `POST /api/agents/{agent_id}/chat/hitl/resume` (SSE).
 
 OPENAPI_TAGS: list[dict[str, str]] = [
     {
-        "name": "agentcomputer",
-        "description": "AgentComputer 专用版本化协议：/api/agentcomputer/v1。contract=independent-project-tasks，与网页共享独立项目、多轮任务服务和数据；仅接受 Bearer 请求头，使用协议错误信封。提供项目配置、首条消息建任务、追问、历史、增量回复与停止；旧专家绑定、Run、事件与文档协议未接入。Bridge 仅转发这组明确的资源与方法。",
-    },
-    {
         "name": "projects",
         "description": "独立项目和任务：管理项目自己的目录、Skill、MCP 与行动指南；发送首条消息创建任务，在同一任务内继续多轮对话。支持持久历史、增量回复和停止。无需专家。",
     },

@@ -22,7 +22,7 @@
 
 ## 当前接口和数据范围
 
-当前项目列表返回完整 `ProjectView[]`，包含目录、指南、Skill/MCP 引用和项目版本。任务列表返回完整 `TaskSummary[]`，当前页面约每秒重取所在列表及选中任务详情。网页和 AgentComputer 使用各自入口，调用相同的独立项目和多轮任务服务。
+当前项目列表返回完整 `ProjectView[]`，包含目录、指南、Skill/MCP 引用和项目版本。任务列表返回完整 `TaskSummary[]`，当前页面约每秒重取所在列表及选中任务详情。项目和任务统一通过标准 API 调用独立项目和多轮任务服务。
 
 | 数据 | 本方案中的处理方式 |
 | --- | --- |
@@ -119,15 +119,15 @@
 
 ## 接口草案
 
-以下路径和字段已接入。网页与 AgentComputer 保持各自入口，共享底层服务。现有任务列表响应由数组改为分页对象，调用方需要适配；不引入旧专家绑定模型兼容。
+以下路径和字段已接入标准项目/任务接口，暂不提供 AgentComputer 专用协议或 Bridge 转发。现有任务列表响应由数组改为分页对象，调用方需要适配；不引入旧专家绑定模型兼容。
 
-| 用途 | 网页入口 | AgentComputer 入口 |
-| --- | --- | --- |
-| 项目初始快照或增量 | `GET /api/projects/sync` | `GET /api/agentcomputer/v1/projects/sync` |
-| 项目内任务分页 | `GET /api/projects/{project_id}/tasks` | `GET /api/agentcomputer/v1/projects/{project_id}/tasks` |
-| 项目内任务增量 | `GET /api/projects/{project_id}/tasks/sync` | `GET /api/agentcomputer/v1/projects/{project_id}/tasks/sync` |
-| 无项目任务分页 | `GET /api/project-tasks` | `GET /api/agentcomputer/v1/tasks` |
-| 无项目任务增量 | `GET /api/project-tasks/sync` | `GET /api/agentcomputer/v1/tasks/sync` |
+| 用途 | 接口 |
+| --- | --- |
+| 项目初始快照或增量 | `GET /api/projects/sync` |
+| 项目内任务分页 | `GET /api/projects/{project_id}/tasks` |
+| 项目内任务增量 | `GET /api/projects/{project_id}/tasks/sync` |
+| 无项目任务分页 | `GET /api/project-tasks` |
+| 无项目任务增量 | `GET /api/project-tasks/sync` |
 
 历史分页请求传 `limit` 和可选 `page_cursor`；默认 `limit=50`，上限为 100。增量请求传 `sync_cursor`，分页续取再携带服务端返回的本批分页游标。项目同步不带 `sync_cursor` 表示获取项目完整快照；任务增量入口必须携带同步基线，首次列表使用分页入口建立基线。
 
@@ -198,7 +198,7 @@
 
 ## 服务端和客户端必须保证的规则
 
-业务数据、变更记录、对应作用域序列推进和任务摘要版本必须在同一个数据库事务里提交。网页、AgentComputer 和后台任务执行都走这套规则；失败请求和幂等重放不重复生成业务变更。
+业务数据、变更记录、对应作用域序列推进和任务摘要版本必须在同一个数据库事务里提交。标准 API 和后台任务执行都走这套规则；失败请求和幂等重放不重复生成业务变更。
 
 项目序列与任务列表序列分别管理。同一作用域的序列按可见提交顺序推进，事务内锁定对应序列并持锁到提交。不能直接用生成时间、ULID 或普通自增主键代表已提交同步位置，避免较大序号先提交后跳过尚未提交的较小序号。
 
@@ -238,13 +238,12 @@
 | 翻页时的列表变化 | 实时位置分页配合增量补齐，按摘要版本解决响应交错 |
 | 历史保留期限 | 暂不自动清理，确定期限后再实现清理与过期边界 |
 | 网页缓存 | 按服务地址、账号和列表保存到 sessionStorage，不缓存任务对话正文 |
-| AgentComputer 协议 | contractVersion=2，声明项目同步、任务分页和摘要同步能力 |
+| 入口范围 | 标准项目/任务 API；不提供专用协议或 Bridge 转发 |
 
 ## 当前实现依据
 
-- [现有 API 说明](api.md)：网页与 AgentComputer 入口、项目字段、任务语义和当前轮询方式。
+- [现有 API 说明](api.md)：标准项目/任务入口、项目字段、任务语义和当前轮询方式。
 - `src/octop/api/routers/projects.py`：当前完整项目列表、分项目任务列表、无项目任务列表和详情入口。
-- `src/octop/api/routers/agentcomputer_projects.py`：调用共享服务的 AgentComputer 专用入口。
 - `src/octop/infra/projects/service.py`：项目创建幂等和版本冲突检查。
 - `src/octop/infra/projects/tasks.py`：任务摘要与会话详情边界。
 - `src/octop/infra/projects/runtime.py`：后台执行、结束和中断恢复对任务摘要的更新。

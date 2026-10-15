@@ -80,54 +80,36 @@ def test_denies_management_and_auth_paths() -> None:
     assert not is_tunnel_path_allowed("DELETE", "/api/setup/password")
 
 
-def test_agentcomputer_tunnel_only_allows_independent_project_task_contract() -> None:
-    prefix = "/api/agentcomputer/v1"
-    project = "proj_01ABC"
-    task = "task_01DEF"
-    allowed = {
-        "GET": [
-            "/capabilities",
-            "/projects",
-            "/projects/resources",
-            f"/projects/{project}",
-            f"/projects/{project}/tasks",
-            "/tasks",
-            f"/tasks/{task}",
-            f"/tasks/{task}/turns",
-        ],
-        "POST": [
-            "/projects",
-            f"/projects/{project}/tasks",
-            "/tasks",
-            f"/tasks/{task}/turns",
-            f"/tasks/{task}/cancel",
-        ],
-        "PATCH": [f"/projects/{project}"],
-        "PUT": [f"/projects/{project}"],
-    }
-    for method, paths in allowed.items():
-        for path in paths:
-            assert is_tunnel_path_allowed(method, prefix + path), (method, path)
-    denied = [
-        ("POST", "/capabilities"),
-        ("DELETE", "/projects"),
-        ("POST", f"/tasks/{task}"),
-        ("GET", f"/tasks/{task}/cancel"),
-        ("GET", f"/projects/{project}/documents"),
-        ("PUT", f"/projects/{project}/documents/brief.md"),
-        ("GET", f"/runs/{task}/output"),
-        ("GET", f"/tasks/{task}/snapshot"),
-        ("GET", "/projects/not-a-project"),
-        ("GET", "/tasks/not-a-task"),
-        ("GET", f"/projects/{project}/tasks/extra"),
-        ("GET", "/../auth/login"),
-        ("GET", "/projects/.."),
-        ("GET", "/projects/proj_bad%2Fname"),
-        ("PATCH", "/projects/resources"),
-        ("PUT", f"/tasks/{task}/turns"),
+def test_denies_independent_projects_tasks_and_retired_protocol() -> None:
+    resources = [
+        "/capabilities",
+        "/projects",
+        "/projects/resources",
+        "/projects/sync",
+        "/projects/proj_01ABC",
+        "/projects/proj_01ABC/tasks",
+        "/projects/proj_01ABC/tasks/sync",
+        "/tasks",
+        "/tasks/sync",
+        "/tasks/task_01DEF",
+        "/tasks/task_01DEF/turns",
+        "/tasks/task_01DEF/cancel",
     ]
-    for method, path in denied:
-        assert not is_tunnel_path_allowed(method, prefix + path), (method, path)
-    for method in ("GET", "POST", "PATCH", "PUT"):
-        assert not is_tunnel_path_allowed(method, "/api/projects")
-        assert not is_tunnel_path_allowed(method, "/api/project-tasks")
+    local_resources = [
+        "/projects",
+        "/projects/resources",
+        "/projects/sync",
+        "/projects/proj_01ABC",
+        "/projects/proj_01ABC/tasks",
+        "/projects/proj_01ABC/tasks/sync",
+        "/project-tasks",
+        "/project-tasks/sync",
+        "/project-tasks/task_01DEF",
+        "/project-tasks/task_01DEF/messages",
+        "/project-tasks/task_01DEF/cancel",
+    ]
+    for method in ("GET", "POST", "PATCH", "PUT", "DELETE", "HEAD"):
+        for path in resources:
+            assert not is_tunnel_path_allowed(method, "/api/agentcomputer/v1" + path)
+        for path in local_resources:
+            assert not is_tunnel_path_allowed(method, "/api" + path)

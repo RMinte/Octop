@@ -65,7 +65,7 @@ async def project_resources(
     response_model=ProjectView,
     status_code=201,
     summary="新建独立项目",
-    description="Octop 网页的独立项目入口；AgentComputer 使用 /api/agentcomputer/v1/projects，共享底层服务与数据。必须提供 Idempotency-Key 请求头；同一用户、同一标识和相同内容重试返回首次创建结果，内容不同返回 409。保存两类目录、多个 Skill/MCP 引用和行动指南；不创建专家，不上传或访问客户端文件。同名项目返回 409。",
+    description="必须提供 Idempotency-Key 请求头；同一用户、同一标识和相同内容重试返回首次创建结果，内容不同返回 409。保存两类目录、多个 Skill/MCP 引用和行动指南；不创建专家，不上传或访问客户端文件。同名项目返回 409。",
 )
 async def create_project(
     body: ProjectFields,
