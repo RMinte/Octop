@@ -125,11 +125,14 @@ async def sync_projects(
     "/{project_id}/tasks/sync",
     response_model=sync.TaskSyncPage,
     summary="同步任务列表最终状态",
-    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。也返回移出当前归档筛选的摘要，调用方应按 archived 字段更新显示范围。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
 )
 async def sync_project_tasks(
     project_id: str,
     response: Response,
+    archived: bool = Query(
+        default=False, description="false 读取未归档任务，true 读取归档任务；两种游标不可混用。"
+    ),
     sync_cursor: str = Query(min_length=1, max_length=4096, description="任务首页返回的增量基线。"),
     page_cursor: str | None = Query(
         default=None, max_length=4096, description="本批变更下一页游标。"
@@ -147,6 +150,7 @@ async def sync_project_tasks(
         sync_cursor=sync_cursor,
         page_cursor=page_cursor,
         limit=limit,
+        archived=archived,
     )
 
 
@@ -214,6 +218,9 @@ async def update_project(
 async def list_project_tasks(
     project_id: str,
     response: Response,
+    archived: bool = Query(
+        default=False, description="false 读取未归档任务，true 读取归档任务；两种游标不可混用。"
+    ),
     limit: int = Query(default=50, ge=1, le=100, description="每页摘要数量，默认 50，最多 100。"),
     page_cursor: str | None = Query(
         default=None, max_length=4096, description="历史任务下一页游标。"
@@ -223,7 +230,13 @@ async def list_project_tasks(
 ) -> sync.TaskListPage:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(
-        sync.task_page, _services(server), user.id, project_id, limit=limit, page_cursor=page_cursor
+        sync.task_page,
+        _services(server),
+        user.id,
+        project_id,
+        limit=limit,
+        page_cursor=page_cursor,
+        archived=archived,
     )
 
 
@@ -232,7 +245,7 @@ async def list_project_tasks(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="在项目中发送首条消息并创建任务",
-    description="保存任务及首条消息后排队执行，返回任务详情。每轮采用发送时的项目配置；不创建专家。request_id 用于幂等重试。模型或资源未配置时不会创建空任务。",
+    description="保存任务及首条消息后排队执行，返回任务详情。每轮采用发送时的项目配置及本轮 options；不创建专家。request_id 用于幂等重试。模型或资源未配置时不会创建空任务。",
 )
 async def create_project_task(
     project_id: str,
@@ -268,6 +281,9 @@ task_router = APIRouter(prefix="/project-tasks")
 )
 async def list_standalone_tasks(
     response: Response,
+    archived: bool = Query(
+        default=False, description="false 读取未归档任务，true 读取归档任务；两种游标不可混用。"
+    ),
     limit: int = Query(default=50, ge=1, le=100, description="每页摘要数量，默认 50，最多 100。"),
     page_cursor: str | None = Query(
         default=None, max_length=4096, description="历史任务下一页游标。"
@@ -277,7 +293,13 @@ async def list_standalone_tasks(
 ) -> sync.TaskListPage:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(
-        sync.task_page, _services(server), user.id, None, limit=limit, page_cursor=page_cursor
+        sync.task_page,
+        _services(server),
+        user.id,
+        None,
+        limit=limit,
+        page_cursor=page_cursor,
+        archived=archived,
     )
 
 
@@ -286,7 +308,7 @@ async def list_standalone_tasks(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="创建任务并发送首条消息",
-    description="project_id 可为 null，创建无项目任务；也可指定本人项目。首条消息和任务原子保存，request_id 重试不重复执行。",
+    description="project_id 可为 null，创建无项目任务；也可指定本人项目。首条消息和任务原子保存，可用 options 选择本轮模型、Skill 和 MCP。request_id 重试不重复执行。",
 )
 async def create_task(
     body: tasks.TaskCreate,
@@ -307,10 +329,13 @@ async def create_task(
     "/sync",
     response_model=sync.TaskSyncPage,
     summary="同步任务列表最终状态",
-    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+    description="只返回该列表基线之后变化的任务摘要，同一任务合并为最终状态，不包含正文。也返回移出当前归档筛选的摘要，调用方应按 archived 字段更新显示范围。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
 )
 async def sync_standalone_tasks(
     response: Response,
+    archived: bool = Query(
+        default=False, description="false 读取未归档任务，true 读取归档任务；两种游标不可混用。"
+    ),
     sync_cursor: str = Query(min_length=1, max_length=4096, description="任务首页返回的增量基线。"),
     page_cursor: str | None = Query(
         default=None, max_length=4096, description="本批变更下一页游标。"
@@ -328,7 +353,40 @@ async def sync_standalone_tasks(
         sync_cursor=sync_cursor,
         page_cursor=page_cursor,
         limit=limit,
+        archived=archived,
     )
+
+
+@task_router.get(
+    "/resources",
+    response_model=tasks.TaskResources,
+    summary="读取本轮可选择的模型、Skill 和 MCP",
+    description="仅列出可用模型和本人可访问的资源引用，不返回密钥；选择仅影响本轮，不修改项目或全局默认值。",
+)
+async def task_resources(
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskResources:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(tasks.resources, _services(server), user.id)
+
+
+@task_router.patch(
+    "/{task_id}",
+    response_model=tasks.TaskDetail,
+    summary="修改任务标题或归档状态",
+    description="必须提供 expected_revision（list_revision）。归档保留会话，可恢复；执行中的任务须先结束或停止再归档，归档任务须恢复后才能继续发送。版本冲突返回 409。",
+)
+async def patch_task(
+    task_id: str,
+    body: tasks.TaskPatch,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(tasks.patch, _services(server), user.id, task_id, body)
 
 
 @task_router.get(
@@ -356,7 +414,7 @@ async def task_detail(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="继续任务对话",
-    description="在同一任务中发送下一轮消息，保留成功历史和标记为未完成的失败/取消正文，使用最新项目配置。任务执行中返回 409；同一 request_id 的相同消息返回原任务，不重复执行。",
+    description="在同一任务中发送下一轮消息，保留成功历史和标记为未完成的失败/取消正文，使用最新项目配置和本轮 options；不修改项目。归档任务须先恢复。任务执行中返回 409；同一 request_id 的相同消息返回原任务，不重复执行。",
 )
 async def send_task_message(
     task_id: str,

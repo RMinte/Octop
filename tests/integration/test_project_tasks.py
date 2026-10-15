@@ -373,7 +373,7 @@ async def test_real_harness_reads_project_files_and_loads_selected_skills_mcp(
 async def test_model_selection_prefers_global_pin_then_existing_text_model(task_env):
     from dataclasses import replace
 
-    from octop.infra.projects.tasks import _configuration
+    from octop.infra.projects.tasks import TaskExecutionOptions, _configuration
 
     client, server, auth, calls = task_env
     services = server.services
@@ -388,11 +388,11 @@ async def test_model_selection_prefers_global_pin_then_existing_text_model(task_
     configured = replace(
         services, config=replace(services.config, agentcomputer_text_model_ref="preferred/glm")
     )
-    assert _configuration(configured, owner, None)[1] == "preferred/glm"
+    assert _configuration(configured, owner, None, TaskExecutionOptions())[1] == "preferred/glm"
     services.settings_repo.set_active_model("openai", "gpt-4o")
-    assert _configuration(configured, owner, None)[1] == "openai/gpt-4o"
+    assert _configuration(configured, owner, None, TaskExecutionOptions())[1] == "openai/gpt-4o"
     services.settings_repo.set_active_model("missing", "unavailable")
-    assert _configuration(configured, owner, None)[1] == "preferred/glm"
+    assert _configuration(configured, owner, None, TaskExecutionOptions())[1] == "preferred/glm"
 
 
 async def test_task_cursor_pages_are_bounded_and_sync_promotes_unloaded_tasks(env):
@@ -714,12 +714,16 @@ async def test_retry_preserves_failed_text_uses_current_configuration_and_is_ide
     monkeypatch.setattr(runtime, "run_turn", succeeding)
     base = f"/api/project-tasks/{first['task_id']}"
     url = base + f"/turns/{original['turn_id']}/retry"
-    request = {"request_id": "retry-new-round"}
+    request = {
+        "request_id": "retry-new-round",
+        "options": {"model_ref": "openai/gpt-4o", "skills": [], "mcp_servers": []},
+    }
     response = await client.post(url, headers=auth, json=request)
     assert response.status_code == 202, response.text
     done = await settled(client, auth, first["task_id"])
     assert len(done["turns"]) == 2 and done["turns"][0] == original
     retried = done["turns"][1]
+    assert retried["options"] == request["options"]
     assert retried["retry_of_turn_id"] == original["turn_id"]
     assert retried["prompt"] == original["prompt"] and retried["project_revision"] == 2
     assert json.loads(observed[0][0].configuration_json)["instructions"] == "Updated"
@@ -801,3 +805,205 @@ async def test_task_sse_resumes_persisted_state_and_rejects_foreign_cursors(task
         assert invalid.status_code == 409
     alice = await create_user(client, auth, username="stream-alice")
     assert (await client.get(base + "/events", headers=alice)).status_code == 404
+
+
+async def test_task_rename_archive_restore_and_filtered_sync(task_env):
+    from octop.infra.projects import tasks
+
+    client, server, auth, _ = task_env
+    created = (
+        await client.post(
+            "/api/project-tasks",
+            headers=auth,
+            json={"request_id": "managed-task", "prompt": "Keep this conversation"},
+        )
+    ).json()
+    base = f"/api/project-tasks/{created['task_id']}"
+    done = await settled(client, auth, created["task_id"])
+    owner = await resolve_user_id(client, auth, "admin")
+    active_page = (await client.get("/api/project-tasks", headers=auth)).json()
+    archived_page = (await client.get("/api/project-tasks?archived=true", headers=auth)).json()
+    assert archived_page["items"] == []
+    renamed = (
+        await client.patch(
+            base,
+            headers=auth,
+            json={"expected_revision": done["list_revision"], "title": "  A better title  "},
+        )
+    ).json()
+    assert renamed["title"] == "A better title" and renamed["turns"] == done["turns"]
+    changes = tasks.updates(server.services, owner, created["task_id"], done["event_cursor"])
+    assert len(changes) == 1 and changes[0].task.title == "A better title"
+    response = await client.patch(
+        base, headers=auth, json={"expected_revision": done["list_revision"], "title": "Stale edit"}
+    )
+    assert (
+        response.status_code == 409 and response.json()["error"]["code"] == "TASK_REVISION_CONFLICT"
+    )
+    archived = (
+        await client.patch(
+            base,
+            headers=auth,
+            json={"expected_revision": renamed["list_revision"], "archived": True},
+        )
+    ).json()
+    assert archived["archived"] is True and archived["turns"] == done["turns"]
+    assert (await client.get("/api/project-tasks", headers=auth)).json()["items"] == []
+    assert (await client.get("/api/project-tasks?archived=true", headers=auth)).json()["items"][0][
+        "task_id"
+    ] == created["task_id"]
+    for page, query in ((active_page, {}), (archived_page, {"archived": True})):
+        delta = (
+            await client.get(
+                "/api/project-tasks/sync",
+                headers=auth,
+                params={"sync_cursor": page["sync_cursor"], **query},
+            )
+        ).json()
+        assert len(delta["changes"]) == 1 and delta["changes"][0]["data"]["archived"] is True
+    assert (
+        await client.get(
+            "/api/project-tasks/sync",
+            headers=auth,
+            params={"archived": True, "sync_cursor": active_page["sync_cursor"]},
+        )
+    ).status_code == 409
+    response = await client.post(
+        base + "/messages",
+        headers=auth,
+        json={"request_id": "archived-new-message", "prompt": "Continue"},
+    )
+    assert response.status_code == 409 and response.json()["error"]["code"] == "TASK_ARCHIVED"
+    restored = (
+        await client.patch(
+            base,
+            headers=auth,
+            json={"expected_revision": archived["list_revision"], "archived": False},
+        )
+    ).json()
+    assert restored["archived"] is False and restored["turns"] == done["turns"]
+    assert (
+        await client.post(
+            base + "/messages",
+            headers=auth,
+            json={"request_id": "restored-new-message", "prompt": "Continue"},
+        )
+    ).status_code == 202
+    await settled(client, auth, created["task_id"])
+    alice = await create_user(client, auth, username="task-editor-alice")
+    assert (
+        await client.patch(
+            base,
+            headers=alice,
+            json={"expected_revision": restored["list_revision"], "title": "Steal"},
+        )
+    ).status_code == 404
+    for patch in ({}, {"title": None}, {"title": "  "}, {"archived": None}, {"archived": 1}):
+        assert (
+            await client.patch(
+                base, headers=auth, json={"expected_revision": restored["list_revision"], **patch}
+            )
+        ).status_code == 422
+
+
+async def test_active_task_can_be_renamed_but_not_archived(task_env):
+    client, server, auth, _ = task_env
+    await server.project_task_worker.close()
+    services = server.services
+    owner = await resolve_user_id(client, auth, "admin")
+    task = send(services, owner, TaskMessage(request_id="managed-busy", prompt="Still queued"))
+    base = f"/api/project-tasks/{task.task_id}"
+    response = await client.patch(
+        base, headers=auth, json={"expected_revision": task.list_revision, "archived": True}
+    )
+    assert response.status_code == 409 and response.json()["error"]["code"] == "TASK_BUSY"
+    renamed = (
+        await client.patch(
+            base,
+            headers=auth,
+            json={"expected_revision": task.list_revision, "title": "Queued work"},
+        )
+    ).json()
+    assert renamed["active_turn_id"] == task.active_turn_id and not renamed["archived"]
+
+
+async def test_turn_execution_options_override_without_mutating_project_and_bind_replays(task_env):
+    from tests.integration.test_projects import resource_fixture
+    from tests.support.auth import seed_openai_provider
+
+    client, server, auth, calls = task_env
+    owner = await resolve_user_id(client, auth, "admin")
+    package = resource_fixture(server, owner)
+    await seed_openai_provider(client, auth, name="alternate")
+    project = (
+        await client.post(
+            "/api/projects",
+            headers={**auth, "Idempotency-Key": str(uuid4())},
+            json={
+                "name": "Per-turn choices",
+                "skills": [{"package_id": package, "slug": "review"}],
+                "mcp_servers": ["notes"],
+            },
+        )
+    ).json()
+    choice = {"model_ref": "alternate/gpt-4o", "skills": [], "mcp_servers": []}
+    body = {
+        "request_id": "chosen-first",
+        "project_id": project["project_id"],
+        "prompt": "Use my choices",
+        "options": choice,
+    }
+    response = await client.post("/api/project-tasks", headers=auth, json=body)
+    assert response.status_code == 202, response.text
+    task = await settled(client, auth, response.json()["task_id"])
+    assert (
+        task["turns"][0]["options"] == choice
+        and task["turns"][0]["model_ref"] == choice["model_ref"]
+    )
+    assert task["turns"][0]["project_revision"] == 1
+    assert (
+        await client.get(f"/api/projects/{project['project_id']}", headers=auth)
+    ).json() == project
+    assert (await client.post("/api/project-tasks", headers=auth, json=body)).status_code == 202
+    conflict = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={**body, "options": {**choice, "model_ref": "openai/gpt-4o"}},
+    )
+    assert conflict.status_code == 409 and len(calls) == 1
+    base = f"/api/project-tasks/{task['task_id']}"
+    inherited = await client.post(
+        base + "/messages",
+        headers=auth,
+        json={"request_id": "inherited-next", "prompt": "Use project defaults"},
+    )
+    assert inherited.status_code == 202
+    done = await settled(client, auth, task["task_id"])
+    assert done["turns"][-1]["options"]["skills"] == project["skills"]
+    assert done["turns"][-1]["options"]["mcp_servers"] == ["notes"]
+    for options, status in (
+        ({"model_ref": "missing/model"}, 409),
+        ({"skills": [{"package_id": "missing", "slug": "review"}]}, 422),
+        ({"mcp_servers": ["not-owned"]}, 422),
+        ({"mcp_servers": ["notes", "notes"]}, 422),
+        ({"permission_mode": "bypass"}, 422),
+    ):
+        response = await client.post(
+            base + "/messages",
+            headers=auth,
+            json={
+                "request_id": "invalid-options",
+                "prompt": "Do not accept this",
+                "options": options,
+            },
+        )
+        assert response.status_code == status, response.text
+    assert len((await client.get(base, headers=auth)).json()["turns"]) == 2
+    resources = (await client.get("/api/project-tasks/resources", headers=auth)).json()
+    assert {model["model_ref"] for model in resources["models"]} == {
+        "openai/gpt-4o",
+        "alternate/gpt-4o",
+    }
+    assert "fixture-private-secret" not in json.dumps(resources) and "api_key" not in json.dumps(
+        resources
+    )

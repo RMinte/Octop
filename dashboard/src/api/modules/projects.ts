@@ -86,6 +86,7 @@ export interface TaskSummary {
   task_id: string;
   project_id: string | null;
   title: string;
+  archived: boolean;
   active_turn_id: string | null;
   list_revision: number;
   created_at: string;
@@ -101,6 +102,7 @@ export interface TaskTurn {
   error_code: string;
   activity: string;
   model_ref: string;
+  options: TaskExecutionOptions;
   project_revision: number | null;
   retry_of_turn_id: string | null;
   cancel_requested: boolean;
@@ -169,9 +171,19 @@ async function readTaskEvents(
   }
 }
 
+export interface TaskExecutionOptions {
+  model_ref?: string;
+  skills?: ProjectSkill[];
+  mcp_servers?: string[];
+}
+export interface TaskResources extends ProjectResources {
+  models: { model_ref: string; name: string }[];
+  default_model_ref: string | null;
+}
 export interface TaskMessage {
   request_id: string;
   prompt: string;
+  options?: TaskExecutionOptions;
 }
 const taskPath = (id: string) => `/project-tasks/${encodeURIComponent(id)}`;
 export interface TaskListPage {
@@ -195,20 +207,39 @@ const taskListPath = (projectID: string | null) =>
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
 export const projectTasksApi = {
-  list: (projectID: string | null, pageCursor?: string | null) =>
+  resources: () =>
+    request<TaskResources>("/project-tasks/resources", { cache: "no-store" }),
+  update: (
+    id: string,
+    body: { expected_revision: number; title?: string; archived?: boolean },
+  ) =>
+    request<TaskDetail>(taskPath(id), {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  list: (
+    projectID: string | null,
+    pageCursor?: string | null,
+    archived = false,
+  ) =>
     request<TaskListPage>(
-      `${taskListPath(projectID)}${query({ page_cursor: pageCursor })}`,
+      `${taskListPath(projectID)}${query({
+        page_cursor: pageCursor,
+        archived: archived ? "true" : undefined,
+      })}`,
       { cache: "no-store" },
     ),
   sync: (
     projectID: string | null,
     syncCursor: string,
     pageCursor?: string | null,
+    archived = false,
   ) =>
     request<TaskSyncPage>(
       `${taskListPath(projectID)}/sync${query({
         sync_cursor: syncCursor,
         page_cursor: pageCursor,
+        archived: archived ? "true" : undefined,
       })}`,
       { cache: "no-store" },
     ),
@@ -233,12 +264,17 @@ export const projectTasksApi = {
       method: "POST",
       body: JSON.stringify({ turn_id: turnID }),
     }),
-  retry: (id: string, turnID: string, requestID: string) =>
+  retry: (
+    id: string,
+    turnID: string,
+    requestID: string,
+    options?: TaskExecutionOptions,
+  ) =>
     request<TaskDetail>(
       `${taskPath(id)}/turns/${encodeURIComponent(turnID)}/retry`,
       {
         method: "POST",
-        body: JSON.stringify({ request_id: requestID }),
+        body: JSON.stringify({ request_id: requestID, options }),
       },
     ),
 };

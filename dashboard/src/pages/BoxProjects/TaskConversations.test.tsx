@@ -22,6 +22,8 @@ vi.mock("../../api/modules/projects", () => ({
     cancel: vi.fn(),
     events: vi.fn(),
     retry: vi.fn(),
+    resources: vi.fn(),
+    update: vi.fn(),
   },
 }));
 vi.mock("../../hooks/useServerTimezone", () => ({
@@ -44,6 +46,7 @@ const fixture: TaskDetail = {
   task_id: "task_a",
   project_id: "proj_a",
   title: "第一项任务",
+  archived: false,
   active_turn_id: null,
   list_revision: 1,
   created_at: "2026-10-15T00:00:00Z",
@@ -61,6 +64,7 @@ const fixture: TaskDetail = {
       error_code: "",
       activity: "",
       model_ref: "glm/glm",
+      options: {},
       retry_of_turn_id: null,
       cancel_requested: false,
       project_revision: 1,
@@ -88,6 +92,14 @@ beforeEach(() => {
       signal.addEventListener("abort", () => resolve(), { once: true }),
     );
   });
+  api.resources.mockResolvedValue({
+    skills: [],
+    mcp_servers: [],
+    directory_roots: [],
+    models: [{ model_ref: "glm/glm", name: "GLM" }],
+    default_model_ref: "glm/glm",
+  });
+  api.update.mockResolvedValue(fixture);
   api.retry.mockResolvedValue(fixture);
   api.get.mockResolvedValue(fixture);
   api.create.mockResolvedValue(fixture);
@@ -541,4 +553,168 @@ it("实时接口解析跨网络分块的中文与 SSE 帧，并释放连接", as
   } finally {
     stream.mockRestore();
   }
+});
+
+it("任务可以改名，提交读取到的摘要版本", async () => {
+  api.update.mockResolvedValue({
+    ...fixture,
+    title: "新的会话名称",
+    list_revision: 2,
+  });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await user.click(await screen.findByRole("button", { name: "修改任务名称" }));
+  const title = screen.getByRole("textbox", { name: "" });
+  await user.clear(title);
+  await user.type(title, "新的会话名称");
+  await user.tab();
+  await waitFor(() =>
+    expect(api.update).toHaveBeenCalledWith("task_a", {
+      title: "新的会话名称",
+      expected_revision: 1,
+    }),
+  );
+  expect(
+    await screen.findByRole("heading", { name: /新的会话名称/ }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("已记住蓝鸟")).toBeInTheDocument();
+});
+
+it("归档保留会话并关闭发送，恢复后仍可继续", async () => {
+  let stored = fixture;
+  api.list.mockImplementation(async (_projectID, _page, archived = false) => ({
+    items: stored.archived === archived ? [stored] : [],
+    next_page_cursor: null,
+    sync_cursor: "sync_filtered",
+  }));
+  api.update.mockImplementation(async (_id, patch) => {
+    stored = { ...stored, ...patch, list_revision: stored.list_revision + 1 };
+    return stored;
+  });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await user.click(await screen.findByRole("button", { name: "归档" }));
+  expect(
+    await screen.findByRole("button", { name: "恢复任务" }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "任务消息" })).toBeDisabled();
+  expect(screen.getByText("已记住蓝鸟")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(api.list).toHaveBeenCalledWith("proj_a", undefined, true),
+  );
+  await user.click(screen.getByRole("button", { name: "恢复任务" }));
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "任务消息" })).toBeEnabled(),
+  );
+  expect(api.update.mock.calls.map((call) => call[1])).toEqual([
+    { archived: true, expected_revision: 1 },
+    { archived: false, expected_revision: 2 },
+  ]);
+});
+
+it("外部归档后的旧历史页不会让任务重新出现在未归档列表", async () => {
+  api.list.mockResolvedValueOnce({
+    items: [fixture],
+    next_page_cursor: "old_page",
+    sync_cursor: "sync_first",
+  });
+  let finishPage!: (
+    value: Awaited<ReturnType<typeof projectTasksApi.list>>,
+  ) => void;
+  api.list.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishPage = resolve;
+      }),
+  );
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+  await user.click(screen.getByRole("button", { name: "加载更早的任务" }));
+  await act(async () =>
+    api.events.mock.calls[0][2]({
+      type: "turn",
+      data: {
+        task: { ...fixture, archived: true, list_revision: 2 },
+        turn: fixture.turns[0],
+        cursor: "archived_event",
+      },
+    }),
+  );
+  await act(async () =>
+    finishPage({ items: [fixture], next_page_cursor: null, sync_cursor: null }),
+  );
+  expect(
+    screen.queryByRole("button", { name: /第一项任务/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "任务消息" })).toBeDisabled();
+});
+
+it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目", async () => {
+  api.resources.mockResolvedValue({
+    skills: [],
+    mcp_servers: [],
+    directory_roots: [],
+    models: [{ model_ref: "other/model", name: "Other model" }],
+    default_model_ref: "glm/glm",
+  });
+  const user = userEvent.setup();
+  mount();
+  await user.click(screen.getByText("本轮设置"));
+  await user.click(await screen.findByRole("combobox", { name: "本轮模型" }));
+  await user.click(await screen.findByText("Other model · other/model"));
+  await user.click(screen.getByRole("switch", { name: "自定义本轮 Skill" }));
+  await user.click(screen.getByRole("switch", { name: "自定义本轮 MCP" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "按本轮设置执行",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(api.create).toHaveBeenCalledWith(
+      "proj_a",
+      expect.objectContaining({
+        prompt: "按本轮设置执行",
+        options: { model_ref: "other/model", skills: [], mcp_servers: [] },
+      }),
+    ),
+  );
+  expect(api.update).not.toHaveBeenCalled();
+});
+
+it("改名期间收到新版本时使用开始编辑的版本，冲突后不覆盖远端", async () => {
+  api.update.mockRejectedValue(
+    new Error('409 - {"error":{"code":"TASK_REVISION_CONFLICT"}}'),
+  );
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+  await user.click(screen.getByRole("button", { name: "修改任务名称" }));
+  await act(async () =>
+    api.events.mock.calls[0][2]({
+      type: "turn",
+      data: {
+        task: { ...fixture, title: "另一设备修改的标题", list_revision: 2 },
+        turn: fixture.turns[0],
+        cursor: "renamed_elsewhere",
+      },
+    }),
+  );
+  const title = screen.getByRole("textbox", { name: "" });
+  await user.clear(title);
+  await user.type(title, "本机编辑的标题");
+  await user.tab();
+  await waitFor(() =>
+    expect(api.update).toHaveBeenCalledWith("task_a", {
+      title: "本机编辑的标题",
+      expected_revision: 1,
+    }),
+  );
+  expect(
+    await screen.findByText("任务已发生变化，请刷新后重新修改。"),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("heading", { name: /另一设备修改的标题/ }),
+  ).toBeInTheDocument();
+  expect(api.update).toHaveBeenCalledTimes(1);
 });

@@ -38,7 +38,9 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 |---|---|---|
 | GET | `/api/projects/{project_id}/tasks` | 列出该项目的任务，按最近活动排序 |
 | POST | `/api/projects/{project_id}/tasks` | 在项目中发送首条消息，原子创建任务和首轮，返回 202 |
-| GET | `/api/project-tasks` | 列出无项目任务 |
+| GET | `/api/project-tasks` | 分页列出无项目任务；archived=true 查看归档任务 |
+| GET | `/api/project-tasks/resources` | 本轮可用的模型、Skill 和 MCP 引用 |
+| PATCH | `/api/project-tasks/{task_id}` | 修改名称、归档或恢复，校验 expected_revision |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
 | GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
 | GET | `/api/project-tasks/{task_id}/events` | 订阅实时轮次状态，支持游标或 Last-Event-ID 续接 |
@@ -46,11 +48,11 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | POST | `/api/project-tasks/{task_id}/cancel` | 指定 turn_id 停止对应回复，保留已有正文 |
 | POST | `/api/project-tasks/{task_id}/turns/{turn_id}/retry` | 重新尝试最后一个失败或取消轮次，创建新轮次 |
 
-发送体：`{"request_id":"每次发送唯一的UUID","prompt":"用户消息"}`。通用创建接口另接受 `project_id`。网络重试必须复用 `request_id` 和同一条消息；标识与内容冲突返回 409。执行中发送新消息返回 `TASK_BUSY`，停止或结束后可继续。所有读写均按当前登录用户隔离；其他用户的资源返回 404。读取带 `Cache-Control: no-store`。
+发送体：`{"request_id":"每次发送唯一的UUID","prompt":"用户消息"}`。通用创建接口另接受 `project_id`。网络重试必须复用 `request_id`、消息和原 options；标识与消息、执行选项或重试来源冲突返回 409。执行中发送新消息返回 `TASK_BUSY`，停止或结束后可继续。所有读写均按当前登录用户隔离；其他用户的资源返回 404。读取带 `Cache-Control: no-store`。
 
 每轮采用发送时项目配置的快照：行动指南进入系统提示；服务端目录作为实际工作目录；所选已安装技能和 SkillHub 包通过 Harness 工作区加载；仅装配所选 MCP 的工具，凭据沿用连接管理。项目修改在下一轮生效，已保存轮次的 `project_revision` 保留原值。客户端目录仍然只记录路径。无项目任务使用服务端自动分配的独立工作区。
 
-当前使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。需要审批的工具当前会结束本轮并提示失败，不绕过审批；本轮提供文字对话、项目文件/脚本、Skill 和所选 MCP；浏览器、桌面、审批恢复和附件上传未接入。
+未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。需要审批的工具当前会结束本轮并提示失败，不绕过审批；本轮提供文字对话、项目文件/脚本、Skill 和所选 MCP；浏览器、桌面、审批恢复和附件上传未接入。
 
 状态为 `queued/running/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 SSE 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的用户消息和已输出正文用作后续上下文；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
 
@@ -173,7 +175,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-消息只支持文字：`prompt` 去首尾空白后为 1–32768 字符，`request_id` 为 8–128 位字母、数字、短横线或下划线。当前请求不接受附件、模型选择、权限模式或临时 Skill/MCP 字段；任务继承发送时的项目配置和当前模型选择规则。
+消息只支持文字：`prompt` 去首尾空白后为 1–32768 字符，`request_id` 为 8–128 位字母、数字、短横线或下划线。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；附件和权限模式尚未接入。未覆盖的资源继承发送时的项目配置。
 
 通过 `GET /api/project-tasks/task_example` 读取 `TaskDetail`，默认最近 50 轮。`limit` 为 1–100；使用 `next_page_cursor` 作为下一次的 `page_cursor` 读取更早轮次，每页内部按创建顺序正序排列。首屏与实时基线来自同一数据库快照，历史页的 `event_cursor=null`，不能用历史页推进实时位置。以下是单轮已完成时的示意，创建响应的轮次通常处于 queued：
 
@@ -182,6 +184,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
   "task_id": "task_example",
   "project_id": "proj_example",
   "title": "请先概括项目目标，再列出下一步。",
+  "archived": false,
   "active_turn_id": null,
   "list_revision": 2,
   "created_at": "2026-10-15T05:01:00Z",
@@ -199,6 +202,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
       "error_code": "",
       "activity": "",
       "model_ref": "provider/model",
+      "options": {"model_ref": "provider/model", "skills": [], "mcp_servers": []},
       "cancel_requested": false,
       "retry_of_turn_id": null,
       "input_tokens": 120,
@@ -226,6 +230,36 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 停止使用 `POST /api/project-tasks/{task_id}/cancel`，必须提交 `{"turn_id":"turn_example"}`。返回 HTTP 200 和任务详情；运行轮次先置 `cancel_requested=true`，继续订阅直到进入终态。重复或迟到的请求只作用于指定轮次，该轮已结束时不影响下一轮；缺少请求体返回 422，其他任务的轮次返回 404。
 
 重新尝试使用 `POST /api/project-tasks/{task_id}/turns/{turn_id}/retry`，提交 `{"request_id":"new-retry-request"}`。只允许最后一个失败或取消轮次，活动任务返回 `TASK_BUSY`，不符合条件返回 `TASK_RETRY_UNAVAILABLE`。新轮次沿用原始消息，采用当前项目配置和模型，`retry_of_turn_id` 指向原轮次；原正文和状态不覆盖。同一重试标识重传不会重复执行。重试可能再次执行之前发生过的操作，网页在按钮旁明确提示；不自动重试失败轮次。
+
+### 任务名称、归档与恢复
+
+`PATCH /api/project-tasks/{task_id}` 接受 `expected_revision`（当前 list_revision）以及可选的 title、archived，至少提供一个修改字段；省略保持原值，不接受 null。名称去首尾空白后为 1–128 字符。版本冲突返回 409 `TASK_REVISION_CONFLICT`，应刷新后重新编辑，不能直接覆盖。相同字段值不递增版本。
+
+例如 `{"expected_revision":2,"title":"需求整理","archived":true}` 会修改名称并归档。归档保存全部会话和执行记录，没有删除业务数据；`archived:false` 恢复任务。任务排队或运行时归档返回 `TASK_BUSY`，须先结束或停止；归档状态不自动取消执行。归档任务可以读取历史，但新消息和新重试返回 `TASK_ARCHIVED`，需恢复后继续。已成功发送的 request_id 幂等重传仍返回原任务。
+
+项目内与无项目的任务列表都接受 `archived=false/true`，默认只显示未归档任务，归档任务仍按游标分页读取。两种视图的历史及同步游标不能混用。增量会返回变过任务的完整摘要，包含 archived；任务归档或恢复时，旧视图据此移出任务，新视图据此加入任务。保留较高 list_revision 的摘要，包括不属于当前显示筛选的摘要，防止迟到历史页重新加入旧状态。改名、归档、恢复与列表变更在同一事务提交，并可通过当前会话的实时连接获取最新摘要。
+
+### 本轮执行选项
+
+创建、追问和手动重试都接受 options，不写回项目或全局模型配置。例如：
+
+```json
+{
+  "request_id": "chosen-turn-request",
+  "prompt": "请先检查代码，不调用外部连接。",
+  "options": {
+    "model_ref": "provider/model",
+    "skills": [{"package_id":"pkg_example","slug":"review"}],
+    "mcp_servers": []
+  }
+}
+```
+
+model_ref 省略或 null 使用发送时的默认选择；显式指定不可用模型返回 `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。skills、mcp_servers 省略或 null 继承项目配置；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。无项目任务同样可以选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
+
+`GET /api/project-tasks/resources` 返回可用 models（model_ref/name）、default_model_ref，以及共享 Skill 与本人 MCP 引用，不包含凭据。网页“本轮设置”在成功发送后恢复继承状态；网络失败保留选择和发送标识。同一 request_id 必须重传相同的原选项，项目后来修改不会影响幂等回放。手动重试采用该次请求的 options，未指定时使用当前项目配置，不隐式复制失败轮次的覆盖项。返回的 turns[].options 是该轮实际采用的模型、Skill 和 MCP，project_revision 仍记录发送时项目版本。
+
+数据库 schema 34 只增加归档标记和分页索引，已有任务默认未归档。SQLite 从 schema 32/33 升级的定向用例验证了任务、轮次和正文保留；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
 
 ### 实时状态续接
 
@@ -262,6 +296,8 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 422 / `PROJECT_DIRECTORY_INVALID` | 服务端目录不存在或不可访问 | 重新选择有权限的服务端目录 |
 | 422 / `PROJECT_RESOURCE_INVALID` | Skill/MCP 引用不存在或无权使用 | 刷新资源目录后重新选择 |
 | 409 / `TASK_BUSY` | 任务已有活动轮次 | 读取当前任务，等待结束或由用户停止 |
+| 409 / `TASK_ARCHIVED` | 任务已归档 | 恢复后再开始新轮次 |
+| 409 / `TASK_REVISION_CONFLICT` | 任务摘要版本已变化 | 刷新后重新编辑 |
 | 409 / `TASK_RETRY_UNAVAILABLE` | 指定轮次不是最后一个失败/取消轮次 | 刷新会话，不重试旧轮次 |
 | 409 / `TASK_REQUEST_CONFLICT` | 消息标识已用于不同内容或作用域 | 核对原发送结果，禁止换内容复用标识 |
 | 409 / `TASK_MODEL_UNAVAILABLE` | 没有可用模型 | 保留草稿，配置模型后重新发送；不会创建空任务 |
@@ -284,7 +320,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 
 此前专用协议和 Bridge 的验证记录仅反映历史实现，不代表现行可用接口。当前路由契约验证覆盖标准项目/任务入口，以及已移除地址不可用、不触发转发的边界。完整 `make all` 按约定后置。
 
-本轮已补齐会话历史分页、可续接轮次状态流、精确取消和失败/取消后的继续及手动重试。任务列表分页和摘要同步已有实现。后续仍需改造：任务执行选项、任务改名和归档、附件产物与审批。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
+本轮已补齐会话历史分页、可续接轮次状态流、精确取消和失败/取消后的继续及手动重试。任务列表分页和摘要同步已有实现。本轮继续补齐任务改名、归档/恢复和逐轮模型、Skill/MCP 选择。后续仍需改造：执行权限模式、附件产物与审批。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
 
 当前实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
 

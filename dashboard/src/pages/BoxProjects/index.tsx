@@ -312,6 +312,7 @@ export default function BoxProjectsPage() {
                       <TaskConversations
                         key={selected.project_id}
                         projectID={selected.project_id}
+                        project={selected}
                       />
                     ),
                   },

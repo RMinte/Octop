@@ -59,8 +59,9 @@ def task_page(
     *,
     limit: int = 50,
     page_cursor: str | None = None,
+    archived: bool = False,
 ) -> TaskListPage:
-    codec = cursor_codec(services, owner_id, task_scope(project_id))
+    codec = cursor_codec(services, owner_id, task_scope(project_id) + f":archive-v1:{archived}")
     cursor = codec.decode(page_cursor, "history") if page_cursor is not None else None
     boundary = (cursor.updated_at, cursor.after) if cursor else None
     with services.db.read_snapshot() as conn:
@@ -70,7 +71,9 @@ def task_page(
         ):
             raise OctopError.localized(ErrorCode.NOT_FOUND)
         head = services.project_sync_repo.head(conn, owner_id, task_scope(project_id))
-        rows = services.project_task_repo.page(conn, owner_id, project_id, limit + 1, boundary)
+        rows = services.project_task_repo.page(
+            conn, owner_id, project_id, limit + 1, boundary, archived
+        )
     items = rows[:limit]
     next_page = None
     if len(rows) > limit:
@@ -182,9 +185,10 @@ def task_sync(
     sync_cursor: str,
     page_cursor: str | None = None,
     limit: int = 50,
+    archived: bool = False,
 ) -> TaskSyncPage:
     scope = task_scope(project_id)
-    codec = cursor_codec(services, owner_id, scope)
+    codec = cursor_codec(services, owner_id, scope + f":archive-v1:{archived}")
     rows, next_sync, next_page = _delta(
         services,
         owner_id,

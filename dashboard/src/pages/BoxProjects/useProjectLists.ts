@@ -5,6 +5,7 @@ import {
   projectTasksApi,
   type Project,
   type TaskSummary,
+  type TaskSyncPage,
 } from "../../api/modules/projects";
 import { useCurrentUser } from "../../hooks/useCurrentUser";
 import { parseApiError } from "../../utils/apiError";
@@ -184,9 +185,18 @@ export function useProjectList() {
   return { items: cache.items, refresh, upsert };
 }
 
-export function useTaskList(projectID: string | null) {
+export function useTaskList(projectID: string | null, archived = false) {
   const { cache, publish, current } = useCache<TaskSummary>(
-    `tasks:${projectID ?? ""}`,
+    `tasks:${projectID ?? ""}:${archived}`,
+  );
+  const listPage = useCallback(
+    (page?: string | null) =>
+      archived
+        ? projectTasksApi.list(projectID, page, true)
+        : page
+        ? projectTasksApi.list(projectID, page)
+        : projectTasksApi.list(projectID),
+    [projectID, archived],
   );
   const refresh = useCallback((): Promise<void> => {
     if (cache.pending) return cache.pending;
@@ -195,7 +205,7 @@ export function useTaskList(projectID: string | null) {
         const generation = cache.generation;
         try {
           if (!cache.cursor) {
-            const result = await projectTasksApi.list(projectID);
+            const result = await listPage();
             if (current.current !== cache || generation !== cache.generation)
               return;
             cache.items = mergeTasks(cache.items, result.items);
@@ -206,11 +216,9 @@ export function useTaskList(projectID: string | null) {
             let next: string | null = null;
             const incoming: TaskSummary[] = [];
             do {
-              const result = await projectTasksApi.sync(
-                projectID,
-                cache.cursor,
-                page,
-              );
+              const result: TaskSyncPage = await (archived
+                ? projectTasksApi.sync(projectID, cache.cursor, page, true)
+                : projectTasksApi.sync(projectID, cache.cursor, page));
               incoming.push(...result.changes.map((change) => change.data));
               next = result.next_sync_cursor;
               page = result.next_page_cursor;
@@ -233,7 +241,7 @@ export function useTaskList(projectID: string | null) {
       cache.pending = undefined;
     });
     return cache.pending;
-  }, [cache, projectID, current, publish]);
+  }, [cache, projectID, current, publish, archived, listPage]);
   const loadMore = useCallback((): Promise<void> => {
     if (cache.paging) return cache.paging;
     if (!cache.page) return Promise.resolve();
@@ -241,7 +249,7 @@ export function useTaskList(projectID: string | null) {
     const generation = cache.generation;
     cache.paging = (async () => {
       try {
-        const result = await projectTasksApi.list(projectID, page);
+        const result = await listPage(page);
         if (current.current !== cache || generation !== cache.generation)
           return;
         cache.items = mergeTasks(cache.items, result.items);
@@ -260,7 +268,7 @@ export function useTaskList(projectID: string | null) {
     });
     publish();
     return cache.paging;
-  }, [cache, projectID, current, publish, refresh]);
+  }, [cache, current, publish, refresh, listPage]);
   const upsert = useCallback(
     (item: TaskSummary) => {
       if (item.project_id !== projectID) return;
@@ -268,6 +276,7 @@ export function useTaskList(projectID: string | null) {
         task_id,
         project_id,
         title,
+        archived,
         active_turn_id,
         list_revision,
         created_at,
@@ -278,6 +287,7 @@ export function useTaskList(projectID: string | null) {
           task_id,
           project_id,
           title,
+          archived,
           active_turn_id,
           list_revision,
           created_at,
@@ -289,7 +299,7 @@ export function useTaskList(projectID: string | null) {
     [cache, projectID, publish],
   );
   return {
-    items: cache.items,
+    items: cache.items.filter((item) => item.archived === archived),
     hasMore: !!cache.page,
     loadingMore: !!cache.paging,
     refresh,

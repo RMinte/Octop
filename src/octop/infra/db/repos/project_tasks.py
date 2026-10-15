@@ -21,6 +21,7 @@ class ProjectTaskRow:
     created_at: int
     updated_at: int
     list_revision: int = 1
+    archived: bool = False
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -34,6 +35,7 @@ class ProjectTaskRow:
             strict_int(row["created_at"]),
             strict_int(row["updated_at"]),
             strict_int(row["list_revision"]),
+            bool(row["archived"]),
         )
 
 
@@ -48,12 +50,15 @@ class ProjectTaskRepo:
         project_id: str | None,
         limit: int,
         boundary: tuple[int, str] | None = None,
+        archived: bool = False,
     ) -> list[ProjectTaskRow]:
         params: list[Any] = [owner_id]
         scope = "project_id IS NULL"
         if project_id is not None:
             scope = "project_id=?"
             params.append(project_id)
+        scope += " AND archived=?"
+        params.append(int(archived))
         position = ""
         if boundary is not None:
             position = " AND (updated_at, task_id)<(?, ?)"
@@ -136,6 +141,30 @@ class ProjectTaskRepo:
         if result is not None:
             row = ProjectTaskRow.from_row(result)
             record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
+
+    @staticmethod
+    def update_metadata(
+        conn: Any, row: ProjectTaskRow, expected_revision: int
+    ) -> ProjectTaskRow | None:
+        result = conn.execute(
+            "UPDATE project_tasks SET title=?, archived=?, updated_at=?, list_revision=list_revision+1 "
+            "WHERE task_id=? AND owner_id=? AND list_revision=? RETURNING *",
+            (
+                row.title,
+                int(row.archived),
+                row.updated_at,
+                row.task_id,
+                row.owner_id,
+                expected_revision,
+            ),
+        ).fetchone()
+        if result is None:
+            return None
+        updated = ProjectTaskRow.from_row(result)
+        record_change(
+            conn, updated.owner_id, task_scope(updated.project_id), updated.task_id, updated
+        )
+        return updated
 
     def runtime_owner(self, task_id: str) -> int | None:
         with self._db.connect() as conn:

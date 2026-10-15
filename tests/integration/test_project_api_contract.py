@@ -20,6 +20,9 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
     assert "/api/projects/sync" in project_paths
     assert "/api/projects/{project_id}/tasks/sync" in project_paths
     assert "/api/project-tasks/sync" in project_paths
+    assert "/api/project-tasks/resources" in project_paths
+    assert "patch" in project_paths["/api/project-tasks/{task_id}"]
+    assert "TaskExecutionOptions" in schema["components"]["schemas"]
     assert "/api/project-tasks/{task_id}/messages" in project_paths
     assert "/api/project-tasks/{task_id}/events" in project_paths
     assert "/api/project-tasks/{task_id}/turns/{turn_id}/retry" in project_paths

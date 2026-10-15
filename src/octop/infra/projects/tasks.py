@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Self, cast
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StrictBool, StrictInt, StringConstraints, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
@@ -15,8 +17,16 @@ from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
-from octop.infra.projects.models import ProjectFields, ProjectModel
+from octop.infra.projects.models import (
+    ProjectFields,
+    ProjectModel,
+    ProjectResources,
+    Reference,
+    SkillBinding,
+    SkillHubBinding,
+)
 from octop.infra.projects.service import _validate, get_project
+from octop.infra.projects.service import resources as project_resources
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.ulid import new_ulid
 
@@ -25,15 +35,77 @@ Prompt = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, m
 TurnStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 
+class TaskExecutionOptions(ProjectModel):
+    model_ref: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+        | None
+    ) = Field(default=None, description="本轮模型；省略或 null 使用当前默认模型。")
+    skills: list[SkillBinding | SkillHubBinding] | None = Field(
+        default=None,
+        max_length=64,
+        description="本轮完整 Skill 选择；省略或 null 继承项目，[] 本轮禁用。",
+    )
+    mcp_servers: list[Reference] | None = Field(
+        default=None,
+        max_length=64,
+        description="本轮完整 MCP 选择；省略或 null 继承项目，[] 本轮禁用。",
+    )
+
+    @model_validator(mode="after")
+    def validate_references(self) -> Self:
+        ProjectFields.model_validate(
+            {"name": "Task", **self.model_dump(exclude_none=True, exclude={"model_ref"})}
+        )
+        return self
+
+
+class TaskModelOption(ProjectModel):
+    model_ref: str
+    name: str
+
+
+class TaskResources(ProjectResources):
+    models: list[TaskModelOption]
+    default_model_ref: str | None
+
+
+class TaskPatch(ProjectModel):
+    expected_revision: Annotated[StrictInt, Field(ge=1)] = Field(
+        description="详情或摘要的 list_revision；冲突返回 409。"
+    )
+    title: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+        | SkipJsonSchema[None]
+    ) = None
+    archived: StrictBool | SkipJsonSchema[None] = Field(
+        default=None, description="省略保持原值；不可为 null。"
+    )
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> Self:
+        changes = self.model_dump(exclude_unset=True, exclude={"expected_revision"})
+        if not changes or any(value is None for value in changes.values()):
+            raise ValueError("a non-null title or archived value is required")
+        return self
+
+
 class TaskMessage(ProjectModel):
     request_id: RequestID = Field(
         description="本次发送的唯一标识；网络重试必须复用，相同标识不会重复执行。"
     )
     prompt: Prompt = Field(description="本轮用户消息。发送后开始一次执行。")
+    options: TaskExecutionOptions = Field(
+        default_factory=TaskExecutionOptions,
+        description="本轮执行选项；省略时使用当前项目及默认模型，不修改项目。",
+    )
 
 
 class TaskRetry(ProjectModel):
     request_id: RequestID = Field(description="本次重试的唯一标识；网络重传必须复用。")
+    options: TaskExecutionOptions = Field(
+        default_factory=TaskExecutionOptions,
+        description="本轮执行选项；省略时使用当前项目及默认模型，不修改项目。",
+    )
 
 
 class TaskCancel(ProjectModel):
@@ -56,6 +128,7 @@ class TaskTurn(ProjectModel):
     error_code: str
     activity: str = Field(description="当前执行的工具名称；不包含参数、凭据或工具输出。")
     model_ref: str
+    options: TaskExecutionOptions = Field(description="本轮实际采用的模型、Skill 和 MCP。")
     cancel_requested: bool = Field(description="该轮已请求停止；运行中需等待 cancelled 终态。")
     retry_of_turn_id: str | None = Field(description="手动重试的原轮次；普通消息为 null。")
     input_tokens: int = Field(description="本轮模型输入 Token 数，独立于专家用量记录。")
@@ -69,6 +142,7 @@ class TaskSummary(ProjectModel):
     task_id: str
     project_id: str | None
     title: str
+    archived: bool
     active_turn_id: str | None
     list_revision: int = Field(description="任务摘要版本；仅列表字段变化时递增。")
     created_at: datetime
@@ -104,6 +178,7 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
         task_id=row.task_id,
         project_id=row.project_id,
         title=row.title,
+        archived=row.archived,
         active_turn_id=row.active_turn_id,
         list_revision=row.list_revision,
         created_at=_datetime(row.created_at),
@@ -123,6 +198,11 @@ def turn_view(t: ProjectTaskTurnRow) -> TaskTurn:
         error_code=t.error_code,
         activity=t.activity,
         model_ref=t.model_ref,
+        options=TaskExecutionOptions(
+            model_ref=t.model_ref,
+            skills=configuration.get("skills", []),
+            mcp_servers=configuration.get("mcp_servers", []),
+        ),
         cancel_requested=t.cancel_requested,
         retry_of_turn_id=configuration.get("retry_of_turn_id"),
         input_tokens=t.input_tokens,
@@ -133,9 +213,11 @@ def turn_view(t: ProjectTaskTurnRow) -> TaskTurn:
     )
 
 
-def _fingerprint(turn: TaskTurn) -> str:
+def _fingerprint(turn: TaskTurn, list_revision: int) -> str:
     # Lease heartbeats alone do not change the public conversation state.
-    return hashlib.sha256(turn.model_dump_json(exclude={"updated_at"}).encode()).hexdigest()
+    return hashlib.sha256(
+        (str(list_revision) + ":" + turn.model_dump_json(exclude={"updated_at"})).encode()
+    ).hexdigest()
 
 
 def detail(
@@ -166,7 +248,7 @@ def detail(
             stream.encode(
                 "conversation",
                 position=turns[-1].pk if turns else 0,
-                after=_fingerprint(views[-1]) if views else "",
+                after=_fingerprint(views[-1], row.list_revision) if views else "",
             )
             if page_cursor is None
             else None
@@ -189,7 +271,7 @@ def updates(
     result = []
     for row in rows:
         view = turn_view(row)
-        fingerprint = _fingerprint(view)
+        fingerprint = _fingerprint(view, task.list_revision)
         if row.pk == cursor.position and fingerprint == cursor.after:
             continue
         result.append(
@@ -203,17 +285,28 @@ def updates(
 
 
 def _configuration(
-    services: SharedServices, owner_id: int, project_id: str | None
+    services: SharedServices, owner_id: int, project_id: str | None, options: TaskExecutionOptions
 ) -> tuple[str, str]:
     fields = (
         get_project(services, owner_id, project_id) if project_id else ProjectFields(name="Task")
     )
+    snapshot = fields.model_dump(mode="json")
+    overrides = options.model_dump(exclude_none=True, exclude={"model_ref"})
+    fields = ProjectFields.model_validate(
+        {**fields.model_dump(include=set(ProjectFields.model_fields)), **overrides}
+    )
     _validate(services, owner_id, fields)
     assert_token_quota_available(services.user_policy_repo, services.usage_repo, owner_id)
-    ref = resolve_model_ref(services)
-    if not ref:
+    ref = options.model_ref or resolve_model_ref(services)
+    if not ref or not ProviderStore(services.provider_repo).is_model_ref_usable(ref):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE, status=409)
-    return fields.model_dump_json(), ref
+    return json.dumps(
+        {
+            **snapshot,
+            **fields.model_dump(),
+            "execution_options": options.model_dump(exclude_none=True),
+        }
+    ), ref
 
 
 def resolve_model_ref(services: SharedServices) -> str | None:
@@ -235,6 +328,8 @@ def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: s
     if (
         old.prompt != body.prompt
         or json.loads(old.configuration_json).get("retry_of_turn_id") != retry_of_turn_id
+        or json.loads(old.configuration_json).get("execution_options", {})
+        != body.options.model_dump(exclude_none=True)
     ):
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
 
@@ -263,7 +358,9 @@ def send(
             original = turns.get_in_transaction(conn, retry_of_turn_id)
             if original is None or original.task_id != task_id:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
-            body = TaskMessage(request_id=body.request_id, prompt=original.prompt)
+            body = TaskMessage(
+                request_id=body.request_id, prompt=original.prompt, options=body.options
+            )
         assert isinstance(body, TaskMessage)
         if task:
             if not task_id and task.project_id != project_id:
@@ -273,6 +370,8 @@ def send(
                 _same_prompt(previous, body, retry_of_turn_id)
                 task_id = task.task_id
             else:
+                if task.archived:
+                    raise OctopError.localized(ErrorCode.TASK_ARCHIVED)
                 if task.active_turn_id is not None:
                     raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
                 if retry_of_turn_id is not None:
@@ -283,7 +382,9 @@ def send(
                         or latest[0].status not in {"failed", "cancelled"}
                     ):
                         raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
-                configuration, model_ref = _configuration(services, owner_id, task.project_id)
+                configuration, model_ref = _configuration(
+                    services, owner_id, task.project_id, body.options
+                )
                 if retry_of_turn_id is not None:
                     configuration = json.dumps(
                         {**json.loads(configuration), "retry_of_turn_id": retry_of_turn_id}
@@ -312,7 +413,7 @@ def send(
                 )
                 task_id = task.task_id
         else:
-            configuration, model_ref = _configuration(services, owner_id, project_id)
+            configuration, model_ref = _configuration(services, owner_id, project_id, body.options)
             task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
             tasks.insert(
                 conn,
@@ -366,4 +467,45 @@ def cancel(services: SharedServices, owner_id: int, task_id: str, turn_id: str) 
             turn = turns.get_in_transaction(conn, turn_id)
             if turn is not None and turn.status == "cancelled":
                 tasks.finish(conn, task_id, turn.turn_id, now_ms())
+    return detail(services, owner_id, task_id)
+
+
+def resources(services: SharedServices, owner_id: int) -> TaskResources:
+    available = project_resources(services, owner_id)
+    providers = ProviderStore(services.provider_repo)
+    models = [
+        TaskModelOption(
+            model_ref=f"{provider.name}/{model['id']}", name=str(model.get("name") or model["id"])
+        )
+        for provider in providers.iter_usable_rows()
+        for model in provider.get_models()
+        if providers.is_model_ref_usable(f"{provider.name}/{model['id']}")
+    ]
+    return TaskResources(
+        **available.model_dump(), models=models, default_model_ref=resolve_model_ref(services)
+    )
+
+
+def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch) -> TaskDetail:
+    with services.db.transaction() as conn:
+        repo = services.project_task_repo
+        if not repo.lock_owner(conn, owner_id):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
+        current = repo.get_in_transaction(conn, task_id, owner_id)
+        if current is None:
+            raise OctopError.localized(ErrorCode.NOT_FOUND)
+        if current.list_revision != body.expected_revision:
+            raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+        title = body.title if body.title is not None else current.title
+        archived = body.archived if body.archived is not None else current.archived
+        if archived and not current.archived and current.active_turn_id:
+            raise OctopError.localized(ErrorCode.TASK_BUSY)
+        if title != current.title or archived != current.archived:
+            updated = repo.update_metadata(
+                conn,
+                replace(current, title=title, archived=archived, updated_at=now_ms()),
+                body.expected_revision,
+            )
+            if updated is None:
+                raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
     return detail(services, owner_id, task_id)
