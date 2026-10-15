@@ -34,14 +34,6 @@ def strict_int(value: object) -> int:
     return value
 
 
-def strict_bool_int(value: object) -> bool:
-    """Decode a stored 0/1 flag; truthiness is not evidence of a valid flag."""
-    number = strict_int(value)
-    if number not in (0, 1):
-        raise ValueError("Stored value is not a 0/1 flag")
-    return number == 1
-
-
 def map_rows[R_co](rows: Sequence[DbRow], cls: type[_FromRow[R_co]]) -> list[R_co]:
     return [cls.from_row(r) for r in rows]
 

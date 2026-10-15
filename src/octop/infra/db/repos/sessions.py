@@ -114,56 +114,10 @@ class SessionRepo:
 
     def get(self, session_key: str) -> SessionRow | None:
         with self._db.connect() as conn:
-            return self.get_in_transaction(conn, session_key)
-
-    @staticmethod
-    def get_raw_in_transaction(conn: Any, session_key: str) -> DbRow | None:
-        """Read stored fields unchanged, including nullable subject and raw metadata."""
-        row: DbRow | None = conn.execute(
-            "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
-        ).fetchone()
-        return row
-
-    @staticmethod
-    def get_in_transaction(conn: Any, session_key: str) -> SessionRow | None:
-        r = SessionRepo.get_raw_in_transaction(conn, session_key)
+            r = conn.execute(
+                "SELECT * FROM sessions WHERE session_key = ?", (session_key,)
+            ).fetchone()
         return SessionRow.from_row(r) if r else None
-
-    @staticmethod
-    def insert_in_transaction(
-        conn: Any,
-        *,
-        session_key: str,
-        agent_id: str,
-        user_id: int,
-        channel_type: str,
-        chat_type: str,
-        thread_id: str,
-        updated_at: int,
-        channel_subject_id: str,
-        channel_chat_type: str,
-        channel_metadata: dict[str, Any],
-        channel_id: str | None = None,
-    ) -> None:
-        """Register a fixed binding without legacy backfill, upsert or rebinding."""
-        conn.execute(
-            "INSERT INTO sessions(session_key, agent_id, user_id, channel_type, chat_type, "
-            "thread_id, updated_at, channel_subject_id, channel_chat_type, channel_metadata, "
-            "channel_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                session_key,
-                agent_id,
-                user_id,
-                channel_type,
-                chat_type,
-                thread_id,
-                updated_at,
-                channel_subject_id,
-                channel_chat_type,
-                json.dumps(channel_metadata, ensure_ascii=False),
-                channel_id,
-            ),
-        )
 
     def upsert(
         self,
@@ -255,24 +209,6 @@ class SessionRepo:
                 "UPDATE sessions SET unread_count = 0 WHERE agent_id = ? AND user_id = ?",
                 (agent_id, user_id),
             )
-
-    def has_task_bindings_for_agent_user(self, agent_id: str, user_id: int) -> bool:
-        if self._db.dialect == "postgresql":
-            reserved_key = "split_part(s.session_key, ':', 2) = 'agentcomputer'"
-        else:
-            tail = "substr(s.session_key, instr(s.session_key, ':') + 1)"
-            reserved_key = (
-                f"(instr(s.session_key, ':') > 0 AND ({tail} = 'agentcomputer' "
-                f"OR {tail} LIKE 'agentcomputer:%'))"
-            )
-        with self._db.connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM sessions s WHERE s.agent_id = ? AND s.user_id = ? AND "
-                f"(s.channel_type = 'agentcomputer' OR {reserved_key} OR EXISTS "
-                "(SELECT 1 FROM ac_tasks t WHERE t.octop_thread_id = s.thread_id)) LIMIT 1",
-                (agent_id, user_id),
-            ).fetchone()
-        return row is not None
 
     def list_by_thread(self, thread_id: str) -> list[SessionRow]:
         """Sessions currently bound to *thread_id* (dashboard, CLI, and IM)."""

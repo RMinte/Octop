@@ -58,9 +58,6 @@ async def test_foreground_constructs_daemon_and_cleans_on_serve_or_planning_exit
     server = instances[0]
     assert constructions[0] == {
         "daemon_bootstrap": server._agentcomputer_bootstrap,
-        "agentcomputer_listen_host": "127.0.0.1",
-        "agentcomputer_workers": 1,
-        "agentcomputer_reload": False,
     }
     assert server.services is None and server.app_runtime is None
     other = DaemonBootstrap(server.paths.agentcomputer_identity.parent)

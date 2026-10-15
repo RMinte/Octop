@@ -14,7 +14,6 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from uuid import UUID
 
 from octop_harness import HarnessAgent, HarnessAgentConfig, HarnessAgentManager
 from octop_harness.registry import AgentEntry
@@ -25,7 +24,6 @@ from octop.i18n.domains.agents import (
     NO_MODELS_CONFIGURED,
     format_agent_start_error,
 )
-from octop.infra.agents.managed import assert_legacy_agent_access, is_managed_agent
 from octop.infra.agents.memory.backend import memory_backend_from_agent_config
 from octop.infra.agents.memory.slim import MemorySlimCoordinator
 from octop.infra.agents.providers import ProviderStore, sync_providers_to_harness
@@ -87,13 +85,7 @@ from octop.infra.utils.locale import Locale
 from octop.infra.utils.ulid import new_short_id
 
 if TYPE_CHECKING:
-    from octop_harness.backends.workspace import BackendWorkspace
-
     from octop.config import OctopConfig
-    from octop.infra.agentcomputer.models import (
-        ProjectConfiguration,
-        ProjectPreparationIntent,
-    )
     from octop.infra.agents.experts.catalog import ExpertCatalog
     from octop.infra.agents.plugins.manager import PluginManager
     from octop.infra.cron.manager import CronManager
@@ -519,7 +511,7 @@ class AgentManager:
 
         rows = self._repos.agent_repo.list_all(include_disabled=False)
         for row in rows:
-            if row.last_state == "stopped" or is_managed_agent(row):
+            if row.last_state == "stopped":
                 continue
             try:
                 await asyncio.wait_for(
@@ -600,369 +592,6 @@ class AgentManager:
     # ------------------------------------------------------------------
     # CRUD — persist agent rows and sync harness runtime
     # ------------------------------------------------------------------
-
-    def _assert_legacy_agent(self, agent_id: str) -> None:
-        assert_legacy_agent_access(self.get_row(agent_id))
-
-    @staticmethod
-    def _check_preparation_path(path: Path) -> None:
-        if not path.is_absolute() or path == Path(path.anchor):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "invalidProjectRoot"}
-            )
-        if any(item.is_symlink() for item in (path, *path.parents)) or path.resolve() != path:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "invalidProjectRoot"}
-            )
-
-    def _project_preparation_intent(
-        self, agent_id: str, project_id: str, owner_id: int
-    ) -> ProjectPreparationIntent:
-        from octop.infra.agentcomputer.commands import content_digest
-        from octop.infra.agentcomputer.identity import get_or_create_identity
-        from octop.infra.agentcomputer.models import (
-            ProjectConfiguration,
-            ProjectPreparationIntent,
-        )
-
-        journal = self._repos.ac_project_preparation_repo.get(project_id, owner_id)
-        project = self._repos.ac_project_repo.get(project_id, owner_id)
-        if journal is None or project is None:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "missingPreparationIntent"}
-            )
-        intent = ProjectPreparationIntent.model_validate_json(journal.intent_json)
-        if (
-            journal.planned_agent_id != agent_id
-            or journal.project_id != project_id
-            or journal.owner_id != owner_id
-            or str(intent.projectID) != project_id
-            or intent.ownerID != owner_id
-            or intent.plannedAgentID != agent_id
-            or str(intent.workspaceID) != project.workspace_id
-            or str(intent.boxID) != project.box_id
-            or intent.configurationDigest != project.config_digest
-            or intent.boxID != get_or_create_identity(self._paths.agentcomputer_identity).boxID
-            or journal.intent_digest != content_digest(intent.model_dump(mode="json"))
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        configuration = ProjectConfiguration.model_validate_json(project.config_json)
-        if project.config_digest != content_digest(configuration.model_dump(mode="json")):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        expected_root = (
-            self._paths.root.resolve() / "agentcomputer-workspaces" / project.workspace_id
-        )
-        if Path(intent.serverRoot) != expected_root:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "invalidProjectRoot"}
-            )
-        self._check_preparation_path(Path(intent.serverRoot))
-        return intent
-
-    def _task_preparation_configuration(
-        self, agent_id: str, task_id: str, owner_id: int
-    ) -> tuple[ProjectConfiguration, Path]:
-        from octop.infra.agentcomputer.commands import content_digest
-        from octop.infra.agentcomputer.identity import get_or_create_identity
-        from octop.infra.agentcomputer.models import ProjectConfiguration
-
-        task = self._repos.ac_task_repo.get(task_id, owner_id)
-        if (
-            task is None
-            or task.project_id is not None
-            or task.standalone_box_id is None
-            or task.standalone_workspace_id is None
-            or task.standalone_agent_id != agent_id
-            or task.standalone_config_json is None
-            or task.standalone_config_digest is None
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        try:
-            workspace_id = UUID(task.standalone_workspace_id)
-            configuration = ProjectConfiguration.model_validate_json(task.standalone_config_json)
-        except ValueError as exc:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            ) from exc
-        if (
-            str(workspace_id) != task.standalone_workspace_id
-            or configuration.model_fields_set != set(ProjectConfiguration.model_fields)
-            or task.standalone_box_id
-            != str(get_or_create_identity(self._paths.agentcomputer_identity).boxID)
-            or task.standalone_config_digest
-            != content_digest(configuration.model_dump(mode="json"))
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        root = self._paths.root.resolve() / "agentcomputer-task-workspaces" / str(workspace_id)
-        self._check_preparation_path(root)
-        return configuration, root
-
-    @staticmethod
-    def _check_preparation_spec(spec: AgentCreateSpec) -> None:
-        if (
-            not spec.agent_id
-            or spec.user_id is None
-            or spec.kind != "expert"
-            or spec.is_shared
-            or spec.template_name
-            or spec.member_ids
-            or spec.skill_package_ids
-            or spec.knowledge_base_ids
-            or spec.mcp_servers
-            or spec.runtime_config
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "invalidPreparationSpec"}
-            )
-
-    async def create_stopped(self, spec: AgentCreateSpec, *, project_id: str) -> AgentRow:
-        """Register a reserved, disabled project expert without a runtime or background work."""
-        async with self._lock:
-            return await asyncio.to_thread(self._create_stopped, spec, project_id)
-
-    def _create_stopped(self, spec: AgentCreateSpec, project_id: str) -> AgentRow:
-        self._check_preparation_spec(spec)
-        assert spec.agent_id is not None and spec.user_id is not None
-        validate_custom_agent_id(spec.agent_id)
-        intent = self._project_preparation_intent(spec.agent_id, project_id, spec.user_id)
-        from octop.infra.agentcomputer.models import ProjectConfiguration
-
-        project = self._repos.ac_project_repo.get(project_id, spec.user_id)
-        assert project is not None
-        configuration = ProjectConfiguration.model_validate_json(project.config_json)
-        if (
-            spec.default_model != configuration.modelRef
-            or spec.system_prompt != configuration.instructions
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        root = Path(intent.serverRoot)
-        virtual_workspace = f"/.octop/workspaces/{spec.agent_id}"
-        backend = {"type": "filesystem", "root_dir": str(root), "virtual_mode": True}
-        if spec.config != {"backend": backend, "workspace_dir": virtual_workspace}:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
-            )
-        from octop.infra.users.resource_policy import (
-            assert_agent_quota_available,
-            raise_if_backend_outside_user_root,
-        )
-
-        if self.get_row(spec.agent_id) is not None:
-            raise OctopError(ErrorCode.AGENT_ID_TAKEN, spec.agent_id)
-        self._assert_agent_name_available(spec.user_id, spec.name)
-        assert_agent_quota_available(
-            self._repos.user_policy_repo, self._repos.agent_repo, spec.user_id
-        )
-        raise_if_backend_outside_user_root(self._repos.user_policy_repo, spec.user_id, backend)
-        workspace_dir = root / ".octop" / "workspaces" / spec.agent_id
-        self._check_preparation_path(workspace_dir)
-        workspace_dir.mkdir(parents=True, exist_ok=True)
-        self._check_preparation_path(workspace_dir)
-        config = dict(spec.config)
-        config["system_files_path"] = ".octop"
-        self._repos.agent_repo.create(
-            agent_id=spec.agent_id,
-            user_id=spec.user_id,
-            name=spec.name,
-            description=spec.description,
-            default_model=spec.default_model,
-            system_prompt=spec.system_prompt,
-            config_json=dumps_config(config),
-            skill_package_ids=dump_id_list([]),
-            knowledge_base_ids=dump_id_list([]),
-            mcp_servers=dump_id_list([]),
-            enabled=False,
-            last_state="stopped",
-            managed_by="agentcomputer",
-            managed_project_id=project_id,
-        )
-        row = self.get_row(spec.agent_id)
-        assert row is not None
-        return row
-
-    async def create_task_stopped(self, spec: AgentCreateSpec, *, task_id: str) -> AgentRow:
-        """Register a disabled expert bound to one project-free AgentComputer Task."""
-        async with self._lock:
-            return await asyncio.to_thread(self._create_task_stopped, spec, task_id)
-
-    def _create_task_stopped(self, spec: AgentCreateSpec, task_id: str) -> AgentRow:
-        self._check_preparation_spec(spec)
-        assert spec.agent_id is not None and spec.user_id is not None
-        validate_custom_agent_id(spec.agent_id)
-        configuration, root = self._task_preparation_configuration(
-            spec.agent_id, task_id, spec.user_id
-        )
-        if (
-            spec.default_model != configuration.modelRef
-            or spec.system_prompt != configuration.instructions
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        backend = {"type": "filesystem", "root_dir": str(root), "virtual_mode": True}
-        virtual_workspace = f"/.octop/workspaces/{spec.agent_id}"
-        if spec.config != {"backend": backend, "workspace_dir": virtual_workspace}:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
-            )
-        from octop.infra.users.resource_policy import (
-            assert_agent_quota_available,
-            raise_if_backend_outside_user_root,
-        )
-
-        if self.get_row(spec.agent_id) is not None:
-            raise OctopError(ErrorCode.AGENT_ID_TAKEN, spec.agent_id)
-        self._assert_agent_name_available(spec.user_id, spec.name)
-        assert_agent_quota_available(
-            self._repos.user_policy_repo, self._repos.agent_repo, spec.user_id
-        )
-        raise_if_backend_outside_user_root(self._repos.user_policy_repo, spec.user_id, backend)
-        workspace_dir = root / ".octop" / "workspaces" / spec.agent_id
-        self._check_preparation_path(workspace_dir)
-        workspace_dir.mkdir(parents=True, exist_ok=True)
-        self._check_preparation_path(workspace_dir)
-        config = dict(spec.config)
-        config["system_files_path"] = ".octop"
-        self._repos.agent_repo.create(
-            agent_id=spec.agent_id,
-            user_id=spec.user_id,
-            name=spec.name,
-            description=spec.description,
-            default_model=spec.default_model,
-            system_prompt=spec.system_prompt,
-            config_json=dumps_config(config),
-            skill_package_ids=dump_id_list([]),
-            knowledge_base_ids=dump_id_list([]),
-            mcp_servers=dump_id_list([]),
-            enabled=False,
-            last_state="stopped",
-            managed_by="agentcomputer",
-            managed_task_id=task_id,
-        )
-        row = self.get_row(spec.agent_id)
-        assert row is not None
-        return row
-
-    def workspace_for_project_preparation(self, agent_id: str, project_id: str) -> BackendWorkspace:
-        """Return only the exact reserved local workspace; never use host-path fallback."""
-        row = self.get_row(agent_id)
-        if (
-            row is None
-            or row.user_id is None
-            or not is_managed_agent(row)
-            or row.managed_project_id != project_id
-            or row.enabled
-            or row.last_state != "stopped"
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        intent = self._project_preparation_intent(agent_id, project_id, row.user_id)
-        from octop.infra.agentcomputer.models import ProjectConfiguration
-
-        project = self._repos.ac_project_repo.get(project_id, row.user_id)
-        assert project is not None
-        configuration = ProjectConfiguration.model_validate_json(project.config_json)
-        if (
-            row.default_model != configuration.modelRef
-            or row.system_prompt != configuration.instructions
-            or row.kind != "expert"
-            or row.is_shared
-            or row.template_name
-            or row.skill_package_ids not in (None, "[]")
-            or row.knowledge_base_ids not in (None, "[]")
-            or row.mcp_servers not in (None, "[]")
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        root = Path(intent.serverRoot)
-        workspace_dir = root / ".octop" / "workspaces" / agent_id
-        self._check_preparation_path(workspace_dir)
-        cfg = parse_config_json(row.config_json)
-        expected_config = {
-            "backend": {"type": "filesystem", "root_dir": str(root), "virtual_mode": True},
-            "workspace_dir": f"/.octop/workspaces/{agent_id}",
-            "system_files_path": ".octop",
-        }
-        if cfg != expected_config:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
-            )
-        workspace = self._backend_workspace_for_row(row, cfg=cfg, workspace_dir=workspace_dir)
-        if (
-            Path(workspace.workspace_dir) != workspace_dir
-            or Path(workspace.resolve_path("/")) != root
-            or workspace.system_files_path != ".octop"
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
-            )
-        self._check_preparation_path(workspace_dir)
-        return cast("BackendWorkspace", workspace)
-
-    def workspace_for_task_preparation(self, agent_id: str, task_id: str) -> BackendWorkspace:
-        """Return only the exact reserved workspace for a project-free Task."""
-        row = self.get_row(agent_id)
-        if (
-            row is None
-            or row.user_id is None
-            or not is_managed_agent(row)
-            or row.managed_project_id is not None
-            or row.managed_task_id != task_id
-            or row.enabled
-            or row.last_state != "stopped"
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        configuration, root = self._task_preparation_configuration(agent_id, task_id, row.user_id)
-        if (
-            row.default_model != configuration.modelRef
-            or row.system_prompt != configuration.instructions
-            or row.kind != "expert"
-            or row.is_shared
-            or row.template_name
-            or row.skill_package_ids not in (None, "[]")
-            or row.knowledge_base_ids not in (None, "[]")
-            or row.mcp_servers not in (None, "[]")
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBindingMismatch"}
-            )
-        workspace_dir = root / ".octop" / "workspaces" / agent_id
-        self._check_preparation_path(workspace_dir)
-        cfg = parse_config_json(row.config_json)
-        expected_config = {
-            "backend": {"type": "filesystem", "root_dir": str(root), "virtual_mode": True},
-            "workspace_dir": f"/.octop/workspaces/{agent_id}",
-            "system_files_path": ".octop",
-        }
-        if cfg != expected_config:
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
-            )
-        workspace = self._backend_workspace_for_row(row, cfg=cfg, workspace_dir=workspace_dir)
-        if (
-            Path(workspace.workspace_dir) != workspace_dir
-            or Path(workspace.resolve_path("/")) != root
-            or workspace.system_files_path != ".octop"
-        ):
-            raise OctopError.localized(
-                ErrorCode.FORBIDDEN, details={"reason": "preparationBackendMismatch"}
-            )
-        self._check_preparation_path(workspace_dir)
-        return cast("BackendWorkspace", workspace)
 
     async def create(
         self,
@@ -1189,7 +818,6 @@ class AgentManager:
 
     async def update(self, agent_id: str, **kwargs: Any) -> AgentRow:
         """Update agent config in DB and reload harness agent in the background."""
-        self._assert_legacy_agent(agent_id)
         runtime_updates = {
             key: kwargs.pop(key) for key in AGENT_RUNTIME_CONFIG_KEYS if key in kwargs
         }
@@ -1249,7 +877,6 @@ class AgentManager:
 
     async def set_shared(self, agent_id: str, shared: bool) -> AgentRow:
         """Persist whether other users may access this agent."""
-        self._assert_legacy_agent(agent_id)
         existing = self._repos.agent_repo.get(agent_id)
         if existing is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -1265,7 +892,6 @@ class AgentManager:
 
     def set_icon_url(self, agent_id: str, icon_url: str | None) -> AgentRow:
         """Persist display avatar URL without reloading the harness agent."""
-        self._assert_legacy_agent(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -1277,7 +903,6 @@ class AgentManager:
 
     async def delete(self, agent_id: str) -> None:
         """Remove agent from DB, harness runtime, and workspace directory."""
-        self._assert_legacy_agent(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -1312,7 +937,6 @@ class AgentManager:
 
     async def start(self, agent_id: str) -> None:
         """Load agent into harness runtime (no-op config merge)."""
-        self._assert_legacy_agent(agent_id)
         async with self._lock:
             row = self._repos.agent_repo.get(agent_id)
             if row is None:
@@ -1348,7 +972,6 @@ class AgentManager:
 
     async def stop(self, agent_id: str) -> None:
         """Unload agent from harness runtime and persist ``last_state=stopped``."""
-        self._assert_legacy_agent(agent_id)
         async with self._lock:
             row = self._repos.agent_repo.get(agent_id)
             if row is None:
@@ -1416,7 +1039,6 @@ class AgentManager:
         only falls back to building a fresh backend from the row's spec when
         no live handle exists (agent stopped, failed, or harness not booted).
         """
-        self._assert_legacy_agent(agent_id)
         row = self.get_row(agent_id)
         if row is None:
             return None
@@ -1464,7 +1086,6 @@ class AgentManager:
         still only live in the dict, copy them onto empty columns so a later overlay
         does not drop mounts.
         """
-        self._assert_legacy_agent(agent_id)
         cfg = self._preserve_internal_layout(agent_id, cfg)
         lifted = extract_profile_from_config(cfg)
         row = self._repos.agent_repo.get(agent_id)
@@ -1484,7 +1105,6 @@ class AgentManager:
         ``_build_harness_config`` parses the persisted string directly from
         config — do not route harness through this host join.
         """
-        self._assert_legacy_agent(agent_id)
         from octop.infra.agents.workspace.dir import (  # noqa: PLC0415
             neutralize_unwritable_local_root,
             resolve_workspace_host_path,
@@ -1569,7 +1189,6 @@ class AgentManager:
             AGENT_FAILED — agent exists but last start failed
             AGENT_NOT_RUNNING — agent exists but is not loaded in harness
         """
-        self._assert_legacy_agent(agent_id)
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
         try:
@@ -1604,7 +1223,6 @@ class AgentManager:
         running, or no checkpointer configured for it) — both are normal,
         expected states, not errors.
         """
-        self._assert_legacy_agent(agent_id)
         try:
             harness = self.get_agent(agent_id)
         except OctopError:
@@ -1674,7 +1292,6 @@ class AgentManager:
 
     async def stream(self, agent_id: str, request: dict[str, Any]) -> AsyncIterator[Any]:
         """Stream harness chunks (Langfuse tracing handled inside octop-harness)."""
-        self._assert_legacy_agent(agent_id)
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
 
@@ -1692,7 +1309,6 @@ class AgentManager:
 
     async def call(self, agent_id: str, request: dict[str, Any]) -> dict[str, Any]:
         """Non-streaming harness invocation (one-shot agent call)."""
-        self._assert_legacy_agent(agent_id)
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
         async with self._track_invocation(agent_id):
@@ -1712,7 +1328,6 @@ class AgentManager:
         decisions: list[dict[str, Any]],
     ) -> AsyncIterator[Any]:
         """Resume a paused HITL interrupt for *thread_id*."""
-        self._assert_legacy_agent(agent_id)
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
         async with (
@@ -1729,7 +1344,6 @@ class AgentManager:
 
     def cancel_stream(self, agent_id: str, thread_id: str) -> None:
         """Signal octop-harness to stop the active stream for *(agent_id, thread_id)*."""
-        self._assert_legacy_agent(agent_id)
         if self._harness_manager is not None:
             self._harness_manager.cancel(agent_id, thread_id)
 
@@ -1739,12 +1353,10 @@ class AgentManager:
         return self._harness_manager.get_thread_model(agent_id, thread_id)
 
     def set_thread_model(self, agent_id: str, thread_id: str, model: str) -> None:
-        self._assert_legacy_agent(agent_id)
         if self._harness_manager is not None:
             self._harness_manager.set_thread_model(agent_id, thread_id, model)
 
     def clear_thread_model(self, agent_id: str, thread_id: str) -> None:
-        self._assert_legacy_agent(agent_id)
         if self._harness_manager is not None:
             self._harness_manager.clear_thread_model(agent_id, thread_id)
 
@@ -1763,15 +1375,12 @@ class AgentManager:
 
     async def reload(self, agent_id: str) -> None:
         """Rebuild harness runtime for one agent (e.g. after plugin install)."""
-        self._assert_legacy_agent(agent_id)
         await self._reload_agent(agent_id)
 
     async def reload_all(self) -> None:
         """Rebuild harness runtime for every enabled agent (bounded parallel)."""
         agent_ids = [
-            row.agent_id
-            for row in self._repos.agent_repo.list_all(include_disabled=False)
-            if not is_managed_agent(row)
+            row.agent_id for row in self._repos.agent_repo.list_all(include_disabled=False)
         ]
         await self._reload_agents(agent_ids)
 
@@ -2371,7 +1980,6 @@ class AgentManager:
 
     async def update_config_json(self, agent_id: str, config_json: str) -> AgentRow:
         """Patch ``config_json`` and reload the harness runtime in the background."""
-        self._assert_legacy_agent(agent_id)
         parsed = self._preserve_internal_layout(
             agent_id, parse_config_json(config_json), pin_workspace_dir=True
         )
@@ -2512,7 +2120,6 @@ class AgentManager:
         Unlike :meth:`update_config_json`, this does not schedule a harness rebuild.
         Mounting packages only needs ``skills_dir`` updated so list/enable keep working.
         """
-        self._assert_legacy_agent(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -2580,7 +2187,6 @@ class AgentManager:
 
     def persist_knowledge_base_ids(self, agent_id: str, knowledge_base_ids: list[str]) -> None:
         """Persist composer knowledge-base defaults without reloading harness."""
-        self._assert_legacy_agent(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -2596,7 +2202,6 @@ class AgentManager:
 
     def persist_mcp_servers(self, agent_id: str, mcp_servers: list[str]) -> None:
         """Persist composer connector defaults without reloading harness."""
-        self._assert_legacy_agent(agent_id)
         from octop.infra.agents.teams import is_team_agent
 
         row = self._repos.agent_repo.get(agent_id)
@@ -2675,8 +2280,6 @@ class AgentManager:
     async def strip_skill_package_id(self, package_id: str) -> None:
         """Remove a deleted package id from every agent and hot-sync running agents."""
         for row in self._repos.agent_repo.list_all():
-            if is_managed_agent(row):
-                continue
             cfg = self.get_config(row.agent_id)
             package_ids = skill_package_ids_list(cfg)
             if package_id not in package_ids:
@@ -2955,7 +2558,6 @@ class AgentManager:
     async def _start_agent(
         self, row: AgentRow, *, init_workspace: bool = True
     ) -> HarnessAgent | None:
-        assert_legacy_agent_access(row)
         assert self._harness_manager is not None, "_start_agent called before boot()"
         if self._harness_manager.shared_factory is None:
             self._repos.agent_repo.set_state(row.agent_id, "failed", error=NO_MODELS_CONFIGURED)
@@ -3277,8 +2879,6 @@ class AgentManager:
     # ------------------------------------------------------------------
 
     async def _reload_agent(self, agent_id: str) -> None:
-        if is_managed_agent(self.get_row(agent_id)):
-            return
         assert self._harness_manager is not None
         async with self._lifecycle_lock_for(agent_id):
             self._bootstrap_graph_refresh_pending.discard(agent_id)

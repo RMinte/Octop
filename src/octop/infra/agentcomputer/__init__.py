@@ -1,1 +1,1 @@
-"""AgentComputer protocol foundation; task execution is not implemented yet."""
+"""AgentComputer transport lifecycle and installation identity."""

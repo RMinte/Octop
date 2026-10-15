@@ -145,13 +145,10 @@ def test_run_migrations_creates_tables(db: SqlitePool):
         ).fetchall()
     names = {r["name"] for r in rows}
     expected = {
-        "ac_projects",
-        "ac_project_preparations",
-        "ac_tasks",
-        "ac_turns",
-        "ac_runs",
-        "ac_commands",
-        "ac_events",
+        "projects",
+        "project_tasks",
+        "project_task_turns",
+        "project_create_requests",
         "users",
         "user_policies",
         "agents",
@@ -183,8 +180,9 @@ def test_run_migrations_creates_tables(db: SqlitePool):
     assert "knowledge_base_members" not in names
 
 
-def test_v20_database_receives_agentcomputer_core_tables(tmp_path: Path, monkeypatch) -> None:
-    """An already applied v20 must not skip the new command-admission DDL."""
+def test_v20_database_receives_independent_tables_without_changing_existing_schema(
+    tmp_path: Path, monkeypatch
+) -> None:
     import shutil
 
     from octop.infra.db import migrate
@@ -195,493 +193,118 @@ def test_v20_database_receives_agentcomputer_core_tables(tmp_path: Path, monkeyp
         if version <= 20:
             shutil.copy2(source, old_migrations / source.name)
     pool = SqlitePool(tmp_path / "upgrade.db")
-    with monkeypatch.context() as patch:
-        patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
+            run_migrations(pool)
+        with pool.transaction() as conn:
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 20
+            conn.execute(
+                "INSERT INTO users(username,password_hash,role,created_at) VALUES('preserved-user','fixture','user',1)"
+            )
+            before = {
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                )
+            }
         run_migrations(pool)
-    with pool.connect() as conn:
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 20
-        conn.execute(
-            "INSERT INTO users(username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
-            ("preserved-user", "fixture-hash", "user", 1),
-        )
-    run_migrations(pool)
-    run_migrations(pool)
-    with pool.connect() as conn:
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 32
-        assert conn.execute("SELECT username FROM users").fetchone()[0] == "preserved-user"
-        names = {
-            row["name"]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-    assert {"ac_projects", "ac_tasks", "ac_turns", "ac_runs", "ac_commands", "ac_events"} <= names
-    pool.close()
+        run_migrations(pool)
+        with pool.connect() as conn:
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 32
+            assert conn.execute("SELECT username FROM users").fetchone()[0] == "preserved-user"
+            after = {
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                )
+            }
+            added_tables = {name for kind, name, _ in after - before if kind == "table"}
+            assert before <= after
+            assert added_tables == {
+                "projects",
+                "project_tasks",
+                "project_task_turns",
+                "project_create_requests",
+            }
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        pool.close()
 
 
-@pytest.mark.parametrize("recorded_version", [26, 27])
-def test_v27_optional_task_project_preserves_existing_graph(
+@pytest.mark.parametrize("recorded_version", [21, 22, 26, 27, 32])
+def test_retired_agentcomputer_schema_and_data_are_preserved(
     tmp_path: Path, monkeypatch, recorded_version: int
 ) -> None:
-    """A populated v26 Task graph survives both normal and skipped-watermark upgrades."""
-    import shutil
-    from uuid import uuid4
-
-    from octop.infra.db import migrate
-    from octop.infra.db.repos.ac_tasks import AcTaskRepo
-
-    old_migrations = tmp_path / "v26-migrations"
-    old_migrations.mkdir()
-    for version, source in migrate._discover("sqlite"):
-        if version <= 26:
-            shutil.copy2(source, old_migrations / source.name)
-    pool = SqlitePool(tmp_path / "upgrade.db")
-    with monkeypatch.context() as patch:
-        patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
-        run_migrations(pool)
-    project_id, task_id, turn_id, run_id, legacy_agent_id = (str(uuid4()) for _ in range(5))
-    command_id, event_id, session_id = (str(uuid4()) for _ in range(3))
-    dispatch_id, engine_request_id, effect_id, pause_id, receipt_id = (
-        str(uuid4()) for _ in range(5)
-    )
-    with pool.transaction() as conn:
-        conn.execute(
-            "INSERT INTO users(username,password_hash,role,created_at) VALUES ('owner','hash','user',1)"
-        )
-        owner_id = conn.execute("SELECT id FROM users WHERE username='owner'").fetchone()[0]
-        conn.execute(
-            "INSERT INTO ac_projects(project_id,owner_id,box_id,workspace_id,"
-            "config_json,config_digest,name,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                project_id,
-                owner_id,
-                str(uuid4()),
-                str(uuid4()),
-                "config-before",
-                "digest",
-                "P",
-                1,
-                1,
-            ),
-        )
-        conn.execute(
-            "INSERT INTO agents(agent_id,user_id,name,description,default_model,"
-            "config_json,kind,created_at,updated_at,managed_by,managed_project_id) "
-            "VALUES (?,?,?,?,? ,?,'expert',1,1,'agentcomputer',?)",
-            (
-                legacy_agent_id,
-                owner_id,
-                "Legacy managed agent",
-                "Agent survives rebuild",
-                "fixture/model",
-                '{"model":"fixture/model"}',
-                project_id,
-            ),
-        )
-        legacy_agent_pk = conn.execute(
-            "SELECT id FROM agents WHERE agent_id=?", (legacy_agent_id,)
-        ).fetchone()[0]
-        conn.execute(
-            "UPDATE ac_projects SET default_agent_id=? WHERE project_id=?",
-            (legacy_agent_id, project_id),
-        )
-        conn.execute(
-            "INSERT INTO ac_tasks(task_id,project_id,owner_id,session_id,title,"
-            "preparation_state,created_at,updated_at) VALUES (?,?,?,?,?,'ready',1,1)",
-            (task_id, project_id, owner_id, session_id, "Legacy task"),
-        )
-        legacy_task_pk = conn.execute(
-            "SELECT id FROM ac_tasks WHERE task_id=?", (task_id,)
-        ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO ac_turns(turn_id,task_id,project_id,owner_id,user_message_id,"
-            "assistant_message_id,context_mode,snapshot_json,snapshot_digest,created_at) "
-            "VALUES (?,?,?,?,?,?,'newMessage',?,?,1)",
-            (
-                turn_id,
-                task_id,
-                project_id,
-                owner_id,
-                str(uuid4()),
-                str(uuid4()),
-                "snapshot-before",
-                "digest",
-            ),
-        )
-        conn.execute(
-            "INSERT INTO ac_runs(run_id,turn_id,task_id,project_id,owner_id,state,"
-            "dispatch_phase,created_at,updated_at) VALUES (?,?,?,?,?,'queued','notDispatched',1,1)",
-            (run_id, turn_id, task_id, project_id, owner_id),
-        )
-        conn.execute(
-            "INSERT INTO ac_commands(command_id,owner_id,idempotency_key,operation,target_id,"
-            "payload_digest,restore_epoch,receipt_json,created_at) "
-            "VALUES (?,?,?,?,?, ?,1,?,1)",
-            (
-                command_id,
-                owner_id,
-                "legacy-key",
-                "turn.newMessage",
-                task_id,
-                "digest",
-                "receipt-before",
-            ),
-        )
-        conn.execute(
-            "INSERT INTO ac_events(event_id,task_id,owner_id,sequence,run_id,turn_id,"
-            "event_type,payload_version,payload_json,created_at) "
-            "VALUES (?,?,?,1,?,?,'run.accepted',1,'event-before',1)",
-            (event_id, task_id, owner_id, run_id, turn_id),
-        )
-        conn.execute(
-            "INSERT INTO ac_run_dispatches(dispatch_id,run_id,turn_id,task_id,project_id,"
-            "owner_id,execution_epoch,restore_epoch,claimant_id,engine_request_id,"
-            "intent_json,intent_digest,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,1,1,'legacy-worker',?,'dispatch-before','digest',1,1)",
-            (dispatch_id, run_id, turn_id, task_id, project_id, owner_id, engine_request_id),
-        )
-        conn.execute(
-            "INSERT INTO ac_tool_effects(effect_id,run_id,turn_id,task_id,project_id,"
-            "owner_id,dispatch_id,engine_request_id,claimant_id,restore_epoch,"
-            "execution_epoch,tool_call_id,execution_attempt,intent_json,intent_digest,"
-            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'legacy-worker',1,1,?,1,"
-            "'effect-before','digest',1,1)",
-            (
-                effect_id,
-                run_id,
-                turn_id,
-                task_id,
-                project_id,
-                owner_id,
-                dispatch_id,
-                engine_request_id,
-                str(uuid4()),
-            ),
-        )
-        conn.execute(
-            "INSERT INTO ac_run_pauses(pause_id,kind,run_id,turn_id,task_id,project_id,"
-            "owner_id,dispatch_id,engine_request_id,claimant_id,restore_epoch,"
-            "execution_epoch,intent_json,intent_digest,created_at,updated_at,expires_at) "
-            "VALUES (?,'approval',?,?,?,?,?,?,?,'legacy-worker',1,1,"
-            "'pause-before','digest',1,1,2)",
-            (
-                pause_id,
-                run_id,
-                turn_id,
-                task_id,
-                project_id,
-                owner_id,
-                dispatch_id,
-                engine_request_id,
-            ),
-        )
-        conn.execute(
-            "INSERT INTO ac_run_cancellations(run_id,turn_id,task_id,project_id,owner_id,"
-            "command_id,restore_epoch,execution_epoch,run_revision_at_request,phase,"
-            "requested_at) VALUES (?,?,?,?,?,?,1,0,1,'requested',1)",
-            (run_id, turn_id, task_id, project_id, owner_id, command_id),
-        )
-        conn.execute(
-            "INSERT INTO ac_run_terminals(receipt_id,run_id,turn_id,task_id,project_id,"
-            "owner_id,dispatch_id,engine_request_id,claimant_id,restore_epoch,"
-            "execution_epoch,receipt_json,receipt_digest,completed_at) "
-            "VALUES (?,?,?,?,?,?,?,?,'legacy-worker',1,1,'terminal-before','digest',1)",
-            (
-                receipt_id,
-                run_id,
-                turn_id,
-                task_id,
-                project_id,
-                owner_id,
-                dispatch_id,
-                engine_request_id,
-            ),
-        )
-        if recorded_version == 27:
-            conn.execute("UPDATE _schema_version SET version=27")
-    run_migrations(pool)
-    run_migrations(pool)
-    with pool.connect() as conn:
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 32
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(ac_tasks)")}
-        assert columns["project_id"]["notnull"] == 0
-        assert any(
-            row["name"] == "idx_ac_tasks_project"
-            for row in conn.execute("PRAGMA index_list(ac_tasks)")
-        )
-        assert (
-            conn.execute("SELECT id FROM ac_tasks WHERE task_id=?", (task_id,)).fetchone()[0]
-            == legacy_task_pk
-        )
-        assert (
-            conn.execute("SELECT project_id FROM ac_tasks WHERE task_id=?", (task_id,)).fetchone()[
-                0
-            ]
-            == project_id
-        )
-        legacy_agent = conn.execute(
-            "SELECT * FROM agents WHERE agent_id=?", (legacy_agent_id,)
-        ).fetchone()
-        assert legacy_agent["id"] == legacy_agent_pk
-        assert legacy_agent["description"] == "Agent survives rebuild"
-        assert legacy_agent["config_json"] == '{"model":"fixture/model"}'
-        assert legacy_agent["managed_project_id"] == project_id
-        assert legacy_agent["managed_task_id"] is None
-        assert (
-            conn.execute(
-                "SELECT default_agent_id FROM ac_projects WHERE project_id=?", (project_id,)
-            ).fetchone()[0]
-            == legacy_agent_id
-        )
-        assert (
-            conn.execute(
-                "SELECT snapshot_json FROM ac_turns WHERE turn_id=?", (turn_id,)
-            ).fetchone()[0]
-            == "snapshot-before"
-        )
-        assert (
-            conn.execute("SELECT run_id FROM ac_runs WHERE run_id=?", (run_id,)).fetchone()[0]
-            == run_id
-        )
-        assert (
-            conn.execute(
-                "SELECT receipt_json FROM ac_commands WHERE command_id=?", (command_id,)
-            ).fetchone()[0]
-            == "receipt-before"
-        )
-        assert (
-            conn.execute(
-                "SELECT payload_json FROM ac_events WHERE event_id=?", (event_id,)
-            ).fetchone()[0]
-            == "event-before"
-        )
-        for table, identity_column, identity, payload_column, payload in (
-            ("ac_run_dispatches", "dispatch_id", dispatch_id, "intent_json", "dispatch-before"),
-            ("ac_tool_effects", "effect_id", effect_id, "intent_json", "effect-before"),
-            ("ac_run_pauses", "pause_id", pause_id, "intent_json", "pause-before"),
-            ("ac_run_terminals", "receipt_id", receipt_id, "receipt_json", "terminal-before"),
-        ):
-            saved = conn.execute(
-                f"SELECT project_id,{payload_column} FROM {table} WHERE {identity_column}=?",
-                (identity,),
-            ).fetchone()
-            assert saved["project_id"] == project_id and saved[payload_column] == payload
-        assert (
-            conn.execute(
-                "SELECT command_id FROM ac_run_cancellations WHERE run_id=?", (run_id,)
-            ).fetchone()[0]
-            == command_id
-        )
-        for table in (
-            "ac_turns",
-            "ac_runs",
-            "ac_run_dispatches",
-            "ac_tool_effects",
-            "ac_run_pauses",
-            "ac_run_cancellations",
-            "ac_run_terminals",
-        ):
-            columns = {item["name"]: item for item in conn.execute(f"PRAGMA table_info({table})")}
-            assert columns["project_id"]["notnull"] == 0
-        unscoped_id = str(uuid4())
-        row = AcTaskRepo.insert(
-            conn,
-            task_id=unscoped_id,
-            project_id=None,
-            owner_id=owner_id,
-            session_id=str(uuid4()),
-            octop_thread_id=None,
-            title="Independent task",
-            created_at=2,
-            updated_at=2,
-            preparation_state="pending",
-            standalone_box_id=str(uuid4()),
-            standalone_workspace_id=str(uuid4()),
-            standalone_agent_id=f"ac-{uuid4().hex}",
-            standalone_config_json='{"model":"fixture/model"}',
-            standalone_config_digest="task-config-digest",
-        )
-        assert row is not None and row.project_id is None
-        assert row.standalone_box_id is not None
-        assert row.standalone_agent_id is not None
-        conn.execute(
-            "INSERT INTO agents(agent_id,user_id,name,created_at,updated_at,"
-            "managed_by,managed_task_id) VALUES (?,?,?,2,2,'agentcomputer',?)",
-            (row.standalone_agent_id, owner_id, "Independent task agent", unscoped_id),
-        )
-        assert (
-            conn.execute(
-                "SELECT managed_task_id FROM agents WHERE agent_id=?", (row.standalone_agent_id,)
-            ).fetchone()[0]
-            == unscoped_id
-        )
-        independent_turn, independent_run, independent_dispatch = (str(uuid4()) for _ in range(3))
-        independent_engine = str(uuid4())
-        conn.execute(
-            "INSERT INTO ac_turns(turn_id,task_id,project_id,owner_id,user_message_id,"
-            "assistant_message_id,context_mode,snapshot_json,snapshot_digest,created_at) "
-            "VALUES (?,?,NULL,?,?,?,'newMessage','task-snapshot','digest',2)",
-            (independent_turn, unscoped_id, owner_id, str(uuid4()), str(uuid4())),
-        )
-        conn.execute(
-            "INSERT INTO ac_runs(run_id,turn_id,task_id,project_id,owner_id,state,"
-            "dispatch_phase,created_at,updated_at) "
-            "VALUES (?,?,?,NULL,?,'queued','notDispatched',2,2)",
-            (independent_run, independent_turn, unscoped_id, owner_id),
-        )
-        conn.execute(
-            "INSERT INTO ac_run_dispatches(dispatch_id,run_id,turn_id,task_id,project_id,"
-            "owner_id,execution_epoch,restore_epoch,claimant_id,engine_request_id,"
-            "intent_json,intent_digest,created_at,updated_at) "
-            "VALUES (?,?,?,?,NULL,?,1,1,'task-worker',?,'task-dispatch','digest',2,2)",
-            (
-                independent_dispatch,
-                independent_run,
-                independent_turn,
-                unscoped_id,
-                owner_id,
-                independent_engine,
-            ),
-        )
-        conn.execute(
-            "INSERT INTO ac_tool_effects(effect_id,run_id,turn_id,task_id,project_id,"
-            "owner_id,dispatch_id,engine_request_id,claimant_id,restore_epoch,"
-            "execution_epoch,tool_call_id,execution_attempt,intent_json,intent_digest,"
-            "created_at,updated_at) VALUES (?,?,?,?,NULL,?,?,?,'task-worker',1,1,?,1,"
-            "'task-effect','digest',2,2)",
-            (
-                str(uuid4()),
-                independent_run,
-                independent_turn,
-                unscoped_id,
-                owner_id,
-                independent_dispatch,
-                independent_engine,
-                str(uuid4()),
-            ),
-        )
-        from octop.infra.db.repos.ac_runs import AcRunRepo
-        from octop.infra.db.repos.ac_turns import AcTurnRepo
-
-        independent_turn_row = AcTurnRepo.get_in_transaction(conn, independent_turn, owner_id)
-        independent_run_row = AcRunRepo.get_in_transaction(conn, independent_run, owner_id)
-        assert independent_turn_row is not None and independent_turn_row.project_id is None
-        assert independent_run_row is not None and independent_run_row.project_id is None
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        conn.execute(
-            "INSERT INTO users(username,password_hash,role,created_at) "
-            "VALUES ('other','hash','user',2)"
-        )
-        other_owner = conn.execute("SELECT id FROM users WHERE username='other'").fetchone()[0]
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO ac_turns(turn_id,task_id,project_id,owner_id,user_message_id,"
-                "assistant_message_id,context_mode,snapshot_json,snapshot_digest,created_at) "
-                "VALUES (?,?,NULL,?,?,?,'newMessage','wrong-owner','digest',2)",
-                (str(uuid4()), unscoped_id, other_owner, str(uuid4()), str(uuid4())),
-            )
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                "INSERT INTO ac_runs(run_id,turn_id,task_id,project_id,owner_id,state,"
-                "dispatch_phase,created_at,updated_at) "
-                "VALUES (?,?,?,NULL,?,'queued','notDispatched',2,2)",
-                (str(uuid4()), turn_id, unscoped_id, owner_id),
-            )
-        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
-            conn.execute(
-                "INSERT INTO ac_tool_effects(effect_id,run_id,turn_id,task_id,project_id,"
-                "owner_id,dispatch_id,engine_request_id,claimant_id,restore_epoch,"
-                "execution_epoch,tool_call_id,execution_attempt,phase,intent_json,intent_digest,"
-                "terminal_json,terminal_digest,terminal_at,created_at,updated_at) "
-                "VALUES (?,?,?,?,NULL,?,?,?,'task-worker',1,1,?,1,'terminal',"
-                "'wrong-dispatch','digest','{}','digest',2,2,2)",
-                (
-                    str(uuid4()),
-                    independent_run,
-                    independent_turn,
-                    unscoped_id,
-                    owner_id,
-                    str(uuid4()),
-                    independent_engine,
-                    str(uuid4()),
-                ),
-            )
-        with pytest.raises(sqlite3.IntegrityError):
-            AcTaskRepo.insert(
-                conn,
-                task_id=str(uuid4()),
-                project_id=str(uuid4()),
-                owner_id=owner_id,
-                session_id=str(uuid4()),
-                octop_thread_id=None,
-                title="Invalid project",
-                created_at=2,
-                updated_at=2,
-                preparation_state="pending",
-            )
-        assert [
-            item.task_id
-            for item in AcTaskRepo.list_page_in_transaction(
-                conn, None, owner_id, after=None, limit=10
-            )
-        ] == [unscoped_id]
-        assert [
-            item.task_id
-            for item in AcTaskRepo.list_page_in_transaction(
-                conn, project_id, owner_id, after=None, limit=10
-            )
-        ] == [task_id]
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    pool.close()
-
-
-def test_v27_existing_task_scope_receives_execution_scope(tmp_path: Path, monkeypatch) -> None:
-    """A local v27 from the first Task-only iteration must not skip its folded DDL."""
     import shutil
 
     from octop.infra.db import migrate
 
-    old_migrations = tmp_path / "early-v27-migrations"
+    old_migrations = tmp_path / "v20-migrations"
     old_migrations.mkdir()
     for version, source in migrate._discover("sqlite"):
-        if version <= 26:
+        if version <= 20:
             shutil.copy2(source, old_migrations / source.name)
-        elif version == 27:
-            prefix = source.read_text(encoding="utf-8").split("-- V27_EXECUTION_SCOPE_BEGIN\n", 1)[
-                0
-            ]
-            (old_migrations / source.name).write_text(
-                prefix
-                + "UPDATE _schema_version SET version = 27;\nCOMMIT;\nPRAGMA foreign_keys = ON;\n",
-                encoding="utf-8",
+    pool = SqlitePool(tmp_path / "historical.db")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
+            run_migrations(pool)
+        with pool.transaction() as conn:
+            conn.execute(
+                "CREATE TABLE ac_projects(project_id TEXT PRIMARY KEY, configuration TEXT NOT NULL)"
             )
-    pool = SqlitePool(tmp_path / "early-v27.db")
-    with monkeypatch.context() as patch:
-        patch.setattr(migrate, "_MIGRATIONS_DIR", old_migrations)
+            conn.execute(
+                "CREATE TABLE ac_tasks(task_id TEXT PRIMARY KEY, project_id TEXT REFERENCES ac_projects(project_id))"
+            )
+            conn.execute("INSERT INTO ac_projects VALUES('old-project','preserved-config')")
+            conn.execute("INSERT INTO ac_tasks VALUES('old-task','old-project')")
+            conn.execute("ALTER TABLE agents ADD COLUMN managed_by TEXT")
+            conn.execute(
+                "ALTER TABLE agents ADD COLUMN managed_project_id TEXT REFERENCES ac_projects(project_id)"
+            )
+            conn.execute(
+                "ALTER TABLE agents ADD COLUMN managed_task_id TEXT REFERENCES ac_tasks(task_id)"
+            )
+            conn.execute(
+                "INSERT INTO agents(agent_id,name,enabled,last_state,created_at,updated_at,managed_by,managed_project_id) VALUES('old-agent','Old agent',0,'stopped',1,1,'agentcomputer','old-project')"
+            )
+            conn.execute("UPDATE _schema_version SET version=?", (recorded_version,))
+            before = {
+                table: (
+                    conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[
+                        0
+                    ],
+                    [tuple(row) for row in conn.execute(f"SELECT * FROM {table}")],
+                )
+                for table in ("agents", "ac_projects", "ac_tasks")
+            }
         run_migrations(pool)
-    with pool.connect() as conn:
-        assert conn.execute("PRAGMA table_info(ac_runs)").fetchall()[4]["notnull"] == 1
-    run_migrations(pool)
-    run_migrations(pool)
-    with pool.connect() as conn:
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 32
-        for table in (
-            "ac_turns",
-            "ac_runs",
-            "ac_run_dispatches",
-            "ac_tool_effects",
-            "ac_run_pauses",
-            "ac_run_cancellations",
-            "ac_run_terminals",
-        ):
-            columns = {item["name"]: item for item in conn.execute(f"PRAGMA table_info({table})")}
-            assert columns["project_id"]["notnull"] == 0
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    pool.close()
+        run_migrations(pool)
+        with pool.connect() as conn:
+            for table, (sql, rows) in before.items():
+                assert (
+                    conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[
+                        0
+                    ]
+                    == sql
+                )
+                assert [tuple(row) for row in conn.execute(f"SELECT * FROM {table}")] == rows
+            names = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ac_%'"
+                )
+            }
+            assert names == {"ac_projects", "ac_tasks"}
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 32
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        pool.close()
 
 
-def test_high_watermark_repairs_missing_agentcomputer_tables(tmp_path: Path, monkeypatch) -> None:
-    """Legacy version clamping must materialize v23 before reporting that version."""
+def test_high_watermark_repairs_missing_independent_tables(tmp_path: Path, monkeypatch) -> None:
+    """A skipped watermark still materializes only the independent project/task tables."""
     import shutil
 
     from octop.infra.db import migrate
@@ -705,7 +328,8 @@ def test_high_watermark_repairs_missing_agentcomputer_tables(tmp_path: Path, mon
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-    assert {"ac_projects", "ac_tasks", "ac_turns", "ac_runs", "ac_commands", "ac_events"} <= names
+    assert {"projects", "project_tasks", "project_task_turns", "project_create_requests"} <= names
+    assert not any(name.startswith("ac_") for name in names)
     pool.close()
 
 

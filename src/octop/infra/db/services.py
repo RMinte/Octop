@@ -6,18 +6,6 @@ from dataclasses import dataclass
 
 from octop.config import OctopConfig
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos.ac_commands import AcCommandRepo
-from octop.infra.db.repos.ac_events import AcEventRepo
-from octop.infra.db.repos.ac_project_preparations import AcProjectPreparationRepo
-from octop.infra.db.repos.ac_projects import AcProjectRepo
-from octop.infra.db.repos.ac_run_cancellations import AcRunCancellationRepo
-from octop.infra.db.repos.ac_run_dispatches import AcRunDispatchRepo
-from octop.infra.db.repos.ac_run_pauses import AcRunPauseRepo
-from octop.infra.db.repos.ac_run_terminals import AcRunTerminalRepo
-from octop.infra.db.repos.ac_runs import AcRunRepo
-from octop.infra.db.repos.ac_tasks import AcTaskRepo
-from octop.infra.db.repos.ac_tool_effects import AcToolEffectRepo
-from octop.infra.db.repos.ac_turns import AcTurnRepo
 from octop.infra.db.repos.agents import AgentRepo
 from octop.infra.db.repos.audit import AuditRepo
 from octop.infra.db.repos.backends import BackendRepo
@@ -53,19 +41,6 @@ from octop.infra.utils.paths import PathLayout
 class RepoBundle:
     db: DatabasePool
 
-    ac_project_repo: AcProjectRepo
-    ac_project_preparation_repo: AcProjectPreparationRepo
-    ac_task_repo: AcTaskRepo
-    ac_turn_repo: AcTurnRepo
-    ac_run_repo: AcRunRepo
-    ac_run_pause_repo: AcRunPauseRepo
-    ac_run_terminal_repo: AcRunTerminalRepo
-    ac_run_cancellation_repo: AcRunCancellationRepo
-    ac_run_dispatch_repo: AcRunDispatchRepo
-    ac_tool_effect_repo: AcToolEffectRepo
-    ac_command_repo: AcCommandRepo
-    ac_event_repo: AcEventRepo
-
     project_task_repo: ProjectTaskRepo
     project_task_turn_repo: ProjectTaskTurnRepo
     project_repo: ProjectRepo
@@ -99,18 +74,6 @@ class RepoBundle:
     def from_pool(cls, db: DatabasePool) -> RepoBundle:
         return cls(
             db=db,
-            ac_project_repo=AcProjectRepo(db),
-            ac_project_preparation_repo=AcProjectPreparationRepo(db),
-            ac_task_repo=AcTaskRepo(db),
-            ac_turn_repo=AcTurnRepo(db),
-            ac_run_repo=AcRunRepo(db),
-            ac_run_pause_repo=AcRunPauseRepo(db),
-            ac_run_terminal_repo=AcRunTerminalRepo(),
-            ac_run_cancellation_repo=AcRunCancellationRepo(db),
-            ac_run_dispatch_repo=AcRunDispatchRepo(db),
-            ac_tool_effect_repo=AcToolEffectRepo(db),
-            ac_command_repo=AcCommandRepo(db),
-            ac_event_repo=AcEventRepo(db),
             project_task_repo=ProjectTaskRepo(db),
             project_task_turn_repo=ProjectTaskTurnRepo(db),
             project_repo=ProjectRepo(db),
@@ -163,54 +126,6 @@ class SharedServices:
     @property
     def project_repo(self) -> ProjectRepo:
         return self.repos.project_repo
-
-    @property
-    def ac_project_repo(self) -> AcProjectRepo:
-        return self.repos.ac_project_repo
-
-    @property
-    def ac_project_preparation_repo(self) -> AcProjectPreparationRepo:
-        return self.repos.ac_project_preparation_repo
-
-    @property
-    def ac_task_repo(self) -> AcTaskRepo:
-        return self.repos.ac_task_repo
-
-    @property
-    def ac_turn_repo(self) -> AcTurnRepo:
-        return self.repos.ac_turn_repo
-
-    @property
-    def ac_run_repo(self) -> AcRunRepo:
-        return self.repos.ac_run_repo
-
-    @property
-    def ac_run_pause_repo(self) -> AcRunPauseRepo:
-        return self.repos.ac_run_pause_repo
-
-    @property
-    def ac_run_terminal_repo(self) -> AcRunTerminalRepo:
-        return self.repos.ac_run_terminal_repo
-
-    @property
-    def ac_run_cancellation_repo(self) -> AcRunCancellationRepo:
-        return self.repos.ac_run_cancellation_repo
-
-    @property
-    def ac_run_dispatch_repo(self) -> AcRunDispatchRepo:
-        return self.repos.ac_run_dispatch_repo
-
-    @property
-    def ac_tool_effect_repo(self) -> AcToolEffectRepo:
-        return self.repos.ac_tool_effect_repo
-
-    @property
-    def ac_command_repo(self) -> AcCommandRepo:
-        return self.repos.ac_command_repo
-
-    @property
-    def ac_event_repo(self) -> AcEventRepo:
-        return self.repos.ac_event_repo
 
     @property
     def user_repo(self) -> UserRepo:

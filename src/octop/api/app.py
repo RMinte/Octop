@@ -17,7 +17,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from octop.api.agentcomputer import (
     API_PREFIX,
-    admission_error_response,
     is_agentcomputer_path,
     octop_error_response,
     protocol_error_response,
@@ -87,14 +86,6 @@ def _mount_routers(app: FastAPI, mounts: Sequence[_RouterMount]) -> None:
 
 
 def _install_exception_handlers(app: FastAPI) -> None:
-    from octop.infra.agentcomputer.commands import CommandAdmissionError
-
-    @app.exception_handler(CommandAdmissionError)
-    async def _agentcomputer_admission(
-        request: Request, exc: CommandAdmissionError
-    ) -> JSONResponse:
-        return admission_error_response(exc)
-
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request, exc: RequestValidationError) -> Response:
         if is_agentcomputer_path(request.url.path):

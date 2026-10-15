@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from octop.i18n import tr
-from octop.infra.agents.managed import assert_legacy_agent_access, is_managed_agent
 from octop.infra.connectors.crypto import decrypt_credentials
 from octop.infra.connectors.gateway.adapters.agently_cli import read_auth_status
 from octop.infra.connectors.gateway.agently_watch import AgentlyWatchManager
@@ -115,7 +114,6 @@ class CronManager:
     async def create(self, spec: CronCreateSpec | None = None, **kwargs: Any) -> CronJobRow:
         if spec is None:
             spec = CronCreateSpec(**kwargs)
-        assert_legacy_agent_access(self._repos.agent_repo.get(spec.agent_id))
         self._mail_source(spec.trigger, spec.user_id)
         session_key = spec.session_key or ThreadRegistry.dashboard_key(
             agent_id=spec.agent_id,
@@ -192,7 +190,6 @@ class CronManager:
             existing = self._repos.cron_repo.get(cron_id)
             if existing is None:
                 raise OctopError(ErrorCode.NOT_FOUND, f"cron job {cron_id!r} not found")
-            assert_legacy_agent_access(self._repos.agent_repo.get(existing.agent_id))
             if trigger is not None or enabled_bool is True:
                 self._mail_source(trigger or existing.trigger, existing.user_id)
             repo_kwargs: dict[str, Any] = {
@@ -224,9 +221,6 @@ class CronManager:
 
     async def delete(self, cron_id: str) -> None:
         async with self._lock:
-            row = self._repos.cron_repo.get(cron_id)
-            if row is not None:
-                assert_legacy_agent_access(self._repos.agent_repo.get(row.agent_id))
             await self._unschedule(cron_id)
             self._repos.cron_repo.delete(cron_id)
             self._repos.audit_repo.write(actor=ACTOR_SYSTEM, action="cron.delete", target=cron_id)
@@ -245,7 +239,6 @@ class CronManager:
             asyncio.ensure_future(job.run())
 
     def _make_job(self, row: Any) -> CronJob:
-        assert_legacy_agent_access(self._repos.agent_repo.get(row.agent_id))
         return CronJob.from_row(
             row,
             delivery_service=self._delivery_service,
@@ -254,7 +247,7 @@ class CronManager:
         )
 
     def _schedule(self, row: Any) -> None:
-        if not row.enabled or is_managed_agent(self._repos.agent_repo.get(row.agent_id)):
+        if not row.enabled:
             return
         try:
             trigger = build_trigger(row.trigger, timezone=self._timezone)

@@ -16,7 +16,6 @@ from octop_gateway.manager import ChannelManager
 from octop_gateway.models import ChannelSubject
 
 from octop.i18n import channel_probe_incomplete, channel_runtime_reason, tr
-from octop.infra.agents.managed import assert_legacy_agent_access, is_managed_agent
 from octop.infra.db.repos.channels import ChannelRow
 from octop.infra.db.repos.sessions import SessionRow
 from octop.infra.errors import ErrorCode, OctopError
@@ -326,7 +325,6 @@ class Gateway:
         return self._repos.channel_repo.get(channel_id)
 
     async def create_channel(self, spec: ChannelCreateSpec) -> ChannelRow:
-        assert_legacy_agent_access(self._repos.agent_repo.get(spec.agent_id))
         config_json = json.dumps(spec.config)
         existing = self._repos.channel_repo.get_by_agent_and_name(spec.agent_id, spec.name)
         if existing is not None:
@@ -370,9 +368,6 @@ class Gateway:
         config_json: str | None = None,
         enabled: int | None = None,
     ) -> ChannelRow | None:
-        existing = self._repos.channel_repo.get(channel_id)
-        if existing is not None:
-            assert_legacy_agent_access(self._repos.agent_repo.get(existing.agent_id))
         self._repos.channel_repo.update(
             channel_id,
             kind=kind,
@@ -389,16 +384,12 @@ class Gateway:
         return row
 
     async def delete_channel(self, channel_id: str) -> None:
-        row = self._repos.channel_repo.get(channel_id)
-        if row is not None:
-            assert_legacy_agent_access(self._repos.agent_repo.get(row.agent_id))
         self._repos.channel_repo.delete(channel_id)
         await self._unregister(channel_id)
         self._runtime_status.pop(channel_id, None)
 
     def require_session(self, agent_id: str, session_key: str) -> SessionRow:
         """Return a session after validating its owning agent."""
-        assert_legacy_agent_access(self._repos.agent_repo.get(agent_id))
         session = self._thread_registry.get_session(session_key)
         if session is None:
             raise ValueError(f"session {session_key!r} not found")
@@ -681,9 +672,6 @@ class Gateway:
         )
 
     async def _safe_register_channel(self, row: ChannelRow) -> None:
-        if is_managed_agent(self._repos.agent_repo.get(row.agent_id)):
-            self._set_runtime_status(row.channel_id, connected=False, reason="disabled")
-            return
         try:
             await self._register_channel(row)
         except Exception as exc:
@@ -693,7 +681,6 @@ class Gateway:
             )
 
     async def _register_channel(self, row: ChannelRow) -> None:
-        assert_legacy_agent_access(self._repos.agent_repo.get(row.agent_id))
         if not self._channel_manager or not self._processor:
             return
         config = self._config_from_row(row)

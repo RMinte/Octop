@@ -14,7 +14,6 @@ from octop.cli.support.db import (
     resolve_username,
 )
 from octop.infra.agents.experts.catalog import ExpertCatalog, default_library_root
-from octop.infra.agents.managed import assert_legacy_agent_access
 from octop.infra.agents.providers.model_flags import is_local_runtime_provider
 from octop.infra.cron.task_type import normalize_cron_task_type, require_cron_prompt
 from octop.infra.cron.trigger import build_trigger
@@ -207,7 +206,6 @@ def create_cron_offline(
     cleaned_prompt = require_cron_prompt(prompt)
     session_key = ThreadRegistry.dashboard_key(agent_id=agent_id, user_id=user_id)
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         if svc.agent_repo.get(agent_id) is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
         asyncio.run(
@@ -242,7 +240,6 @@ def create_cron_offline(
 
 def delete_cron_offline(agent_id: str, cron_id: str, *, home: Path | None = None) -> None:
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         row = svc.cron_repo.get(cron_id)
         if row is None or row.agent_id != agent_id:
             raise OctopError(ErrorCode.NOT_FOUND, "cron job not found")
@@ -266,7 +263,6 @@ def delete_agent_offline(agent_id: str, *, home: Path | None = None) -> None:
     from octop.infra.agents.workspace.dir import workspace_dir_from_config_json
 
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         row = svc.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -455,7 +451,6 @@ def create_channel_offline(
 ) -> dict[str, Any]:
     channel_id = new_ulid()
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         if svc.agent_repo.get(agent_id) is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
         svc.channel_repo.create(
@@ -481,7 +476,6 @@ def patch_channel_offline(
     home: Path | None = None,
 ) -> dict[str, Any]:
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         row = svc.channel_repo.get(channel_id)
         if row is None or row.agent_id != agent_id:
             raise OctopError(ErrorCode.NOT_FOUND, f"channel {channel_id!r} not found")
@@ -498,7 +492,6 @@ def patch_channel_offline(
 
 def delete_channel_offline(agent_id: str, channel_id: str, *, home: Path | None = None) -> None:
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         row = svc.channel_repo.get(channel_id)
         if row is None or row.agent_id != agent_id:
             raise OctopError(ErrorCode.NOT_FOUND, f"channel {channel_id!r} not found")
@@ -516,7 +509,6 @@ def create_thread_offline(
 ) -> dict[str, Any]:
     session_key = ThreadRegistry.dashboard_key(agent_id=agent_id, user_id=user_id)
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         registry = ThreadRegistry(
             session_repo=svc.session_repo,
             thread_repo=svc.thread_repo,
@@ -548,7 +540,6 @@ def update_thread_offline(
     home: Path | None = None,
 ) -> dict[str, Any]:
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         row = svc.thread_repo.get(thread_id)
         if row is None or row.agent_id != agent_id:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"thread {thread_id!r} not found")
@@ -567,7 +558,6 @@ def update_thread_offline(
 
 def delete_thread_offline(agent_id: str, thread_id: str, *, home: Path | None = None) -> None:
     with open_cli_services(home) as svc:
-        assert_legacy_agent_access(svc.agent_repo.get(agent_id))
         row = svc.thread_repo.get(thread_id)
         if row is None or row.agent_id != agent_id:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"thread {thread_id!r} not found")

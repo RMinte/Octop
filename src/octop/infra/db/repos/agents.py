@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import UNSET, DbRow, bool_int, map_rows, now_ts, optional_updates
@@ -48,9 +47,6 @@ class AgentRow:
     knowledge_base_ids: str | None = None
     mcp_servers: str | None = None
     kind: str = "expert"
-    managed_by: str | None = None
-    managed_project_id: str | None = None
-    managed_task_id: str | None = None
 
     @classmethod
     def from_row(cls, r: DbRow) -> AgentRow:
@@ -92,9 +88,6 @@ class AgentRow:
             knowledge_base_ids=_opt_str(r, "knowledge_base_ids"),
             mcp_servers=_opt_str(r, "mcp_servers"),
             kind=kind,
-            managed_by=_opt_str(r, "managed_by"),
-            managed_project_id=_opt_str(r, "managed_project_id"),
-            managed_task_id=_opt_str(r, "managed_task_id"),
         )
 
 
@@ -124,11 +117,6 @@ class AgentRepo:
         knowledge_base_ids: str | None = None,
         mcp_servers: str | None = None,
         kind: str = "expert",
-        enabled: bool = True,
-        last_state: str | None = None,
-        managed_by: str | None = None,
-        managed_project_id: str | None = None,
-        managed_task_id: str | None = None,
     ) -> str:
         ts = now_ts()
         agent_kind = kind if kind in {"expert", "team"} else "expert"
@@ -138,9 +126,8 @@ class AgentRepo:
                 "persona_mbti, default_model, system_prompt, enabled, config_json, icon, "
                 "template_name, color, icon_name, icon_url, skill_package_ids, "
                 "published_expert_id, welcome_message, knowledge_base_ids, mcp_servers, "
-                "kind, created_at, updated_at, last_state, managed_by, managed_project_id, "
-                "managed_task_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "kind, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     agent_id,
                     user_id,
@@ -149,7 +136,6 @@ class AgentRepo:
                     persona_mbti,
                     default_model,
                     system_prompt,
-                    bool_int(enabled),
                     config_json,
                     icon,
                     template_name,
@@ -164,21 +150,13 @@ class AgentRepo:
                     agent_kind,
                     ts,
                     ts,
-                    last_state,
-                    managed_by,
-                    managed_project_id,
-                    managed_task_id,
                 ),
             )
         return agent_id
 
     def get(self, agent_id: str) -> AgentRow | None:
         with self._db.connect() as conn:
-            return self.get_in_transaction(conn, agent_id)
-
-    @staticmethod
-    def get_in_transaction(conn: Any, agent_id: str) -> AgentRow | None:
-        r = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
+            r = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
         return AgentRow.from_row(r) if r else None
 
     def list_by_user(self, user_id: int, *, include_disabled: bool = True) -> list[AgentRow]:

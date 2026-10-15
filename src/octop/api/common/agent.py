@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from octop.infra.agents.managed import assert_legacy_agent_access
 from octop.infra.errors import ErrorCode, OctopError
 
 
@@ -18,7 +17,6 @@ def user_owns_agent(row: Any, user: Any) -> bool:
 
 def assert_agent_owner(row: Any, user: Any) -> None:
     """Raise if the user may not mutate this agent row (admin bypasses)."""
-    assert_legacy_agent_access(row)
     if user.is_admin:
         return
     if row.user_id is None or row.user_id != user.id:
@@ -34,7 +32,6 @@ def _user_may_access(row: Any, user: Any) -> bool:
 
 
 def assert_agent_access_row(row: Any, user: Any) -> None:
-    assert_legacy_agent_access(row)
     if not _user_may_access(row, user):
         raise OctopError(ErrorCode.FORBIDDEN, "agent not accessible to user")
 
@@ -51,7 +48,6 @@ def require_agent_row(
     row = server.app_runtime.agent_registry.get_row(agent_id)
     if row is None:
         raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
-    assert_legacy_agent_access(row)
     if as_user is not None and as_user != user.id:
         if not user.is_admin:
             raise OctopError(ErrorCode.FORBIDDEN, "as_user requires admin")

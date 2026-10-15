@@ -21,7 +21,6 @@ from octop_harness.teams.processor import ReplyEvent
 from octop_harness.teams.util import PeerCall, PeerSession
 
 from octop.i18n.domains.stream import format_stream_error
-from octop.infra.agents.managed import assert_legacy_agent_access
 from octop.infra.agents.providers.reasoning import reasoning_request_parameters
 from octop.infra.agents.settings.profile import parse_config_json
 from octop.infra.agents.teams import is_team_agent
@@ -619,17 +618,11 @@ class GlobalProcessor:
             return
 
         agent_row = self._agent_repo.get(agent_id)
-        assert_legacy_agent_access(agent_row)
         user_id = resolve_user_id_for_message(
             msg,
             agent_owner_id=agent_row.user_id if agent_row is not None else None,
         )
         session_key = session_key_from_message(msg, agent_id=agent_id)
-        thread_id_hint = (msg.metadata or {}).get("thread_id")
-        self._thread_registry.require_legacy_binding(
-            session_key,
-            thread_id=thread_id_hint if isinstance(thread_id_hint, str) else None,
-        )
         channel_type = msg.channel_type or "unknown"
         im_meta = sanitize_im_metadata(msg)
 
@@ -922,7 +915,6 @@ class GlobalProcessor:
             return
 
         agent_row = self._agent_repo.get(agent_id)
-        assert_legacy_agent_access(agent_row)
         team_host = is_team_agent(agent_row)
         traj_on = self._agent_trajectory_enabled(agent_id, agent_row)
         user_id = resolve_user_id_for_message(
@@ -930,11 +922,6 @@ class GlobalProcessor:
             agent_owner_id=agent_row.user_id if agent_row is not None else None,
         )
         session_key = session_key_from_message(msg, agent_id=agent_id)
-        thread_id_hint = (msg.metadata or {}).get("thread_id")
-        self._thread_registry.require_legacy_binding(
-            session_key,
-            thread_id=thread_id_hint if isinstance(thread_id_hint, str) else None,
-        )
         channel_type = msg.channel_type or "unknown"
         im_meta = sanitize_im_metadata(msg)
         meta = msg.metadata or {}

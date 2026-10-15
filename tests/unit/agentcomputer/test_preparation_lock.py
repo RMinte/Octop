@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from octop.infra.agentcomputer.commands import StorageDataError
 from octop.infra.agentcomputer.preparation_lock import preparation_lock
 
 
@@ -57,6 +56,6 @@ def test_lock_refuses_symlink_without_touching_target(tmp_path: Path) -> None:
     target.write_text("preserve")
     lock = tmp_path / "project.lock"
     lock.symlink_to(target)
-    with pytest.raises(StorageDataError), preparation_lock(lock):
+    with pytest.raises(ValueError), preparation_lock(lock):
         pass
     assert target.read_text() == "preserve"

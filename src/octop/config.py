@@ -134,8 +134,6 @@ class OctopConfig:
     enable_dashboard: bool = True
     enable_api_docs: bool = False
     history_v2_enabled: bool = False
-    # Explicit opt-in for loopback-only AgentComputer text Task experiments.
-    agentcomputer_text_enabled: bool = False
     agentcomputer_text_model_ref: str = ""
     require_setup_password: bool = True
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -615,11 +613,6 @@ def load_config(path: Path) -> OctopConfig:
             os.environ.get(
                 "OCTOP_HISTORY_V2_ENABLED", str(merged.get("history_v2_enabled", False))
             ),
-            False,
-        ),
-        agentcomputer_text_enabled=_coerce_bool(
-            "agentcomputer_text_enabled",
-            str(merged.get("agentcomputer_text_enabled", False)),
             False,
         ),
         agentcomputer_text_model_ref=(

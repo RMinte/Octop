@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from octop.config import OctopConfig, load_config
-from octop.infra.agentcomputer.active_runs import ActiveRunRegistry
 from octop.infra.agentcomputer.bootstrap import DaemonBootstrap, settle_task
 from octop.infra.agentcomputer.http_operations import HttpOperationRegistry
 from octop.infra.agents.experts.catalog import ExpertCatalog, default_library_root
@@ -37,7 +36,6 @@ from octop.infra.users.manager import UserManager
 from octop.infra.utils.paths import PathLayout
 
 if TYPE_CHECKING:
-    from octop.infra.agentcomputer.text_worker import LocalTextTaskWorker
     from octop.infra.auth.ldap.service import LdapAuthService
     from octop.infra.auth.ldap.throttle import LdapBindThrottle
     from octop.infra.auth.sso.service import SsoService
@@ -255,9 +253,6 @@ class OctopServer:
         home: Path | None = None,
         *,
         daemon_bootstrap: DaemonBootstrap | None = None,
-        agentcomputer_listen_host: str | None = None,
-        agentcomputer_workers: int = 1,
-        agentcomputer_reload: bool = False,
     ) -> None:
         self._home = home or PathLayout.from_env().root
         self.paths = PathLayout(self._home)
@@ -275,12 +270,7 @@ class OctopServer:
         self._ldap_bind_throttle: LdapBindThrottle | None = None
         self._ldap_bind_throttle_services: SharedServices | None = None
         self._agentcomputer_bootstrap = daemon_bootstrap
-        self._agentcomputer_listen_host = agentcomputer_listen_host
-        self._agentcomputer_workers = agentcomputer_workers
-        self._agentcomputer_reload = agentcomputer_reload
-        self.agentcomputer_active_runs = ActiveRunRegistry()
         self.agentcomputer_http_operations = HttpOperationRegistry()
-        self.agentcomputer_text_worker: LocalTextTaskWorker | None = None
         self.project_task_worker: ProjectTaskWorker | None = None
         self._stop_task: asyncio.Task[None] | None = None
 
@@ -350,10 +340,6 @@ class OctopServer:
             raise RuntimeError("server shutdown is still in progress")
         if self._started:
             return
-        if self.agentcomputer_active_runs.closing:
-            if self.services is not None or self.app_runtime is not None:
-                raise RuntimeError("agentcomputer Run drain is still in progress")
-            self.agentcomputer_active_runs = ActiveRunRegistry()
         if self.agentcomputer_http_operations.closing:
             if self.services is not None or self.app_runtime is not None:
                 raise RuntimeError("agentcomputer HTTP drain is still in progress")
@@ -365,16 +351,6 @@ class OctopServer:
         except BaseException:
             await self.stop()
             raise
-
-    def _check_agentcomputer_text_listener(self, config: OctopConfig) -> None:
-        if config.agentcomputer_text_enabled and (
-            (self._agentcomputer_listen_host or config.bind_host) not in {"127.0.0.1", "::1"}
-            or self._agentcomputer_workers != 1
-            or self._agentcomputer_reload
-        ):
-            raise ValueError(
-                "AgentComputer text Tasks require a loopback listener, one worker, and no reload"
-            )
 
     async def _start(self) -> None:
         self.paths.ensure_root()
@@ -389,12 +365,6 @@ class OctopServer:
         self._setup_logging()
         config = ensure_mobile_capabilities_probed(self.paths.config)
         self.config = config
-        self._check_agentcomputer_text_listener(config)
-        if config.agentcomputer_text_enabled and self._agentcomputer_bootstrap is None:
-            self._agentcomputer_bootstrap = DaemonBootstrap(
-                self.paths.agentcomputer_identity.parent
-            )
-            await self._agentcomputer_bootstrap.acquire()
 
         self.expert_catalog = ExpertCatalog(
             default_library_root(),
@@ -444,12 +414,6 @@ class OctopServer:
             return
         config = load_config(self.paths.config)
         self.config = config
-        self._check_agentcomputer_text_listener(config)
-        if config.agentcomputer_text_enabled and self._agentcomputer_bootstrap is None:
-            self._agentcomputer_bootstrap = DaemonBootstrap(
-                self.paths.agentcomputer_identity.parent
-            )
-            await self._agentcomputer_bootstrap.acquire()
         db = open_database(config, self.paths)
         try:
             run_migrations(db)
@@ -474,8 +438,6 @@ class OctopServer:
 
         cleanup = AsyncExitStack()
         try:
-            if self._agentcomputer_bootstrap is not None:
-                await self._agentcomputer_bootstrap.recover(self.services)
             await self._construct_runtime(config, cleanup)
             from octop.infra.projects.runtime import ProjectTaskWorker
 
@@ -737,12 +699,6 @@ class OctopServer:
         if self.project_task_worker is not None:
             await self.project_task_worker.close()
             self.project_task_worker = None
-        if self.agentcomputer_text_worker is not None:
-            await self.agentcomputer_text_worker.close()
-            self.agentcomputer_text_worker = None
-        # The daemon guard and DB must also outlive every registered dispatch
-        # task, including its shielded uncertainty fence and DB thread work.
-        await self.agentcomputer_active_runs.drain()
         if not self._started and self.services is None and self.app_runtime is None:
             if self._agentcomputer_bootstrap is not None:
                 await self._agentcomputer_bootstrap.close()

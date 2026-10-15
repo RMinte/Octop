@@ -105,7 +105,12 @@ async def test_projects_share_data_and_idempotency_without_creating_experts(env)
     assert created.headers["cache-control"] == "no-store"
     assert server.services.agent_repo.list_all() == before
     with server.services.db.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM ac_projects").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ac_projects'"
+            ).fetchone()
+            is None
+        )
 
 
 async def test_dedicated_authentication_ownership_and_validation(env):
@@ -192,7 +197,6 @@ async def test_shared_tasks_multi_turn_configuration_and_retries(task_env):
     )
     assert conflict.status_code == 409 and conflict.json()["error"]["code"] == "idempotencyConflict"
     assert server.services.agent_repo.list_all() == before
-    assert server.agentcomputer_text_worker is None
 
 
 async def test_projectless_cancel_and_isolation(task_env, monkeypatch):
@@ -260,14 +264,20 @@ async def test_discovery_uses_same_model_as_shared_worker(task_env):
 async def test_shutdown_admission_race_keeps_protocol_error(env, monkeypatch):
     from unittest.mock import AsyncMock
 
-    from octop.infra.agentcomputer.commands import CommandAdmissionError
+    from octop.infra.errors import ErrorCode, OctopError
 
     client, server, auth = env
     monkeypatch.setattr(
         server.agentcomputer_http_operations,
         "run_thread",
-        AsyncMock(side_effect=CommandAdmissionError("runtimeUnavailable")),
+        AsyncMock(side_effect=OctopError.localized(ErrorCode.CONTROL_PLANE_BUSY, status=503)),
     )
     response = await client.get(AC + "/projects", headers=auth)
     assert response.status_code == 503
-    assert response.json() == {"error": {"code": "runtimeUnavailable", "retryable": False}}
+    assert response.json() == {
+        "error": {
+            "code": "runtimeUnavailable",
+            "retryable": False,
+            "reasonCode": "CONTROL_PLANE_BUSY",
+        }
+    }

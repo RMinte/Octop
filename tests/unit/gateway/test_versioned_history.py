@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from uuid import uuid4
 
 import pytest
 from langchain_core.messages import (
@@ -51,99 +50,6 @@ def archive(tmp_path):
 
 async def no_anchor(_anchor):
     raise AssertionError("Unexpected legacy checkpoint read")
-
-
-def _archive_rows(archive):
-    with archive.store.db.connect() as conn:
-        return (
-            [tuple(row) for row in conn.execute("SELECT * FROM segments ORDER BY id")],
-            [tuple(row) for row in conn.execute("SELECT * FROM turns ORDER BY id")],
-        )
-
-
-def test_bound_turn_uses_external_uuid_without_changing_native_begin(archive):
-    turn_id = str(uuid4())
-    bound = archive.begin_bound("a", "t", turn_id=turn_id)
-    assert bound == {
-        "id": turn_id,
-        "segment_id": bound["segment_id"],
-        "format": "v2",
-        "thread_id": "t",
-        "agent_id": "a",
-        "status": "active",
-    }
-    assert archive.store.turn("t")["id"] == turn_id
-    archive.finish(turn_id, "complete")
-    native = archive.begin("a", "t")
-    assert native is not None and native["id"] != turn_id and native["format"] == "v2"
-
-
-def test_bound_turn_rejects_duplicate_scope_and_unfinished_without_writes(archive):
-    turn_id = str(uuid4())
-    archive.begin_bound("a", "t", turn_id=turn_id)
-    original = _archive_rows(archive)
-    with pytest.raises(ValueError, match="already exists"):
-        archive.begin_bound("a", "t", turn_id=turn_id)
-    with pytest.raises(ValueError, match="already exists"):
-        archive.begin_bound("a", "other-thread", turn_id=turn_id)
-    with pytest.raises(ValueError, match="unfinished"):
-        archive.begin_bound("a", "t", turn_id=str(uuid4()))
-    assert _archive_rows(archive) == original
-
-    archive.finish(turn_id, "paused")
-    paused = _archive_rows(archive)
-    with pytest.raises(ValueError, match="unfinished"):
-        archive.begin_bound("a", "t", turn_id=str(uuid4()))
-    assert _archive_rows(archive) == paused
-
-    archive.finish(turn_id, "complete")
-    complete = _archive_rows(archive)
-    with pytest.raises(ValueError, match="another agent"):
-        archive.begin_bound("different-agent", "t", turn_id=str(uuid4()))
-    with pytest.raises(ValueError, match="already exists"):
-        archive.begin_bound("a", "t", turn_id=turn_id)
-    assert _archive_rows(archive) == complete
-
-
-def test_bound_turn_requires_enabled_archive_and_canonical_uuid(archive):
-    original = _archive_rows(archive)
-    archive.enabled = False
-    with pytest.raises(ValueError, match="requires v2"):
-        archive.begin_bound("a", "t", turn_id=str(uuid4()))
-    archive.enabled = True
-    with pytest.raises(ValueError, match="canonical UUID"):
-        archive.begin_bound("a", "t", turn_id=uuid4().hex)
-    assert _archive_rows(archive) == original
-
-
-def test_bound_turn_does_not_recreate_missing_archive(archive):
-    path = archive.store.path
-    archive.store.close()
-    path.unlink()
-    with pytest.raises(FileNotFoundError):
-        archive.begin_bound("a", "t", turn_id=str(uuid4()))
-    assert not path.exists()
-
-
-def test_bound_turn_competing_archives_allow_only_one_unfinished_turn(archive):
-    from concurrent.futures import ThreadPoolExecutor
-
-    other_store = HistoryStore(archive.store.path, identity="test")
-    other = HistoryArchive(other_store, archive.messages, archive.events, enabled=True)
-
-    def start(candidate):
-        try:
-            return candidate.begin_bound("a", "t", turn_id=str(uuid4()))
-        except ValueError:
-            return None
-
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(start, (archive, other)))
-        assert sum(result is not None for result in results) == 1
-        assert len(_archive_rows(archive)[1]) == 1
-    finally:
-        other_store.close()
 
 
 @pytest.mark.asyncio

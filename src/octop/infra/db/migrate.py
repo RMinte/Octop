@@ -18,129 +18,6 @@ from octop.infra.utils.ulid import new_ulid
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _SQL_STMT_RE = re.compile(r";\s*\n")
-_AGENTCOMPUTER_CORE_TABLES = (
-    "ac_projects",
-    "ac_tasks",
-    "ac_turns",
-    "ac_runs",
-    "ac_commands",
-    "ac_events",
-)
-_AGENTCOMPUTER_DISPATCH_COLUMNS = {
-    "id",
-    "dispatch_id",
-    "run_id",
-    "turn_id",
-    "task_id",
-    "project_id",
-    "owner_id",
-    "execution_epoch",
-    "restore_epoch",
-    "claimant_id",
-    "engine_request_id",
-    "intent_json",
-    "intent_digest",
-    "schema_version",
-    "revision",
-    "created_at",
-    "updated_at",
-    "dispatch_started_at",
-    "engine_receipt_id",
-    "engine_receipt_json",
-    "engine_receipt_digest",
-    "engine_accepted_at",
-}
-_AGENTCOMPUTER_TOOL_EFFECT_COLUMNS = {
-    "id",
-    "effect_id",
-    "run_id",
-    "turn_id",
-    "task_id",
-    "project_id",
-    "owner_id",
-    "dispatch_id",
-    "engine_request_id",
-    "claimant_id",
-    "restore_epoch",
-    "execution_epoch",
-    "tool_call_id",
-    "execution_attempt",
-    "phase",
-    "intent_json",
-    "intent_digest",
-    "schema_version",
-    "revision",
-    "created_at",
-    "updated_at",
-    "dispatch_started_at",
-    "terminal_json",
-    "terminal_digest",
-    "terminal_at",
-}
-_AGENTCOMPUTER_PAUSE_COLUMNS = {
-    "id",
-    "pause_id",
-    "kind",
-    "run_id",
-    "turn_id",
-    "task_id",
-    "project_id",
-    "owner_id",
-    "dispatch_id",
-    "engine_request_id",
-    "claimant_id",
-    "restore_epoch",
-    "execution_epoch",
-    "phase",
-    "intent_json",
-    "intent_digest",
-    "schema_version",
-    "revision",
-    "created_at",
-    "updated_at",
-    "expires_at",
-    "decision_command_id",
-    "decision_idempotency_key",
-    "decision_request_json",
-    "decision_request_digest",
-    "decision_receipt_json",
-    "decision_receipt_digest",
-    "decided_at",
-}
-_AGENTCOMPUTER_CANCELLATION_COLUMNS = {
-    "id",
-    "run_id",
-    "turn_id",
-    "task_id",
-    "project_id",
-    "owner_id",
-    "command_id",
-    "restore_epoch",
-    "execution_epoch",
-    "run_revision_at_request",
-    "phase",
-    "revision",
-    "requested_at",
-    "stopped_at",
-}
-_AGENTCOMPUTER_TERMINAL_COLUMNS = {
-    "id",
-    "receipt_id",
-    "run_id",
-    "turn_id",
-    "task_id",
-    "project_id",
-    "owner_id",
-    "dispatch_id",
-    "engine_request_id",
-    "claimant_id",
-    "restore_epoch",
-    "execution_epoch",
-    "receipt_json",
-    "receipt_digest",
-    "schema_version",
-    "completed_at",
-}
 
 
 def _split_pg_sql(sql: str) -> list[str]:
@@ -238,15 +115,6 @@ def _ensure_column(db: DatabasePool, table: str, column: str, definition: str) -
         return
     with db.connect() as conn:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-
-def _ensure_project_client_directory_schema(db: DatabasePool) -> None:
-    """Add nullable client metadata without touching server paths or project data."""
-    _ensure_column(db, "projects", "client_directory", "TEXT")
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE _schema_version SET version = CASE WHEN version < 29 THEN 29 ELSE version END"
-        )
 
 
 _AGENT_PROFILE_COLUMNS = (
@@ -1744,36 +1612,8 @@ def _ensure_bridge_connections_schema(db: DatabasePool) -> None:
         )
 
 
-def _ensure_missing_initial_tables(db: DatabasePool) -> None:
-    """Materialize missing v1 tables without replaying existing tables or seed rows."""
-    if _current_version(db) <= 0:
-        return
-    path = next(path for version, path in _discover(db.dialect) if version == 1)
-    statements = _split_pg_sql(path.read_text(encoding="utf-8"))
-    missing = {
-        match[1]
-        for stmt in statements
-        if (match := re.match(r"CREATE TABLE (\w+)\b", stmt)) is not None
-        and match[1] != "_schema_version"
-        and not _table_exists(db, match[1])
-    }
-    if not missing:
-        return
-    with db.transaction() as conn:
-        for stmt in statements:
-            table = re.match(r"CREATE TABLE (\w+)\b", stmt)
-            index = re.match(r"CREATE (?:UNIQUE )?INDEX \w+ ON (\w+)\b", stmt)
-            if (
-                (table is not None and table[1] in missing)
-                or (index is not None and index[1] in missing)
-                or ("settings" in missing and stmt.startswith("INSERT INTO settings("))
-            ):
-                conn.execute(stmt)
-
-
 def _repair_legacy_schema(db: DatabasePool) -> None:
     """Idempotent compatibility repairs for local databases from old builds."""
-    _ensure_missing_initial_tables(db)
     if _table_exists(db, "users"):
         _ensure_column(db, "users", "locale", "TEXT NOT NULL DEFAULT 'zh'")
         _ensure_column(db, "users", "login_failed_count", "INTEGER NOT NULL DEFAULT 0")
@@ -1813,372 +1653,6 @@ def _repair_legacy_schema(db: DatabasePool) -> None:
 def _max_discovered_version(dialect: str) -> int:
     versions = [version for version, _ in _discover(dialect)]
     return max(versions) if versions else 0
-
-
-def _ensure_agentcomputer_core_schema(db: DatabasePool) -> None:
-    """Apply the canonical idempotent v21 DDL to normal and watermark repair paths."""
-    path = next(path for version, path in _discover(db.dialect) if version == 21)
-    sql = path.read_text(encoding="utf-8")
-    if db.dialect == "postgresql":
-        with db.transaction() as conn:
-            _apply_postgresql_migration(conn, sql)
-        return
-    with db.connect() as conn:
-        try:
-            conn.executescript(sql)
-        except Exception:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
-
-
-def _ensure_agentcomputer_projects_schema(db: DatabasePool) -> None:
-    """Apply v22 atomically, including missing-column and skipped-watermark repair."""
-    if any(not _table_exists(db, table) for table in _AGENTCOMPUTER_CORE_TABLES):
-        _ensure_agentcomputer_core_schema(db)
-    path = next(path for version, path in _discover(db.dialect) if version == 22)
-    sql = path.read_text(encoding="utf-8")
-    with db.transaction() as conn:
-        if db.dialect == "postgresql":
-            _apply_postgresql_migration(conn, sql)
-            return
-        columns = {
-            table: {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
-            for table in ("ac_projects", "agents")
-        }
-        for stmt in _split_pg_sql(sql):
-            if stmt in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
-                continue
-            added = re.match(r"ALTER TABLE (\w+) ADD COLUMN (\w+)\b", stmt)
-            if added is not None:
-                table, column = added.groups()
-                if column in columns[table]:
-                    continue
-                # A partial legacy schema can already contain the project FK.
-                # Put the pair check on the other newly added column in that case.
-                if column == "managed_by" and "managed_project_id" in columns["agents"]:
-                    stmt += (
-                        " CONSTRAINT agents_managed_project_pair CHECK ("
-                        "(managed_by IS NULL AND managed_project_id IS NULL) OR "
-                        "(managed_by IS NOT NULL AND managed_by = 'agentcomputer' "
-                        "AND managed_project_id IS NOT NULL))"
-                    )
-                columns[table].add(column)
-            conn.execute(stmt)
-
-
-def _ensure_agentcomputer_dispatch_schema(db: DatabasePool) -> None:
-    """Apply canonical v23 without inventing facts in a partial dispatch journal."""
-    if any(not _table_exists(db, table) for table in _AGENTCOMPUTER_CORE_TABLES):
-        _ensure_agentcomputer_core_schema(db)
-    if (
-        not _table_exists(db, "ac_project_preparations")
-        or "name" not in _table_columns(db, "ac_projects")
-        or not {"managed_by", "managed_project_id"} <= _table_columns(db, "agents")
-    ):
-        _ensure_agentcomputer_projects_schema(db)
-    if (
-        _table_exists(db, "ac_run_dispatches")
-        and not (_table_columns(db, "ac_run_dispatches")) >= _AGENTCOMPUTER_DISPATCH_COLUMNS
-    ):
-        raise RuntimeError("Incomplete AgentComputer dispatch journal schema")
-    path = next(path for version, path in _discover(db.dialect) if version == 23)
-    sql = path.read_text(encoding="utf-8")
-    with db.transaction() as conn:
-        if db.dialect == "postgresql":
-            _apply_postgresql_migration(conn, sql)
-            return
-        for stmt in _split_pg_sql(sql):
-            if stmt not in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
-                conn.execute(stmt)
-
-
-def _agentcomputer_tool_effect_indexes_present(db: DatabasePool) -> bool:
-    names = ("idx_ac_run_dispatches_effect_binding", "idx_ac_tool_effects_one_pending_per_run")
-    with db.connect() as conn:
-        if db.dialect == "postgresql":
-            rows = conn.execute(
-                "SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() "
-                "AND indexname IN (?, ?)",
-                names,
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
-                names,
-            ).fetchall()
-    return {str(row["name"]) for row in rows} == set(names)
-
-
-def _ensure_agentcomputer_tool_effects_schema(db: DatabasePool) -> None:
-    """Apply canonical v24 without reconstructing partial effect execution facts."""
-    if (
-        _table_exists(db, "ac_tool_effects")
-        and not _table_columns(db, "ac_tool_effects") >= _AGENTCOMPUTER_TOOL_EFFECT_COLUMNS
-    ):
-        raise RuntimeError("Incomplete AgentComputer tool-effect journal schema")
-    if (
-        not _table_exists(db, "ac_run_dispatches")
-        or not _table_columns(db, "ac_run_dispatches") >= _AGENTCOMPUTER_DISPATCH_COLUMNS
-    ):
-        _ensure_agentcomputer_dispatch_schema(db)
-    path = next(path for version, path in _discover(db.dialect) if version == 24)
-    sql = path.read_text(encoding="utf-8")
-    with db.transaction() as conn:
-        if db.dialect == "postgresql":
-            _apply_postgresql_migration(conn, sql)
-            return
-        for stmt in _split_pg_sql(sql):
-            if stmt not in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
-                conn.execute(stmt)
-
-
-def _agentcomputer_pause_indexes_present(db: DatabasePool) -> bool:
-    names = ("idx_ac_run_pauses_one_active_per_run", "idx_ac_run_pauses_decision_key")
-    with db.connect() as conn:
-        if db.dialect == "postgresql":
-            rows = conn.execute(
-                "SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() "
-                "AND indexname IN (?, ?)",
-                names,
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)",
-                names,
-            ).fetchall()
-    return {str(row["name"]) for row in rows} == set(names)
-
-
-def _ensure_agentcomputer_pause_schema(db: DatabasePool) -> None:
-    """Repair absent v25 tables/indexes, never reconstruct their lost facts."""
-    for table, columns in (
-        ("ac_run_pauses", _AGENTCOMPUTER_PAUSE_COLUMNS),
-        ("ac_run_cancellations", _AGENTCOMPUTER_CANCELLATION_COLUMNS),
-    ):
-        if _table_exists(db, table) and not _table_columns(db, table) >= columns:
-            raise RuntimeError(f"Incomplete AgentComputer {table} journal schema")
-    if (
-        not _table_exists(db, "ac_run_dispatches")
-        or not _table_columns(db, "ac_run_dispatches") >= _AGENTCOMPUTER_DISPATCH_COLUMNS
-    ):
-        _ensure_agentcomputer_dispatch_schema(db)
-    path = next(path for version, path in _discover(db.dialect) if version == 25)
-    sql = path.read_text(encoding="utf-8")
-    with db.transaction() as conn:
-        if db.dialect == "postgresql":
-            _apply_postgresql_migration(conn, sql)
-            return
-        for stmt in _split_pg_sql(sql):
-            if stmt not in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
-                conn.execute(stmt)
-
-
-def _ensure_agentcomputer_completion_schema(db: DatabasePool) -> None:
-    """Create v26 only when doing so cannot erase prior terminal evidence."""
-    if _table_exists(db, "ac_run_terminals"):
-        if not _table_columns(db, "ac_run_terminals") >= _AGENTCOMPUTER_TERMINAL_COLUMNS:
-            raise RuntimeError("Incomplete AgentComputer terminal receipt schema")
-    else:
-        with db.connect() as conn:
-            if conn.execute("SELECT 1 FROM ac_runs WHERE state='succeeded' LIMIT 1").fetchone():
-                raise RuntimeError("Missing AgentComputer terminal receipts for succeeded Runs")
-    path = next(path for version, path in _discover(db.dialect) if version == 26)
-    sql = path.read_text(encoding="utf-8")
-    with db.transaction() as conn:
-        if db.dialect == "postgresql":
-            _apply_postgresql_migration(conn, sql)
-            return
-        for stmt in _split_pg_sql(sql):
-            if stmt not in {"BEGIN IMMEDIATE", "COMMIT;", "COMMIT"}:
-                conn.execute(stmt)
-
-
-_AGENTCOMPUTER_STANDALONE_TASK_COLUMNS = {
-    "standalone_box_id",
-    "standalone_workspace_id",
-    "standalone_agent_id",
-    "standalone_config_json",
-    "standalone_config_digest",
-}
-
-_AGENTCOMPUTER_EXECUTION_SCOPE_TABLES = (
-    "ac_turns",
-    "ac_runs",
-    "ac_run_dispatches",
-    "ac_tool_effects",
-    "ac_run_pauses",
-    "ac_run_cancellations",
-    "ac_run_terminals",
-)
-
-
-def _agentcomputer_base_task_scope_ready(db: DatabasePool) -> bool:
-    if not _table_exists(db, "ac_tasks") or not _table_exists(db, "agents"):
-        return False
-    if not _table_columns(db, "ac_tasks") >= _AGENTCOMPUTER_STANDALONE_TASK_COLUMNS:
-        return False
-    if "managed_task_id" not in _table_columns(db, "agents"):
-        return False
-    with db.connect() as conn:
-        if db.dialect == "postgresql":
-            row = conn.execute(
-                "SELECT is_nullable FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'ac_tasks' "
-                "AND column_name = 'project_id'"
-            ).fetchone()
-            constraints = {
-                item["constraint_name"]
-                for item in conn.execute(
-                    "SELECT constraint_name FROM information_schema.table_constraints "
-                    "WHERE table_schema = current_schema() "
-                    "AND table_name IN ('ac_tasks', 'agents')"
-                )
-            }
-            return (
-                row is not None
-                and row["is_nullable"] == "YES"
-                and {
-                    "ac_tasks_scope_shape",
-                    "agents_managed_scope_pair",
-                    "agents_managed_task_fk",
-                }
-                <= constraints
-            )
-        rows = conn.execute("PRAGMA table_info(ac_tasks)").fetchall()
-        task_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ac_tasks'"
-        ).fetchone()[0]
-        agent_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='agents'"
-        ).fetchone()[0]
-        return (
-            any(row["name"] == "project_id" and row["notnull"] == 0 for row in rows)
-            and "ac_tasks_scope_shape" in task_sql
-            and "agents_managed_scope_pair" in agent_sql
-        )
-
-
-def _agentcomputer_execution_scope_ready(db: DatabasePool) -> bool:
-    if any(not _table_exists(db, table) for table in _AGENTCOMPUTER_EXECUTION_SCOPE_TABLES):
-        return False
-    with db.connect() as conn:
-        if db.dialect == "postgresql":
-            rows = conn.execute(
-                "SELECT table_name, is_nullable FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND column_name = 'project_id' "
-                "AND table_name IN ('ac_turns', 'ac_runs', 'ac_run_dispatches', "
-                "'ac_tool_effects', 'ac_run_pauses', 'ac_run_cancellations', 'ac_run_terminals')"
-            ).fetchall()
-            nullable = {row["table_name"] for row in rows if row["is_nullable"] == "YES"}
-            constraints = {
-                row["constraint_name"]
-                for row in conn.execute(
-                    "SELECT constraint_name FROM information_schema.table_constraints "
-                    "WHERE table_schema = current_schema() "
-                    "AND table_name IN ('ac_turns', 'ac_runs', 'ac_tool_effects', "
-                    "'ac_run_pauses', 'ac_run_terminals')"
-                )
-            }
-            return (
-                nullable == set(_AGENTCOMPUTER_EXECUTION_SCOPE_TABLES)
-                and {
-                    "ac_turns_task_owner_fk",
-                    "ac_runs_task_owner_fk",
-                    "ac_runs_turn_task_owner_fk",
-                    "ac_tool_effects_dispatch_task_owner_fk",
-                    "ac_run_pauses_dispatch_task_owner_fk",
-                    "ac_run_terminals_dispatch_task_owner_fk",
-                }
-                <= constraints
-            )
-        for table in _AGENTCOMPUTER_EXECUTION_SCOPE_TABLES:
-            columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
-            if not any(row["name"] == "project_id" and row["notnull"] == 0 for row in columns):
-                return False
-        turn_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ac_turns'"
-        ).fetchone()[0]
-        run_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='ac_runs'"
-        ).fetchone()[0]
-        task_dispatch_fk = "FOREIGN KEY (dispatch_id, run_id, turn_id, task_id, owner_id,"
-        for table in ("ac_tool_effects", "ac_run_pauses", "ac_run_terminals"):
-            table_sql = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone()[0]
-            if task_dispatch_fk not in table_sql:
-                return False
-        return (
-            "FOREIGN KEY (task_id, owner_id)" in turn_sql
-            and "FOREIGN KEY (task_id, owner_id)" in run_sql
-            and "FOREIGN KEY (turn_id, task_id, owner_id)" in run_sql
-            and conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='index' "
-                "AND name='idx_ac_run_dispatches_effect_binding_task'"
-            ).fetchone()
-            is not None
-        )
-
-
-def _agentcomputer_task_scope_ready(db: DatabasePool) -> bool:
-    return _agentcomputer_base_task_scope_ready(db) and _agentcomputer_execution_scope_ready(db)
-
-
-def _ensure_agentcomputer_optional_task_project_schema(db: DatabasePool) -> None:
-    """Apply v27 without weakening existing Task/Turn/Run foreign keys."""
-    if _agentcomputer_task_scope_ready(db):
-        with db.connect() as conn:
-            if db.dialect == "postgresql":
-                conn.execute("UPDATE _schema_version SET version = %s", (27,))
-            else:
-                conn.execute("UPDATE _schema_version SET version = ?", (27,))
-        return
-    base_ready = _agentcomputer_base_task_scope_ready(db)
-    if not base_ready and (
-        _table_columns(db, "ac_tasks") & _AGENTCOMPUTER_STANDALONE_TASK_COLUMNS
-        or "managed_task_id" in _table_columns(db, "agents")
-    ):
-        raise RuntimeError("Incomplete AgentComputer task-scope schema")
-    path = next(path for version, path in _discover(db.dialect) if version == 27)
-    sql = path.read_text(encoding="utf-8")
-    if db.dialect == "postgresql":
-        with db.transaction() as conn:
-            _apply_postgresql_migration(conn, sql)
-        return
-    if base_ready:
-        sql = sql.split("-- V27_EXECUTION_SCOPE_BEGIN\n", 1)[1]
-    with db.connect() as conn:
-        if base_ready:
-            # A repaired missing dispatch table loses its UNIQUE indexes. Restore
-            # the task-scoped parent key before checking existing child FKs.
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_ac_run_dispatches_effect_binding_task "
-                "ON ac_run_dispatches(dispatch_id, run_id, turn_id, task_id, owner_id, "
-                "restore_epoch, execution_epoch, claimant_id, engine_request_id)"
-            )
-        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
-            raise RuntimeError("Cannot rebuild AgentComputer Tasks with broken foreign keys")
-        conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            for stmt in _split_pg_sql(sql):
-                if stmt.rstrip(";").strip().upper() in {
-                    "PRAGMA FOREIGN_KEYS = OFF",
-                    "PRAGMA FOREIGN_KEYS = ON",
-                    "BEGIN IMMEDIATE",
-                    "COMMIT",
-                }:
-                    continue
-                conn.execute(stmt)
-            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                raise RuntimeError("AgentComputer Task rebuild violated foreign keys")
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
@@ -2225,16 +1699,6 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
                 _ensure_thread_conversation_mode_schema(db)
             if max_version >= 18:
                 _ensure_user_role_schema(db)
-            if max_version >= 21:
-                _ensure_agentcomputer_core_schema(db)
-            if max_version >= 22:
-                _ensure_agentcomputer_projects_schema(db)
-            if max_version >= 23:
-                _ensure_agentcomputer_dispatch_schema(db)
-            if max_version >= 24:
-                _ensure_agentcomputer_tool_effects_schema(db)
-            if max_version >= 25:
-                _ensure_agentcomputer_pause_schema(db)
             with db.connect() as conn:
                 conn.execute("UPDATE _schema_version SET version = %s", (max_version,))
             return
@@ -2279,16 +1743,6 @@ def _reconcile_pre_squash_schema_version(db: DatabasePool) -> None:
         _ensure_thread_conversation_mode_schema(db)
     if max_version >= 18:
         _ensure_user_role_schema(db)
-    if max_version >= 21:
-        _ensure_agentcomputer_core_schema(db)
-    if max_version >= 22:
-        _ensure_agentcomputer_projects_schema(db)
-    if max_version >= 23:
-        _ensure_agentcomputer_dispatch_schema(db)
-    if max_version >= 24:
-        _ensure_agentcomputer_tool_effects_schema(db)
-    if max_version >= 25:
-        _ensure_agentcomputer_pause_schema(db)
     with db.connect() as conn:
         conn.execute("UPDATE _schema_version SET version = ?", (max_version,))
 
@@ -2449,37 +1903,47 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
         with db.connect() as conn:
             conn.execute("UPDATE _schema_version SET version = ?", (version,))
         return
-    if version == 21:
-        _ensure_agentcomputer_core_schema(db)
-        return
-    if version == 22:
-        _ensure_agentcomputer_projects_schema(db)
-        return
-    if version == 23:
-        _ensure_agentcomputer_dispatch_schema(db)
-        return
-    if version == 24:
-        _ensure_agentcomputer_tool_effects_schema(db)
-        return
-    if version == 25:
-        _ensure_agentcomputer_pause_schema(db)
-        return
-    if version == 26:
-        _ensure_agentcomputer_completion_schema(db)
-        return
-    if version == 27:
-        _ensure_agentcomputer_optional_task_project_schema(db)
-        return
     sql = path.read_text(encoding="utf-8")
     with db.connect() as conn:
         conn.executescript(sql)
+
+
+def _ensure_independent_projects_schema(db: DatabasePool) -> None:
+    """Apply only the independent project/task DDL, preserving historical tables.
+
+    Versions 21–27 belonged to the retired expert-bound model. Keep 28–32
+    numbered as applied locally; never replay that model or lower its watermark.
+    """
+    tables = {
+        28: ("projects",),
+        30: ("project_tasks", "project_task_turns"),
+        32: ("project_create_requests",),
+    }
+    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 32]
+    for version, path in versions:
+        if version == 29:
+            _ensure_column(db, "projects", "client_directory", "TEXT")
+        elif version == 31:
+            _ensure_column(db, "project_task_turns", "input_tokens", "BIGINT NOT NULL DEFAULT 0")
+            _ensure_column(db, "project_task_turns", "output_tokens", "BIGINT NOT NULL DEFAULT 0")
+        elif any(not _table_exists(db, table) for table in tables[version]):
+            with db.transaction() as conn:
+                for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
+                    if not stmt.startswith("UPDATE _schema_version "):
+                        conn.execute(stmt)
+    if versions:
+        latest = versions[-1][0]
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE _schema_version SET version = ? WHERE version < ?", (latest, latest)
+            )
 
 
 def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
     for version, path in _discover(db.dialect):
-        if version <= _current_version(db):
+        if 28 <= version <= 32 or version <= _current_version(db):
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.
@@ -2490,27 +1954,6 @@ def run_migrations(db: DatabasePool) -> None:
                     conn.execute("UPDATE _schema_version SET version = %s", (version,))
                 else:
                     conn.execute("UPDATE _schema_version SET version = ?", (version,))
-            continue
-        if version == 22:
-            _ensure_agentcomputer_projects_schema(db)
-            continue
-        if version == 23:
-            _ensure_agentcomputer_dispatch_schema(db)
-            continue
-        if version == 24:
-            _ensure_agentcomputer_tool_effects_schema(db)
-            continue
-        if version == 25:
-            _ensure_agentcomputer_pause_schema(db)
-            continue
-        if version == 26:
-            _ensure_agentcomputer_completion_schema(db)
-            continue
-        if version in {28, 29, 30, 31, 32}:
-            continue
-        if version == 27:
-            # Defer the table rebuild until missing legacy columns/journals
-            # have been repaired below, including skipped-watermark restores.
             continue
         if db.dialect == "postgresql":
             sql = path.read_text(encoding="utf-8")
@@ -2548,89 +1991,4 @@ def run_migrations(db: DatabasePool) -> None:
     _ensure_sso_provider_kind_schema(db)
     _ensure_user_role_schema(db)
     _ensure_bridge_connections_schema(db)
-    # A restored or pre-squash DB may already report v21 while omitting its DDL.
-    # Avoid rewriting intact schemas (and their watermark) on every startup.
-    if _max_discovered_version(db.dialect) >= 21 and any(
-        not _table_exists(db, table) for table in _AGENTCOMPUTER_CORE_TABLES
-    ):
-        _ensure_agentcomputer_core_schema(db)
-    if _max_discovered_version(db.dialect) >= 22 and (
-        _current_version(db) < 22
-        or not _table_exists(db, "ac_project_preparations")
-        or "name" not in _table_columns(db, "ac_projects")
-        or not {"managed_by", "managed_project_id"} <= _table_columns(db, "agents")
-    ):
-        _ensure_agentcomputer_projects_schema(db)
-    if _max_discovered_version(db.dialect) >= 23 and (
-        _current_version(db) < 23
-        or not _table_exists(db, "ac_run_dispatches")
-        or not _table_columns(db, "ac_run_dispatches") >= _AGENTCOMPUTER_DISPATCH_COLUMNS
-    ):
-        _ensure_agentcomputer_dispatch_schema(db)
-    if _max_discovered_version(db.dialect) >= 24 and (
-        _current_version(db) < 24
-        or not _table_exists(db, "ac_tool_effects")
-        or not _table_columns(db, "ac_tool_effects") >= _AGENTCOMPUTER_TOOL_EFFECT_COLUMNS
-        or not _agentcomputer_tool_effect_indexes_present(db)
-    ):
-        _ensure_agentcomputer_tool_effects_schema(db)
-    if _max_discovered_version(db.dialect) >= 25 and (
-        _current_version(db) < 25
-        or not _table_exists(db, "ac_run_pauses")
-        or not _table_columns(db, "ac_run_pauses") >= _AGENTCOMPUTER_PAUSE_COLUMNS
-        or not _table_exists(db, "ac_run_cancellations")
-        or not _table_columns(db, "ac_run_cancellations") >= _AGENTCOMPUTER_CANCELLATION_COLUMNS
-        or not _agentcomputer_pause_indexes_present(db)
-    ):
-        _ensure_agentcomputer_pause_schema(db)
-    if _max_discovered_version(db.dialect) >= 26 and (
-        _current_version(db) < 26
-        or not _table_exists(db, "ac_run_terminals")
-        or not _table_columns(db, "ac_run_terminals") >= _AGENTCOMPUTER_TERMINAL_COLUMNS
-    ):
-        _ensure_agentcomputer_completion_schema(db)
-    if _max_discovered_version(db.dialect) >= 27 and (
-        _current_version(db) < 27 or not _agentcomputer_task_scope_ready(db)
-    ):
-        _ensure_agentcomputer_optional_task_project_schema(db)
-    if _max_discovered_version(db.dialect) >= 28 and _current_version(db) < 28:
-        path = next(path for version, path in _discover(db.dialect) if version == 28)
-        if db.dialect == "postgresql":
-            with db.transaction() as conn:
-                _apply_postgresql_migration(conn, path.read_text(encoding="utf-8"))
-        else:
-            _apply_sqlite_migration(db, 28, path)
-    if _max_discovered_version(db.dialect) >= 29 and (
-        _current_version(db) < 29 or "client_directory" not in _table_columns(db, "projects")
-    ):
-        _ensure_project_client_directory_schema(db)
-
-    if _max_discovered_version(db.dialect) >= 30 and (
-        _current_version(db) < 30
-        or not _table_exists(db, "project_tasks")
-        or not _table_exists(db, "project_task_turns")
-    ):
-        path = next(path for version, path in _discover(db.dialect) if version == 30)
-        if db.dialect == "postgresql":
-            with db.transaction() as conn:
-                _apply_postgresql_migration(conn, path.read_text(encoding="utf-8"))
-        else:
-            _apply_sqlite_migration(db, 30, path)
-
-    if _max_discovered_version(db.dialect) >= 31:
-        _ensure_column(db, "project_task_turns", "input_tokens", "BIGINT NOT NULL DEFAULT 0")
-        _ensure_column(db, "project_task_turns", "output_tokens", "BIGINT NOT NULL DEFAULT 0")
-        with db.connect() as conn:
-            conn.execute(
-                "UPDATE _schema_version SET version = CASE WHEN version < 31 THEN 31 ELSE version END"
-            )
-
-    if _max_discovered_version(db.dialect) >= 32 and (
-        _current_version(db) < 32 or not _table_exists(db, "project_create_requests")
-    ):
-        path = next(path for version, path in _discover(db.dialect) if version == 32)
-        if db.dialect == "postgresql":
-            with db.transaction() as conn:
-                _apply_postgresql_migration(conn, path.read_text(encoding="utf-8"))
-        else:
-            _apply_sqlite_migration(db, 32, path)
+    _ensure_independent_projects_schema(db)

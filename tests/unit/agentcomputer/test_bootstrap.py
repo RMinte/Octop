@@ -1,4 +1,4 @@
-"""Lifetime ownership cannot be stolen, including during cancelled recovery."""
+"""Lifetime ownership cannot be stolen, including during cancelled acquisition."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import subprocess
 import sys
 from threading import Event
-from unittest.mock import Mock
 
 import pytest
 
@@ -58,12 +57,6 @@ async def test_busy_guard_does_not_release_owner(tmp_path):
     await other.close()
 
 
-async def test_recovery_requires_owned_daemon_guard(tmp_path):
-    guard = DaemonBootstrap(tmp_path / "control")
-    with pytest.raises(RuntimeError, match="lifetime ownership"):
-        await guard.recover(Mock())
-
-
 async def test_cancelled_acquire_waits_for_os_operation_and_releases(tmp_path, monkeypatch):
     guard = DaemonBootstrap(tmp_path / "control")
     acquired, release = Event(), Event()
@@ -89,43 +82,5 @@ async def test_cancelled_acquire_waits_for_os_operation_and_releases(tmp_path, m
         release.set()
         await guard.close()
     other = DaemonBootstrap(tmp_path / "control")
-    await other.acquire()
-    await other.close()
-
-
-async def test_cancelled_recovery_settles_before_lifetime_owner_can_release(tmp_path, monkeypatch):
-    from octop.infra.agentcomputer import recovery
-
-    started, release, finished = Event(), Event(), Event()
-
-    def delayed(_services):
-        started.set()
-        assert release.wait(5)
-        finished.set()
-        return recovery.RecoveryReport(scanned=0, tightened=0, unchanged=0)
-
-    monkeypatch.setattr(recovery, "recover_dispatches", delayed)
-    control_directory = tmp_path / "agentcomputer-control"
-    guard = DaemonBootstrap(control_directory)
-    await guard.acquire()
-    services = Mock()
-    services.paths.agentcomputer_identity = control_directory / "identity.json"
-    task = asyncio.create_task(guard.recover(services))
-    other = DaemonBootstrap(control_directory)
-    try:
-        assert await asyncio.to_thread(started.wait, 5)
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(OctopError):
-            await other.acquire()
-        assert not task.done() and not finished.is_set()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert finished.is_set()
-    finally:
-        release.set()
-        await guard.close()
     await other.acquire()
     await other.close()

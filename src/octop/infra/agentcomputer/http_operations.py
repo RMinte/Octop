@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from octop.infra.agentcomputer.commands import CommandAdmissionError
+from octop.infra.errors import ErrorCode, OctopError
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class HttpOperationRegistry:
     def _start[T](self, operation: Callable[[], Coroutine[Any, Any, T]]) -> asyncio.Task[T]:
         loop = asyncio.get_running_loop()
         if self._closing:
-            raise CommandAdmissionError("runtimeUnavailable")
+            raise OctopError.localized(ErrorCode.CONTROL_PLANE_BUSY, status=503)
         if self._loop is not None and self._loop is not loop:
             raise RuntimeError("AgentComputer HTTP registry belongs to another event loop")
         self._loop = loop

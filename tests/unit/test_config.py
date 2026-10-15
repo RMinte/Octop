@@ -18,7 +18,6 @@ def test_defaults_when_missing(tmp_path: Path):
     assert cfg.access_token_ttl_seconds == 86400
     assert cfg.enable_dashboard is True
     assert cfg.enable_api_docs is False
-    assert cfg.agentcomputer_text_enabled is False
     assert cfg.agentcomputer_text_model_ref == ""
     assert cfg.require_setup_password is True
     assert cfg.database.driver == "sqlite"
@@ -41,36 +40,31 @@ def test_defaults_when_missing(tmp_path: Path):
     assert "password" not in written.get("database", {})
     assert written.get("backup", {}).get("auto_enabled") is False
     assert written["max_upload_mb"] == 100
-    assert written["agentcomputer_text_enabled"] is False
     assert written["agentcomputer_text_model_ref"] == ""
 
 
-def test_agentcomputer_text_opt_in_is_explicit_and_malformed_values_fail_closed(
+def test_task_model_ref_is_trimmed_and_rejects_malformed_values(
     tmp_path: Path,
 ) -> None:
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
         json.dumps(
             {
-                "agentcomputer_text_enabled": True,
                 "agentcomputer_text_model_ref": "  Trusted/glm-5  ",
             }
         )
     )
     enabled = load_config(cfg_path)
-    assert enabled.agentcomputer_text_enabled is True
     assert enabled.agentcomputer_text_model_ref == "Trusted/glm-5"
 
     cfg_path.write_text(
         json.dumps(
             {
-                "agentcomputer_text_enabled": "maybe",
                 "agentcomputer_text_model_ref": ["Trusted/glm-5"],
             }
         )
     )
     invalid = load_config(cfg_path)
-    assert invalid.agentcomputer_text_enabled is False
     assert invalid.agentcomputer_text_model_ref == ""
 
 

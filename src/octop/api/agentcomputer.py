@@ -9,7 +9,6 @@ from typing import Literal
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from octop.infra.agentcomputer.commands import CommandAdmissionError
 from octop.infra.errors import ErrorCode, OctopError
 
 API_PREFIX = "/api/agentcomputer/v1"
@@ -113,30 +112,3 @@ PROJECT_TASK_ERROR_CODES: dict[ErrorCode, ProtocolErrorCode] = {
     ErrorCode.BRIDGE_REMOTE_UNSUPPORTED: "capabilityUnsupported",
     ErrorCode.BRIDGE_TUNNEL_FAILED: "runtimeUnavailable",
 }
-
-
-def admission_error_response(error: CommandAdmissionError) -> JSONResponse:
-    """Map domain refusal codes, without exposing untrusted exception details."""
-    statuses = {
-        "resourceNotFound": 404,
-        "accessDenied": 403,
-        "resourceConflict": 409,
-        "idempotencyConflict": 409,
-        "restoreEpochConflict": 409,
-        "revisionConflict": 409,
-        "activeRunConflict": 409,
-        "reconciliationRequired": 409,
-        "capabilityUnsupported": 422,
-        "runtimeUnavailable": 503,
-    }
-    safe_reasons = {
-        "preparationIncomplete",
-        "userMessageAlreadyRegistered",
-        "executionUnavailable",
-        "permissionModeUnsupported",
-    }
-    return protocol_error_response(
-        error.code,
-        statuses[error.code],
-        reason=error.reason if error.reason in safe_reasons else None,
-    )
