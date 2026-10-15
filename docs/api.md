@@ -40,6 +40,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | POST | `/api/projects/{project_id}/tasks` | 在项目中发送首条消息，原子创建任务和首轮，返回 202 |
 | GET | `/api/project-tasks` | 分页列出无项目任务；archived=true 查看归档任务 |
 | GET | `/api/project-tasks/resources` | 本轮可用的模型、Skill 和 MCP 引用 |
+| WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
 | PATCH | `/api/project-tasks/{task_id}` | 修改名称、归档或恢复，校验 expected_revision |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
 | GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
@@ -54,7 +55,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。需要审批的工具当前会结束本轮并提示失败，不绕过审批；本轮提供文字对话、项目文件/脚本、Skill 和所选 MCP；浏览器、桌面、审批恢复和附件上传未接入。
 
-状态为 `queued/running/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 SSE 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的用户消息和已输出正文用作后续上下文；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
+状态为 `queued/running/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 WebSocket 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的用户消息和已输出正文用作后续上下文；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
 
 验证：任务 HTTP/持久化/多轮/幂等/用户隔离/取消/崩溃恢复集成用例通过；真实 Harness 配合本地模拟模型完成项目文件读取及模拟 MCP 调用，并验证 Skill/行动指南进入提示。8088 已登录正式页面使用现有 GLM-5 完成项目内首轮、同 Task 追问及刷新后历史恢复；无项目任务同样返回真实回复。真实 MCP 供应商连接、PostgreSQL 与 Ubuntu 盒子尚未实机点验。
 
@@ -264,13 +265,65 @@ model_ref 省略或 null 使用发送时的默认选择；显式指定不可用�
 
 未发布的数据库 schema 34 包含归档标记、分页索引和任务状态摘要。已有任务默认未归档，状态从活动轮次或最近一轮初始化；本地已记录 schema 34 但缺少状态列的库也会补齐。任务、轮次和正文保留。任务列表游标及网页任务缓存版本随状态字段更新，旧游标返回 `PROJECT_SYNC_RESET`，客户端重建第一页；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
 
-### 实时状态续接
+### 任务 WebSocket：命令与实时状态
 
-首屏取得 `event_cursor` 后，通过带 Bearer token 的 `GET /api/project-tasks/{task_id}/events?cursor=…` 连接 SSE；也可以用 `Last-Event-ID` 请求头携带位置。不要把 token 放进 URL。每个 `turn` 事件的 `data` 为 `{task: TaskSummary, turn: TaskTurn, cursor: string}`，SSE `id` 与 cursor 相同。应用事件后保存游标，按 turn_id 合并该轮完整状态，以轮次 sequence 稳定排序（序号可能不连续），并以 list_revision 防止旧摘要覆盖新状态。
+客户端开发以独立的[任务 WebSocket 接入指南](project-task-websocket.md)为准，包含完整命令、事件、字段、Swift 连接示例、恢复和错误处理。机器可读结构见 [JSON Schema](project-task-websocket.schema.json)。
 
-连接断开不会停止任务。重连会补齐上次位置之后各轮次的最新持久状态，包括离线期间的完成和后续轮次；同一轮的中间 token 和工具名称变化可以合并，不提供完整工具事件账本。无游标连接先发送最近一页 `snapshot`（TaskDetail）。游标绑定实例、恢复代次、用户、任务和用途，不能与列表/历史分页游标混用；失效时返回 HTTP 409 `PROJECT_SYNC_RESET`，连接建立后的失效通过 `error` 事件返回相同错误信封。此时重新读取最近一页并替换原加载范围。
+正式任务页面使用 `WS /api/project-tasks/ws`（HTTPS 部署使用 WSS）。同一页面和账号共用一条连接，可同时订阅多个任务；切换任务取消旧订阅，不停止任务。项目配置、任务列表、历史分页、改名和归档继续使用 REST。AgentComputer 原生客户端本轮未修改，仍需按本节接入。
 
-服务端约每 0.5 秒检查持久状态，纯租约心跳不推送正文；空闲时发送 SSE 注释心跳。连接约 25 秒后正常结束，客户端以最后游标重连以重新校验登录态，并处理滑动续期令牌。网页切换任务、进入后台或离线时关闭连接；回到前台或联网时续接。加载更早轮次不推进实时游标，迟到的历史页或写入响应不能覆盖已经收到的终态。
+浏览器建立连接后须在 10 秒内发送首帧：
+
+```json
+{"type":"authenticate","token":"<access token>","locale":"zh"}
+```
+
+原生客户端也可在升级请求中携带 `Authorization: Bearer <access token>`，无需 authenticate 帧。两种方式都不把 token 放进 URL。认证成功返回 `{"type":"ready","protocol_version":1}`。连接绑定当前账号；每条命令和约每 10 秒重新检查登录态，滑动续期通过 `{"type":"session","access_token":"<renewed token>"}` 返回，客户端应按原来的记住登录偏好保存。认证失败返回错误后以 4401 关闭；数据库未就绪时拒绝连接。账号切换或退出时关闭旧连接，不能把旧账号事件交给新账号。
+
+所有命令携带 `id`（8–128 位字母、数字、短横线或下划线），用于匹配本次响应。`data.request_id` 是持久化的消息幂等标识，与命令 id 分开：断线后手动重发可换命令 id，但必须保留原 request_id、正文和 options。
+
+| 命令 type | 其他字段 | 成功 result.data |
+| --- | --- | --- |
+| `task.create` | `data: TaskCreate`，含 prompt、request_id、可选 project_id/options | TaskDetail |
+| `task.message` | `task_id`、`data: TaskMessage` | TaskDetail |
+| `task.retry` | `task_id`、`turn_id`、`data: TaskRetry` | TaskDetail |
+| `task.cancel` | `task_id`、`data: {turn_id}` | TaskDetail |
+| `task.subscribe` | `task_id`、可选 cursor | null；另外推送 snapshot/turn |
+| `task.unsubscribe` | `task_id` | null |
+| `ping` | 无 | null |
+| `client.attach` | `client_id`；连接内不可切换 | null；随后推送该执行端的未结束调用 |
+| `tool.get` | `task_id`、`turn_id`、`call_id` | ClientToolCall |
+| `tool.claim` | 上述调用标识、稳定的 `request_id` | ClientToolClaim（含 claim_token） |
+| `tool.result` | 上述调用标识、`data: {claim_token,output,is_error?}` | ClientToolCall |
+
+例如创建无项目任务并发送首条消息：
+
+```json
+{"type":"task.create","id":"command-create-001","data":{"project_id":null,"request_id":"message-first-001","prompt":"请概括下一步工作"}}
+```
+
+命令成功返回 `{"type":"result","id":"command-create-001","data":{...TaskDetail}}`。这表示消息已经保存和排队，不表示生成完成。创建、追问和重试复用当前任务服务，每轮使用最新项目配置及 options。后台仍按原 worker 串行执行，订阅多个任务不会开启并行推理，也不会创建专家。
+
+取到 task_id 后订阅；可直接使用创建响应或 REST 首页的 event_cursor：
+
+```json
+{"type":"task.subscribe","id":"command-watch-001","task_id":"task_example","cursor":"opaque_event_cursor"}
+```
+
+不带 cursor 时先返回 `{"type":"snapshot","data":TaskDetail}`（最近一页），随后推送 `{"type":"turn","data":{"task":TaskSummary,"turn":TaskTurn,"cursor":"..."}}`。订阅时先补齐游标之后的变化，再返回订阅命令的 result；不同任务事件可以交错到达，客户端按 task_id/turn_id 分发。snapshot 与 turn 是完整状态，按 sequence 稳定排序，按 list_revision 防止旧摘要覆盖新状态；不要把完整 reply 当新增文字重复追加。正文会在生成过程中持续推送，无需客户端反复 GET。
+
+每条连接最多订阅 32 个不同任务，客户端发往服务端的单帧上限 512 KiB；超限帧以 1009 关闭。客户端只订阅当前打开的正文，其他任务的侧栏摘要仍通过列表增量同步。无关任务不会自动把全部正文发到连接。
+
+服务端沿用约 0.5 秒保存一次的正文/活动状态，检查订阅变化后推送；中间片段可以合并，纯租约心跳不推正文。空闲连接约每 10 秒发送 `{"type":"heartbeat"}`。正文是实时状态推送，不是逐 token 的不可变事件账本。客户端工具通过同一连接下发 tool.call，领取后回传结果，模型继续当前轮次，见接入指南第 12 节。
+
+### 断线续接和错误
+
+断线只停止观察，不取消任务。客户端保存每个任务最近应用的 cursor，重新认证后分别 task.subscribe 续接，补齐离线期间各轮的最新持久状态；不重新发送用户消息、不重放工具操作。一次轮次 completed 不代表连接或 Task 结束，后续追问继续沿用 task_id 和连接。加载更早历史仍使用 REST，不推进实时游标。
+
+业务错误返回 `{"type":"error","id":"<command id>","status":409,"error":{"code":"...","message":"...","details":{}}}`。订阅推送错误携带 task_id，移除该任务订阅，不影响其他任务。游标失效返回 PROJECT_SYNC_RESET，需丢弃该任务旧实时基线，重新获取最近一页；跨用户/任务游标同样无效。格式错误为 TASK_FRAME_INVALID；无法解析命令 id 时错误没有 id，禁止回显无效请求正文或 token。
+
+网页在当前任务订阅断开时按退避重连；切到后台或离线时解除订阅，回前台恢复。连接和命令等待都有超时，网络故障时挂起的发送不会自动重放；保留 request_id 后由用户显式重试。较旧的写入回执、历史页不能覆盖已经收到的终态。
+
+已有 `GET /api/project-tasks/{task_id}/events` SSE 保持原来的状态和游标语义，供已有调用方使用；工具领取和回传使用 WebSocket。正式网页的实时订阅与发送已切到 WebSocket。
 
 ### 错误和网络重试
 

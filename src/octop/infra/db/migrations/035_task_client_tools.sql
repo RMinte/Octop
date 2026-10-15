@@ -1,0 +1,22 @@
+-- Durable client tool handoff, claims and idempotent results.
+CREATE TABLE IF NOT EXISTS project_task_tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL REFERENCES project_tasks(task_id),
+  turn_id TEXT NOT NULL REFERENCES project_task_turns(turn_id),
+  owner_id INTEGER NOT NULL REFERENCES users(id),
+  client_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  arguments_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'completed', 'cancelled', 'expired', 'interrupted')),
+  claim_request_id TEXT NOT NULL DEFAULT '',
+  claim_token TEXT NOT NULL DEFAULT '',
+  result_json TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  expires_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_tool_calls_client ON project_task_tool_calls(owner_id, client_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_task_tool_calls_turn ON project_task_tool_calls(turn_id, status);
+UPDATE _schema_version SET version = 35;

@@ -508,6 +508,12 @@
     "TASK_ARCHIVED": "This task is archived. Restore it to continue.",
     "TASK_REVISION_CONFLICT": "The task has changed. Refresh before editing again.",
     "TASK_BUSY": "The task is running. Wait for it to finish or stop it before continuing.",
+    "TASK_CLIENT_TOOL_CLAIMED": "This call is already claimed. Recover using the original claim request_id; do not execute it again.",
+    "TASK_CLIENT_TOOL_CLOSED": "The client tool call is closed or no longer active.",
+    "TASK_CLIENT_TOOL_RESULT_CONFLICT": "A different result has already been accepted for this tool call.",
+    "TASK_CLIENT_TOOL_TIMEOUT": "Timed out waiting for the client tool result.",
+    "TASK_CLIENT_TOOL_ARGUMENTS_INVALID": "Client tool arguments do not match the declared schema.",
+    "TASK_FRAME_INVALID": "The task connection message is invalid or exceeds the subscription limit.",
     "TASK_REQUEST_CONFLICT": "This request ID was used for a different message, execution options, or retry source. Check the original request before retrying.",
     "TASK_MODEL_UNAVAILABLE": "The selected or default chat model is unavailable. Check model settings or choose another model.",
     "TASK_EXECUTION_FAILED": "This turn failed. You can send another message; completed history is preserved.",
@@ -891,6 +897,7 @@
   },
   "projects": {
     "task_incomplete_context": "[This turn did not complete. Any text above is partial, not a completed result. Tool actions may already have taken effect; check the current state before continuing or retrying to avoid duplicate actions.]",
+    "client_tools_prompt": "Tools prefixed client__ execute on the user client; other tools execute on the server. The client directory is location metadata only: do not access it using server filesystem tools. Use declared client tools for client data/actions and wait for their actual results. An error result is not evidence of success.",
     "task_prompt": "You are a project task assistant. Help the user complete their work and retain conversation context. Follow the project instructions below. The client directory is metadata only and is not synced to this server; do not claim to have accessed its files. Use tools when required by the request, and never invent tool results."
   }
 }

@@ -27,6 +27,8 @@ from octop.infra.connectors.service import ConnectorService
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.client_tool_models import ClientToolDefinition
+from octop.infra.projects.client_tools import ClientToolBroker
 from octop.infra.projects.models import ProjectFields, SkillBinding
 from octop.infra.projects.service import _validate
 from octop.infra.projects.tasks import now_ms
@@ -122,6 +124,17 @@ async def run_turn(
     prompt = tr("projects.task_prompt", locale)
     if fields.instructions:
         prompt += "\n\n" + fields.instructions
+    options = raw.get("execution_options", {})
+    definitions = [
+        ClientToolDefinition.model_validate(t) for t in options.get("client_tools") or []
+    ]
+    broker = ClientToolBroker(services, owner_id, turn, options.get("client_id") or "", definitions)
+    client_tools = broker.tools()
+    if {tool.name for tool in client_tools} & {tool.name for tool in tools}:
+        raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE)
+    active_mcp = [*fields.mcp_servers, *(["client"] if definitions else [])]
+    if definitions:
+        prompt += "\n\n" + tr("projects.client_tools_prompt", locale)
     cfg = HarnessAgentConfig(
         name="project-task",
         language=locale,
@@ -132,7 +145,7 @@ async def run_turn(
         providers=configs_provider,
         system_prompt=prompt,
         default_timezone=services.config.default_timezone,
-        mcp_server_configs={name: {} for name in selected},
+        mcp_server_configs={name: {} for name in active_mcp},
         memory=(),
         memory_enabled=False,
         model_retry_enabled=False,
@@ -168,8 +181,8 @@ async def run_turn(
                 await agent.workspace.aupload_bytes(
                     agent.workspace.system_rel(f"skills/{slug}/{name}"), data
                 )
-        if tools:
-            agent.inject_mcp_tools(tools)
+        if tools or client_tools:
+            agent.inject_mcp_tools([*tools, *client_tools])
         await asyncio.to_thread(
             inject_missing_gateway_tools,
             agent,
@@ -185,9 +198,11 @@ async def run_turn(
             user=str(owner_id),
             source="project-task",
             skills=[slug for slug, _ in files],
-            mcp_servers=fields.mcp_servers,
+            mcp_servers=active_mcp,
         )
         async for event in agent.stream(request, protocol="langgraph"):
+            if broker.failure:
+                raise OctopError.localized(broker.failure)
             kind = event.get("type")
             if kind == "token":
                 yield {"type": "token", "content": str(event.get("content") or "")}
@@ -200,6 +215,8 @@ async def run_turn(
             elif kind == "hitl_required":
                 # No approval-resume API in this slice; never claim the paused action completed.
                 raise OctopError.localized(ErrorCode.TASK_EXECUTION_FAILED)
+        if broker.failure:
+            raise OctopError.localized(broker.failure)
     finally:
         try:
             await asyncio.to_thread(
@@ -237,8 +254,14 @@ class ProjectTaskWorker:
     def _recover(self) -> None:
         before, now = now_ms() - 90_000, now_ms()
         for turn in self.services.project_task_turn_repo.stale(before):
+            owner = self.services.project_task_repo.runtime_owner(turn.task_id)
             with self.services.db.transaction() as conn:
+                if owner is not None:
+                    self.services.project_task_repo.lock_owner(conn, owner)
                 if self.services.project_task_turn_repo.interrupt(conn, turn.turn_id, before, now):
+                    self.services.project_task_tool_call_repo.close_turn(
+                        conn, turn.turn_id, "interrupted", "TASK_INTERRUPTED", now
+                    )
                     self.services.project_task_repo.finish(conn, turn.task_id, turn.turn_id, now)
 
     async def _loop(self) -> None:
@@ -261,10 +284,23 @@ class ProjectTaskWorker:
 
     def _finish(self, turn: ProjectTaskTurnRow, status: str, reply: str, error: str) -> None:
         now = now_ms()
+        owner = self.services.project_task_repo.runtime_owner(turn.task_id)
         with self.services.db.transaction() as conn:
+            # Serialize finalization with client claims/results and cancellation.
+            if owner is not None:
+                self.services.project_task_repo.lock_owner(conn, owner)
             if self.services.project_task_turn_repo.finish(
                 conn, turn.turn_id, self.worker_id, status, reply, error, now
             ):
+                final = self.services.project_task_turn_repo.get_in_transaction(conn, turn.turn_id)
+                cancelled = final is not None and final.status == "cancelled"
+                self.services.project_task_tool_call_repo.close_turn(
+                    conn,
+                    turn.turn_id,
+                    "cancelled" if cancelled else "interrupted",
+                    "" if cancelled else error,
+                    now,
+                )
                 self.services.project_task_repo.finish(conn, turn.task_id, turn.turn_id, now)
 
     async def _execute(self, turn: ProjectTaskTurnRow) -> None:

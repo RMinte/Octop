@@ -16,6 +16,7 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.client_tool_models import ClientID, ClientToolDefinition
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
 from octop.infra.projects.models import (
     ProjectFields,
@@ -51,11 +52,28 @@ class TaskExecutionOptions(ProjectModel):
         description="本轮完整 MCP 选择；省略或 null 继承项目，[] 本轮禁用。",
     )
 
+    client_id: ClientID | None = Field(
+        default=None, description="本轮客户端工具执行端标识；与 client.attach 一致。"
+    )
+    client_tools: list[ClientToolDefinition] | None = Field(
+        default=None, max_length=64, description="本轮可调用的客户端工具；不继承前轮或项目。"
+    )
+
     @model_validator(mode="after")
     def validate_references(self) -> Self:
         ProjectFields.model_validate(
-            {"name": "Task", **self.model_dump(exclude_none=True, exclude={"model_ref"})}
+            {
+                "name": "Task",
+                **self.model_dump(
+                    exclude_none=True, exclude={"model_ref", "client_id", "client_tools"}
+                ),
+            }
         )
+        if self.client_tools and not self.client_id:
+            raise ValueError("client_tools require client_id")
+        names = [tool.name for tool in self.client_tools or []]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate client tool names")
         return self
 
 
@@ -128,7 +146,9 @@ class TaskTurn(ProjectModel):
     error_code: str
     activity: str = Field(description="当前执行的工具名称；不包含参数、凭据或工具输出。")
     model_ref: str
-    options: TaskExecutionOptions = Field(description="本轮实际采用的模型、Skill 和 MCP。")
+    options: TaskExecutionOptions = Field(
+        description="本轮实际采用的模型、Skill、MCP 和客户端工具。"
+    )
     cancel_requested: bool = Field(description="该轮已请求停止；运行中需等待 cancelled 终态。")
     retry_of_turn_id: str | None = Field(description="手动重试的原轮次；普通消息为 null。")
     input_tokens: int = Field(description="本轮模型输入 Token 数，独立于专家用量记录。")
@@ -206,6 +226,8 @@ def turn_view(t: ProjectTaskTurnRow) -> TaskTurn:
             model_ref=t.model_ref,
             skills=configuration.get("skills", []),
             mcp_servers=configuration.get("mcp_servers", []),
+            client_id=configuration.get("execution_options", {}).get("client_id"),
+            client_tools=configuration.get("execution_options", {}).get("client_tools"),
         ),
         cancel_requested=t.cancel_requested,
         retry_of_turn_id=configuration.get("retry_of_turn_id"),
@@ -295,7 +317,9 @@ def _configuration(
         get_project(services, owner_id, project_id) if project_id else ProjectFields(name="Task")
     )
     snapshot = fields.model_dump(mode="json")
-    overrides = options.model_dump(exclude_none=True, exclude={"model_ref"})
+    overrides = options.model_dump(
+        exclude_none=True, exclude={"model_ref", "client_id", "client_tools"}
+    )
     fields = ProjectFields.model_validate(
         {**fields.model_dump(include=set(ProjectFields.model_fields)), **overrides}
     )

@@ -1,4 +1,5 @@
-import { request, requestStream } from "../request";
+import { request } from "../request";
+import { projectTaskSocket } from "./projectTaskSocket";
 
 export interface PackageProjectSkill {
   package_id: string;
@@ -130,54 +131,6 @@ export type TaskEvent =
   | { type: "turn"; data: TaskUpdate }
   | { type: "snapshot"; data: TaskDetail };
 
-async function readTaskEvents(
-  id: string,
-  cursor: string,
-  onEvent: (event: TaskEvent) => void,
-  signal: AbortSignal,
-  onOpen?: () => void,
-): Promise<void> {
-  const { body } = await requestStream(
-    `${taskPath(id)}/events${query({ cursor })}`,
-    { signal, cache: "no-store", headers: { Accept: "text/event-stream" } },
-  );
-  onOpen?.();
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // Normalize complete SSE lines, including CRLF split across network chunks.
-      buffer = buffer.replace(/\r\n/g, "\n");
-      let boundary: number;
-      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const lines = frame.split("\n");
-        const type = lines
-          .find((line) => line.startsWith("event:"))
-          ?.slice(6)
-          .trim();
-        const data = lines
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart())
-          .join("\n");
-        if (type === "error") throw new Error(data);
-        if (type === "turn")
-          onEvent({ type, data: JSON.parse(data) as TaskUpdate });
-        if (type === "snapshot")
-          onEvent({ type, data: JSON.parse(data) as TaskDetail });
-      }
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-}
-
 export interface TaskExecutionOptions {
   model_ref?: string;
   skills?: ProjectSkill[];
@@ -255,21 +208,20 @@ export const projectTasksApi = {
       `${taskPath(id)}${query({ page_cursor: pageCursor })}`,
       { cache: "no-store" },
     ),
-  events: readTaskEvents,
+  events: projectTaskSocket.events.bind(projectTaskSocket),
   create: (projectID: string | null, body: TaskMessage) =>
-    request<TaskDetail>("/project-tasks", {
-      method: "POST",
-      body: JSON.stringify({ ...body, project_id: projectID }),
+    projectTaskSocket.command<TaskDetail>("task.create", {
+      data: { ...body, project_id: projectID },
     }),
   send: (id: string, body: TaskMessage) =>
-    request<TaskDetail>(`${taskPath(id)}/messages`, {
-      method: "POST",
-      body: JSON.stringify(body),
+    projectTaskSocket.command<TaskDetail>("task.message", {
+      task_id: id,
+      data: body,
     }),
   cancel: (id: string, turnID: string) =>
-    request<TaskDetail>(`${taskPath(id)}/cancel`, {
-      method: "POST",
-      body: JSON.stringify({ turn_id: turnID }),
+    projectTaskSocket.command<TaskDetail>("task.cancel", {
+      task_id: id,
+      data: { turn_id: turnID },
     }),
   retry: (
     id: string,
@@ -277,11 +229,9 @@ export const projectTasksApi = {
     requestID: string,
     options?: TaskExecutionOptions,
   ) =>
-    request<TaskDetail>(
-      `${taskPath(id)}/turns/${encodeURIComponent(turnID)}/retry`,
-      {
-        method: "POST",
-        body: JSON.stringify({ request_id: requestID, options }),
-      },
-    ),
+    projectTaskSocket.command<TaskDetail>("task.retry", {
+      task_id: id,
+      turn_id: turnID,
+      data: { request_id: requestID, options },
+    }),
 };

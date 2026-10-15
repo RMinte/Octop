@@ -868,7 +868,7 @@ async def test_retry_preserves_failed_text_uses_current_configuration_and_is_ide
     done = await settled(client, auth, first["task_id"])
     assert len(done["turns"]) == 2 and done["turns"][0] == original
     retried = done["turns"][1]
-    assert retried["options"] == request["options"]
+    assert retried["options"] == {**request["options"], "client_id": None, "client_tools": None}
     assert retried["retry_of_turn_id"] == original["turn_id"]
     assert retried["prompt"] == original["prompt"] and retried["project_revision"] == 2
     assert json.loads(observed[0][0].configuration_json)["instructions"] == "Updated"
@@ -1102,7 +1102,7 @@ async def test_turn_execution_options_override_without_mutating_project_and_bind
     assert response.status_code == 202, response.text
     task = await settled(client, auth, response.json()["task_id"])
     assert (
-        task["turns"][0]["options"] == choice
+        task["turns"][0]["options"] == {**choice, "client_id": None, "client_tools": None}
         and task["turns"][0]["model_ref"] == choice["model_ref"]
     )
     assert task["turns"][0]["project_revision"] == 1

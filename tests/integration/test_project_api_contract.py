@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock
 async def test_project_task_contract_is_documented_without_dedicated_protocol(env):
     client, _, _ = env
     schema = client._octop_app.openapi()
+    project_tag = next(tag for tag in schema["tags"] if tag["name"] == "projects")
+    assert "/api/project-tasks/ws" in project_tag["description"]
     paths = schema["paths"]
     assert not any("agentcomputer" in path for path in paths)
     assert not any(tag["name"] == "agentcomputer" for tag in schema["tags"])

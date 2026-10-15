@@ -508,6 +508,12 @@
     "TASK_ARCHIVED": "任务已归档，请恢复后继续对话。",
     "TASK_REVISION_CONFLICT": "任务已发生变化，请刷新后重新修改。",
     "TASK_BUSY": "任务正在执行，请等待完成或停止后再操作。",
+    "TASK_CLIENT_TOOL_CLAIMED": "该调用已被领取；请使用原领取 request_id 恢复，不要重复执行。",
+    "TASK_CLIENT_TOOL_CLOSED": "客户端工具调用已结束或已失效。",
+    "TASK_CLIENT_TOOL_RESULT_CONFLICT": "该工具调用已经收到不同的执行结果。",
+    "TASK_CLIENT_TOOL_TIMEOUT": "等待客户端工具结果超时。",
+    "TASK_CLIENT_TOOL_ARGUMENTS_INVALID": "客户端工具参数不符合声明的格式。",
+    "TASK_FRAME_INVALID": "任务连接消息格式不正确，或已超过订阅数量上限。",
     "TASK_REQUEST_CONFLICT": "该发送标识已用于不同的消息、执行选项或重试来源，请核对原请求后重试。",
     "TASK_MODEL_UNAVAILABLE": "所选或默认对话模型不可用，请检查模型设置或重新选择。",
     "TASK_EXECUTION_FAILED": "本轮执行失败，可重新发送消息；已完成的历史仍然保留。",
@@ -891,6 +897,7 @@
   },
   "projects": {
     "task_incomplete_context": "【本轮未完成：以下仅保留已输出的内容，不能视为完成结果。工具操作可能已发生；继续或重试前请核对当前状态，避免重复执行。】",
+    "client_tools_prompt": "client__ 前缀工具在用户客户端执行；其他工具在服务端执行。客户端工作目录只是位置元数据，不要用服务端文件工具访问它。需要用户电脑上的数据或操作时选择已声明的客户端工具，并等待实际结果；错误结果不表示操作成功。",
     "task_prompt": "你是项目中的任务助手。直接帮助用户完成工作，保留多轮对话上下文。遵循下方项目行动指南。客户端目录仅是路径记录，尚未同步到服务端，不能声称已访问其中的文件。只在用户请求需要时使用工具，不得编造工具执行结果。"
   }
 }

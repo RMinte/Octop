@@ -1,0 +1,279 @@
+"""Durable handoff to an authenticated client's local tool executor."""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import secrets
+import time
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import Any, cast
+
+from jsonschema import Draft202012Validator
+from langchain_core.tools import StructuredTool
+
+from octop.infra.db.repos.project_task_tool_calls import ProjectTaskToolCallRow
+from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
+from octop.infra.db.services import SharedServices
+from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.client_tool_models import (
+    CallStatus,
+    ClientToolCall,
+    ClientToolClaim,
+    ClientToolDefinition,
+    ClientToolResult,
+)
+from octop.infra.utils.ulid import new_ulid
+
+CALL_TIMEOUT_MS = 600_000
+_POLL_SECONDS = 0.2
+
+
+def _now() -> int:
+    return int(time.time() * 1000)
+
+
+def view(row: ProjectTaskToolCallRow) -> ClientToolCall:
+    return ClientToolCall(
+        call_id=row.call_id,
+        task_id=row.task_id,
+        turn_id=row.turn_id,
+        client_id=row.client_id,
+        name=row.name,
+        arguments=json.loads(row.arguments_json),
+        status=cast(CallStatus, row.status),
+        error_code=row.error_code,
+        created_at=datetime.fromtimestamp(row.created_at / 1000, UTC),
+        updated_at=datetime.fromtimestamp(row.updated_at / 1000, UTC),
+        expires_at=datetime.fromtimestamp(row.expires_at / 1000, UTC),
+    )
+
+
+def _normalize(
+    services: SharedServices, conn: Any, row: ProjectTaskToolCallRow
+) -> ProjectTaskToolCallRow:
+    if row.status not in {"pending", "claimed"}:
+        return row
+    turn = services.project_task_turn_repo.get_in_transaction(conn, row.turn_id)
+    now, status, error = _now(), "", ""
+    if turn is None or turn.cancel_requested or turn.status == "cancelled":
+        status = "cancelled"
+    elif turn.status != "running" or turn.updated_at < now - 90_000:
+        status, error = "interrupted", "TASK_INTERRUPTED"
+    elif row.expires_at <= now:
+        status, error = "expired", "TASK_CLIENT_TOOL_TIMEOUT"
+    if status:
+        services.project_task_tool_call_repo.close(conn, row.call_id, status, error, now)
+        return replace(row, status=status, error_code=error, updated_at=now)
+    return row
+
+
+def _load(
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    client_id: str,
+    task_id: str,
+    turn_id: str,
+    call_id: str,
+) -> ProjectTaskToolCallRow:
+    if not services.project_task_repo.lock_owner(conn, owner_id):
+        raise OctopError.localized(ErrorCode.FORBIDDEN)
+    task = services.project_task_repo.get_in_transaction(conn, task_id, owner_id)
+    row = services.project_task_tool_call_repo.get(conn, call_id) if task else None
+    if row is None or row.task_id != task_id or row.turn_id != turn_id:
+        raise OctopError.localized(ErrorCode.NOT_FOUND)
+    if row.client_id != client_id:
+        raise OctopError.localized(ErrorCode.FORBIDDEN)
+    return _normalize(services, conn, row)
+
+
+def get_call(
+    services: SharedServices,
+    owner_id: int,
+    client_id: str,
+    task_id: str,
+    turn_id: str,
+    call_id: str,
+) -> ClientToolCall:
+    with services.db.transaction() as conn:
+        return view(_load(services, conn, owner_id, client_id, task_id, turn_id, call_id))
+
+
+def open_calls(services: SharedServices, owner_id: int, client_id: str) -> list[ClientToolCall]:
+    with services.db.transaction() as conn:
+        if not services.project_task_repo.lock_owner(conn, owner_id):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
+        return [
+            view(_normalize(services, conn, row))
+            for row in services.project_task_tool_call_repo.open_for_client(
+                conn, owner_id, client_id
+            )
+        ]
+
+
+def claim_call(
+    services: SharedServices,
+    owner_id: int,
+    client_id: str,
+    task_id: str,
+    turn_id: str,
+    call_id: str,
+    request_id: str,
+) -> ClientToolClaim:
+    error = None
+    with services.db.transaction() as conn:
+        row = _load(services, conn, owner_id, client_id, task_id, turn_id, call_id)
+        if row.status == "pending":
+            now, token = _now(), secrets.token_urlsafe(32)
+            services.project_task_tool_call_repo.claim(conn, call_id, request_id, token, now)
+            row = replace(
+                row,
+                status="claimed",
+                claim_request_id=request_id,
+                claim_token=token,
+                updated_at=now,
+            )
+        elif row.status != "claimed":
+            error = ErrorCode.TASK_CLIENT_TOOL_CLOSED
+        elif row.claim_request_id != request_id:
+            error = ErrorCode.TASK_CLIENT_TOOL_CLAIMED
+    if error:
+        raise OctopError.localized(error)
+    return ClientToolClaim(call=view(row), claim_token=row.claim_token)
+
+
+def submit_result(
+    services: SharedServices,
+    owner_id: int,
+    client_id: str,
+    task_id: str,
+    turn_id: str,
+    call_id: str,
+    result: ClientToolResult,
+) -> ClientToolCall:
+    # Canonical JSON makes object key order irrelevant to an idempotent retry.
+    encoded = json.dumps(
+        {"output": result.output, "is_error": result.is_error},
+        sort_keys=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    error = None
+    with services.db.transaction() as conn:
+        row = _load(services, conn, owner_id, client_id, task_id, turn_id, call_id)
+        if not row.claim_token or not hmac.compare_digest(row.claim_token, result.claim_token):
+            error = ErrorCode.FORBIDDEN
+        elif row.status == "completed":
+            if row.result_json != encoded:
+                error = ErrorCode.TASK_CLIENT_TOOL_RESULT_CONFLICT
+        elif row.status != "claimed":
+            error = ErrorCode.TASK_CLIENT_TOOL_CLOSED
+        else:
+            now = _now()
+            services.project_task_tool_call_repo.complete(conn, call_id, encoded, now)
+            row = replace(row, status="completed", result_json=encoded, updated_at=now)
+    if error:
+        raise OctopError.localized(error)
+    return view(row)
+
+
+class ClientToolBroker:
+    """One broker per runtime turn. The harness resumes with the actual tool result."""
+
+    def __init__(
+        self,
+        services: SharedServices,
+        owner_id: int,
+        turn: ProjectTaskTurnRow,
+        client_id: str,
+        definitions: list[ClientToolDefinition],
+    ) -> None:
+        self.services, self.owner_id, self.turn = services, owner_id, turn
+        self.client_id, self.definitions = client_id, definitions
+        self.failure: ErrorCode | None = None
+
+    def _create(self, definition: ClientToolDefinition, arguments: dict[str, Any]) -> str:
+        now = _now()
+        row = ProjectTaskToolCallRow(
+            "call_" + new_ulid(),
+            self.turn.task_id,
+            self.turn.turn_id,
+            self.owner_id,
+            self.client_id,
+            definition.name,
+            json.dumps(arguments, allow_nan=False),
+            "pending",
+            "",
+            "",
+            "",
+            "",
+            now,
+            now,
+            now + CALL_TIMEOUT_MS,
+        )
+        with self.services.db.transaction() as conn:
+            if not self.services.project_task_repo.lock_owner(conn, self.owner_id):
+                raise OctopError.localized(ErrorCode.FORBIDDEN)
+            current = self.services.project_task_turn_repo.get_in_transaction(conn, row.turn_id)
+            if (
+                current is None
+                or current.status != "running"
+                or current.cancel_requested
+                or current.worker_id != self.turn.worker_id
+            ):
+                raise OctopError.localized(ErrorCode.TASK_CLIENT_TOOL_CLOSED)
+            self.services.project_task_tool_call_repo.insert(conn, row)
+        return row.call_id
+
+    def _poll(self, call_id: str) -> ProjectTaskToolCallRow:
+        with self.services.db.transaction() as conn:
+            return _load(
+                self.services,
+                conn,
+                self.owner_id,
+                self.client_id,
+                self.turn.task_id,
+                self.turn.turn_id,
+                call_id,
+            )
+
+    async def invoke(self, definition: ClientToolDefinition, arguments: dict[str, Any]) -> str:
+        try:
+            Draft202012Validator(definition.input_schema).validate(arguments)
+            if len(json.dumps(arguments, allow_nan=False).encode()) > 128 * 1024:
+                raise ValueError("arguments exceed 128 KiB")
+        except Exception:
+            # Invalid model arguments never reach the client, nor leak schema details.
+            return json.dumps(
+                {"is_error": True, "error_code": "TASK_CLIENT_TOOL_ARGUMENTS_INVALID"}
+            )
+        call_id = await asyncio.to_thread(self._create, definition, arguments)
+        while True:
+            row = await asyncio.to_thread(self._poll, call_id)
+            if row.status == "completed":
+                return row.result_json
+            if row.status not in {"pending", "claimed"}:
+                self.failure = (
+                    ErrorCode.TASK_CLIENT_TOOL_TIMEOUT
+                    if row.status == "expired"
+                    else ErrorCode.TASK_CLIENT_TOOL_CLOSED
+                )
+                raise OctopError.localized(self.failure)
+            await asyncio.sleep(_POLL_SECONDS)
+
+    def tools(self) -> list[StructuredTool]:
+        def build(definition: ClientToolDefinition) -> StructuredTool:
+            async def execute(**arguments: Any) -> str:
+                return await self.invoke(definition, arguments)
+
+            return StructuredTool.from_function(
+                coroutine=execute,
+                name="client__" + definition.name,
+                description=definition.description,
+                args_schema=definition.input_schema,
+            )
+
+        return [build(definition) for definition in self.definitions]

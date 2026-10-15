@@ -568,54 +568,6 @@ it("实时游标失效时重建最近一页，不沿用失效浏览范围", asyn
   ).not.toBeInTheDocument();
 });
 
-it("实时接口解析跨网络分块的中文与 SSE 帧，并释放连接", async () => {
-  const requests = await import("../../api/request");
-  const actual = await vi.importActual<
-    typeof import("../../api/modules/projects")
-  >("../../api/modules/projects");
-  const payload = {
-    task: fixture,
-    turn: fixture.turns[0],
-    cursor: "event_parsed",
-  };
-  const bytes = new TextEncoder().encode(
-    `: heartbeat\r\n\r\nid: event_parsed\r\nevent: turn\r\ndata: ${JSON.stringify(
-      payload,
-    )}\r\n\r\n`,
-  );
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (let index = 0; index < bytes.length; index += 7)
-        controller.enqueue(bytes.slice(index, index + 7));
-      controller.close();
-    },
-  });
-  const stream = vi
-    .spyOn(requests, "requestStream")
-    .mockResolvedValue({ contentType: "text/event-stream", body });
-  const receive = vi.fn();
-  const controller = new AbortController();
-  try {
-    await actual.projectTasksApi.events(
-      "task_a",
-      "event_start",
-      receive,
-      controller.signal,
-    );
-    expect(receive).toHaveBeenCalledExactlyOnceWith({
-      type: "turn",
-      data: payload,
-    });
-    expect(stream).toHaveBeenCalledWith(
-      "/project-tasks/task_a/events?cursor=event_start",
-      expect.objectContaining({ signal: controller.signal }),
-    );
-    expect(body.locked).toBe(false);
-  } finally {
-    stream.mockRestore();
-  }
-});
-
 it("任务可以改名，提交读取到的摘要版本", async () => {
   api.update.mockResolvedValue({
     ...fixture,
