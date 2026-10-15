@@ -414,11 +414,17 @@ does not set these headers itself.
 
 ## Skills and skill packages
 
+AgentComputer 可复用用户 Bearer token 直接调用这些通用接口。技能目录、项目选择、共享技能包管理的请求与响应见 [AgentComputer 技能接口接入说明](agentcomputer-skills.md)。
+
 Skill copy operations create snapshots; they do not keep the source and
 destination synchronized after the request completes.
 
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
+| `GET` | `/skills/hub/search?q=关键词&limit=50` | user | Search SkillHub without an agent |
+| `GET` | `/skills/hub/rankings?type=all` | user | Browse SkillHub rankings without an agent |
+| `GET` | `/projects/resources` | user | Installed skills available for independent projects; no `skill_packages` permission required |
+| `GET` | `/skill-packages` | user (`skill_packages`) | List global packages and current user's `can_write` / `can_copy` flags |
 | `GET` | `/skill-packages?writable_only=true` | user (`skill_packages`) | List only packages the current user may modify; admins may modify all packages |
 | `POST` | `/agents/{id}/skill-packages/{package_id}/copy` | owner (`skill_packages`) | body `{skill_slugs: string[], overwrite?: boolean}`; copy selected package skills into the workspace |
 | `POST` | `/agents/{id}/skills/{slug}/push-to-package` | owner (`skill_packages`) | body `{package_id, overwrite?: boolean}`; copy a workspace skill into a package created by the user (or any package for admins) |
@@ -597,10 +603,12 @@ Bundled experts live in `src/octop/infra/agents/experts/library/`
 | `GET`    | `/agents/{aid}/workspace/grep` | owner | grep backend files |
 | `GET`    | `/agents/{aid}/workspace/...` | owner | see `api/routers/workspace.py` |
 | `GET`    | `/agents/{aid}/skills` | owner | list installed skills |
-| `PUT`    | `/agents/{aid}/skills/{slug}` | owner | enable / disable a skill |
-| `GET`    | `/agents/{aid}/skills/hub/search` | user | Skill Hub search |
-| `GET`    | `/agents/{aid}/skills/hub/rankings` | user | Skill Hub rankings |
-| `POST`   | `/agents/{aid}/skills/hub/install` | owner | body `{slug, version?}` → `201` |
+| `PUT`    | `/agents/{aid}/skills/{slug}` | owner | Replace skill content; body `{content?, files?}` |
+| `POST`   | `/agents/{aid}/skills/{slug}/enable` | owner | Enable a skill → `204` |
+| `POST`   | `/agents/{aid}/skills/{slug}/disable` | owner | Disable a skill → `204` |
+| `GET`    | `/agents/{aid}/skills/hub/search` | owner | Skill Hub search |
+| `GET`    | `/agents/{aid}/skills/hub/rankings` | owner | Skill Hub rankings |
+| `POST`   | `/agents/{aid}/skills/hub/install` | owner | body `{skill_name, enable?, display_name?, icon_url?, label?, summary?}` → `201` |
 | `GET`    | `/subagent-catalog/divisions` | user | bundled subagent divisions |
 | `GET`    | `/subagent-catalog` | user | bundled subagent catalog |
 | `GET`    | `/subagent-catalog/{slug}` | user | full subagent definition |
