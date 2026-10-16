@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
@@ -85,6 +85,37 @@ class ProjectTaskRepo:
             "SELECT * FROM project_tasks WHERE task_id=? AND owner_id=?", (task_id, owner_id)
         ).fetchone()
         return ProjectTaskRow.from_row(row) if row else None
+
+    @staticmethod
+    def for_project(conn: Any, project_id: str, owner_id: int) -> list[ProjectTaskRow]:
+        rows = conn.execute(
+            "SELECT * FROM project_tasks WHERE project_id=? AND owner_id=? ORDER BY task_id",
+            (project_id, owner_id),
+        ).fetchall()
+        return [ProjectTaskRow.from_row(row) for row in rows]
+
+    @staticmethod
+    def delete(conn: Any, row: ProjectTaskRow) -> None:
+        for table in (
+            "project_task_artifacts",
+            "project_task_tool_calls",
+            "project_task_contexts",
+            "project_task_titles",
+            "project_task_turns",
+        ):
+            conn.execute(f"DELETE FROM {table} WHERE task_id=?", (row.task_id,))
+        conn.execute(
+            "DELETE FROM project_tasks WHERE task_id=? AND owner_id=?",
+            (row.task_id, row.owner_id),
+        )
+        record_change(
+            conn,
+            row.owner_id,
+            task_scope(row.project_id),
+            row.task_id,
+            replace(row, list_revision=row.list_revision + 1),
+            deleted=True,
+        )
 
     def lock_owner(self, conn: Any, owner_id: int) -> bool:
         suffix = " FOR UPDATE" if self._db.dialect == "postgresql" else ""

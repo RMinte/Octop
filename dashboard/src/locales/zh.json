@@ -235,7 +235,9 @@
     "TASK_REASONING_INVALID": "此模型不支持所选的思考模式或强度，请调整本轮设置。",
     "TASK_EXECUTION_FAILED": "本轮执行失败，可重新发送消息；已完成的历史仍然保留。",
     "TASK_INTERRUPTED": "服务重启或执行中断，本轮未自动重试。可重新发送消息。",
-    "TASK_RESOURCE_UNAVAILABLE": "项目的目录、Skill 或 MCP 无法加载，请检查项目配置和连接。"
+    "TASK_RESOURCE_UNAVAILABLE": "项目的目录、Skill 或 MCP 无法加载，请检查项目配置和连接。",
+    "PROJECT_TASKS_BUSY": "项目中有任务正在执行，请先停止所有运行中的任务再归档或删除项目。",
+    "PROJECT_ARCHIVED": "项目已归档，请恢复项目后再继续执行任务。"
   },
   "nav": {
     "chat": "对话",
@@ -6522,6 +6524,11 @@
     "refresh": "刷新",
     "create": "新建项目",
     "edit": "修改项目",
+    "delete": "删除项目",
+    "confirmDelete": "确认删除",
+    "deleteConfirm": "确定永久删除项目「{{name}}」及其中的全部任务吗？所有会话记录和附件都将删除，无法恢复。工作目录中的文件会保留。",
+    "deleted": "项目及其全部任务已删除",
+    "deleteFailed": "项目删除失败，请重试",
     "save": "保存项目",
     "cancel": "取消",
     "list": "项目",
@@ -6637,8 +6644,19 @@
         "failed": "执行失败",
         "cancelled": "已停止"
       },
-      "failure": "任务请求失败，请重试。"
+      "failure": "任务请求失败，请重试。",
+      "delete": "删除任务",
+      "deleteConfirm": "确定永久删除任务「{{name}}」吗？全部会话记录和附件都将删除，无法恢复。工作目录中的文件会保留。",
+      "deleteBusy": "请先结束或停止当前回复再删除",
+      "deleteFailed": "任务删除失败，请重试"
     },
-    "configuration": "项目配置"
+    "configuration": "项目配置",
+    "listScope": "项目列表范围",
+    "activeList": "未归档",
+    "archivedList": "已归档",
+    "archive": "归档项目",
+    "restore": "恢复项目",
+    "archivedHint": "此项目已归档，历史记录和任务归档状态均保留。恢复项目后可继续执行任务。",
+    "archiveFailed": "项目归档状态修改失败，请重试"
   }
 }

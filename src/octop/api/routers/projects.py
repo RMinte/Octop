@@ -16,6 +16,7 @@ from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import artifacts, service, sync, tasks
 from octop.infra.projects.models import (
+    ProjectArchive,
     ProjectFields,
     ProjectPatch,
     ProjectResources,
@@ -97,7 +98,7 @@ async def create_project(
     "/sync",
     response_model=sync.ProjectSyncPage,
     summary="同步项目最终状态",
-    description="不带同步游标返回完整项目快照；之后只返回变过的项目，游标与任务独立。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
+    description="不带同步游标返回完整项目快照；之后只返回变过的项目，删除记录的 operation=delete、data=null。游标与任务独立。增量分页固定截止版本，最后一页才返回新同步位置。无效游标返回 409 PROJECT_SYNC_RESET。",
 )
 async def sync_projects(
     response: Response,
@@ -208,6 +209,49 @@ async def update_project(
     return await asyncio.to_thread(
         service.update_project, _services(server), user.id, project_id, body
     )
+
+
+@router.patch(
+    "/{project_id}/archive",
+    response_model=ProjectView,
+    summary="归档或恢复项目",
+    description="校验 expected_revision 后归档或恢复本人项目，保留全部会话和文件，也保留任务各自的归档状态。归档前须结束或停止所有排队/运行任务；归档后可查看历史，恢复前不能新建任务、继续对话或重试。",
+)
+async def archive_project(
+    project_id: str,
+    body: ProjectArchive,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> ProjectView:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        service.archive_project,
+        _services(server),
+        user.id,
+        project_id,
+        body.expected_revision,
+        body.archived,
+    )
+
+
+@router.delete(
+    "/{project_id}",
+    status_code=204,
+    response_class=Response,
+    summary="删除项目及其全部任务",
+    description="永久删除本人项目，以及其中全部任务的会话、附件和工具记录。项目中有排队或执行中的任务时返回 409 PROJECT_TASKS_BUSY，须先停止。必须传 expected_revision；版本冲突返回 409。保留服务端与客户端工作目录中的文件。其他用户的项目返回 404。",
+)
+async def delete_project(
+    project_id: str,
+    expected_revision: int = Query(ge=1, description="确认删除时的项目 revision。"),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> Response:
+    await asyncio.to_thread(
+        service.delete_project, _services(server), user.id, project_id, expected_revision
+    )
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
 @router.get(
@@ -388,6 +432,23 @@ async def patch_task(
 ) -> tasks.TaskDetail:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(tasks.patch, _services(server), user.id, task_id, body)
+
+
+@task_router.delete(
+    "/{task_id}",
+    status_code=204,
+    response_class=Response,
+    summary="永久删除任务",
+    description="删除本人任务及全部会话轮次、已发布附件和工具记录，支持项目内和无项目任务。排队或执行中的任务须先停止，返回 409 TASK_BUSY。必须传 expected_revision（list_revision），版本冲突返回 409。保留工作目录中的文件。其他用户的任务返回 404。",
+)
+async def delete_task(
+    task_id: str,
+    expected_revision: int = Query(ge=1, description="确认删除时的任务 list_revision。"),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> Response:
+    await asyncio.to_thread(tasks.delete, _services(server), user.id, task_id, expected_revision)
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
 @task_router.get(

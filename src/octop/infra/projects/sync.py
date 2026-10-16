@@ -19,9 +19,9 @@ from octop.infra.projects.tasks import TaskSummary, summary
 
 
 class ProjectChange(ProjectModel):
-    operation: Literal["upsert"] = "upsert"
+    operation: Literal["upsert", "delete"] = "upsert"
     project_id: str
-    data: ProjectView
+    data: ProjectView | None = Field(default=None, description="删除时为 null。")
 
 
 class ProjectSyncPage(ProjectModel):
@@ -39,10 +39,10 @@ class TaskListPage(ProjectModel):
 
 
 class TaskChange(ProjectModel):
-    operation: Literal["upsert"] = "upsert"
+    operation: Literal["upsert", "delete"] = "upsert"
     task_id: str
     list_revision: int
-    data: TaskSummary
+    data: TaskSummary | None = Field(default=None, description="删除时为 null。")
 
 
 class TaskSyncPage(ProjectModel):
@@ -164,18 +164,24 @@ def project_sync(
         page_cursor,
         limit,
     )
+    changes = []
+    for row in rows:
+        payload = json.loads(row.payload_json)
+        payload.setdefault("archived", 0)
+        deleted = payload.pop("deleted", False)
+        changes.append(
+            ProjectChange(
+                operation="delete" if deleted else "upsert",
+                project_id=row.entity_id,
+                data=None if deleted else _view(ProjectRow.from_row(payload)),
+            )
+        )
     return ProjectSyncPage(
         mode="delta",
         base_sync_cursor=sync_cursor,
         next_sync_cursor=next_sync,
         next_page_cursor=next_page,
-        changes=[
-            ProjectChange(
-                project_id=row.entity_id,
-                data=_view(ProjectRow.from_row(json.loads(row.payload_json))),
-            )
-            for row in rows
-        ],
+        changes=changes,
     )
 
 
@@ -202,9 +208,16 @@ def task_sync(
     )
     changes = []
     for row in rows:
-        data = summary(ProjectTaskRow.from_row(json.loads(row.payload_json)))
+        payload = json.loads(row.payload_json)
+        deleted = payload.pop("deleted", False)
+        data = summary(ProjectTaskRow.from_row(payload))
         changes.append(
-            TaskChange(task_id=row.entity_id, list_revision=data.list_revision, data=data)
+            TaskChange(
+                operation="delete" if deleted else "upsert",
+                task_id=row.entity_id,
+                list_revision=data.list_revision,
+                data=None if deleted else data,
+            )
         )
     return TaskSyncPage(
         base_sync_cursor=sync_cursor,

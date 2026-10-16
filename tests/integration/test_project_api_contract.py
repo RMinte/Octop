@@ -24,7 +24,15 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
     assert "/api/project-tasks/sync" in project_paths
     assert "/api/project-tasks/resources" in project_paths
     assert "patch" in project_paths["/api/project-tasks/{task_id}"]
+    for path in ("/api/projects/{project_id}", "/api/project-tasks/{task_id}"):
+        deletion = project_paths[path]["delete"]
+        assert "204" in deletion["responses"]
+        assert any(
+            p["name"] == "expected_revision" and p["required"] for p in deletion["parameters"]
+        )
     assert "TaskExecutionOptions" in schema["components"]["schemas"]
+    assert "patch" in paths["/api/projects/{project_id}/archive"]
+    assert "archived" in schema["components"]["schemas"]["ProjectView"]["properties"]
     task_summary = schema["components"]["schemas"]["TaskSummary"]
     assert "status" in task_summary["required"]
     assert task_summary["properties"]["status"]["enum"] == [

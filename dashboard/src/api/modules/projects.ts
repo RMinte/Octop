@@ -28,6 +28,7 @@ export interface ProjectFields {
 }
 export interface Project extends ProjectFields {
   project_id: string;
+  archived: boolean;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -53,7 +54,10 @@ export interface ProjectSyncPage {
   base_sync_cursor: string | null;
   next_sync_cursor: string | null;
   next_page_cursor: string | null;
-  changes: { operation: "upsert"; project_id: string; data: Project }[];
+  changes: (
+    | { operation: "upsert"; project_id: string; data: Project }
+    | { operation: "delete"; project_id: string; data: null }
+  )[];
 }
 const query = (values: Record<string, string | null | undefined>) => {
   const params = new URLSearchParams();
@@ -64,6 +68,11 @@ const query = (values: Record<string, string | null | undefined>) => {
   return text ? `?${text}` : "";
 };
 export const projectsApi = {
+  archive: (id: string, archived: boolean, expectedRevision: number) =>
+    request<Project>(`/projects/${encodeURIComponent(id)}/archive`, {
+      method: "PATCH",
+      body: JSON.stringify({ archived, expected_revision: expectedRevision }),
+    }),
   sync: (syncCursor?: string | null, pageCursor?: string | null) =>
     request<ProjectSyncPage>(
       `/projects/sync${query({
@@ -93,6 +102,13 @@ export const projectsApi = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  delete: (id: string, expectedRevision: number) =>
+    request<void>(
+      `/projects/${encodeURIComponent(
+        id,
+      )}?expected_revision=${expectedRevision}`,
+      { method: "DELETE" },
+    ),
 };
 
 export type TaskStatus =
@@ -191,18 +207,30 @@ export interface TaskSyncPage {
   base_sync_cursor: string;
   next_sync_cursor: string | null;
   next_page_cursor: string | null;
-  changes: {
-    operation: "upsert";
-    task_id: string;
-    list_revision: number;
-    data: TaskSummary;
-  }[];
+  changes: (
+    | {
+        operation: "upsert";
+        task_id: string;
+        list_revision: number;
+        data: TaskSummary;
+      }
+    | {
+        operation: "delete";
+        task_id: string;
+        list_revision: number;
+        data: null;
+      }
+  )[];
 }
 const taskListPath = (projectID: string | null) =>
   projectID
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
 export const projectTasksApi = {
+  delete: (id: string, expectedRevision: number) =>
+    request<void>(`${taskPath(id)}?expected_revision=${expectedRevision}`, {
+      method: "DELETE",
+    }),
   downloadArtifact: (taskID: string, artifactID: string) =>
     requestBlob(
       `${taskPath(taskID)}/artifacts/${encodeURIComponent(

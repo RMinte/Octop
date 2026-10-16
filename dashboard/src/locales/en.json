@@ -235,7 +235,9 @@
     "TASK_REASONING_INVALID": "The selected reasoning mode or effort is not supported by this model. Adjust the settings for this turn.",
     "TASK_EXECUTION_FAILED": "This turn failed. You can send another message; completed history is preserved.",
     "TASK_INTERRUPTED": "Execution was interrupted. This turn was not retried automatically. You can send another message.",
-    "TASK_RESOURCE_UNAVAILABLE": "A project directory, skill, or MCP could not be loaded. Check the project settings and connections."
+    "TASK_RESOURCE_UNAVAILABLE": "A project directory, skill, or MCP could not be loaded. Check the project settings and connections.",
+    "PROJECT_TASKS_BUSY": "This project has active tasks. Stop all active tasks before archiving or deleting the project.",
+    "PROJECT_ARCHIVED": "This project is archived. Restore it before running tasks."
   },
   "nav": {
     "chat": "Conversation",
@@ -6522,6 +6524,11 @@
     "refresh": "Refresh",
     "create": "New project",
     "edit": "Edit project",
+    "delete": "Delete project",
+    "confirmDelete": "Confirm deletion",
+    "deleteConfirm": "Permanently delete project “{{name}}” and all its tasks? All conversations and attachments will be deleted and cannot be restored. Files in working directories will be kept.",
+    "deleted": "Project and all its tasks deleted",
+    "deleteFailed": "Could not delete the project. Please try again.",
     "save": "Save project",
     "cancel": "Cancel",
     "list": "Projects",
@@ -6637,8 +6644,19 @@
         "failed": "Failed",
         "cancelled": "Stopped"
       },
-      "failure": "Task request failed. Please try again."
+      "failure": "Task request failed. Please try again.",
+      "delete": "Delete task",
+      "deleteConfirm": "Permanently delete task “{{name}}”? All conversations and attachments will be deleted and cannot be restored. Files in working directories will be kept.",
+      "deleteBusy": "Finish or stop the current reply before deleting",
+      "deleteFailed": "Could not delete the task. Please try again."
     },
-    "configuration": "Project settings"
+    "configuration": "Project settings",
+    "listScope": "Project list scope",
+    "activeList": "Active",
+    "archivedList": "Archived",
+    "archive": "Archive project",
+    "restore": "Restore project",
+    "archivedHint": "This project is archived. History and individual task archive states are preserved. Restore the project to run tasks.",
+    "archiveFailed": "Could not change the project archive state. Please try again."
   }
 }

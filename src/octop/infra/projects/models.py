@@ -173,9 +173,17 @@ class ProjectPatch(ProjectModel):
 
 class ProjectView(ProjectFields):
     project_id: str
+    archived: bool = Field(default=False, description="归档保留项目及全部任务；恢复后可继续执行。")
     revision: int
     created_at: datetime
     updated_at: datetime
+
+
+class ProjectArchive(ProjectModel):
+    expected_revision: Annotated[StrictInt, Field(ge=1)]
+    archived: StrictBool = Field(
+        description="true 归档项目，false 恢复；不修改任务各自的归档状态。"
+    )
 
 
 class SkillOption(SkillBinding):

@@ -524,7 +524,9 @@
     "TASK_REASONING_INVALID": "此模型不支持所选的思考模式或强度，请调整本轮设置。",
     "TASK_EXECUTION_FAILED": "本轮执行失败，可重新发送消息；已完成的历史仍然保留。",
     "TASK_INTERRUPTED": "服务重启或执行中断，本轮未自动重试。可重新发送消息。",
-    "TASK_RESOURCE_UNAVAILABLE": "项目的目录、Skill 或 MCP 无法加载，请检查项目配置和连接。"
+    "TASK_RESOURCE_UNAVAILABLE": "项目的目录、Skill 或 MCP 无法加载，请检查项目配置和连接。",
+    "PROJECT_TASKS_BUSY": "项目中有任务正在执行，请先停止所有运行中的任务再归档或删除项目。",
+    "PROJECT_ARCHIVED": "项目已归档，请恢复项目后再继续执行任务。"
   },
   "desktop": {
     "install_log_deps": "正在安装 Python 依赖…",

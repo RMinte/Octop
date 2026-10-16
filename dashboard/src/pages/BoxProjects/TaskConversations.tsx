@@ -4,6 +4,7 @@ import {
   Button,
   Empty,
   Input,
+  Modal,
   Segmented,
   Space,
   Spin,
@@ -18,6 +19,7 @@ import {
   Plus,
   Send,
   Square,
+  Trash2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
@@ -27,6 +29,7 @@ import {
   type TaskExecutionOptions,
   type TaskArtifact,
   type Project,
+  type TaskSummary,
 } from "../../api/modules/projects";
 import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
@@ -56,6 +59,8 @@ export default function TaskConversations({
     hasMore,
     loadingMore,
     upsert: upsertTask,
+    remove: removeTask,
+    isDeleted,
   } = useTaskList(projectID, archivedView);
   const {
     detail,
@@ -83,6 +88,9 @@ export default function TaskConversations({
   const [draft, setDraft] = useState("");
   const [options, setOptions] = useState<TaskExecutionOptions>({});
   const [updating, setUpdating] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<TaskSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -96,8 +104,17 @@ export default function TaskConversations({
     optionsKey: string;
   } | null>(null);
   const busy = !!detail?.active_turn_id;
+  const projectArchived = !!project?.archived;
   const listSummary = useRef("");
   const renameRevision = useRef<number | null>(null);
+  const taskDeleted = !!taskID && isDeleted(taskID);
+
+  useEffect(() => {
+    if (!taskDeleted) return;
+    const next = new URLSearchParams(params);
+    next.delete("task");
+    setParams(next, { replace: true });
+  }, [taskDeleted, params, setParams]);
 
   const refresh = useCallback(async () => {
     try {
@@ -200,6 +217,8 @@ export default function TaskConversations({
       !prompt ||
       busy ||
       detail?.archived ||
+      projectArchived ||
+      deleteTarget ||
       sending ||
       inFlight.current ||
       (taskID && !detail)
@@ -286,7 +305,15 @@ export default function TaskConversations({
   };
 
   const retry = async (turnID: string) => {
-    if (!taskID || busy || detail?.archived || sending || inFlight.current)
+    if (
+      !taskID ||
+      busy ||
+      detail?.archived ||
+      projectArchived ||
+      deleteTarget ||
+      sending ||
+      inFlight.current
+    )
       return;
     const optionsKey = JSON.stringify(options);
     if (
@@ -337,7 +364,7 @@ export default function TaskConversations({
     },
     expectedRevision?: number,
   ) => {
-    if (!taskID || !detail || updating) return;
+    if (!taskID || !detail || updating || deleteTarget) return;
     if (changes.title !== undefined && !changes.title.trim()) {
       setError(t("projects.tasks.titleRequired"));
       return;
@@ -375,6 +402,33 @@ export default function TaskConversations({
     }
   };
 
+  const deleteTask = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await projectTasksApi.delete(
+        deleteTarget.task_id,
+        deleteTarget.list_revision,
+      );
+      removeTask(deleteTarget.task_id, deleteTarget.list_revision);
+      if (!alive.current) return;
+      setDeleteTarget(null);
+      if (selectedTaskID.current === deleteTarget.task_id) {
+        const next = new URLSearchParams(params);
+        next.delete("task");
+        setParams(next);
+      }
+    } catch (err) {
+      if (alive.current)
+        setDeleteError(
+          apiErrorMessage(err, t("projects.tasks.deleteFailed"), t),
+        );
+    } finally {
+      if (alive.current) setDeleting(false);
+    }
+  };
+
   return (
     <section
       className={`${styles.taskSection} ${
@@ -402,7 +456,7 @@ export default function TaskConversations({
         <Button
           icon={<Plus size={16} />}
           onClick={() => selectTask(null)}
-          disabled={sending}
+          disabled={sending || projectArchived}
         >
           {t("projects.tasks.new")}
         </Button>
@@ -507,28 +561,43 @@ export default function TaskConversations({
                 >
                   {detail.title}
                 </Typography.Title>
-                <Button
-                  size="small"
-                  icon={
-                    detail.archived ? (
-                      <ArchiveRestore size={15} />
-                    ) : (
-                      <Archive size={15} />
-                    )
-                  }
-                  disabled={busy || sending}
-                  loading={updating}
-                  title={busy ? t("projects.tasks.archiveBusy") : undefined}
-                  onClick={() =>
-                    void updateTask({ archived: !detail.archived })
-                  }
-                >
-                  {t(
-                    detail.archived
-                      ? "projects.tasks.restore"
-                      : "projects.tasks.archive",
-                  )}
-                </Button>
+                <Space wrap>
+                  <Button
+                    size="small"
+                    icon={
+                      detail.archived ? (
+                        <ArchiveRestore size={15} />
+                      ) : (
+                        <Archive size={15} />
+                      )
+                    }
+                    disabled={busy || sending}
+                    loading={updating}
+                    title={busy ? t("projects.tasks.archiveBusy") : undefined}
+                    onClick={() =>
+                      void updateTask({ archived: !detail.archived })
+                    }
+                  >
+                    {t(
+                      detail.archived
+                        ? "projects.tasks.restore"
+                        : "projects.tasks.archive",
+                    )}
+                  </Button>
+                  <Button
+                    danger
+                    size="small"
+                    icon={<Trash2 size={15} />}
+                    disabled={busy || sending || updating}
+                    title={busy ? t("projects.tasks.deleteBusy") : undefined}
+                    onClick={() => {
+                      setDeleteError("");
+                      setDeleteTarget(detail);
+                    }}
+                  >
+                    {t("projects.tasks.delete")}
+                  </Button>
+                </Space>
               </Space>
               {detail.archived && (
                 <Alert type="info" message={t("projects.tasks.archivedHint")} />
@@ -614,6 +683,7 @@ export default function TaskConversations({
                     )}
                     {!busy &&
                       !detail.archived &&
+                      !projectArchived &&
                       turn.turn_id === latestTurnID &&
                       (turn.status === "failed" ||
                         turn.status === "cancelled") && (
@@ -641,7 +711,7 @@ export default function TaskConversations({
             value={options}
             onChange={setOptions}
             project={project}
-            disabled={sending || busy || !!detail?.archived}
+            disabled={sending || busy || !!detail?.archived || projectArchived}
           />
           <Input.TextArea
             aria-label={t("projects.tasks.message")}
@@ -649,7 +719,11 @@ export default function TaskConversations({
             maxLength={32768}
             autoSize={{ minRows: 3, maxRows: 8 }}
             disabled={
-              sending || loading || !!detail?.archived || !!(taskID && !detail)
+              sending ||
+              loading ||
+              !!detail?.archived ||
+              projectArchived ||
+              !!(taskID && !detail)
             }
             placeholder={t(
               detail
@@ -698,6 +772,7 @@ export default function TaskConversations({
                   !draft.trim() ||
                   loading ||
                   !!detail?.archived ||
+                  projectArchived ||
                   !!(taskID && !detail)
                 }
                 onClick={() => void send()}
@@ -708,6 +783,26 @@ export default function TaskConversations({
           </div>
         </div>
       </div>
+      <Modal
+        title={t("projects.tasks.delete")}
+        open={deleteTarget !== null}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        onOk={() => void deleteTask()}
+        okText={t("projects.confirmDelete")}
+        cancelText={t("projects.cancel")}
+        okButtonProps={{ danger: true }}
+        confirmLoading={deleting}
+        cancelButtonProps={{ disabled: deleting }}
+        closable={!deleting}
+        maskClosable={!deleting}
+      >
+        <Typography.Paragraph>
+          {t("projects.tasks.deleteConfirm", { name: deleteTarget?.title })}
+        </Typography.Paragraph>
+        {deleteError && <Alert type="error" showIcon message={deleteError} />}
+      </Modal>
     </section>
   );
 }

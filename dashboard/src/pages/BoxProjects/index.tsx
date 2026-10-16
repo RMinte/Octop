@@ -7,6 +7,7 @@ import {
   Form,
   Input,
   Modal,
+  Segmented,
   Select,
   Space,
   Spin,
@@ -15,7 +16,16 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { Folder, FolderOpen, Pencil, Plus, RefreshCw } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  Folder,
+  FolderOpen,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
@@ -56,12 +66,14 @@ export default function BoxProjectsPage() {
   const navigate = useNavigate();
   const { projectID } = useParams<{ projectID: string }>();
   const timeZone = useServerTimezone();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const archivedView = searchParams.get("project_archived") === "true";
   const standalone = !projectID && searchParams.get("view") === "tasks";
   const {
     items: projects,
     refresh: refreshProjects,
     upsert: upsertProject,
+    remove: removeProject,
   } = useProjectList();
   const selected =
     projects.find((item) => item.project_id === projectID) ?? null;
@@ -69,6 +81,10 @@ export default function BoxProjectsPage() {
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Project | "new" | null>(null);
   const [saving, setSaving] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [saveError, setSaveError] = useState("");
   const [resources, setResources] = useState<ProjectResources | null>(null);
   const [resourceError, setResourceError] = useState("");
@@ -76,6 +92,17 @@ export default function BoxProjectsPage() {
   const generation = useRef({ version: 0 });
   const creation = useRef<{ body: string; key: string } | null>(null);
   const [detailTab, setDetailTab] = useState("general");
+  const visibleProjects = projects.filter(
+    (project) => !!project.archived === archivedView,
+  );
+
+  useEffect(() => {
+    if (!selected || !!selected.archived === archivedView) return;
+    const next = new URLSearchParams(searchParams);
+    if (selected.archived) next.set("project_archived", "true");
+    else next.delete("project_archived");
+    setSearchParams(next, { replace: true });
+  }, [selected, archivedView, searchParams, setSearchParams]);
 
   const refresh = useCallback(async () => {
     const current = ++generation.current.version;
@@ -179,6 +206,41 @@ export default function BoxProjectsPage() {
     }
   }
 
+  async function archiveProject() {
+    if (!selected || archiving) return;
+    setArchiving(true);
+    setError("");
+    try {
+      const result = await projectsApi.archive(
+        selected.project_id,
+        !selected.archived,
+        selected.revision,
+      );
+      upsertProject(result);
+    } catch (cause) {
+      setError(apiErrorMessage(cause, t("projects.archiveFailed"), t));
+    } finally {
+      setArchiving(false);
+    }
+  }
+
+  async function deleteProject() {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await projectsApi.delete(deleteTarget.project_id, deleteTarget.revision);
+      removeProject(deleteTarget.project_id);
+      setDeleteTarget(null);
+      void message.success(t("projects.deleted"));
+      navigate("/box-projects");
+    } catch (cause) {
+      setDeleteError(apiErrorMessage(cause, t("projects.deleteFailed"), t));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   const mcpOptions =
     resources?.mcp_servers.map((server) => ({
       value: server.server_name,
@@ -229,18 +291,34 @@ export default function BoxProjectsPage() {
           >
             {t("projects.tasks.standalone")}
           </Button>
+          <Segmented
+            block
+            aria-label={t("projects.listScope")}
+            value={archivedView ? "archived" : "active"}
+            options={[
+              { label: t("projects.activeList"), value: "active" },
+              { label: t("projects.archivedList"), value: "archived" },
+            ]}
+            onChange={(value) =>
+              navigate(
+                value === "archived"
+                  ? "/box-projects?project_archived=true"
+                  : "/box-projects",
+              )
+            }
+          />
           <Typography.Text type="secondary">
-            {t("projects.list")} · {projects.length}
+            {t("projects.list")} · {visibleProjects.length}
           </Typography.Text>
           {loading && projects.length === 0 ? (
             <Spin />
-          ) : projects.length === 0 ? (
+          ) : visibleProjects.length === 0 ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={t("projects.empty")}
             />
           ) : (
-            projects.map((project) => (
+            visibleProjects.map((project) => (
               <button
                 key={project.project_id}
                 type="button"
@@ -249,7 +327,9 @@ export default function BoxProjectsPage() {
                 }`}
                 onClick={() =>
                   navigate(
-                    `/box-projects/${encodeURIComponent(project.project_id)}`,
+                    `/box-projects/${encodeURIComponent(project.project_id)}${
+                      archivedView ? "?project_archived=true" : ""
+                    }`,
                   )
                 }
               >
@@ -305,13 +385,45 @@ export default function BoxProjectsPage() {
                     })}
                   </Typography.Text>
                 </div>
-                <Button
-                  icon={<Pencil size={15} />}
-                  onClick={() => openEditor(selected)}
-                >
-                  {t("projects.edit")}
-                </Button>
+                <Space wrap>
+                  <Button
+                    icon={
+                      selected.archived ? (
+                        <ArchiveRestore size={15} />
+                      ) : (
+                        <Archive size={15} />
+                      )
+                    }
+                    loading={archiving}
+                    onClick={() => void archiveProject()}
+                  >
+                    {t(
+                      selected.archived
+                        ? "projects.restore"
+                        : "projects.archive",
+                    )}
+                  </Button>
+                  <Button
+                    icon={<Pencil size={15} />}
+                    onClick={() => openEditor(selected)}
+                  >
+                    {t("projects.edit")}
+                  </Button>
+                  <Button
+                    danger
+                    icon={<Trash2 size={15} />}
+                    onClick={() => {
+                      setDeleteError("");
+                      setDeleteTarget(selected);
+                    }}
+                  >
+                    {t("projects.delete")}
+                  </Button>
+                </Space>
               </div>
+              {selected.archived && (
+                <Alert type="info" message={t("projects.archivedHint")} />
+              )}
               <Tabs
                 defaultActiveKey="tasks"
                 key={selected.project_id}
@@ -441,6 +553,26 @@ export default function BoxProjectsPage() {
           )}
         </main>
       </div>
+      <Modal
+        title={t("projects.delete")}
+        open={deleteTarget !== null}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        onOk={() => void deleteProject()}
+        okText={t("projects.confirmDelete")}
+        cancelText={t("projects.cancel")}
+        okButtonProps={{ danger: true }}
+        confirmLoading={deleting}
+        cancelButtonProps={{ disabled: deleting }}
+        closable={!deleting}
+        maskClosable={!deleting}
+      >
+        <Typography.Paragraph>
+          {t("projects.deleteConfirm", { name: deleteTarget?.name })}
+        </Typography.Paragraph>
+        {deleteError && <Alert type="error" showIcon message={deleteError} />}
+      </Modal>
       <Modal
         title={t(editing === "new" ? "projects.create" : "projects.edit")}
         open={editing !== null}

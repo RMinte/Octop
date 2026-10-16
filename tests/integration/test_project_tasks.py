@@ -1082,6 +1082,135 @@ async def test_active_task_can_be_renamed_but_not_archived(task_env):
     assert renamed["active_turn_id"] == task.active_turn_id and not renamed["archived"]
 
 
+async def test_project_archive_preserves_task_states_and_blocks_execution_until_restored(
+    task_env, monkeypatch
+):
+    client, server, auth, _ = task_env
+
+    async def run(services, owner, turn, history):
+        if turn.prompt == "retry this":
+            raise RuntimeError("fixture failure")
+        yield {"type": "token", "content": "Saved reply"}
+
+    monkeypatch.setattr(runtime, "run_turn", run)
+    project = (
+        await client.post(
+            "/api/projects",
+            headers={**auth, "Idempotency-Key": str(uuid4())},
+            json={"name": "Archive project"},
+        )
+    ).json()
+    base = f"/api/projects/{project['project_id']}"
+    saved = []
+    for request, prompt in (
+        ("archive-first", "keep history"),
+        ("archive-second", "keep task archive"),
+        ("archive-retry", "retry this"),
+    ):
+        created = (
+            await client.post(
+                base + "/tasks", headers=auth, json={"request_id": request, "prompt": prompt}
+            )
+        ).json()
+        saved.append(await settled(client, auth, created["task_id"]))
+    saved[1] = (
+        await client.patch(
+            f"/api/project-tasks/{saved[1]['task_id']}",
+            headers=auth,
+            json={"expected_revision": saved[1]["list_revision"], "archived": True},
+        )
+    ).json()
+    baseline = (await client.get("/api/projects/sync", headers=auth)).json()["next_sync_cursor"]
+    response = await client.patch(
+        base + "/archive", headers=auth, json={"expected_revision": 1, "archived": True}
+    )
+    assert response.status_code == 200, response.text
+    archived = response.json()
+    assert archived["archived"] and archived["revision"] == 2
+    assert response.headers["cache-control"] == "no-store"
+    for before in saved:
+        assert (
+            await client.get(f"/api/project-tasks/{before['task_id']}", headers=auth)
+        ).json() == before
+    for path, body in (
+        (base + "/tasks", {"request_id": "archive-new-task", "prompt": "new"}),
+        (
+            f"/api/project-tasks/{saved[0]['task_id']}/messages",
+            {"request_id": "archive-followup", "prompt": "continue"},
+        ),
+        (
+            f"/api/project-tasks/{saved[2]['task_id']}/turns/{saved[2]['turns'][0]['turn_id']}/retry",
+            {"request_id": "archive-retry-attempt"},
+        ),
+    ):
+        blocked = await client.post(path, headers=auth, json=body)
+        assert blocked.status_code == 409 and blocked.json()["error"]["code"] == "PROJECT_ARCHIVED"
+    delta = (
+        await client.get("/api/projects/sync", headers=auth, params={"sync_cursor": baseline})
+    ).json()
+    assert delta["changes"][0]["data"]["archived"] is True
+    assert (await client.get(base + "/tasks", headers=auth)).json()["items"][0]["task_id"] in {
+        saved[0]["task_id"],
+        saved[2]["task_id"],
+    }
+    assert len((await client.get(base + "/tasks?archived=true", headers=auth)).json()["items"]) == 1
+    response = await client.patch(
+        base + "/archive", headers=auth, json={"expected_revision": 2, "archived": False}
+    )
+    assert response.status_code == 200 and not response.json()["archived"]
+    continued = await client.post(
+        f"/api/project-tasks/{saved[0]['task_id']}/messages",
+        headers=auth,
+        json={"request_id": "archive-followup", "prompt": "continue"},
+    )
+    assert continued.status_code == 202, continued.text
+    assert len((await settled(client, auth, saved[0]["task_id"]))["turns"]) == 2
+    assert (await client.get(f"/api/project-tasks/{saved[1]['task_id']}", headers=auth)).json()[
+        "archived"
+    ] is True
+
+
+async def test_project_archive_is_scoped_versioned_and_requires_all_tasks_to_stop(task_env):
+    client, server, auth, _ = task_env
+    await server.project_task_worker.close()
+    owner = await resolve_user_id(client, auth, "admin")
+    project = (
+        await client.post(
+            "/api/projects",
+            headers={**auth, "Idempotency-Key": str(uuid4())},
+            json={"name": "Queued project"},
+        )
+    ).json()
+    task = send(
+        server.services,
+        owner,
+        TaskMessage(request_id="archive-queued-task", prompt="queued"),
+        project_id=project["project_id"],
+    )
+    base = f"/api/projects/{project['project_id']}"
+    alice = await create_user(client, auth, username="project-archive-alice")
+    body = {"expected_revision": 1, "archived": True}
+    assert (await client.patch(base + "/archive", headers=alice, json=body)).status_code == 404
+    stale = await client.patch(
+        base + "/archive", headers=auth, json={**body, "expected_revision": 999}
+    )
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "PROJECT_REVISION_CONFLICT"
+    busy = await client.patch(base + "/archive", headers=auth, json=body)
+    assert busy.status_code == 409 and busy.json()["error"]["code"] == "PROJECT_TASKS_BUSY"
+    assert (await client.get(base, headers=auth)).json() == project
+    await client.post(
+        f"/api/project-tasks/{task.task_id}/cancel",
+        headers=auth,
+        json={"turn_id": task.active_turn_id},
+    )
+    result = await client.patch(base + "/archive", headers=auth, json=body)
+    assert result.status_code == 200 and result.json()["archived"]
+    unchanged = await client.patch(
+        base + "/archive", headers=auth, json={**body, "expected_revision": 2}
+    )
+    assert unchanged.json() == result.json()
+
+
 async def test_turn_execution_options_override_without_mutating_project_and_bind_replays(task_env):
     from tests.integration.test_projects import resource_fixture
     from tests.support.auth import seed_openai_provider

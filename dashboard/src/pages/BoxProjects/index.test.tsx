@@ -65,6 +65,7 @@ const api = vi.mocked(request, true);
 const t0 = "2026-10-15T00:00:00Z";
 const initial: Project = {
   project_id: "proj_a",
+  archived: false,
   name: "我的项目",
   description: "简介",
   directory: null,
@@ -152,7 +153,22 @@ beforeEach(() => {
       return item as never;
     }
     if (url === "/projects") return [...rows] as never;
-    const id = url.split("/").pop();
+    const id = url.split("?")[0].split("/").pop();
+    if (init?.method === "PATCH" && url.endsWith("/archive")) {
+      const projectID = url.split("/").at(-2);
+      const { expected_revision, archived } = JSON.parse(init.body as string);
+      const index = rows.findIndex((item) => item.project_id === projectID);
+      rows[index] = {
+        ...rows[index],
+        archived,
+        revision: expected_revision + 1,
+      };
+      return rows[index] as never;
+    }
+    if (init?.method === "DELETE") {
+      rows = rows.filter((item) => item.project_id !== id);
+      return undefined as never;
+    }
     if (init?.method === "PATCH") {
       const { expected_revision, ...fields } = JSON.parse(init.body as string);
       const index = rows.findIndex((item) => item.project_id === id);
@@ -178,6 +194,98 @@ function mount(path: string) {
 }
 
 describe("独立项目正式页面", () => {
+  it("项目可归档和恢复，归档期间禁止新任务及输入", async () => {
+    const user = userEvent.setup();
+    mount("/box-projects/proj_a");
+    await user.type(
+      await screen.findByRole("textbox", { name: "任务消息" }),
+      "暂存草稿",
+    );
+    expect(
+      screen.getByRole("button", { name: "发送", exact: true }),
+    ).toBeEnabled();
+    await user.click(await screen.findByRole("button", { name: "归档项目" }));
+    await screen.findByRole("button", { name: "恢复项目" });
+    expect(screen.getByText(zh.projects.archivedHint)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "新任务", exact: true }),
+    ).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "任务消息" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "发送", exact: true }),
+    ).toBeDisabled();
+    expect(api).toHaveBeenCalledWith("/projects/proj_a/archive", {
+      method: "PATCH",
+      body: JSON.stringify({ archived: true, expected_revision: 1 }),
+    });
+    await user.click(screen.getByRole("button", { name: "恢复项目" }));
+    await screen.findByRole("button", { name: "归档项目" });
+    expect(
+      screen.getByRole("button", { name: "新任务", exact: true }),
+    ).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "任务消息" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "发送", exact: true }),
+    ).toBeEnabled();
+  });
+
+  it("删除项目需确认全部任务范围，失败保留项目并可重试", async () => {
+    const normal = api.getMockImplementation()!;
+    let fail = true;
+    api.mockImplementation(async (url, init) => {
+      if (init?.method === "DELETE" && fail) {
+        fail = false;
+        throw new Error("offline");
+      }
+      return normal(url, init);
+    });
+    const user = userEvent.setup();
+    mount("/box-projects/proj_a");
+    await user.click(await screen.findByRole("button", { name: "删除项目" }));
+    expect(screen.getByText(zh.projects.deleteConfirm)).toBeTruthy();
+    expect(api.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(
+      false,
+    );
+    await user.click(screen.getByRole("button", { name: /取\s*消/ }));
+    await user.click(screen.getByRole("button", { name: "删除项目" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    expect(await screen.findByText("offline")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: initial.name })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: initial.name })).toBeNull(),
+    );
+    expect(api).toHaveBeenCalledWith("/projects/proj_a?expected_revision=1", {
+      method: "DELETE",
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it("增量删除记录会移除已缓存项目", async () => {
+    const user = userEvent.setup();
+    mount("/box-projects/proj_a");
+    await screen.findByRole("heading", { name: initial.name });
+    const normal = api.getMockImplementation()!;
+    api.mockImplementation(async (url, init) =>
+      url.startsWith("/projects/sync")
+        ? ({
+            mode: "delta",
+            base_sync_cursor: "projects_next",
+            next_sync_cursor: "deleted",
+            next_page_cursor: null,
+            changes: [
+              { operation: "delete", project_id: "proj_a", data: null },
+            ],
+          } as never)
+        : normal(url, init),
+    );
+    await user.click(screen.getByRole("button", { name: "刷新", exact: true }));
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: initial.name })).toBeNull(),
+    );
+    expect(screen.getByText(zh.projects.unavailable)).toBeTruthy();
+  });
+
   it("saves project plugins, roles, memory and team settings", async () => {
     const normal = api.getMockImplementation()!;
     api.mockImplementation(async (url, init) => {

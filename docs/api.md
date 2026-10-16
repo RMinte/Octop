@@ -13,6 +13,8 @@
 | `GET /api/projects/{project_id}` | 获取项目完整配置和 `revision` | 服务端自动化通过 |
 | `PATCH /api/projects/{project_id}` | 局部修改；未提交字段保持原值，以 `expected_revision` 防止覆盖修改 | 定向自动化通过 |
 | `PUT /api/projects/{project_id}` | 显式完整替换；必须提交全部项目字段，局部请求返回 422 | 定向自动化通过 |
+| `DELETE /api/projects/{project_id}?expected_revision=…` | 永久删除项目及其全部任务；成功返回 204 | 定向自动化覆盖 |
+| `PATCH /api/projects/{project_id}/archive` | 以 archived 和 expected_revision 归档或恢复项目，保留全部任务及其归档状态 | 定向自动化覆盖 |
 | `GET /api/projects/resources` | 获取可选 Skill、当前用户 MCP 连接和目录浏览范围 | 服务端自动化通过 |
 
 以上接口均需登录，响应 `Cache-Control: no-store`。其他账号的项目返回 404。项目名称在账号内唯一，重名或编辑版本冲突返回 409。新建与修改仅保存配置；发送任务消息时才实际加载项目选定的 Skill/MCP。
@@ -29,6 +31,8 @@
 
 页面每次进入先展示当前账号在本标签页保存的列表缓存，再通过项目独立同步游标获取变化；恢复前台、恢复网络和手动刷新也会同步。创建或修改成功后先应用写入响应，再同步补齐其他变化，不重复获取完整列表和详情。项目详情默认打开任务会话，可直接输入需求创建任务、在同一任务内追问、打开历史和停止回复。项目配置保留在同名页签中。
 
+
+项目响应包含 `archived`，新项目默认为 false。项目归档入口为 `PATCH /api/projects/{project_id}/archive`，请求体例如 `{"archived":true,"expected_revision":3}`；恢复时传 false。归档前须停止项目内所有排队或运行中的任务，否则返回 `409 PROJECT_TASKS_BUSY`；归档项目中的任务仍可读取历史，新的任务、追问及重试返回 `409 PROJECT_ARCHIVED`。项目及任务各自的归档状态独立，项目恢复后仍需单独恢复已归档任务才能继续对应会话。归档/恢复与项目版本递增和同步记录原子提交；不删除任务或工作目录文件。SQLite 和 PostgreSQL schema 40 为项目增加归档字段，现有项目默认未归档，不修改旧任务归档状态。
 
 ### 任务对话接口（独立项目模型）
 
@@ -47,6 +51,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
 | GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
 | PATCH | `/api/project-tasks/{task_id}` | 修改名称、归档或恢复，校验 expected_revision |
+| DELETE | `/api/project-tasks/{task_id}?expected_revision=…` | 永久删除任务及会话、附件和工具记录；成功返回 204 |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
 | GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
 | GET | `/api/project-tasks/{task_id}/events` | 订阅实时轮次状态，支持游标或 Last-Event-ID 续接 |
@@ -72,7 +77,9 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 任务首页返回的 `sync_cursor` 可立即请求对应 `/sync`，不必等历史读完。即使未加载的旧任务发生新活动，也通过增量进入近期列表。增量返回 `base_sync_cursor`、`changes`、`next_page_cursor`、`next_sync_cursor`；同一对象多次修改合并为截止版本的完整状态，中间页不返回可提交的新同步位置。收齐本批后再一起保存对象和游标。历史分页游标和增量分页游标用途不同，客户端分开保存。
 
-分页与增量响应交错时，使用 `list_revision` 保留较新的任务摘要；项目使用 `revision`。自己写入成功也不能跳过期间其他变化，直接推进同步位置。无效游标返回 HTTP 409 `PROJECT_SYNC_RESET`，重新建立项目快照或对应任务第一页即可。后台任务完成、取消和中断恢复的摘要更新与变更记录同事务提交；回复正文和心跳不产生列表变更。当前没有删除入口和自动历史清理，备份恢复流程仍需可靠推进 `restoreEpoch` 后才能使旧游标失效。
+分页与增量响应交错时，使用 `list_revision` 保留较新的任务摘要；项目使用 `revision`。自己写入成功也不能跳过期间其他变化，直接推进同步位置。无效游标返回 HTTP 409 `PROJECT_SYNC_RESET`，重新建立项目快照或对应任务第一页即可。后台任务完成、取消和中断恢复的摘要更新与变更记录同事务提交；回复正文和心跳不产生列表变更。删除项目或任务时，同一事务写入 `operation=delete`、`data=null` 的同步记录；任务删除记录携带递增的 `list_revision`。客户端移除对应项并保存删除标记，防止旧分页或迟到的会话事件重新加入任务。仍不提供自动历史清理，备份恢复流程仍需可靠推进 `restoreEpoch` 后才能使旧游标失效。
+
+删除接口必须提供当前版本作为查询参数 `expected_revision`（项目为 `revision`，任务为 `list_revision`），版本过期返回对应的 `409 *_REVISION_CONFLICT`。排队或运行中的任务须先停止，单任务删除返回 `409 TASK_BUSY`；项目中存在此类任务则返回 `409 PROJECT_TASKS_BUSY`，整个项目及其任务均保持原样。删除项目会原子清理全部任务及会话、附件、工具记录和上下文；其他项目和无项目任务不受影响。删除操作保留工作目录中的文件，包括自动分配的任务工作区，不回滚已执行的工具操作。已删除资源再次读取返回 404；项目名称和创建请求标识随项目删除而释放。
 
 网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
 
@@ -282,7 +289,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 `GET /api/project-tasks/resources` 返回可用 models（model_ref/name）、default_model_ref，以及共享 Skill 与本人 MCP 引用，不包含凭据。网页“本轮设置”在成功发送后恢复继承状态；网络失败保留选择和发送标识。同一 request_id 必须重传相同的原选项，项目后来修改不会影响幂等回放。手动重试采用该次请求的 options，未指定时使用当前项目配置，不隐式复制失败轮次的覆盖项。返回的 turns[].options 是该轮实际采用的模型、Skill 和 MCP，project_revision 仍记录发送时项目版本。
 
-未发布的数据库 schema 34 包含归档标记、分页索引和任务状态摘要。已有任务默认未归档，状态从活动轮次或最近一轮初始化；本地已记录 schema 34 但缺少状态列的库也会补齐。任务、轮次和正文保留。任务列表游标及网页任务缓存版本随状态字段更新，旧游标返回 `PROJECT_SYNC_RESET`，客户端重建第一页；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
+未发布的数据库 schema 34 包含分页索引和任务状态摘要，状态从活动轮次或最近一轮初始化；本地已记录 schema 34 但缺少状态列的库也会补齐。归档标记及任务、轮次和正文保留。任务列表游标及网页任务缓存版本随状态字段更新，旧游标返回 `PROJECT_SYNC_RESET`，客户端重建第一页；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
 
 ### 服务端附件交付
 
@@ -292,7 +299,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 客户端开发以独立的[任务 WebSocket 接入指南](project-task-websocket.md)为准，包含完整命令、事件、字段、Swift 连接示例、恢复和错误处理。机器可读结构见 [JSON Schema](project-task-websocket.schema.json)。
 
-正式任务页面使用 `WS /api/project-tasks/ws`（HTTPS 部署使用 WSS）。同一页面和账号共用一条连接，可同时订阅多个任务；切换任务取消旧订阅，不停止任务。项目配置、任务列表、历史分页、改名和归档继续使用 REST。AgentComputer 原生客户端本轮未修改，仍需按本节接入。
+正式任务页面使用 `WS /api/project-tasks/ws`（HTTPS 部署使用 WSS）。同一页面和账号共用一条连接，可同时订阅多个任务；切换任务取消旧订阅，不停止任务。项目配置、任务列表、历史分页、改名和删除继续使用 REST。AgentComputer 原生客户端本轮未修改，仍需按本节接入。
 
 浏览器建立连接后须在 10 秒内发送首帧：
 
@@ -375,7 +382,6 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 422 / `PROJECT_DIRECTORY_INVALID` | 服务端目录不存在或不可访问 | 重新选择有权限的服务端目录 |
 | 422 / `PROJECT_RESOURCE_INVALID` | Skill/MCP 引用不存在或无权使用 | 刷新资源目录后重新选择 |
 | 409 / `TASK_BUSY` | 任务已有活动轮次 | 读取当前任务，等待结束或由用户停止 |
-| 409 / `TASK_ARCHIVED` | 任务已归档 | 恢复后再开始新轮次 |
 | 409 / `TASK_REVISION_CONFLICT` | 任务摘要版本已变化 | 刷新后重新编辑 |
 | 409 / `TASK_RETRY_UNAVAILABLE` | 指定轮次不是最后一个失败/取消轮次 | 刷新会话，不重试旧轮次 |
 | 409 / `TASK_REQUEST_CONFLICT` | 消息标识已用于不同内容或作用域 | 核对原发送结果，禁止换内容复用标识 |

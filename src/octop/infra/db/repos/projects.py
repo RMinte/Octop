@@ -25,6 +25,7 @@ class ProjectRow:
     created_at: int
     updated_at: int
     capabilities_json: str = "{}"
+    archived: bool = False
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectRow:
@@ -44,6 +45,7 @@ class ProjectRow:
             created_at=strict_int(row["created_at"]),
             updated_at=strict_int(row["updated_at"]),
             capabilities_json=str(row["capabilities_json"]),
+            archived=bool(row["archived"]),
         )
 
 
@@ -154,3 +156,31 @@ class ProjectRepo:
             saved = ProjectRow.from_row(result)
             record_change(conn, saved.owner_id, "projects", saved.project_id, saved)
             return saved
+
+    @staticmethod
+    def set_archived(conn: Any, row: ProjectRow, archived: bool, now: int) -> ProjectRow | None:
+        result = conn.execute(
+            "UPDATE projects SET archived=?, updated_at=?, revision=revision+1 "
+            "WHERE project_id=? AND owner_id=? AND revision=? RETURNING *",
+            (int(archived), now, row.project_id, row.owner_id, row.revision),
+        ).fetchone()
+        if result is None:
+            return None
+        saved = ProjectRow.from_row(result)
+        record_change(conn, saved.owner_id, "projects", saved.project_id, saved)
+        return saved
+
+    @staticmethod
+    def delete(conn: Any, row: ProjectRow, expected_revision: int) -> bool:
+        conn.execute(
+            "DELETE FROM project_create_requests WHERE project_id=? AND owner_id=?",
+            (row.project_id, row.owner_id),
+        )
+        deleted = conn.execute(
+            "DELETE FROM projects WHERE project_id=? AND owner_id=? AND revision=? RETURNING *",
+            (row.project_id, row.owner_id, expected_revision),
+        ).fetchone()
+        if deleted is None:
+            return False
+        record_change(conn, row.owner_id, "projects", row.project_id, row, deleted=True)
+        return True

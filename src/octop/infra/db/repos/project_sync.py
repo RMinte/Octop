@@ -13,7 +13,9 @@ def task_scope(project_id: str | None) -> str:
     return "tasks:" + (project_id or "")
 
 
-def record_change(conn: Any, owner_id: int, scope: str, entity_id: str, row: Any) -> None:
+def record_change(
+    conn: Any, owner_id: int, scope: str, entity_id: str, row: Any, *, deleted: bool = False
+) -> None:
     # UPDATE takes the stream lock until commit, so sequence order is commit order.
     conn.execute(
         "INSERT INTO project_sync_scopes(owner_id, scope) VALUES (?, ?) "
@@ -29,7 +31,13 @@ def record_change(conn: Any, owner_id: int, scope: str, entity_id: str, row: Any
     conn.execute(
         "INSERT INTO project_sync_changes(owner_id, scope, sequence, entity_id, payload_json) "
         "VALUES (?, ?, ?, ?, ?)",
-        (owner_id, scope, head["sequence"], entity_id, json.dumps(asdict(row))),
+        (
+            owner_id,
+            scope,
+            head["sequence"],
+            entity_id,
+            json.dumps({**asdict(row), **({"deleted": True} if deleted else {})}),
+        ),
     )
 
 

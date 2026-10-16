@@ -408,9 +408,10 @@ def _reasoning_configuration(
 def _configuration(
     services: SharedServices, owner_id: int, project_id: str | None, options: TaskExecutionOptions
 ) -> tuple[str, str]:
-    fields = (
-        get_project(services, owner_id, project_id) if project_id else ProjectFields(name="Task")
-    )
+    project = get_project(services, owner_id, project_id) if project_id else None
+    if project and project.archived:
+        raise OctopError.localized(ErrorCode.PROJECT_ARCHIVED)
+    fields = project or ProjectFields(name="Task")
     snapshot = fields.model_dump(mode="json")
     overrides = options.model_dump(
         exclude_none=True,
@@ -647,3 +648,18 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
             if body.title is not None:
                 services.project_task_title_repo.skip_pending(conn, task_id)
     return detail(services, owner_id, task_id)
+
+
+def delete(services: SharedServices, owner_id: int, task_id: str, expected_revision: int) -> None:
+    with services.db.transaction() as conn:
+        repo = services.project_task_repo
+        if not repo.lock_owner(conn, owner_id):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
+        row = repo.get_in_transaction(conn, task_id, owner_id)
+        if row is None:
+            raise OctopError.localized(ErrorCode.NOT_FOUND)
+        if row.list_revision != expected_revision:
+            raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+        if row.active_turn_id:
+            raise OctopError.localized(ErrorCode.TASK_BUSY)
+        repo.delete(conn, row)

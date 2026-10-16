@@ -29,6 +29,7 @@ vi.mock("../../api/modules/projects", () => ({
     retry: vi.fn(),
     resources: vi.fn(),
     update: vi.fn(),
+    delete: vi.fn(),
     downloadArtifact: vi.fn(),
   },
 }));
@@ -111,6 +112,7 @@ beforeEach(() => {
     default_model_ref: "glm/glm",
   });
   api.update.mockResolvedValue(fixture);
+  api.delete.mockResolvedValue(undefined);
   api.retry.mockResolvedValue(fixture);
   api.open.mockResolvedValue(fixture);
   api.get.mockResolvedValue(fixture);
@@ -705,6 +707,105 @@ it("外部归档后的旧历史页不会让任务重新出现在未归档列表"
     screen.queryByRole("button", { name: /第一项任务/ }),
   ).not.toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "任务消息" })).toBeDisabled();
+});
+
+it.each(["proj_a", null])(
+  "删除任务确认后移除列表并关闭会话，所属项目为 %s",
+  async (projectID) => {
+    const task = { ...fixture, project_id: projectID };
+    api.list.mockResolvedValue({
+      items: [task],
+      next_page_cursor: null,
+      sync_cursor: "sync_first",
+    });
+    api.open.mockResolvedValue(task);
+    const user = userEvent.setup();
+    mount("?task=task_a", projectID);
+    await user.click(await screen.findByRole("button", { name: "删除任务" }));
+    expect(screen.getByText(zh.projects.tasks.deleteConfirm)).toBeTruthy();
+    expect(api.delete).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /取\s*消/ }));
+    await user.click(screen.getByRole("button", { name: "删除任务" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(api.delete).toHaveBeenCalledWith("task_a", 1));
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: fixture.title })).toBeNull(),
+    );
+    expect(screen.queryByRole("button", { name: /第一项任务/ })).toBeNull();
+  },
+);
+
+it("删除失败保留任务和对话，可重试", async () => {
+  api.delete.mockRejectedValueOnce(new Error("offline"));
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await user.click(await screen.findByRole("button", { name: "删除任务" }));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByText("offline")).toBeTruthy();
+  expect(screen.getByText("已记住蓝鸟")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() => expect(api.delete).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.queryByText("已记住蓝鸟")).toBeNull());
+});
+
+it("运行中的任务不能删除", async () => {
+  api.open.mockResolvedValue({
+    ...fixture,
+    active_turn_id: "turn_a",
+    status: "running",
+  });
+  mount("?task=task_a");
+  expect(
+    await screen.findByRole("button", { name: "删除任务" }),
+  ).toBeDisabled();
+  expect(api.delete).not.toHaveBeenCalled();
+});
+
+it("删除增量后，迟到的历史分页和会话更新不能恢复列表项", async () => {
+  api.list.mockResolvedValueOnce({
+    items: [fixture],
+    next_page_cursor: "old_page",
+    sync_cursor: "sync_first",
+  });
+  let finishPage!: (
+    value: Awaited<ReturnType<typeof projectTasksApi.list>>,
+  ) => void;
+  api.list.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishPage = resolve;
+      }),
+  );
+  api.sync.mockResolvedValue({
+    base_sync_cursor: "sync_first",
+    next_sync_cursor: "sync_deleted",
+    next_page_cursor: null,
+    changes: [
+      { operation: "delete", task_id: "task_a", list_revision: 2, data: null },
+    ],
+  });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+  await user.click(screen.getByRole("button", { name: "加载更早的任务" }));
+  fireEvent(document, new Event("visibilitychange"));
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: /第一项任务/ })).toBeNull(),
+  );
+  await act(async () =>
+    finishPage({ items: [fixture], next_page_cursor: null, sync_cursor: null }),
+  );
+  await act(async () =>
+    api.events.mock.calls[0][2]({
+      type: "turn",
+      data: {
+        task: { ...fixture, list_revision: 2 },
+        turn: fixture.turns[0],
+        cursor: "late",
+      },
+    }),
+  );
+  expect(screen.queryByRole("button", { name: /第一项任务/ })).toBeNull();
 });
 
 it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目", async () => {
