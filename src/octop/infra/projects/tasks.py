@@ -16,6 +16,8 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects import artifacts
+from octop.infra.projects.artifact_models import TaskArtifact
 from octop.infra.projects.client_tool_models import ClientID, ClientToolDefinition
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
 from octop.infra.projects.models import (
@@ -75,6 +77,8 @@ class TaskExecutionOptions(ProjectModel):
         names = [tool.name for tool in self.client_tools or []]
         if len(names) != len(set(names)):
             raise ValueError("duplicate client tool names")
+        if set(names) & artifacts.SERVER_ARTIFACT_TOOLS:
+            raise ValueError("artifact tools are server-owned and cannot be registered by clients")
         return self
 
 
@@ -146,6 +150,10 @@ class TaskTurn(ProjectModel):
     status: TurnStatus
     error_code: str
     activity: str = Field(description="当前执行的工具名称；不包含参数、凭据或工具输出。")
+    artifacts: list[TaskArtifact] = Field(
+        default_factory=list,
+        description="该轮已成功发布的不可变附件；仅含元数据，内容使用鉴权 HTTP 下载。",
+    )
     model_ref: str
     options: TaskExecutionOptions = Field(
         description="本轮实际采用的模型、Skill、MCP 和客户端工具。"
@@ -211,7 +219,7 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
     )
 
 
-def turn_view(t: ProjectTaskTurnRow) -> TaskTurn:
+def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = None) -> TaskTurn:
     configuration = json.loads(t.configuration_json)
     return TaskTurn(
         sequence=t.pk,
@@ -222,6 +230,7 @@ def turn_view(t: ProjectTaskTurnRow) -> TaskTurn:
         status=cast(TurnStatus, t.status),
         error_code=t.error_code,
         activity=t.activity,
+        artifacts=attachments or [],
         model_ref=t.model_ref,
         options=TaskExecutionOptions(
             model_ref=t.model_ref,
@@ -263,9 +272,10 @@ def detail(
         if row is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
         turns = services.project_task_turn_repo.page(conn, task_id, limit + 1, before)
+        attachments = artifacts.for_turns(services, conn, task_id, [turn.turn_id for turn in turns])
     more = len(turns) > limit
     turns = turns[-limit:]
-    views = [turn_view(t) for t in turns]
+    views = [turn_view(t, attachments.get(t.turn_id)) for t in turns]
     stream = cursor_codec(services, owner_id, f"conversation:{task_id}:events")
     return TaskDetail(
         **summary(row).model_dump(),
@@ -293,11 +303,12 @@ def updates(
         if task is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
         rows = services.project_task_turn_repo.since(conn, task_id, cursor.position, 50)
+        attachments = artifacts.for_turns(services, conn, task_id, [turn.turn_id for turn in rows])
     if cursor.position and (not rows or rows[0].pk != cursor.position):
         raise cursor_reset()
     result = []
     for row in rows:
-        view = turn_view(row)
+        view = turn_view(row, attachments.get(row.turn_id))
         fingerprint = _fingerprint(view, task.list_revision)
         if row.pk == cursor.position and fingerprint == cursor.after:
             continue

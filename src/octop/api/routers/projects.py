@@ -10,10 +10,11 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
+from octop.api.common.content_disposition import content_disposition
 from octop.api.deps import current_user, get_server, require_database
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import service, sync, tasks
+from octop.infra.projects import artifacts, service, sync, tasks
 from octop.infra.projects.models import (
     ProjectFields,
     ProjectPatch,
@@ -393,7 +394,7 @@ async def patch_task(
     "/{task_id}",
     response_model=tasks.TaskDetail,
     summary="读取任务对话和执行状态",
-    description="返回最近一页轮次及任务摘要，默认 50 轮、最多 100；page_cursor 读取更早记录。首页 event_cursor 可用于订阅实时状态，不返回凭据或工具参数。其他用户的任务返回 404。",
+    description="返回最近一页轮次及任务摘要，默认 50 轮、最多 100；page_cursor 读取更早记录。每轮 artifacts 包含已发布附件元数据，内容通过鉴权 HTTP 下载。首页 event_cursor 可用于订阅实时状态，不返回凭据或附件字节。其他用户的任务返回 404。",
 )
 async def task_detail(
     task_id: str,
@@ -406,6 +407,40 @@ async def task_detail(
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(
         tasks.detail, _services(server), user.id, task_id, limit=limit, page_cursor=page_cursor
+    )
+
+
+@task_router.get(
+    "/{task_id}/artifacts/{artifact_id}/download",
+    response_class=Response,
+    summary="下载任务已发布的附件",
+    description="需要当前任务所属账号鉴权。下载发布时保存的不可变快照，不读取工作目录，不依赖任务运行状态。不存在或他人附件返回 404；响应始终为 attachment，支持中文文件名。",
+    responses={
+        200: {
+            "description": "附件原始字节，Content-Type 按已保存的 MIME 类型返回。",
+            "content": {
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+            },
+        }
+    },
+)
+async def download_task_artifact(
+    task_id: str,
+    artifact_id: str,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> Response:
+    artifact, content = await asyncio.to_thread(
+        artifacts.download, _services(server), user.id, task_id, artifact_id
+    )
+    return Response(
+        content=content,
+        media_type=artifact.media_type,
+        headers={
+            "Content-Disposition": content_disposition(artifact.name),
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

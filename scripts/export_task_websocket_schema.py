@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from octop.api.routers.project_tasks_ws import AuthenticateFrame, _command
+from octop.infra.projects.artifact_models import CreateArtifactArgs, PublishWorkspaceFileArgs
 from octop.infra.projects.client_tool_models import ClientToolCall, ClientToolClaim
 from octop.infra.projects.tasks import TaskDetail, TaskUpdate
 
@@ -19,7 +20,15 @@ def export_schema() -> dict[str, Any]:
         definitions[name] = schema
 
     add("ClientCommand", _command.json_schema())
-    for model in (AuthenticateFrame, TaskDetail, TaskUpdate, ClientToolCall, ClientToolClaim):
+    for model in (
+        AuthenticateFrame,
+        TaskDetail,
+        TaskUpdate,
+        ClientToolCall,
+        ClientToolClaim,
+        CreateArtifactArgs,
+        PublishWorkspaceFileArgs,
+    ):
         add(model.__name__, model.model_json_schema())
 
     def ref(name: str) -> dict[str, str]:

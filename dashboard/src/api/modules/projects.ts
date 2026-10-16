@@ -1,4 +1,4 @@
-import { request } from "../request";
+import { request, requestBlob } from "../request";
 import { projectTaskSocket } from "./projectTaskSocket";
 
 export interface PackageProjectSkill {
@@ -100,6 +100,18 @@ export interface TaskSummary {
   created_at: string;
   updated_at: string;
 }
+export interface TaskArtifact {
+  artifact_id: string;
+  task_id: string;
+  turn_id: string;
+  name: string;
+  media_type: string;
+  byte_count: number;
+  sha256: string;
+  source_path: string | null;
+  download_url: string;
+  created_at: string;
+}
 export interface TaskTurn {
   sequence: number;
   turn_id: string;
@@ -109,6 +121,7 @@ export interface TaskTurn {
   status: TaskStatus;
   error_code: string;
   activity: string;
+  artifacts: TaskArtifact[];
   model_ref: string;
   options: TaskExecutionOptions;
   project_revision: number | null;
@@ -167,6 +180,12 @@ const taskListPath = (projectID: string | null) =>
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
 export const projectTasksApi = {
+  downloadArtifact: (taskID: string, artifactID: string) =>
+    requestBlob(
+      `${taskPath(taskID)}/artifacts/${encodeURIComponent(
+        artifactID,
+      )}/download`,
+    ),
   resources: () =>
     request<TaskResources>("/project-tasks/resources", { cache: "no-store" }),
   update: (

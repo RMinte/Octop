@@ -43,6 +43,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | GET | `/api/project-tasks` | 分页列出无项目任务；archived=true 查看归档任务 |
 | GET | `/api/project-tasks/resources` | 本轮可用的模型、Skill 和 MCP 引用 |
 | WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
+| GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
 | PATCH | `/api/project-tasks/{task_id}` | 修改名称、归档或恢复，校验 expected_revision |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
 | GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
@@ -266,6 +267,10 @@ model_ref 省略或 null 使用发送时的默认选择；显式指定不可用�
 `GET /api/project-tasks/resources` 返回可用 models（model_ref/name）、default_model_ref，以及共享 Skill 与本人 MCP 引用，不包含凭据。网页“本轮设置”在成功发送后恢复继承状态；网络失败保留选择和发送标识。同一 request_id 必须重传相同的原选项，项目后来修改不会影响幂等回放。手动重试采用该次请求的 options，未指定时使用当前项目配置，不隐式复制失败轮次的覆盖项。返回的 turns[].options 是该轮实际采用的模型、Skill 和 MCP，project_revision 仍记录发送时项目版本。
 
 未发布的数据库 schema 34 包含归档标记、分页索引和任务状态摘要。已有任务默认未归档，状态从活动轮次或最近一轮初始化；本地已记录 schema 34 但缺少状态列的库也会补齐。任务、轮次和正文保留。任务列表游标及网页任务缓存版本随状态字段更新，旧游标返回 `PROJECT_SYNC_RESET`，客户端重建第一页；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
+
+### 服务端附件交付
+
+任务运行时提供 `create_artifact(name,content,media_type?)` 和 `publish_workspace_file(path,name?)`，两者均在服务端执行，客户端不能注册。后者只读取本轮服务端工作目录，不读取 `client_directory`。有无项目都可创建附件；只有显式工具调用成功才算正式交付。每轮 `artifacts` 返回稳定 ID、名称、MIME 类型、大小、SHA-256、可选来源相对路径和鉴权下载地址；REST 历史和 WebSocket 使用同一结构，重连可恢复。源文件更改/删除不影响已发布快照。单文件最多 25 MiB，每轮最多 5 份、合计 50 MiB。详细字段、错误和客户端适配见[任务 WebSocket 指南第 13 节](project-task-websocket.md#13-服务端附件交付)。
 
 ### 任务 WebSocket：命令与实时状态
 

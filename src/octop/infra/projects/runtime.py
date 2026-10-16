@@ -27,6 +27,7 @@ from octop.infra.connectors.service import ConnectorService
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.artifacts import SERVER_ARTIFACT_TOOLS, TaskArtifactPublisher
 from octop.infra.projects.client_tool_models import ClientToolDefinition
 from octop.infra.projects.client_tools import ClientToolBroker
 from octop.infra.projects.models import ProjectFields, SkillBinding
@@ -131,11 +132,15 @@ async def run_turn(
     ]
     broker = ClientToolBroker(services, owner_id, turn, options.get("client_id") or "", definitions)
     client_tools = broker.tools()
-    if {tool.name for tool in client_tools} & {tool.name for tool in tools}:
+    if ({tool.name for tool in client_tools} | SERVER_ARTIFACT_TOOLS) & {
+        tool.name for tool in tools
+    }:
         raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE)
     active_mcp = [*fields.mcp_servers, *(["client"] if definitions else [])]
     if definitions:
         prompt += "\n\n" + tr("projects.client_tools_prompt", locale)
+    publisher = TaskArtifactPublisher(services, owner_id, turn, workspace, locale)
+    prompt += "\n\n" + tr("projects.artifacts_prompt", locale)
     cfg = HarnessAgentConfig(
         name="project-task",
         language=locale,
@@ -169,12 +174,14 @@ async def run_turn(
             }
         ),
         web_search_tools=False,
+        tools=publisher.tools(),
     )
     policy = await asyncio.to_thread(
         SecuritySettingsStore(settings_repo=services.settings_repo).load
     )
     cfg = policy.apply_to_config(cfg)
     agent = await asyncio.to_thread(HarnessAgent, cfg, agent_id=turn.task_id)
+    publisher.workspace = agent.workspace
     usage: dict[str, dict[str, Any]] = {}
     try:
         for slug, entries in files:

@@ -13,6 +13,7 @@ import {
 import {
   Archive,
   ArchiveRestore,
+  Download,
   MessageSquare,
   Plus,
   Send,
@@ -24,6 +25,7 @@ import {
   projectTasksApi,
   type TaskMessage,
   type TaskExecutionOptions,
+  type TaskArtifact,
   type Project,
 } from "../../api/modules/projects";
 import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
@@ -83,6 +85,7 @@ export default function TaskConversations({
   const [updating, setUpdating] = useState(false);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [downloading, setDownloading] = useState<string | null>(null);
   const inFlight = useRef(false);
   const pending = useRef<{ target: string; body: TaskMessage } | null>(null);
   const end = useRef<HTMLDivElement>(null);
@@ -154,6 +157,32 @@ export default function TaskConversations({
     if (followOutput.current)
       end.current?.scrollIntoView?.({ block: "nearest" });
   }, [latestReply, latestTurnID]);
+
+  const downloadArtifact = async (artifact: TaskArtifact) => {
+    setDownloading(artifact.artifact_id);
+    try {
+      const blob = await projectTasksApi.downloadArtifact(
+        artifact.task_id,
+        artifact.artifact_id,
+      );
+      if (!alive.current || selectedTaskID.current !== artifact.task_id) return;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = artifact.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      if (alive.current && selectedTaskID.current === artifact.task_id)
+        setError(
+          apiErrorMessage(err, t("projects.tasks.artifactDownloadFailed"), t),
+        );
+    } finally {
+      if (alive.current) setDownloading(null);
+    }
+  };
 
   const selectTask = (id: string | null) => {
     const next = new URLSearchParams(params);
@@ -548,6 +577,24 @@ export default function TaskConversations({
                       <Typography.Text type="secondary">
                         {t("projects.tasks.tool", { name: turn.activity })}
                       </Typography.Text>
+                    )}
+                    {turn.artifacts?.length > 0 && (
+                      <Space
+                        direction="vertical"
+                        aria-label={t("projects.tasks.artifacts")}
+                      >
+                        {turn.artifacts.map((artifact) => (
+                          <Button
+                            key={artifact.artifact_id}
+                            icon={<Download size={14} />}
+                            loading={downloading === artifact.artifact_id}
+                            disabled={downloading !== null}
+                            onClick={() => void downloadArtifact(artifact)}
+                          >
+                            {artifact.name}
+                          </Button>
+                        ))}
+                      </Space>
                     )}
                     {turn.error_code && (
                       <Alert

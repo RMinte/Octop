@@ -28,6 +28,7 @@ vi.mock("../../api/modules/projects", () => ({
     retry: vi.fn(),
     resources: vi.fn(),
     update: vi.fn(),
+    downloadArtifact: vi.fn(),
   },
 }));
 vi.mock("../../hooks/useServerTimezone", () => ({
@@ -68,6 +69,7 @@ const fixture: TaskDetail = {
       status: "completed",
       error_code: "",
       activity: "",
+      artifacts: [],
       model_ref: "glm/glm",
       options: {},
       retry_of_turn_id: null,
@@ -110,6 +112,7 @@ beforeEach(() => {
   api.create.mockResolvedValue(fixture);
   api.send.mockResolvedValue(fixture);
   api.cancel.mockResolvedValue({ ...fixture, active_turn_id: null });
+  api.downloadArtifact.mockResolvedValue(new Blob(["report"]));
 });
 function mount(query = "", projectID: string | null = "proj_a") {
   return render(
@@ -730,4 +733,48 @@ it("改名期间收到新版本时使用开始编辑的版本，冲突后不覆�
     screen.getByRole("heading", { name: /另一设备修改的标题/ }),
   ).toBeInTheDocument();
   expect(api.update).toHaveBeenCalledTimes(1);
+});
+
+it("downloads a published attachment through the authenticated API using its resource IDs", async () => {
+  const artifact = {
+    artifact_id: "artifact_report",
+    task_id: fixture.task_id,
+    turn_id: fixture.turns[0].turn_id,
+    name: "报告.md",
+    media_type: "text/markdown",
+    byte_count: 6,
+    sha256: "a".repeat(64),
+    source_path: null,
+    download_url:
+      "/api/project-tasks/task_a/artifacts/artifact_report/download",
+    created_at: fixture.created_at,
+  };
+  api.get.mockResolvedValue({
+    ...fixture,
+    turns: [{ ...fixture.turns[0], artifacts: [artifact] }],
+  });
+  URL.createObjectURL = vi.fn(() => "blob:attachment-report");
+  URL.revokeObjectURL = vi.fn();
+  const clicked: HTMLAnchorElement[] = [];
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(function () {
+      clicked.push(this);
+    });
+  try {
+    mount("?task=task_a");
+    fireEvent.click(await screen.findByRole("button", { name: artifact.name }));
+    await waitFor(() =>
+      expect(api.downloadArtifact).toHaveBeenCalledWith(
+        "task_a",
+        "artifact_report",
+      ),
+    );
+    await waitFor(() => expect(clicked).toHaveLength(1));
+    expect(clicked[0].download).toBe("报告.md");
+    expect(clicked[0].href).toBe("blob:attachment-report");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:attachment-report");
+  } finally {
+    click.mockRestore();
+  }
 });

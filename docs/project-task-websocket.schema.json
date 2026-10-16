@@ -818,6 +818,75 @@
       "title": "AuthenticateFrame",
       "type": "object"
     },
+    "TaskArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "media_type": {
+          "title": "Media Type",
+          "type": "string"
+        },
+        "byte_count": {
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "发布已有文件时的服务端工作目录相对路径；直接创建为 null。",
+          "title": "Source Path"
+        },
+        "download_url": {
+          "description": "需要当前账号鉴权的相对 HTTP 下载地址；不包含令牌。",
+          "title": "Download Url",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "task_id",
+        "turn_id",
+        "name",
+        "media_type",
+        "byte_count",
+        "sha256",
+        "source_path",
+        "download_url",
+        "created_at"
+      ],
+      "title": "TaskArtifact",
+      "type": "object"
+    },
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
@@ -861,6 +930,14 @@
           "description": "当前执行的工具名称；不包含参数、凭据或工具输出。",
           "title": "Activity",
           "type": "string"
+        },
+        "artifacts": {
+          "description": "该轮已成功发布的不可变附件；仅含元数据，内容使用鉴权 HTTP 下载。",
+          "items": {
+            "$ref": "#/$defs/TaskArtifact"
+          },
+          "title": "Artifacts",
+          "type": "array"
         },
         "model_ref": {
           "title": "Model Ref",
@@ -1253,6 +1330,75 @@
         "claim_token"
       ],
       "title": "ClientToolClaim",
+      "type": "object"
+    },
+    "CreateArtifactArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "附件文件名，含文本格式扩展名，不含目录。",
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "content": {
+          "description": "完整 UTF-8 文本内容；不会写入工作目录。",
+          "title": "Content",
+          "type": "string"
+        },
+        "media_type": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "可选 MIME 类型。",
+          "title": "Media Type"
+        }
+      },
+      "required": [
+        "name",
+        "content"
+      ],
+      "title": "CreateArtifactArgs",
+      "type": "object"
+    },
+    "PublishWorkspaceFileArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "服务端工作目录内文件的相对路径。",
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "可选附件文件名，省略沿用源文件名。",
+          "title": "Name"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "PublishWorkspaceFileArgs",
       "type": "object"
     },
     "ReadyEvent": {

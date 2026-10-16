@@ -4,7 +4,7 @@
 
 客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。当前后台仍串行执行，正文按约 0.5 秒的保存节奏更新。
 
-这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字消息、工具活动摘要、停止，以及客户端工具声明、调用和结果回传。审批续跑及附件尚未接入；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)。
+这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字消息、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。审批续跑尚未接入；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)。
 
 - [JSON Schema](project-task-websocket.schema.json)：请求按实际 Pydantic 模型导出；服务端数据模型与 REST 共用定义。
 - [API 参考](api.md)：项目配置、任务列表、历史分页、改名与归档。
@@ -531,7 +531,7 @@ client_id 是当前登录用户下的**路由标识**，不是独立的设备认
 | 字段 | 约束 |
 | --- | --- |
 | client_tools | 省略、null 或 [] 表示本轮不提供客户端工具；不继承前轮和项目。非空时必须带 client_id，最多 64 项 |
-| name | 首位英文字母，后接字母、数字、下划线，总长 1–48 字符；本轮唯一 |
+| name | 首位英文字母，后接字母、数字、下划线，总长 1–48 字符；本轮唯一。create_artifact、publish_workspace_file 为服务端保留工具名，客户端不能注册 |
 | description | 1–4096 字符，说明工具的功能、参数及执行条件 |
 | input_schema | 根 type=object 的 Draft 2020-12 JSON Schema，序列化后最多 32 KiB；只支持 # 开头的文档内引用，不允许 $id 或远程引用 |
 
@@ -631,3 +631,69 @@ tool.get 也要求先 client.attach；result.data=ClientToolCall，只返回调�
 REST 创建/追问/重试也接受相同 options 字段，格式错误走标准 422 校验响应；工具领取和结果回传仅使用 WebSocket。网页当前不声明客户端工具，原生客户端按本节实现执行器。
 
 客户端联调需覆盖：正常执行后继续同轮回答、工具报错、领取回执丢失、结果回执丢失、pending/claimed 两种状态重连、多个连接争领、取消期间迟到结果、十分钟超时、客户端崩溃且副作用不确定，以及无工具声明的下一轮不会继承工具。
+
+## 13 服务端附件交付
+
+create_artifact 和 publish_workspace_file 均由 Octop 服务端提供。客户端不注册这两个工具，也不执行、不上传这两个工具的文件内容。客户端在普通任务轮次中读取 artifacts，按需下载和预览。无项目任务同样可使用两个服务端工具。
+
+### 13.1 工具语义与执行边界
+
+| 服务端工具 | 模型参数 | 成功行为 |
+| --- | --- | --- |
+| create_artifact | name、content、可选 media_type | 将完整 UTF-8 文本保存成不可变附件，不修改工作目录；支持 txt、md、csv、json、html 等文本格式 |
+| publish_workspace_file | path、可选 name | 从该轮服务端工作目录读取已有普通文件，保存不可变附件；PPTX、PDF、DOCX 等使用真实文件字节 |
+
+工具名没有 client__ 前缀。账号、task_id、turn_id、工具调用标识和服务端工作目录由运行时绑定，模型不能通过参数覆盖。参数的机器可读结构见 JSON Schema 中的 CreateArtifactArgs 和 PublishWorkspaceFileArgs；它们是模型工具参数，不是客户端 WebSocket 命令。
+
+publish_workspace_file 的 path 必须是非空的工作目录相对路径，使用正斜线分隔；拒绝绝对路径、..、.、空路径段、反斜线和冒号，拒绝符号链接及目录。只有服务端工作目录可读：项目有 directory 时使用本轮采用的目录，没有时使用任务自己的服务端工作目录。client_directory 仍只是元数据，服务端不会访问该位置，也不自动将请求转发给客户端。文件在读取过程中变化时发布失败，不产生附件。
+
+name 是单个文件名，最长 240 字符，不含目录、冒号或控制字符；前后不能有空白。create_artifact 的 media_type 省略或 null 时按扩展名推断，非空时只能是 MIME 类型本身，不带 charset 等参数。create_artifact 不把字符串伪装成 PPTX、PDF、DOCX；这些格式应先在服务端生成文件，再用 publish_workspace_file 发布。
+
+每份附件最多 25 MiB，每轮最多 5 份、合计 50 MiB；额度按持久化记录计算，服务重启不重置。失败调用不占用额度。同一轮、同一个工具调用 ID、相同参数重试返回同一 artifact_id，即使源文件已经删除；相同调用 ID 改用其他参数报冲突。新的工具调用 ID 可以发布新的快照。
+
+### 13.2 附件随轮次完整状态同步
+
+每个 TaskTurn 都包含 artifacts 数组，无附件时为 []。REST 历史、snapshot 和 turn 使用同一结构；发布成功后，即使 reply 没有变化，也会通过现有 turn 状态通道推送附件。无需订阅额外事件或轮询文件列表。
+
+| artifacts 字段 | 含义 |
+| --- | --- |
+| artifact_id | 服务端生成的不透明字符串，客户端原样保存、去重，不强制解析成 UUID |
+| task_id / turn_id | 所属任务和轮次 |
+| name / media_type | 文件显示名和 MIME 类型 |
+| byte_count / sha256 | 原始字节数和 SHA-256 十六进制摘要；用于校验下载及本地缓存 |
+| source_path | 发布已有文件时的服务端工作目录相对路径；直接创建文本为 null |
+| download_url | 当前 Octop 实例下的相对鉴权下载地址，不包含访问令牌 |
+| created_at | 服务端生成的 UTC ISO 8601 时间 |
+
+客户端按 task_id、turn_id 合并完整轮次，按 artifact_id 渲染附件；数组顺序为发布顺序。task.subscribe 的 cursor 同时覆盖文字和附件状态。重新连接或加载历史后使用服务端 artifacts 恢复文件卡，不从 Markdown 文件路径、工具活动文字或 source_path 推断附件，也不追加重复卡片。服务端工具失败或模型仅提到文件名时，不产生附件。
+
+发布成功的工具返回值包含 status=attached 和同一份附件元数据；模型随后继续当前轮次。工具收到受控失败时返回 is_error、error_code、message，模型可纠正参数或说明失败。工具成功、工具结果被模型消费、任务 completed 是不同事实：取消或生成失败不会回滚已经成功保存的附件。
+
+### 13.3 下载与本地缓存
+
+使用已有登录 token 请求 metadata.download_url，例如：
+
+```http
+GET /api/project-tasks/{task_id}/artifacts/{artifact_id}/download
+Authorization: Bearer <access token>
+```
+
+成功返回原始文件字节，并带有正确的 Content-Type、Content-Length、Content-Disposition: attachment、Cache-Control: private, no-store 和 X-Content-Type-Options: nosniff。文件名支持 UTF-8；不要把 token 加进 URL。下载始终校验当前账号对任务的访问权，未知任务、他人任务或不匹配的附件 ID 返回 404。
+
+原生客户端按当前账号、服务端实例和 artifact_id 隔离缓存；下载后核对 byte_count 和 sha256，再交给本地文件预览或系统分享。客户端现有 UUID 附件实体应通过适配层映射服务端不透明 ID，不能要求 artifact_id 符合 UUID 格式。网页使用带鉴权的文件下载请求，不依赖裸链接携带令牌。
+
+已发布内容与元数据一起持久保存在服务端数据库，随数据库备份恢复；它不再依赖源文件是否存在，也不依赖任务是否仍在运行。归档后的任务仍可下载附件。附件内容不会放进 WebSocket、正文历史或工具结果文本；客户端不需要通过 read_file 取回二进制文件。
+
+### 13.4 失败与联调
+
+| 错误码 | 状态 | 含义 |
+| --- | --- | --- |
+| TASK_ARTIFACT_INVALID | 422 | 文件名、文本格式、相对路径、文件类型或符号链接不符合要求 |
+| TASK_ARTIFACT_LIMIT | 413 | 超过单文件或本轮附件额度 |
+| TASK_ARTIFACT_CONFLICT | 409 | 同一工具调用 ID 已发布过不同参数的附件 |
+| TASK_ARTIFACT_CLOSED | 409 | 当前轮次已停止、结束或执行租约已失效，不能发布新的附件 |
+| TASK_ARTIFACT_UNAVAILABLE | 404 | 源文件不存在、无法读取、读取时发生变化或已保存快照损坏 |
+
+工具错误供模型读取；下载接口错误使用标准错误信封。客户端声明这两个保留工具名会被拒绝：WebSocket 为 TASK_FRAME_INVALID，REST 为标准 422 参数校验响应。
+
+客户端联调应覆盖：无项目文本附件、多个文件、中文文件名、正文未变化时出现附件、任务完成前下载、断线恢复、历史分页、归档后下载、源文件删除后仍可下载、跨账号拒绝访问，以及工具失败时不生成附件卡。当前没有客户端文件上传或附件发布命令；客户端只消费服务端发布的附件。

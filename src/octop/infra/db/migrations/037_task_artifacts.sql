@@ -1,0 +1,19 @@
+-- Immutable task attachments. Bytes and publication records commit together.
+CREATE TABLE IF NOT EXISTS project_task_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  artifact_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL REFERENCES project_tasks(task_id),
+  turn_id TEXT NOT NULL REFERENCES project_task_turns(turn_id),
+  tool_call_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  name TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  byte_count BIGINT NOT NULL CHECK(byte_count >= 0 AND byte_count <= 26214400),
+  sha256 TEXT NOT NULL,
+  source_path TEXT,
+  content BLOB NOT NULL,
+  created_at BIGINT NOT NULL,
+  UNIQUE(turn_id, tool_call_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_artifacts_turn ON project_task_artifacts(task_id, turn_id, id);
+UPDATE _schema_version SET version = 37;
