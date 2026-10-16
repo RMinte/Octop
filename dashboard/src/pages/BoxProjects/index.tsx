@@ -44,6 +44,7 @@ import RootDirSelect from "../Experts/components/RootDirSelect";
 import styles from "./index.module.less";
 import TaskConversations from "./TaskConversations";
 import { useProjectList } from "./useProjectLists";
+import { useTaskMessageQueue } from "./useTaskMessageQueue";
 import ProjectSkillsField, { projectSkillKey } from "./ProjectSkillsField";
 
 const EMPTY: ProjectFields = {
@@ -63,6 +64,7 @@ type FormValues = ProjectFields;
 
 export default function BoxProjectsPage() {
   const { t } = useTranslation();
+  const taskQueue = useTaskMessageQueue();
   const navigate = useNavigate();
   const { projectID } = useParams<{ projectID: string }>();
   const timeZone = useServerTimezone();
@@ -230,6 +232,10 @@ export default function BoxProjectsPage() {
     setDeleteError("");
     try {
       await projectsApi.delete(deleteTarget.project_id);
+      for (const [taskID, queued] of Object.entries(taskQueue.queues)) {
+        if (queued.projectID === deleteTarget.project_id)
+          taskQueue.clear(taskID);
+      }
       removeProject(deleteTarget.project_id);
       setDeleteTarget(null);
       void message.success(t("projects.deleted"));
@@ -349,7 +355,11 @@ export default function BoxProjectsPage() {
         </aside>
         <main className={styles.detail}>
           {standalone ? (
-            <TaskConversations key="standalone" projectID={null} />
+            <TaskConversations
+              key="standalone"
+              projectID={null}
+              queue={taskQueue}
+            />
           ) : loading ? (
             <div className={styles.loading}>
               <Spin />
@@ -436,6 +446,7 @@ export default function BoxProjectsPage() {
                         key={selected.project_id}
                         projectID={selected.project_id}
                         project={selected}
+                        queue={taskQueue}
                       />
                     ),
                   },

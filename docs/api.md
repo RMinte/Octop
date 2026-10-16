@@ -318,7 +318,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 ### 任务输入附件
 
-独立上传、发送、历史展示与多轮文件处理的接入步骤见[任务通用附件接入说明](project-task-input-attachments.md)。
+独立上传、发送、历史展示与多轮文件处理的接入步骤见[任务通用附件接入说明](project-task-input-attachments.md)。网页支持执行中将后续消息加入本地先进先出队列，当前轮结束后逐条提交；队列不改变接口的 `TASK_BUSY` 约束，具体生命周期和重试规则见[任务消息队列使用和接入说明](project-task-message-queue.md)。
 
 先使用 `POST /api/project-tasks/attachments`，以 multipart `file` 提交文件并取得 `{attachment_id,name,media_type,byte_count,sha256,preview_url,workspace_path,created_at}`，再在 REST 创建、继续消息或 WebSocket `task.create/task.message` 的 `attachment_ids` 引用。支持文档、表格、PDF、文本、代码、压缩包等通用文件；每条消息图片和其他文件合计最多九个，每个上限为服务端上传设置与 25 MiB 的较小值，单文件大小超限返回 `413 TASK_ATTACHMENT_LIMIT`。消息附件超过九个、ID 为空或重复时，REST 返回 `422` 请求校验响应，WebSocket 返回 `422 TASK_FRAME_INVALID`。
 

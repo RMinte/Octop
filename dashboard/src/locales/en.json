@@ -6628,6 +6628,8 @@
       "imageUploading": "Uploading…",
       "imageUploadFailed": "Attachment upload failed. Remove it and add it again.",
       "imagePreviewRetry": "Reload image",
+      "attachmentRestorePreviewFailed": "The preview could not load. The original attachment is retained and can still be sent.",
+      "queueRetry": "Retry send",
       "imageSize": "Each attachment must be no larger than 25 MiB. Your server may set a lower upload limit.",
       "imageCount": "Add up to 9 attachments per message.",
       "supportsImages": "Supports images",

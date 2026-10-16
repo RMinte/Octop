@@ -51,18 +51,30 @@ import TaskInteractions from "./TaskInteractions";
 import TaskApprovalModePicker from "./TaskApprovalMode";
 import TaskInputImages from "./TaskInputImages";
 import { MAX_TASK_IMAGES, useTaskImages } from "./useTaskImages";
+import {
+  useTaskMessageQueue,
+  type TaskMessageQueue,
+} from "./useTaskMessageQueue";
 
 export default function TaskConversations({
   projectID,
   project,
+  queue: sharedQueue,
 }: {
   projectID: string | null;
   project?: Project;
+  queue?: TaskMessageQueue;
 }) {
   const { t } = useTranslation();
+  const localQueue = useTaskMessageQueue();
+  const queue = sharedQueue ?? localQueue;
+  const clearQueue = queue.clear;
   const timeZone = useServerTimezone();
   const [params, setParams] = useSearchParams();
   const taskID = params.get("task");
+  const queued = taskID ? queue.queues[taskID] : undefined;
+  const queuedItems = queued?.items ?? [];
+  const queueDelivery = taskID ? queue.delivered[taskID] : undefined;
   const archivedView = params.get("archived") === "true";
   const {
     items: list,
@@ -170,11 +182,23 @@ export default function TaskConversations({
   const taskDeleted = !!taskID && isDeleted(taskID);
 
   useEffect(() => {
+    if (
+      queueDelivery?.task_id === taskID &&
+      queueDelivery.project_id === projectID &&
+      !taskDeleted
+    ) {
+      applyWrite(queueDelivery);
+      upsertTask(queueDelivery);
+    }
+  }, [queueDelivery, taskID, projectID, taskDeleted, applyWrite, upsertTask]);
+
+  useEffect(() => {
     if (!taskDeleted) return;
+    if (taskID) clearQueue(taskID);
     const next = new URLSearchParams(params);
     next.delete("task");
     setParams(next, { replace: true });
-  }, [taskDeleted, params, setParams]);
+  }, [taskDeleted, taskID, clearQueue, params, setParams]);
 
   const refresh = useCallback(async () => {
     try {
@@ -279,7 +303,6 @@ export default function TaskConversations({
     if (
       (!prompt && !attachmentIDs.length) ||
       images.blocked ||
-      busy ||
       detail?.archived ||
       projectArchived ||
       deleteTarget ||
@@ -289,9 +312,6 @@ export default function TaskConversations({
       (taskID && !detail)
     )
       return;
-    inFlight.current = true;
-    setSending(true);
-    setError("");
     const target = taskID ?? `new:${projectID ?? ""}`;
     if (
       pending.current?.target !== target ||
@@ -314,6 +334,29 @@ export default function TaskConversations({
         },
       };
     }
+    if (taskID && (busy || queuedItems.length > 0 || queued?.sendingID)) {
+      const enqueued = queue.enqueue(
+        taskID,
+        projectID,
+        pending.current.body,
+        images.items.flatMap((item) =>
+          item.attachment ? [item.attachment] : [],
+        ),
+      );
+      if (enqueued === "full") {
+        setError(t("chat.queue.full"));
+        return;
+      }
+      setDraft("");
+      images.clear();
+      setOptions({});
+      pending.current = null;
+      setError("");
+      return;
+    }
+    inFlight.current = true;
+    setSending(true);
+    setError("");
     try {
       const result = taskID
         ? await projectTasksApi.send(taskID, pending.current.body)
@@ -351,6 +394,34 @@ export default function TaskConversations({
     }
   };
 
+  const reclaimQueued = (id: string) => {
+    if (!taskID) return;
+    const apply = () => {
+      if (
+        !alive.current ||
+        selectedTaskID.current !== taskID ||
+        selectedProjectID.current !== projectID
+      )
+        return;
+      const item = queue.reclaim(taskID, id);
+      if (!item) return;
+      setDraft(item.body.prompt ?? "");
+      images.restore(item.attachments);
+      setOptions(item.body.options ?? {});
+      pending.current = { target: taskID, body: item.body };
+      setError("");
+    };
+    if (draft.trim() || images.items.length) {
+      Modal.confirm({
+        title: t("chat.queue.reclaimOverwriteTitle"),
+        content: t("chat.queue.reclaimOverwrite"),
+        okText: t("common.confirm"),
+        cancelText: t("common.cancel"),
+        onOk: apply,
+      });
+    } else apply();
+  };
+
   const stop = async () => {
     if (!taskID || !detail?.active_turn_id || stopping) return;
     setStopping(true);
@@ -383,6 +454,8 @@ export default function TaskConversations({
     if (
       !taskID ||
       busy ||
+      queuedItems.length > 0 ||
+      queued?.sendingID ||
       detail?.archived ||
       projectArchived ||
       deleteTarget ||
@@ -483,6 +556,7 @@ export default function TaskConversations({
     setDeleteError("");
     try {
       await projectTasksApi.delete(deleteTarget.task_id);
+      queue.clear(deleteTarget.task_id);
       removeTask(deleteTarget.task_id, deleteTarget.list_revision);
       if (!alive.current) return;
       setDeleteTarget(null);
@@ -527,8 +601,11 @@ export default function TaskConversations({
         />
         <Button
           icon={<Plus size={16} />}
-          onClick={() => selectTask(null)}
-          disabled={sending || projectArchived}
+          onClick={() => {
+            if (taskID) queue.clear(taskID);
+            selectTask(null);
+          }}
+          disabled={sending || !!queued?.sendingID || projectArchived}
         >
           {t("projects.tasks.new")}
         </Button>
@@ -774,6 +851,9 @@ export default function TaskConversations({
                           </Typography.Text>
                           <Button
                             loading={sending}
+                            disabled={
+                              queuedItems.length > 0 || !!queued?.sendingID
+                            }
                             onClick={() => void retry(turn.turn_id)}
                           >
                             {t("projects.tasks.retry")}
@@ -819,7 +899,7 @@ export default function TaskConversations({
             value={options}
             onChange={setOptions}
             project={project}
-            disabled={sending || busy || !!detail?.archived || projectArchived}
+            disabled={sending || !!detail?.archived || projectArchived}
           />
           <Input.TextArea
             aria-label={t("projects.tasks.message")}
@@ -855,7 +935,7 @@ export default function TaskConversations({
             <div className={styles.inputImages}>
               {images.items.map((image) => (
                 <div className={styles.inputImage} key={image.id}>
-                  {image.isImage ? (
+                  {image.isImage && image.url ? (
                     <Image
                       src={image.url}
                       alt={image.name}
@@ -886,6 +966,7 @@ export default function TaskConversations({
                       icon={<Download size={14} />}
                       href={image.url}
                       download={image.name}
+                      disabled={!image.url}
                     >
                       {t("common.download")}
                     </Button>
@@ -905,6 +986,73 @@ export default function TaskConversations({
           )}
           {images.error && (
             <Alert type="error" showIcon message={images.error} />
+          )}
+          {!!queuedItems.length && (
+            <div
+              className={styles.queuedMessages}
+              role="list"
+              aria-label={t("chat.queue.label")}
+            >
+              {queuedItems.map((item, index) => (
+                <div
+                  className={styles.queuedMessageItem}
+                  role="listitem"
+                  key={item.id}
+                >
+                  <Typography.Text type="secondary">
+                    {index + 1}
+                  </Typography.Text>
+                  <Button
+                    type="text"
+                    className={styles.queuedMessageBody}
+                    aria-label={t("chat.queue.reclaim")}
+                    title={t("chat.queue.reclaim")}
+                    disabled={queued?.sendingID === item.id || composerDisabled}
+                    onClick={() => reclaimQueued(item.id)}
+                  >
+                    <Typography.Text ellipsis>
+                      {item.body.prompt ||
+                        t("chat.queue.attachmentsOnly", {
+                          count: item.attachments.length,
+                        })}
+                    </Typography.Text>
+                    {!!item.attachments.length && (
+                      <span>
+                        <Paperclip size={12} /> {item.attachments.length}
+                      </span>
+                    )}
+                  </Button>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<X size={14} />}
+                    aria-label={t("chat.queue.remove")}
+                    disabled={queued?.sendingID === item.id}
+                    onClick={() => taskID && queue.remove(taskID, item.id)}
+                  />
+                </div>
+              ))}
+              {queued?.error && (
+                <Alert
+                  type="error"
+                  showIcon
+                  message={apiErrorMessage(
+                    queued.error,
+                    t("chat.queue.flushFailed"),
+                    t,
+                  )}
+                  action={
+                    <Button
+                      size="small"
+                      disabled={composerDisabled || !!queued.sendingID}
+                      onClick={() => taskID && queue.retry(taskID)}
+                    >
+                      {t("projects.tasks.queueRetry")}
+                    </Button>
+                  }
+                />
+              )}
+            </div>
           )}
           <div className={styles.imageUpload}>
             <input
@@ -943,45 +1091,49 @@ export default function TaskConversations({
                   : "projects.tasks.standaloneHint",
               )}
             </Typography.Text>
-            {busy ? (
-              <Space>
-                <Button
-                  icon={
-                    activeTurn?.pause_requested ||
-                    activeTurn?.status === "paused" ? (
-                      <Play size={15} />
-                    ) : (
-                      <Pause size={15} />
-                    )
-                  }
-                  loading={controlling}
-                  disabled={
-                    reconnecting || stopping || activeTurn?.cancel_requested
-                  }
-                  title={t("projects.tasks.controlHint")}
-                  onClick={() => void control()}
-                >
-                  {t(
-                    activeTurn?.pause_requested ||
-                      activeTurn?.status === "paused"
-                      ? "projects.tasks.resume"
-                      : "projects.tasks.pause",
-                  )}
-                </Button>
-                <Button
-                  icon={<Square size={15} />}
-                  loading={stopping}
-                  disabled={detail?.turns.some(
-                    (turn) =>
-                      turn.turn_id === detail.active_turn_id &&
-                      turn.cancel_requested,
-                  )}
-                  onClick={() => void stop()}
-                >
-                  {t("projects.tasks.stop")}
-                </Button>
-              </Space>
-            ) : (
+            <Space>
+              {busy && (
+                <>
+                  <Button
+                    icon={
+                      activeTurn?.pause_requested ||
+                      activeTurn?.status === "paused" ? (
+                        <Play size={15} />
+                      ) : (
+                        <Pause size={15} />
+                      )
+                    }
+                    loading={controlling}
+                    disabled={
+                      reconnecting || stopping || activeTurn?.cancel_requested
+                    }
+                    title={t("projects.tasks.controlHint")}
+                    onClick={() => void control()}
+                  >
+                    {t(
+                      activeTurn?.pause_requested ||
+                        activeTurn?.status === "paused"
+                        ? "projects.tasks.resume"
+                        : "projects.tasks.pause",
+                    )}
+                  </Button>
+                  <Button
+                    icon={<Square size={15} />}
+                    loading={stopping}
+                    disabled={
+                      !!queued?.sendingID ||
+                      detail?.turns.some(
+                        (turn) =>
+                          turn.turn_id === detail.active_turn_id &&
+                          turn.cancel_requested,
+                      )
+                    }
+                    onClick={() => void stop()}
+                  >
+                    {t("projects.tasks.stop")}
+                  </Button>
+                </>
+              )}
               <Button
                 type="primary"
                 icon={<Send size={16} />}
@@ -990,6 +1142,7 @@ export default function TaskConversations({
                   (!draft.trim() && !images.attachmentIDs.length) ||
                   images.blocked ||
                   approvalSaving ||
+                  !!deleteTarget ||
                   loading ||
                   !!detail?.archived ||
                   projectArchived ||
@@ -997,9 +1150,13 @@ export default function TaskConversations({
                 }
                 onClick={() => void send()}
               >
-                {t("projects.tasks.send")}
+                {t(
+                  busy || queuedItems.length > 0 || queued?.sendingID
+                    ? "chat.queue.action"
+                    : "projects.tasks.send",
+                )}
               </Button>
-            )}
+            </Space>
           </div>
         </div>
       </div>

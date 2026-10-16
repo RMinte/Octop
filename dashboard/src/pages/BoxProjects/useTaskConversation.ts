@@ -157,7 +157,10 @@ export function useTaskConversation(
           historyRequest.current = null;
           setLoadingHistory(false);
           setDetail((old) =>
-            old?.task_id === snapshot.task_id
+            old?.task_id === snapshot.task_id &&
+            old.list_revision > snapshot.list_revision
+              ? old
+              : old?.task_id === snapshot.task_id
               ? { ...snapshot, approval_policy: approvalPolicy(old, snapshot) }
               : snapshot,
           );
@@ -173,7 +176,10 @@ export function useTaskConversation(
             if (disposed || controller?.signal.aborted) return;
             if (event.type === "snapshot") {
               setDetail((old) =>
-                old?.task_id === event.data.task_id
+                old?.task_id === event.data.task_id &&
+                old.list_revision > event.data.list_revision
+                  ? old
+                  : old?.task_id === event.data.task_id
                   ? {
                       ...event.data,
                       approval_policy: approvalPolicy(old, event.data),

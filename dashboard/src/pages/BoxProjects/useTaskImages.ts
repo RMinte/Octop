@@ -133,12 +133,59 @@ export function useTaskImages(scope: string) {
     setItems(itemsRef.current);
   };
 
+  const restore = (attachments: TaskInputAttachment[]) => {
+    clear();
+    const currentGeneration = generation.current;
+    const currentScope = scope;
+    const restored = attachments.map((attachment) => ({
+      id: crypto.randomUUID(),
+      name: attachment.name,
+      isImage: isTaskImage(attachment.media_type),
+      url: "",
+      controller: new AbortController(),
+      attachment,
+    }));
+    itemsRef.current = restored;
+    setItems(restored);
+    for (const item of restored) {
+      void projectTasksApi
+        .attachmentPreview(
+          item.attachment.attachment_id,
+          item.controller.signal,
+        )
+        .then((blob) => {
+          if (
+            item.controller.signal.aborted ||
+            generation.current !== currentGeneration ||
+            scopeRef.current !== currentScope
+          )
+            return;
+          const url = URL.createObjectURL(blob);
+          itemsRef.current = itemsRef.current.map((entry) =>
+            entry.id === item.id ? { ...entry, url } : entry,
+          );
+          setItems(itemsRef.current);
+        })
+        .catch(() => {
+          // The upload remains valid when only the local preview cannot load.
+          if (
+            item.controller.signal.aborted ||
+            generation.current !== currentGeneration ||
+            scopeRef.current !== currentScope
+          )
+            return;
+          setError(t("projects.tasks.attachmentRestorePreviewFailed"));
+        });
+    }
+  };
+
   return {
     items,
     error,
     add,
     remove,
     clear,
+    restore,
     uploading: items.some((item) => !item.attachment && !item.error),
     blocked: items.some((item) => !item.attachment),
     attachmentIDs: items.flatMap((item) =>

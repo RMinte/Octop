@@ -6628,6 +6628,8 @@
       "imageUploading": "上传中…",
       "imageUploadFailed": "附件上传失败，请移除后重新添加。",
       "imagePreviewRetry": "重新加载图片",
+      "attachmentRestorePreviewFailed": "附件预览暂时无法加载，已保留原附件，可继续发送。",
+      "queueRetry": "重试发送",
       "imageSize": "每个附件不能超过 25 MiB；服务端可能设置更低的上传限额。",
       "imageCount": "每条消息最多添加 9 个附件。",
       "supportsImages": "支持图片",

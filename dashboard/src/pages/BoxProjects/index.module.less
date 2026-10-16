@@ -235,6 +235,31 @@
   margin-top: 10px;
   font-size: 12px;
 }
+.queuedMessages {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.queuedMessageItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--ant-color-border-secondary, #e5e7eb);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+.queuedMessageBody {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 6px;
+  > span:first-child {
+    min-width: 0;
+  }
+}
 .inputImages {
   display: flex;
   flex-wrap: wrap;
