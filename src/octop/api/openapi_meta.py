@@ -60,7 +60,7 @@ HITL resume still uses `POST /api/agents/{agent_id}/chat/hitl/resume` (SSE).
 OPENAPI_TAGS: list[dict[str, str]] = [
     {
         "name": "projects",
-        "description": "独立项目和任务：管理项目自己的目录、Skill、MCP 与行动指南；发送首条消息创建任务，在同一任务内继续多轮对话。支持持久历史、增量回复和停止。无需专家。任务实时通道为 `/api/project-tasks/ws`，支持多任务共用连接；浏览器首帧 authenticate 鉴权，命令包括 task.create、task.message、task.subscribe、task.cancel、task.retry。支持按轮声明客户端工具，通过 client.attach、tool.claim、tool.result 完成客户端执行和模型续跑。create_artifact、publish_workspace_file 由服务端提供；每轮 artifacts 返回已发布附件元数据，内容通过鉴权 HTTP 下载。WebSocket 帧协议见仓库 docs/project-task-websocket.md；REST 保留配置、列表、历史和快照。",
+        "description": "独立项目和任务：管理项目自己的目录、Skill、MCP、插件、子代理角色、长期记忆、团队协作与行动指南；发送首条消息创建任务，在同一任务内继续多轮对话。支持持久工具上下文、任务独立记忆、增量回复和停止。独立保存并实时传送模型返回的思考内容，本轮可选择模型支持的思考模式和强度。团队使用任务内选定角色同步协作，无需专家。任务实时通道为 `/api/project-tasks/ws`，支持多任务共用连接；浏览器首帧 authenticate 鉴权，命令包括 task.create、task.open、task.message、task.subscribe、task.cancel、task.retry。task.open 表示进入任务详情，按需补生成标题；普通订阅和断线恢复不触发标题重试。支持按轮声明客户端工具，通过 client.attach、tool.claim、tool.result 完成客户端执行和模型续跑。create_artifact、publish_workspace_file 由服务端提供；每轮 artifacts 返回已发布附件元数据，内容通过鉴权 HTTP 下载。WebSocket 帧协议见仓库 docs/project-task-websocket.md；REST 保留配置、列表、历史和快照。",
     },
     {
         "name": "setup",

@@ -1,17 +1,17 @@
 # 任务 WebSocket 客户端接入指南
 
-协议版本：`1`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 15 日。
+协议版本：`1`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 16 日。
 
 客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。当前后台仍串行执行，正文按约 0.5 秒的保存节奏更新。
 
-这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字消息、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。审批续跑尚未接入；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)。
+这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字消息、独立的思考内容、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。审批续跑尚未接入；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)。
 
 - [JSON Schema](project-task-websocket.schema.json)：请求按实际 Pydantic 模型导出；服务端数据模型与 REST 共用定义。
 - [API 参考](api.md)：项目配置、任务列表、历史分页、改名与归档。
 - [列表增量同步](project-task-incremental-sync.md)：侧栏任务状态同步。
 - 网页参考实现：[连接管理](../dashboard/src/api/modules/projectTaskSocket.ts)、[命令封装](../dashboard/src/api/modules/projects.ts)、[状态合并和恢复](../dashboard/src/pages/BoxProjects/useTaskConversation.ts)。
 
-目录：[最短流程](#1-最短接入流程) · [连接与鉴权](#2-连接与鉴权) · [标识约定](#3-标识与公共约定) · [客户端命令](#4-客户端命令) · [服务端事件](#5-服务端事件与完整示例) · [数据合并](#6-数据模型与状态合并) · [本轮设置](#7-本轮模型与资源) · [断线恢复](#8-断线恢复与多任务复用) · [错误与关闭](#9-错误与关闭) · [Swift 示例](#10-原生客户端最小连接示例) · [联调检查](#11-客户端联调检查) · [客户端工具](#12-客户端工具完整接入协议)。
+目录：[最短流程](#1-最短接入流程) · [连接与鉴权](#2-连接与鉴权) · [标识约定](#3-标识与公共约定) · [客户端命令](#4-客户端命令) · [服务端事件](#5-服务端事件与完整示例) · [数据合并](#6-数据模型与状态合并) · [本轮设置](#7-本轮模型与资源) · [APP 思考接入](#app-思考内容接入) · [断线恢复](#8-断线恢复与多任务复用) · [错误与关闭](#9-错误与关闭) · [Swift 示例](#10-原生客户端最小连接示例) · [联调检查](#11-客户端联调检查) · [客户端工具](#12-客户端工具完整接入协议)。
 
 示例中的 task_example、provider/model 和 opaque_event_cursor 等为占位值，联调时使用服务端实际返回的标识和游标。
 
@@ -23,6 +23,8 @@
 4. 用创建响应的 event_cursor 发送 task.subscribe。创建成功不会自动订阅。
 5. 在唯一的接收循环中处理全部事件，再按任务 ID 分发。
 6. 用 task.message 继续同一任务。断线后重新鉴权、重新订阅，不自动重发用户消息。
+
+打开已有任务详情时，先发送 task.open 获取 TaskDetail，再用返回的 event_cursor 订阅。它表示用户明确进入任务，只在本次进入时发送；列表预加载、历史分页和断线恢复不发送 task.open。
 
 任务完成通过 `turn.status=completed` 表达，没有单独的 done 消息。一轮结束不会关闭连接，后续追问继续沿用 task_id。
 
@@ -126,6 +128,22 @@ project_id 为 null 或省略时创建无项目任务；指定项目时必须属
 
 同一次重试的网络重发仍使用原 request_id 和 options。要再次执行另一轮重试，使用新 request_id。
 
+### 打开任务 task.open
+
+```json
+{"type":"task.open","id":"command-open-001","task_id":"task_example"}
+```
+
+成功 result.data 为最近一页 TaskDetail，与详情 GET 的数据形状相同。命令表示本次进入该任务，并按需排队生成语义标题，不创建轮次、不重放原消息或工具，也不自动订阅。客户端随后用 result.data.event_cursor 发送 task.subscribe，接收后台标题更新。
+
+已有模型生成标题或手动标题时不重新命名；旧任务只有仍保留首条消息前 80 字符的默认标题、且没有新版本手动改名记录时，才首次补生成。只处理打开的这一项，不扫描其他历史任务。标题请求使用首轮已保存的模型，仍受用户配额约束，失败不影响对话读取。
+
+排队中、执行中和已完成的标题不会因重复打开而重复请求。打开旧任务首次最多尝试一次；失败后冷却至少 10 分钟，冷却结束后的下一次 task.open 才允许再尝试一次，不在后台持续重试。新任务创建时原有的最多两次初始尝试保留。累计尝试次数和 Token 用量不清零，过期执行的迟到结果不能覆盖新尝试。生成结果不改变任务活动时间；生成期间用户改名仍优先保留用户标题。
+
+APP 应将 task.open 与真实的进入详情动作绑定。停留页面、恢复前台和断线重连仅恢复 task.subscribe；不得把后台订阅或批量预加载当作打开。task.open 的冷却与去重由服务端统一判断，客户端无需根据标题文本猜测是否已生成。
+
+task.open 回执丢失时，生成请求可能已入队；本次进入的自动恢复应通过详情 GET 获取快照再订阅，不自动重发 task.open。再次明确进入任务时才能重新发送。
+
 ### 订阅任务 task.subscribe
 
 有实时游标时：
@@ -141,6 +159,8 @@ project_id 为 null 或省略时创建无项目任务；指定项目时必须属
 ```
 
 带 cursor 时补齐该位置之后各轮的最新状态。省略或传 null 时先返回最近一页 snapshot，再补齐期间的变化。成功 result.data 为 null；没有新状态也会返回回执。
+
+订阅只恢复数据观察，不检查或重试标题；需要按需补标题时，用户进入详情应先发送 task.open。
 
 **snapshot/turn 可以先于订阅命令的 result 到达。** 发送订阅前登记事件接收方；不要等回执才开始读取，也不要在等待某个回执时丢弃其他帧。
 
@@ -200,11 +220,13 @@ project_id 为 null 或省略时创建无项目任务；指定项目时必须属
       "request_id":"message-first-001",
       "prompt":"请概括下一步工作",
       "reply":"",
+      "reasoning":"",
       "status":"queued",
       "error_code":"",
       "activity":"",
+      "artifacts":[],
       "model_ref":"provider/model",
-      "options":{"model_ref":"provider/model","skills":[],"mcp_servers":[]},
+      "options":{"model_ref":"provider/model","reasoning_mode":null,"reasoning_effort":null,"skills":[],"mcp_servers":[]},
       "cancel_requested":false,
       "retry_of_turn_id":null,
       "input_tokens":0,
@@ -239,12 +261,14 @@ project_id 为 null 或省略时创建无项目任务；指定项目时必须属
       "turn_id":"turn_example",
       "request_id":"message-first-001",
       "prompt":"请概括下一步工作",
-      "reply":"下一步先确认项目目标。",
+      "reply":"",
+      "reasoning":"先确认项目目标，再整理下一步。",
       "status":"running",
       "error_code":"",
       "activity":"",
+      "artifacts":[],
       "model_ref":"provider/model",
-      "options":{"model_ref":"provider/model","skills":[],"mcp_servers":[]},
+      "options":{"model_ref":"provider/model","reasoning_mode":"enabled","reasoning_effort":null,"skills":[],"mcp_servers":[]},
       "cancel_requested":false,
       "retry_of_turn_id":null,
       "input_tokens":0,
@@ -258,7 +282,9 @@ project_id 为 null 或省略时创建无项目任务；指定项目时必须属
 }
 ```
 
-reply 是累计全文。例如第一次为“下一步”，第二次为“下一步先确认项目目标”。客户端替换累计文本，或确认前缀一致后仅追加新增部分，不能直接拼接两次 reply。
+上例是只有思考内容的推送：reply 仍为空，APP 也应更新思考区块。思考没有独立的 reasoning 事件，始终随 turn 完整状态发送。
+
+reply 和 reasoning 各自是累计全文。例如 reasoning 第一次为“先确认项目目标”，第二次为“先确认项目目标，再整理下一步。”。客户端分别替换累计文本，或确认前缀一致后仅追加新增部分，不能直接拼接两次累计文本。
 
 snapshot.data 与创建回执的 result.data 使用相同 TaskDetail 结构，没有 data.task 包装。识别任务分别用 `snapshot.data.task_id` 和 `turn.data.task.task_id`。
 
@@ -286,6 +312,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | sequence | integer | 稳定排序序号 |
 | turn_id / request_id | string | 轮次与消息幂等身份 |
 | prompt / reply | string | 用户消息与已保存的累计回复 |
+| reasoning | string | 模型实际返回的可展示思考文本，与 reply 分开保存；无内容时为空字符串 |
 | status / error_code | string | 轮次状态；错误码为空字符串时无错误 |
 | activity | string | 当前工具名称；空字符串表示无活动摘要，不含参数或工具结果 |
 | model_ref | string | 实际模型引用 |
@@ -302,8 +329,8 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 
 1. 按 task_id 找任务，摘要保留较大的 list_revision。不能用历史 turn.status 覆盖任务的当前 status。
 2. 按 turn_id 合并轮次，按 sequence 排序。终态不回退为 queued/running，running 不回退为 queued；cancel_requested=true 不被迟到的 false 清除。
-3. 同一轮的累计 reply 不接受迟到短文本覆盖。迟到的 REST 写入回执和历史页使用相同规则。终态正文可能为空，例如排队时被取消。
-4. 正文和工具活动变化不递增 list_revision；同一个摘要版本下仍要应用新 turn。
+3. 同一轮的累计 reply 和 reasoning 分别合并，不接受迟到短文本覆盖。迟到的 REST 写入回执和历史页使用相同规则。终态正文可能为空，例如排队时被取消。
+4. 回复、思考和工具活动变化不递增 list_revision；同一个摘要版本下仍要应用新 turn。
 5. 应用 turn 后保存其 cursor。已有订阅时，不用迟到写入回执的 event_cursor 跳过尚未应用的事件。
 
 重建 snapshot 基线时替换原加载范围，防止在未知历史缺口两侧直接拼接。需要更早正文时再按分页接口读取。
@@ -319,14 +346,49 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 | options 字段 | 省略或 null | 显式值 |
 | --- | --- | --- |
 | model_ref | 使用发送时的默认可用模型 | 1–512 字符；不可用报错，不静默换模型 |
+| reasoning_mode | 使用所选模型的默认模式 | auto / enabled / disabled；不支持的模式返回 422 TASK_REASONING_INVALID |
+| reasoning_effort | 使用所选模型的默认强度 | 必须来自该模型 reasoning_config.efforts；不支持的值或关闭思考时指定强度返回 422 TASK_REASONING_INVALID |
 | skills | 继承发送时项目选择，无项目时为空 | 完整替换本轮选择；[] 禁用；最多 64 项，不可重复 |
 | mcp_servers | 继承发送时项目选择，无项目时为空 | 完整替换本轮选择；[] 禁用；最多 64 项，不可重复 |
+| plugins | 继承发送时项目选择，无项目时为空 | 已安装且全局启用的插件 ID；[] 禁用；最多 64 项，不可重复 |
+| subagents | 继承发送时项目角色，无项目时为空 | 内置角色 slug；[] 清空；最多 16 项，不可重复 |
+| memory_enabled | 继承项目，无项目时为 true | 严格布尔值；任务独立的持久记忆捕获与搜索 |
+| team_enabled | 继承项目，无项目时为 false | 严格布尔值；通过 agent_list/ask_agent 与所选角色同步协作 |
 | client_id | 无客户端执行端 | 8–128 位字母、数字、短横线或下划线；与 client.attach 一致 |
 | client_tools | 本轮无客户端工具，不继承前轮或项目 | 完整工具定义，最多 64 项，名称唯一；非空时必须同时传 client_id；[] 禁用 |
 
 已安装 Skill 使用 `{package_id,slug}`；SkillHub 引用使用 `{source:"skillhub",slug,name,description?}`。MCP 使用当前账号可用的 server_name，不提交凭据或任意连接地址。候选资源来自 `GET /api/project-tasks/resources`。
 
 options 只影响本轮，不写回项目。相同 request_id 的网络重发保持原 options，不在重连时重新计算继承结果。
+
+### APP 思考内容接入
+
+APP 在轮次数据模型中增加 `reasoning: string`，按 task_id/turn_id 保存并与 reply 分开渲染；非空时显示可折叠的“思考过程”，为空时隐藏。不要以 reply 非空或 list_revision 增长作为处理 turn 的条件，思考可能先于正式回复出现。
+
+| 数据来源 | 思考字段路径 |
+| --- | --- |
+| WebSocket turn 实时推送 | data.turn.reasoning |
+| WebSocket snapshot | data.turns[].reasoning |
+| task.create / task.open / task.message / task.retry / task.cancel 的 result | data.turns[].reasoning |
+| REST 详情或历史分页 | turns[].reasoning |
+
+reasoning 与 reply 一样使用累计文本，通过已有 turn 事件约每 0.5 秒更新。仅思考增长也会产生新游标，不递增任务列表版本。APP 分别保留两类文本中已收到的较长内容，再按第 6 节合并状态；不能因为一个字段较短就丢弃整条 turn，否则可能漏掉另一字段增长或终态。应用完事件后保存 cursor。
+
+断线恢复、历史分页和详情返回同一字段；完成、失败或取消后均保留已收到的内容。思考内容到达不表示任务完成，仍以 turn.status 判断。模型没有返回可展示内容，以及历史未记录思考的轮次，reasoning 均为空字符串。
+
+资源接口的 models[].reasoning_config 描述 supported、toggle、default_mode、efforts、default_effort、effort_type 和 adapter；null 表示未声明思考能力。status_only 模型显示“始终推理”，不提供关闭或强度选择。实际采用的模式、强度及供应商参数按轮保存，不隐式沿用上一轮选择。模型未返回可展示的思考内容时，reasoning 保持空字符串，不从回复推测或生成思考文本。
+
+APP 从 `GET /api/project-tasks/resources` 的选中模型读取该能力，只提供模型支持的选项。省略或 null 使用模型默认值；关闭思考时清除 reasoning_effort，切换模型时清除前一个模型的模式和强度选择。例如，仅当目标模型支持 enabled 且 efforts 包含 high 时，可发送：
+
+```json
+{"type":"task.message","id":"command-thinking-001","task_id":"task_example","data":{"request_id":"message-thinking-001","prompt":"请分析下一步工作","options":{"model_ref":"provider/model","reasoning_mode":"enabled","reasoning_effort":"high"}}}
+```
+
+这两个选项同样用于 task.create 和 task.retry 的 data.options。收到 TASK_REASONING_INVALID 时刷新候选能力，让用户调整本轮设置后用新的 request_id 发送。
+
+主任务只展示自己的思考内容，团队成员和子代理的思考不会混入；长期记忆仍只捕获用户消息和正式回复。接入前需确保服务端已部署并重启到包含 reasoning 字段的版本；本指南中的 Swift 示例不代表 AgentComputer APP 已完成展示接入。
+
+任务跨轮恢复完整工具上下文；内部工具参数、结果及记忆不通过 task.open、历史分页或订阅发送给客户端。停止后追问会看到工具中断结果，不自动重跑工具。所选插件提供工具、中间件及技能；子代理通过 task 委派，团队成员使用同一组选定角色，独立于专家。长期记忆按任务隔离，可跨执行环境重建和服务重启检索。团队成员文本由主任务汇总，成员和子代理模型用量计入本轮；目前仅支持同步团队调用。
 
 ## 8 断线恢复与多任务复用
 
@@ -391,6 +453,7 @@ REST 首次详情默认最近 50 轮，最多 100 轮；历史页 event_cursor �
 | 409 / TASK_MODEL_UNAVAILABLE | 当前模型不可用，刷新模型选择 |
 | 409 / CONTROL_PLANE_BUSY | worker 不接收新执行，稍后由用户重试；没有因此创建空任务 |
 | 422 / TASK_FRAME_INVALID | 格式错误或超过 32 个订阅，修正请求 |
+| 422 / TASK_REASONING_INVALID | 所选模型不支持该思考模式或强度，刷新模型能力并调整本轮设置 |
 | 422 / PROJECT_RESOURCE_INVALID | 所选 Skill/MCP 无效或无权使用，刷新候选 |
 | 500 / INTERNAL_ERROR | 服务端异常，保留发送身份并按错误范围处理 |
 
@@ -407,7 +470,7 @@ status 是 JSON 业务字段，不是连接建立后的 HTTP 状态。按 code �
 
 ## 10 原生客户端最小连接示例
 
-下面的 Swift 示例验证请求头鉴权、创建、订阅、接收累计文字。它只有一个接收循环，不发送 authenticate。生产接入时，将待确认命令、任务状态、游标和重连纳入既有会话服务，按前述规则处理错误与恢复。
+下面的 Swift 示例验证请求头鉴权、创建、订阅、分别读取累计思考与回复。它只有一个接收循环，不发送 authenticate。生产接入时，将待确认命令、任务状态、游标和重连纳入既有会话服务，按前述规则处理错误与恢复。
 
 ```swift
 import Foundation
@@ -454,10 +517,13 @@ func observeExampleTask(endpoint: URL, accessToken: String) async throws {
                 "task_id": taskID, "cursor": cursor
             ])
         case "turn":
-            // reply 是累计全文，实际界面按任务和轮次替换。
+            // 两个字段都是累计全文，reply 为空时也要处理思考更新。
+            // 实际界面按任务和轮次分别合并，再保存 update.cursor。
             if let update = frame["data"] as? [String: Any],
                let turn = update["turn"] as? [String: Any] {
-                print(turn["turn_id"] ?? "", turn["reply"] ?? "")
+                let reasoning = turn["reasoning"] as? String ?? ""
+                let reply = turn["reply"] as? String ?? ""
+                print(turn["turn_id"] ?? "", "思考:", reasoning, "回复:", reply)
             }
         case "session":
             // 在既有凭据存储中保存 access_token，不打印 token。
@@ -479,6 +545,10 @@ func observeExampleTask(endpoint: URL, accessToken: String) async throws {
 - 创建回执只确认已接收；订阅可看到 running、累计文字和终态，完成后还能追问。
 - 两个任务共用连接，事件分发正确，一个排队时仍能查看或停止另一个。
 - 订阅回执前到达的 turn 不丢失；迟到回执不覆盖终态或较长正文。
+- reply 为空、reasoning 增长且 list_revision 未变时，思考区块仍实时更新；累计文本不会重复追加。
+- 思考和回复分别合并，迟到较短的思考不截断已有内容，也不阻挡新回复或终态。
+- 停止、失败、完成及重连后，已收到的思考仍可查看；无思考内容时隐藏区块。
+- 模型选择只展示支持的思考设置；切换模型清除不适用的选择，关闭思考同时清除强度。
 - 断线后任务继续，重连补齐结果，没有额外创建任务或轮次。
 - 回执丢失后的显式重试保留原 request_id、正文和 options。
 - 游标失效只重建对应任务；取消订阅和切换页面不停止任务。

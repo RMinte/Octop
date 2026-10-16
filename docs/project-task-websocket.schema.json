@@ -191,6 +191,36 @@
       "title": "MessageFrame",
       "type": "object"
     },
+    "OpenFrame": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "关联本次命令响应；网络重发使用新的命令 ID。",
+          "pattern": "^[A-Za-z0-9_-]{8,128}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "task.open",
+          "title": "Type",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "用户明确进入详情的任务；按需补生成缺少的语义标题。",
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "task_id"
+      ],
+      "title": "OpenFrame",
+      "type": "object"
+    },
     "PingFrame": {
       "additionalProperties": false,
       "properties": {
@@ -417,6 +447,39 @@
     "TaskExecutionOptions": {
       "additionalProperties": false,
       "properties": {
+        "reasoning_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto",
+                "enabled",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮思考模式；省略或 null 使用所选模型默认值。不支持的设置返回 422。",
+          "title": "Reasoning Mode"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮思考强度，必须来自所选模型 reasoning_config.efforts；省略或 null 使用模型默认值。",
+          "title": "Reasoning Effort"
+        },
         "model_ref": {
           "anyOf": [
             {
@@ -474,6 +537,70 @@
           "default": null,
           "description": "本轮完整 MCP 选择；省略或 null 继承项目，[] 本轮禁用。",
           "title": "Mcp Servers"
+        },
+        "plugins": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮插件；省略或 null 继承项目，[] 禁用。",
+          "title": "Plugins"
+        },
+        "subagents": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 16,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮子代理角色；省略或 null 继承项目，[] 清空角色。",
+          "title": "Subagents"
+        },
+        "memory_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮是否启用任务持久记忆；省略或 null 继承项目。",
+          "title": "Memory Enabled"
+        },
+        "team_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮是否启用任务内团队同步协作；省略或 null 继承项目。",
+          "title": "Team Enabled"
         },
         "client_id": {
           "anyOf": [
@@ -735,6 +862,7 @@
           "task.cancel": "#/$defs/CancelFrame",
           "task.create": "#/$defs/CreateFrame",
           "task.message": "#/$defs/MessageFrame",
+          "task.open": "#/$defs/OpenFrame",
           "task.retry": "#/$defs/RetryFrame",
           "task.subscribe": "#/$defs/SubscribeFrame",
           "task.unsubscribe": "#/$defs/UnsubscribeFrame",
@@ -756,6 +884,9 @@
         },
         {
           "$ref": "#/$defs/CancelFrame"
+        },
+        {
+          "$ref": "#/$defs/OpenFrame"
         },
         {
           "$ref": "#/$defs/SubscribeFrame"
@@ -911,6 +1042,11 @@
           "title": "Reply",
           "type": "string"
         },
+        "reasoning": {
+          "description": "模型实际返回的可展示思考文本；与正式回复分开保存。无内容时为空字符串。",
+          "title": "Reasoning",
+          "type": "string"
+        },
         "status": {
           "enum": [
             "queued",
@@ -945,7 +1081,7 @@
         },
         "options": {
           "$ref": "#/$defs/TaskExecutionOptions",
-          "description": "本轮实际采用的模型、Skill、MCP 和客户端工具。"
+          "description": "本轮实际采用的模型、Skill、MCP、插件、子代理、记忆/团队开关和客户端工具。"
         },
         "cancel_requested": {
           "description": "该轮已请求停止；运行中需等待 cancelled 终态。",
@@ -1003,6 +1139,7 @@
         "request_id",
         "prompt",
         "reply",
+        "reasoning",
         "status",
         "error_code",
         "activity",

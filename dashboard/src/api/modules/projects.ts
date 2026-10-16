@@ -1,5 +1,6 @@
 import { request, requestBlob } from "../request";
 import { projectTaskSocket } from "./projectTaskSocket";
+import type { ReasoningCapability } from "../types/provider";
 
 export interface PackageProjectSkill {
   package_id: string;
@@ -20,6 +21,10 @@ export interface ProjectFields {
   instructions: string;
   skills: ProjectSkill[];
   mcp_servers: string[];
+  plugins: string[];
+  subagents: string[];
+  memory_enabled: boolean;
+  team_enabled: boolean;
 }
 export interface Project extends ProjectFields {
   project_id: string;
@@ -28,6 +33,13 @@ export interface Project extends ProjectFields {
   updated_at: string;
 }
 export interface ProjectResources {
+  plugins: {
+    plugin_id: string;
+    name: string;
+    description: string;
+    available: boolean;
+  }[];
+  subagents: { slug: string; name: string; description: string }[];
   skills: (PackageProjectSkill & { name: string; description: string })[];
   mcp_servers: {
     server_name: string;
@@ -118,6 +130,7 @@ export interface TaskTurn {
   request_id: string;
   prompt: string;
   reply: string;
+  reasoning: string;
   status: TaskStatus;
   error_code: string;
   activity: string;
@@ -145,12 +158,22 @@ export type TaskEvent =
   | { type: "snapshot"; data: TaskDetail };
 
 export interface TaskExecutionOptions {
+  reasoning_mode?: "auto" | "enabled" | "disabled";
+  reasoning_effort?: string;
   model_ref?: string;
   skills?: ProjectSkill[];
   mcp_servers?: string[];
+  plugins?: string[];
+  subagents?: string[];
+  memory_enabled?: boolean;
+  team_enabled?: boolean;
 }
 export interface TaskResources extends ProjectResources {
-  models: { model_ref: string; name: string }[];
+  models: {
+    model_ref: string;
+    name: string;
+    reasoning_config?: ReasoningCapability | null;
+  }[];
   default_model_ref: string | null;
 }
 export interface TaskMessage {
@@ -227,6 +250,8 @@ export const projectTasksApi = {
       `${taskPath(id)}${query({ page_cursor: pageCursor })}`,
       { cache: "no-store" },
     ),
+  open: (id: string) =>
+    projectTaskSocket.command<TaskDetail>("task.open", { task_id: id }),
   events: projectTaskSocket.events.bind(projectTaskSocket),
   create: (projectID: string | null, body: TaskMessage) =>
     projectTaskSocket.command<TaskDetail>("task.create", {

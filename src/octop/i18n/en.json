@@ -521,6 +521,7 @@
     "TASK_FRAME_INVALID": "The task connection message is invalid or exceeds the subscription limit.",
     "TASK_REQUEST_CONFLICT": "This request ID was used for a different message, execution options, or retry source. Check the original request before retrying.",
     "TASK_MODEL_UNAVAILABLE": "The selected or default chat model is unavailable. Check model settings or choose another model.",
+    "TASK_REASONING_INVALID": "The selected reasoning mode or effort is not supported by this model. Adjust the settings for this turn.",
     "TASK_EXECUTION_FAILED": "This turn failed. You can send another message; completed history is preserved.",
     "TASK_INTERRUPTED": "Execution was interrupted. This turn was not retried automatically. You can send another message.",
     "TASK_RESOURCE_UNAVAILABLE": "A project directory, skill, or MCP could not be loaded. Check the project settings and connections."

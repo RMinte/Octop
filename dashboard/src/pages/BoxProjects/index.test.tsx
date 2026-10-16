@@ -72,6 +72,10 @@ const initial: Project = {
   instructions: "指南",
   skills: [],
   mcp_servers: [],
+  plugins: [],
+  subagents: [],
+  memory_enabled: true,
+  team_enabled: false,
   revision: 1,
   created_at: t0,
   updated_at: t0,
@@ -134,7 +138,13 @@ beforeEach(() => {
         sync_cursor: "tasks_first",
       } as never;
     if (url === "/projects/resources")
-      return { skills: [], mcp_servers: [], directory_roots: [] } as never;
+      return {
+        skills: [],
+        mcp_servers: [],
+        plugins: [],
+        subagents: [],
+        directory_roots: [],
+      } as never;
     if (url === "/projects" && init?.method === "POST") {
       const fields = JSON.parse(init.body as string);
       const item = { ...initial, ...fields, project_id: "proj_new" };
@@ -168,6 +178,53 @@ function mount(path: string) {
 }
 
 describe("独立项目正式页面", () => {
+  it("saves project plugins, roles, memory and team settings", async () => {
+    const normal = api.getMockImplementation()!;
+    api.mockImplementation(async (url, init) => {
+      if (url === "/projects/resources")
+        return {
+          skills: [],
+          mcp_servers: [],
+          directory_roots: [],
+          plugins: [
+            {
+              plugin_id: "proof",
+              name: "示例插件",
+              description: "",
+              available: true,
+            },
+          ],
+          subagents: [
+            { slug: "reviewer", name: "代码审查角色", description: "" },
+          ],
+        } as never;
+      return normal(url, init);
+    });
+    const user = userEvent.setup();
+    mount("/box-projects/proj_a");
+    await user.click(await screen.findByRole("button", { name: "修改项目" }));
+    await user.click(screen.getByRole("tab", { name: "能力与协作" }));
+    await user.click(screen.getByLabelText("插件"));
+    await user.click(await screen.findByText("示例插件"));
+    await user.click(screen.getByLabelText("子代理角色"));
+    await user.click(await screen.findByText("代码审查角色"));
+    await user.click(screen.getByLabelText("长期记忆"));
+    await user.click(screen.getByLabelText("团队协作"));
+    await user.click(screen.getByRole("button", { name: "保存项目" }));
+    await waitFor(() => {
+      const saved = api.mock.calls.find(
+        ([url, init]) => url === "/projects/proj_a" && init?.method === "PATCH",
+      );
+      expect(saved).toBeTruthy();
+      expect(JSON.parse(saved![1]!.body as string)).toMatchObject({
+        plugins: ["proof"],
+        subagents: ["reviewer"],
+        memory_enabled: false,
+        team_enabled: true,
+      });
+    });
+  });
+
   it("uses the renamed title and reads its own project service", async () => {
     mount("/box-projects/proj_a");
     expect(
@@ -261,7 +318,7 @@ describe("独立项目正式页面", () => {
     const user = userEvent.setup();
     mount("/box-projects/proj_a");
     await user.click(await screen.findByRole("button", { name: "修改项目" }));
-    await user.click(screen.getByRole("tab", { name: "Skill / MCP" }));
+    await user.click(screen.getByRole("tab", { name: "能力与协作" }));
     await user.click(screen.getByRole("button", { name: "添加技能" }));
     for (const label of ["为你推荐", "近期飙升", "下载热榜", "最近上新"])
       expect(await screen.findByText(label)).toBeTruthy();
@@ -293,7 +350,7 @@ describe("独立项目正式页面", () => {
       ),
     ).toBe(true);
     await user.click(screen.getByRole("button", { name: "修改项目" }));
-    await user.click(screen.getByRole("tab", { name: "Skill / MCP" }));
+    await user.click(screen.getByRole("tab", { name: "能力与协作" }));
     expect(screen.getAllByText("育儿大师.Skill").length).toBeGreaterThan(0);
   });
   it("can remove a previously selected SkillHub skill", async () => {
@@ -308,7 +365,7 @@ describe("独立项目正式页面", () => {
     const user = userEvent.setup();
     mount("/box-projects/proj_a");
     await user.click(await screen.findByRole("button", { name: "修改项目" }));
-    await user.click(screen.getByRole("tab", { name: "Skill / MCP" }));
+    await user.click(screen.getByRole("tab", { name: "能力与协作" }));
     await user.click(screen.getByRole("button", { name: /移除技能/ }));
     await user.click(screen.getByRole("button", { name: "保存项目" }));
     await waitFor(() => expect(rows[0].skills).toEqual([]));

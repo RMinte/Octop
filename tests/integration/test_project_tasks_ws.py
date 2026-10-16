@@ -303,5 +303,6 @@ async def test_task_docs_render_rest_schemas_and_websocket_entry(env, monkeypatc
         assert docs.status_code == 200 and "/api/openapi.json" in docs.text
         schema = (await client.get("/api/openapi.json")).json()
         tag = next(tag for tag in schema["tags"] if tag["name"] == "projects")
+        assert "task.open" in tag["description"]
         assert "task.subscribe" in tag["description"]
         assert schema["components"]["schemas"]["TaskMessage"]["properties"]["prompt"]

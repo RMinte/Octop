@@ -74,7 +74,7 @@ async def test_project_create_edit_read_and_list_do_not_create_experts_or_requir
     item = created.json()
     assert item["name"] == "独立项目" and item["revision"] == 1
     assert item["directory"] == str(directory.resolve())
-    assert not any("agent" in key or "expert" in key for key in item)
+    assert not {"agent_id", "expert_id", "agents", "experts"} & item.keys()
     base = f"/api/projects/{item['project_id']}"
     assert (await client.get(base, headers=auth)).json() == item
     assert (await client.get("/api/projects", headers=auth)).json() == [item]

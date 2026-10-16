@@ -24,6 +24,7 @@ class ProjectRow:
     revision: int
     created_at: int
     updated_at: int
+    capabilities_json: str = "{}"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectRow:
@@ -42,6 +43,7 @@ class ProjectRow:
             revision=strict_int(row["revision"]),
             created_at=strict_int(row["created_at"]),
             updated_at=strict_int(row["updated_at"]),
+            capabilities_json=str(row["capabilities_json"]),
         )
 
 
@@ -104,8 +106,8 @@ class ProjectRepo:
     def create(conn: Any, row: ProjectRow) -> ProjectRow:
         result = conn.execute(
             "INSERT INTO projects(project_id, owner_id, name, description, directory, client_directory, "
-            "instructions, skills_json, mcp_servers_json, revision, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) RETURNING *",
+            "instructions, skills_json, mcp_servers_json, revision, created_at, updated_at, capabilities_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?) RETURNING *",
             (
                 row.project_id,
                 row.owner_id,
@@ -118,6 +120,7 @@ class ProjectRepo:
                 row.mcp_servers_json,
                 row.created_at,
                 row.updated_at,
+                row.capabilities_json,
             ),
         ).fetchone()
         assert result is not None
@@ -129,7 +132,7 @@ class ProjectRepo:
         with self._db.transaction() as conn:
             result = conn.execute(
                 "UPDATE projects SET name=?, description=?, directory=?, client_directory=?, instructions=?, "
-                "skills_json=?, mcp_servers_json=?, revision=revision+1, updated_at=? "
+                "skills_json=?, mcp_servers_json=?, revision=revision+1, updated_at=?, capabilities_json=? "
                 "WHERE project_id=? AND owner_id=? AND revision=? RETURNING *",
                 (
                     row.name,
@@ -140,6 +143,7 @@ class ProjectRepo:
                     row.skills_json,
                     row.mcp_servers_json,
                     row.updated_at,
+                    row.capabilities_json,
                     row.project_id,
                     row.owner_id,
                     expected_revision,

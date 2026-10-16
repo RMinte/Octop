@@ -567,6 +567,15 @@ export default function TaskConversations({
                     <Typography.Paragraph type="secondary">
                       {t("projects.tasks.modelUsed", { model: turn.model_ref })}
                     </Typography.Paragraph>
+                    {turn.reasoning && (
+                      <details className={styles.taskReasoning}>
+                        <summary>{t("projects.tasks.reasoning")}</summary>
+                        <LazyMarkdown
+                          content={turn.reasoning}
+                          isStreaming={turn.status === "running"}
+                        />
+                      </details>
+                    )}
                     {turn.reply && (
                       <LazyMarkdown
                         content={turn.reply}

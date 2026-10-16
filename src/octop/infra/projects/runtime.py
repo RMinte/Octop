@@ -1,6 +1,6 @@
 """Small durable task runner. Each turn uses a fresh harness, never an expert.
 
-Completed conversation text is replayed as context. Interrupted tool calls are
+Canonical messages and tool results are restored as context. Interrupted tool calls are
 never automatically replayed. SQL leases keep multiple HTTP workers from claiming
 the same turn and release abandoned runs after a process crash.
 """
@@ -15,11 +15,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import AIMessage, message_to_dict, messages_from_dict
 from octop_harness import HarnessAgent, HarnessAgentConfig
 from octop_harness.mcp import aload_mcp_tools
+from octop_harness.messages import extract_call_response
 from octop_harness.request import ChatRequest
 
 from octop.i18n import tr
+from octop.infra.agents.middleware.reasoning import CONFIG_KEY, ReasoningRequestMiddleware
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.agents.security.policy_store import SecuritySettingsStore
 from octop.infra.connectors.builder import gateway_mcp_server_names, inject_missing_gateway_tools
@@ -28,8 +31,11 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.artifacts import SERVER_ARTIFACT_TOOLS, TaskArtifactPublisher
+from octop.infra.projects.capabilities import plugin_capabilities, subagent_specs
 from octop.infra.projects.client_tool_models import ClientToolDefinition
 from octop.infra.projects.client_tools import ClientToolBroker
+from octop.infra.projects.collaboration import TaskTeam, guard_subagents
+from octop.infra.projects.context import capture_memory, close_pending_tools
 from octop.infra.projects.models import ProjectFields, SkillBinding
 from octop.infra.projects.service import _validate
 from octop.infra.projects.tasks import now_ms
@@ -75,7 +81,7 @@ def _skill_files(
 
 
 async def run_turn(
-    services: SharedServices, owner_id: int, turn: ProjectTaskTurnRow, history: list[dict[str, Any]]
+    services: SharedServices, owner_id: int, turn: ProjectTaskTurnRow, history: list[Any]
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield only public text/tool-progress events; credentials stay in-process."""
     raw = json.loads(turn.configuration_json)
@@ -141,6 +147,32 @@ async def run_turn(
         prompt += "\n\n" + tr("projects.client_tools_prompt", locale)
     publisher = TaskArtifactPublisher(services, owner_id, turn, workspace, locale)
     prompt += "\n\n" + tr("projects.artifacts_prompt", locale)
+    try:
+        plugin_tools, plugin_middleware, plugin_skills = await asyncio.to_thread(
+            plugin_capabilities,
+            fields,
+            reserved={t.name for t in [*tools, *client_tools]}
+            | SERVER_ARTIFACT_TOOLS
+            | {
+                "task",
+                "agent_list",
+                "ask_agent",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "execute",
+                "ls",
+                "glob",
+                "grep",
+            },
+        )
+        roles = await asyncio.to_thread(subagent_specs, fields, locale)
+        files.extend(plugin_skills)
+        if len({slug for slug, _ in files}) != len(files):
+            raise ValueError("duplicate runtime skill name")
+    except Exception as exc:
+        raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE) from exc
+    await asyncio.to_thread(runtime_dir.mkdir, parents=True, exist_ok=True)
     cfg = HarnessAgentConfig(
         name="project-task",
         language=locale,
@@ -153,19 +185,23 @@ async def run_turn(
         default_timezone=services.config.default_timezone,
         mcp_server_configs={name: {} for name in active_mcp},
         memory=(),
-        memory_enabled=False,
+        memory_enabled=fields.memory_enabled,
+        memory_capture_enabled=False,
+        memory_namespace=turn.task_id,
+        memory_backend_config={"db_path": str(runtime_dir / "memory.sqlite")},
         model_retry_enabled=False,
         memory_jsonl_enabled=False,
         session_log_enabled=False,
         bootstrap_enabled=False,
-        subagents=[],
+        subagents=roles,
         subagents_auto_load=False,
-        team_enabled=False,
+        team_enabled=fields.team_enabled,
+        peer_invoke_mode="sync",
+        middleware=[*plugin_middleware, ReasoningRequestMiddleware()],
         ask_user_enabled=False,
         media_offload_enabled=False,
         tools_disabled=frozenset(
             {
-                "task",
                 "browser_use",
                 "desktop_screenshot",
                 "send_file_to_user",
@@ -174,23 +210,32 @@ async def run_turn(
             }
         ),
         web_search_tools=False,
-        tools=publisher.tools(),
+        tools=[*publisher.tools(), *plugin_tools],
     )
     policy = await asyncio.to_thread(
         SecuritySettingsStore(settings_repo=services.settings_repo).load
     )
     cfg = policy.apply_to_config(cfg)
-    agent = await asyncio.to_thread(HarnessAgent, cfg, agent_id=turn.task_id)
+    guard_subagents(cfg)
+    team = TaskTeam(owner_id)
+    agent = await asyncio.to_thread(
+        HarnessAgent,
+        cfg,
+        agent_id=turn.task_id,
+        team_manager=team.manager if fields.team_enabled else None,
+    )
+    team.register(turn.task_id, agent)
     publisher.workspace = agent.workspace
     usage: dict[str, dict[str, Any]] = {}
-    try:
+    reply_text = ""
+    completed = False
+
+    async def prepare(agent: HarnessAgent) -> None:
         for slug, entries in files:
             for name, data in entries:
                 await agent.workspace.aupload_bytes(
                     agent.workspace.system_rel(f"skills/{slug}/{name}"), data
                 )
-        if tools or client_tools:
-            agent.inject_mcp_tools([*tools, *client_tools])
         await asyncio.to_thread(
             inject_missing_gateway_tools,
             agent,
@@ -200,24 +245,78 @@ async def run_turn(
             agent_id=turn.task_id,
             mcp_server_configs=selected,
         )
+
+    async def enrich_peer(agent_id: str, request: ChatRequest) -> ChatRequest:
+        request.agent_id = agent_id
+        request.skills = [slug for slug, _ in files]
+        request.mcp_servers = active_mcp
+        request.configurable = {
+            **(request.configurable or {}),
+            CONFIG_KEY: raw.get("reasoning_overrides", {}),
+        }
+        return request
+
+    async def peer_finished(call: Any, thread_id: str, payload: dict[str, Any]) -> None:
+        await capture_memory(
+            team.registry.get(call.to_agent_id).agent,
+            owner_id,
+            thread_id,
+            call.message,
+            extract_call_response(payload),
+        )
+
+    try:
+        await prepare(agent)
+        if tools or client_tools:
+            agent.inject_mcp_tools([*tools, *client_tools])
+        if fields.team_enabled:
+            team.manager.bind_invocation_hooks(enrich_request=enrich_peer)
+            team.manager.bind_peer_session(after=peer_finished)
+            await team.load(
+                HarnessAgent,
+                cfg,
+                roles,
+                turn.task_id,
+                runtime_dir,
+                [*tools, *client_tools],
+                prepare,
+            )
         request = ChatRequest(
             messages=[*history, {"role": "user", "content": turn.prompt}],
             thread_id=turn.turn_id,
+            agent_id=turn.task_id,
             user=str(owner_id),
             source="project-task",
             skills=[slug for slug, _ in files],
             mcp_servers=active_mcp,
+            configurable={CONFIG_KEY: raw.get("reasoning_overrides", {})},
         )
+        delegating = False
         async for event in agent.stream(request, protocol="langgraph"):
             if broker.failure:
                 raise OctopError.localized(broker.failure)
             kind = event.get("type")
             if kind == "token":
-                yield {"type": "token", "content": str(event.get("content") or "")}
+                if not delegating:
+                    content = str(event.get("content") or "")
+                    reply_text += content
+                    yield {"type": "token", "content": content}
+            elif kind == "reasoning":
+                if not delegating:
+                    yield {"type": "reasoning", "content": str(event.get("content") or "")}
             elif kind == "tool_call_chunk" and event.get("name"):
+                if event["name"] in {"task", "ask_agent"}:
+                    delegating = True
                 yield {"type": "activity", "name": str(event["name"])}
             elif kind == "tool_result":
+                delegating = False
                 yield {"type": "activity", "name": ""}
+            elif kind == "state_update":
+                for message in (event.get("data") or {}).get("messages", []):
+                    if isinstance(message, AIMessage) and any(
+                        call["name"] in {"task", "ask_agent"} for call in message.tool_calls
+                    ):
+                        delegating = True
             elif kind == "usage":
                 usage[str(event.get("call_id") or "model")] = dict(event.get("usage") or {})
             elif kind == "hitl_required":
@@ -225,17 +324,38 @@ async def run_turn(
                 raise OctopError.localized(ErrorCode.TASK_EXECUTION_FAILED)
         if broker.failure:
             raise OctopError.localized(broker.failure)
+        completed = True
     finally:
         try:
-            await asyncio.to_thread(
-                services.project_task_turn_repo.record_usage,
-                turn.turn_id,
-                turn.worker_id,
-                sum(int(values.get("input_tokens") or 0) for values in usage.values()),
-                sum(int(values.get("output_tokens") or 0) for values in usage.values()),
-            )
+            messages = await agent.aget_history(turn.turn_id, limit=1_000_000)
+            if messages:
+                saved = await asyncio.to_thread(
+                    services.project_task_turn_repo.save_context,
+                    turn.turn_id,
+                    turn.worker_id,
+                    json.dumps([message_to_dict(m) for m in close_pending_tools(messages, locale)]),
+                )
+                if saved:
+                    await capture_memory(
+                        agent,
+                        owner_id,
+                        turn.turn_id,
+                        turn.prompt,
+                        reply_text
+                        if completed
+                        else reply_text + "\n\n" + tr("projects.task_incomplete_context", locale),
+                    )
         finally:
-            await agent.aclose()
+            try:
+                await asyncio.to_thread(
+                    services.project_task_turn_repo.record_usage,
+                    turn.turn_id,
+                    turn.worker_id,
+                    sum(int(values.get("input_tokens") or 0) for values in usage.values()),
+                    sum(int(values.get("output_tokens") or 0) for values in usage.values()),
+                )
+            finally:
+                await team.close()
 
 
 class ProjectTaskWorker:
@@ -294,7 +414,14 @@ class ProjectTaskWorker:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), 1.0)
 
-    def _finish(self, turn: ProjectTaskTurnRow, status: str, reply: str, error: str) -> None:
+    def _finish(
+        self,
+        turn: ProjectTaskTurnRow,
+        status: str,
+        reply: str,
+        error: str,
+        reasoning: str | None = None,
+    ) -> None:
         now = now_ms()
         owner = self.services.project_task_repo.runtime_owner(turn.task_id)
         with self.services.db.transaction() as conn:
@@ -302,7 +429,14 @@ class ProjectTaskWorker:
             if owner is not None:
                 self.services.project_task_repo.lock_owner(conn, owner)
             if self.services.project_task_turn_repo.finish(
-                conn, turn.turn_id, self.worker_id, status, reply, error, now
+                conn,
+                turn.turn_id,
+                self.worker_id,
+                status,
+                reply,
+                error,
+                now,
+                reasoning=reasoning,
             ):
                 final = self.services.project_task_turn_repo.get_in_transaction(conn, turn.turn_id)
                 cancelled = final is not None and final.status == "cancelled"
@@ -316,7 +450,7 @@ class ProjectTaskWorker:
                 self.services.project_task_repo.finish(conn, turn.task_id, turn.turn_id, now)
 
     async def _execute(self, turn: ProjectTaskTurnRow) -> None:
-        reply, activity, status, error = "", "", "completed", ""
+        reply, reasoning, activity, status, error = "", "", "", "completed", ""
 
         async def heartbeat() -> None:
             while True:
@@ -328,6 +462,7 @@ class ProjectTaskWorker:
                     reply,
                     activity,
                     now_ms(),
+                    reasoning=reasoning,
                 )
                 if cancelled or self.closing:
                     assert self._current is not None
@@ -346,8 +481,17 @@ class ProjectTaskWorker:
             rows = await asyncio.to_thread(self.services.project_task_turn_repo.list, turn.task_id)
             user = await asyncio.to_thread(self.services.user_repo.get, task)
             locale = normalize_locale(user.locale if user else "zh")
-            history: list[dict[str, Any]] = []
+            context = await asyncio.to_thread(
+                self.services.project_task_turn_repo.context, turn.task_id
+            )
+            history: list[Any] = messages_from_dict(json.loads(context[1])) if context else []
             for previous in rows:
+                if context and previous.pk <= context[0]:
+                    if previous.pk == context[0] and previous.status != "completed":
+                        history.append(
+                            AIMessage(content=tr("projects.task_incomplete_context", locale))
+                        )
+                    continue
                 if previous.status not in {"completed", "failed", "cancelled"}:
                     continue
                 reply_text = previous.reply
@@ -362,6 +506,8 @@ class ProjectTaskWorker:
             async for event in run_turn(self.services, task, turn, history):
                 if event["type"] == "token":
                     reply += event["content"]
+                elif event["type"] == "reasoning":
+                    reasoning += event["content"]
                 else:
                     activity = event["name"]
             if not reply.strip():
@@ -383,4 +529,4 @@ class ProjectTaskWorker:
             beat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await beat
-            await asyncio.to_thread(self._finish, turn, status, reply, error)
+            await asyncio.to_thread(self._finish, turn, status, reply, error, reasoning)

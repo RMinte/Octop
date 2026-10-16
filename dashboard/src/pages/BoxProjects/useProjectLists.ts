@@ -76,7 +76,7 @@ function reset<T>(cache: Cache<T>) {
 function useCache<T>(scope: string) {
   const user = useCurrentUser();
   const key = user
-    ? `octop:project-lists:v1:${getApiUrl("/")}:${user.id}:${
+    ? `octop:project-lists:v2:${getApiUrl("/")}:${user.id}:${
         user.username
       }:${scope}`
     : null;

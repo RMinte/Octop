@@ -21,6 +21,7 @@ vi.mock("../../api/modules/projects", () => ({
     list: vi.fn(),
     sync: vi.fn(),
     get: vi.fn(),
+    open: vi.fn(),
     create: vi.fn(),
     send: vi.fn(),
     cancel: vi.fn(),
@@ -66,6 +67,7 @@ const fixture: TaskDetail = {
       request_id: "request-first",
       prompt: "记住蓝鸟",
       reply: "已记住蓝鸟",
+      reasoning: "",
       status: "completed",
       error_code: "",
       activity: "",
@@ -102,12 +104,15 @@ beforeEach(() => {
   api.resources.mockResolvedValue({
     skills: [],
     mcp_servers: [],
+    plugins: [],
+    subagents: [],
     directory_roots: [],
     models: [{ model_ref: "glm/glm", name: "GLM" }],
     default_model_ref: "glm/glm",
   });
   api.update.mockResolvedValue(fixture);
   api.retry.mockResolvedValue(fixture);
+  api.open.mockResolvedValue(fixture);
   api.get.mockResolvedValue(fixture);
   api.create.mockResolvedValue(fixture);
   api.send.mockResolvedValue(fixture);
@@ -139,8 +144,9 @@ describe("项目任务对话", () => {
         }),
       ),
     );
-    expect(await screen.findByText("已记住蓝鸟")).toBeInTheDocument();
-    expect(api.get).toHaveBeenCalledWith("task_a");
+    await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("已记住蓝鸟")).toBeInTheDocument();
+    expect(api.open).toHaveBeenCalledWith("task_a");
   });
   it("打开历史后发送下一轮，使用同一个任务", async () => {
     const user = userEvent.setup();
@@ -174,7 +180,7 @@ describe("项目任务对话", () => {
     expect(api.create.mock.calls[0][1]).toEqual(api.create.mock.calls[1][1]);
   });
   it("执行中可以停止，历史回复保留", async () => {
-    api.get.mockResolvedValue({
+    api.open.mockResolvedValue({
       ...fixture,
       active_turn_id: "turn_a",
       turns: [{ ...fixture.turns[0], status: "running" }],
@@ -248,6 +254,7 @@ it("一页任务直接显示列表状态，增量更新无需逐个读取详情"
   expect(api.list).toHaveBeenCalledTimes(1);
   expect(api.get).not.toHaveBeenCalled();
   expect(api.events).not.toHaveBeenCalled();
+  expect(api.open).not.toHaveBeenCalled();
   fireEvent(document, new Event("visibilitychange"));
   await screen.findByRole("button", { name: /任务 queued 回复中/ });
   expect(api.get).not.toHaveBeenCalled();
@@ -339,7 +346,7 @@ it("实时显示回复与终态，迟到的停止响应不能恢复执行中状�
     active_turn_id: "turn_a",
     turns: [{ ...fixture.turns[0], reply: "部分", status: "running" }],
   };
-  api.get.mockResolvedValue(running);
+  api.open.mockResolvedValue(running);
   let finishStop!: (value: TaskDetail) => void;
   api.cancel.mockImplementation(
     () =>
@@ -384,11 +391,12 @@ it("实时显示回复与终态，迟到的停止响应不能恢复执行中状�
   expect(
     screen.queryByRole("button", { name: "停止回复" }),
   ).not.toBeInTheDocument();
-  expect(api.get).toHaveBeenCalledTimes(1);
+  expect(api.open).toHaveBeenCalledTimes(1);
+  expect(api.get).not.toHaveBeenCalled();
 });
 
 it("加载更早对话保留实时收到的新轮次", async () => {
-  api.get.mockResolvedValueOnce({
+  api.open.mockResolvedValueOnce({
     ...fixture,
     next_page_cursor: "messages_older",
   });
@@ -476,7 +484,7 @@ it("失败后手动重试保留原轮次，网络重传沿用重试标识", asyn
       },
     ],
   };
-  api.get.mockResolvedValue(failed);
+  api.open.mockResolvedValue(failed);
   api.retry.mockRejectedValueOnce(new Error("lost response"));
   api.retry.mockResolvedValue({
     ...failed,
@@ -531,7 +539,39 @@ it("断线使用最后收到的游标续接，不重新下载会话历史", asyn
   await act(async () => disconnect(new Error("network offline")));
   await act(async () => vi.advanceTimersByTimeAsync(2000));
   expect(api.events.mock.calls[1][1]).toBe("event_received");
-  expect(api.get).toHaveBeenCalledTimes(1);
+  expect(api.open).toHaveBeenCalledTimes(1);
+  expect(api.get).not.toHaveBeenCalled();
+});
+
+it("详情恢复前台只恢复订阅，不重复发送打开事件", async () => {
+  const hidden = vi.spyOn(document, "hidden", "get");
+  try {
+    mount("?task=task_a");
+    await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+    const signal = api.events.mock.calls[0][3];
+    hidden.mockReturnValue(true);
+    await act(async () => fireEvent(document, new Event("visibilitychange")));
+    expect(signal.aborted).toBe(true);
+    hidden.mockReturnValue(false);
+    await act(async () => fireEvent(document, new Event("visibilitychange")));
+    await waitFor(() => expect(api.events).toHaveBeenCalledTimes(2));
+    expect(api.open).toHaveBeenCalledTimes(1);
+    expect(api.get).not.toHaveBeenCalled();
+  } finally {
+    hidden.mockRestore();
+  }
+});
+
+it("打开回执丢失后只读恢复详情，不重复触发标题补生成", async () => {
+  api.open.mockRejectedValueOnce(new Error("lost open receipt"));
+  vi.useFakeTimers();
+  await act(async () => mount("?task=task_a"));
+  expect(api.open).toHaveBeenCalledTimes(1);
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  expect(api.open).toHaveBeenCalledTimes(1);
+  expect(api.get).toHaveBeenCalledWith("task_a");
+  expect(api.events).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("已记住蓝鸟")).toBeInTheDocument();
 });
 
 it("切换任务会关闭旧连接，迟到的事件不会串入新会话", async () => {
@@ -555,7 +595,7 @@ it("切换任务会关闭旧连接，迟到的事件不会串入新会话", asyn
 });
 
 it("实时游标失效时重建最近一页，不沿用失效浏览范围", async () => {
-  api.get.mockResolvedValueOnce({ ...fixture, next_page_cursor: "old_range" });
+  api.open.mockResolvedValueOnce({ ...fixture, next_page_cursor: "old_range" });
   api.events.mockRejectedValueOnce(
     new Error('409 - {"error":{"code":"PROJECT_SYNC_RESET"}}'),
   );
@@ -565,7 +605,8 @@ it("实时游标失效时重建最近一页，不沿用失效浏览范围", asyn
   });
   expect(screen.getByText("连接中断，正在重新连接…")).toBeInTheDocument();
   await act(async () => vi.advanceTimersByTimeAsync(2000));
-  expect(api.get.mock.calls).toEqual([["task_a"], ["task_a"]]);
+  expect(api.open.mock.calls).toEqual([["task_a"]]);
+  expect(api.get.mock.calls).toEqual([["task_a"]]);
   expect(
     screen.queryByRole("button", { name: "加载更早的对话" }),
   ).not.toBeInTheDocument();
@@ -670,6 +711,8 @@ it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目
   api.resources.mockResolvedValue({
     skills: [],
     mcp_servers: [],
+    plugins: [],
+    subagents: [],
     directory_roots: [],
     models: [{ model_ref: "other/model", name: "Other model" }],
     default_model_ref: "glm/glm",
@@ -696,6 +739,131 @@ it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目
     ),
   );
   expect(api.update).not.toHaveBeenCalled();
+});
+
+it("独立展示思考内容并合并实时更新，迟到内容不截断已收到的思考", async () => {
+  const running: TaskDetail = {
+    ...fixture,
+    active_turn_id: "turn_a",
+    turns: [
+      {
+        ...fixture.turns[0],
+        status: "running",
+        reply: "",
+        reasoning: "先分析问题。",
+      },
+    ],
+  };
+  api.open.mockResolvedValue(running);
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+  const fold = screen.getByText("思考过程").closest("details")!;
+  expect(fold).not.toHaveAttribute("open");
+  await user.click(screen.getByText("思考过程"));
+  expect(screen.getByText("先分析问题。")).toBeVisible();
+  const receive = api.events.mock.calls[0][2];
+  const reasoning = "先分析问题。再检查证据。";
+  await act(async () =>
+    receive({
+      type: "turn",
+      data: {
+        task: running,
+        turn: { ...running.turns[0], reasoning },
+        cursor: "thinking-longer",
+      },
+    }),
+  );
+  expect(screen.getByText(reasoning)).toBeVisible();
+  await act(async () =>
+    receive({
+      type: "turn",
+      data: {
+        task: fixture,
+        turn: { ...fixture.turns[0], reasoning: "先分析问题。" },
+        cursor: "thinking-done",
+      },
+    }),
+  );
+  expect(screen.getByText(reasoning)).toBeVisible();
+  expect(screen.getByText("已记住蓝鸟")).toBeVisible();
+  expect(fold).toHaveAttribute("open");
+});
+
+it("模型支持时发送本轮思考模式与强度，切换模型后清除旧选择", async () => {
+  api.resources.mockResolvedValue({
+    skills: [],
+    mcp_servers: [],
+    plugins: [],
+    subagents: [],
+    directory_roots: [],
+    default_model_ref: "glm/glm",
+    models: [
+      {
+        model_ref: "glm/glm",
+        name: "GLM",
+        reasoning_config: {
+          supported: true,
+          toggle: true,
+          default_mode: "auto",
+          default_effort: null,
+          efforts: ["low", "high"],
+          effort_type: "enum",
+          adapter: "thinking",
+        },
+      },
+      { model_ref: "plain/model", name: "Plain model", reasoning_config: null },
+    ],
+  });
+  const user = userEvent.setup();
+  mount();
+  await user.click(screen.getByText("本轮设置"));
+  await user.click(await screen.findByRole("combobox", { name: "思考模式" }));
+  await user.click(await screen.findByText("开启"));
+  await user.click(screen.getByRole("combobox", { name: "思考强度" }));
+  await user.click(await screen.findByTitle("high"));
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "先认真分析",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(api.create).toHaveBeenCalledWith(
+      "proj_a",
+      expect.objectContaining({
+        options: expect.objectContaining({
+          reasoning_mode: "enabled",
+          reasoning_effort: "high",
+        }),
+      }),
+    ),
+  );
+  await user.click(screen.getByRole("combobox", { name: "思考模式" }));
+  await user.click(await screen.findByText("开启"));
+  await user.click(screen.getByRole("combobox", { name: "思考强度" }));
+  await user.click(await screen.findByTitle("high"));
+  await user.click(screen.getByRole("combobox", { name: "本轮模型" }));
+  await user.click(await screen.findByText("Plain model · plain/model"));
+  expect(
+    screen.queryByRole("combobox", { name: "思考模式" }),
+  ).not.toBeInTheDocument();
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "普通模型继续",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(api.send).toHaveBeenCalledWith(
+      "task_a",
+      expect.objectContaining({
+        options: expect.objectContaining({
+          model_ref: "plain/model",
+          reasoning_mode: undefined,
+          reasoning_effort: undefined,
+        }),
+      }),
+    ),
+  );
 });
 
 it("改名期间收到新版本时使用开始编辑的版本，冲突后不覆盖远端", async () => {
@@ -749,7 +917,7 @@ it("downloads a published attachment through the authenticated API using its res
       "/api/project-tasks/task_a/artifacts/artifact_report/download",
     created_at: fixture.created_at,
   };
-  api.get.mockResolvedValue({
+  api.open.mockResolvedValue({
     ...fixture,
     turns: [{ ...fixture.turns[0], artifacts: [artifact] }],
   });

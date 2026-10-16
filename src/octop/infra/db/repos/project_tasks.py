@@ -188,6 +188,16 @@ class ProjectTaskRepo:
         return updated
 
     @staticmethod
+    def allow_legacy_title_generation(
+        conn: Any, task_id: str, owner_id: int, title_revision: int
+    ) -> None:
+        conn.execute(
+            "UPDATE project_tasks SET title_source='provisional' "
+            "WHERE task_id=? AND owner_id=? AND title_source='manual' AND title_revision=?",
+            (task_id, owner_id, title_revision),
+        )
+
+    @staticmethod
     def apply_generated_title(
         conn: Any, task_id: str, owner_id: int, title_revision: int, title: str
     ) -> bool:

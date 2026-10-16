@@ -15,7 +15,7 @@ from pydantic import Field, StringConstraints, TypeAdapter, ValidationError
 from octop.api.deps import extract_raw_token, maybe_sliding_renew_token, resolve_user_from_token
 from octop.api.routers.projects import _services, _task_worker
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import client_tools, tasks
+from octop.infra.projects import client_tools, tasks, title
 from octop.infra.projects.client_tool_models import (
     ClientID,
     ClientToolCall,
@@ -73,6 +73,11 @@ class SubscribeFrame(CommandFrame):
     cursor: Annotated[str, StringConstraints(min_length=1, max_length=4096)] | None = None
 
 
+class OpenFrame(CommandFrame):
+    type: Literal["task.open"]
+    task_id: Reference = Field(description="用户明确进入详情的任务；按需补生成缺少的语义标题。")
+
+
 class UnsubscribeFrame(CommandFrame):
     type: Literal["task.unsubscribe"]
     task_id: Reference
@@ -112,6 +117,7 @@ TaskCommand = Annotated[
     | MessageFrame
     | RetryFrame
     | CancelFrame
+    | OpenFrame
     | SubscribeFrame
     | UnsubscribeFrame
     | PingFrame
@@ -289,6 +295,13 @@ async def task_websocket(websocket: WebSocket) -> None:
                         else:
                             receipt = await asyncio.to_thread(client_tools.get_call, *args)
                         result = receipt.model_dump(mode="json")
+                    elif isinstance(frame, OpenFrame):
+                        worker = _task_worker(server)
+                        detail = await asyncio.to_thread(
+                            title.open_task, services, user.id, frame.task_id
+                        )
+                        worker.title_worker.wake()
+                        result = detail.model_dump(mode="json")
                     elif isinstance(frame, SubscribeFrame):
                         if (
                             frame.task_id not in subscriptions

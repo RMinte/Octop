@@ -15,6 +15,7 @@ from octop.infra.connectors.service import ConnectorService
 from octop.infra.db.repos.projects import ProjectRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.capabilities import CAPABILITY_FIELDS, capability_options
 from octop.infra.projects.models import (
     McpOption,
     ProjectFields,
@@ -74,15 +75,24 @@ def resources(services: SharedServices, owner_id: int) -> ProjectResources:
         for row in connectors.list_instances_for_api(owner_id)
     ]
     root = _allowed_root(services, owner_id)
+    plugins, subagents = capability_options(services, owner_id)
     return ProjectResources(
         skills=skills,
         mcp_servers=mcp_servers,
+        plugins=plugins,
+        subagents=subagents,
         directory_roots=[root] if root else host_browse_roots(),
     )
 
 
 def _validate(services: SharedServices, owner_id: int, fields: ProjectFields) -> str | None:
     available = resources(services, owner_id)
+    if fields.team_enabled and not fields.subagents:
+        raise OctopError.localized(ErrorCode.PROJECT_RESOURCE_INVALID, status=422)
+    if not set(fields.plugins) <= {
+        p.plugin_id for p in available.plugins if p.available
+    } or not set(fields.subagents) <= {s.slug for s in available.subagents}:
+        raise OctopError.localized(ErrorCode.PROJECT_RESOURCE_INVALID, status=422)
     if not {(s.package_id, s.slug) for s in fields.skills if isinstance(s, SkillBinding)} <= {
         (s.package_id, s.slug) for s in available.skills
     } or not set(fields.mcp_servers) <= {m.server_name for m in available.mcp_servers}:
@@ -114,6 +124,7 @@ def _view(row: ProjectRow) -> ProjectView:
         instructions=row.instructions,
         skills=json.loads(row.skills_json),
         mcp_servers=json.loads(row.mcp_servers_json),
+        **json.loads(row.capabilities_json),
         revision=row.revision,
         created_at=datetime.fromtimestamp(row.created_at / 1000, UTC),
         updated_at=datetime.fromtimestamp(row.updated_at / 1000, UTC),
@@ -159,6 +170,7 @@ def create_project(
                 instructions=fields.instructions,
                 skills_json=json.dumps([s.model_dump() for s in fields.skills]),
                 mcp_servers_json=json.dumps(fields.mcp_servers),
+                capabilities_json=json.dumps(fields.model_dump(include=CAPABILITY_FIELDS)),
                 revision=1,
                 created_at=now,
                 updated_at=now,
@@ -203,6 +215,7 @@ def update_project(
         instructions=fields.instructions,
         skills_json=json.dumps([s.model_dump() for s in fields.skills]),
         mcp_servers_json=json.dumps(fields.mcp_servers),
+        capabilities_json=json.dumps(fields.model_dump(include=CAPABILITY_FIELDS)),
         updated_at=int(datetime.now(UTC).timestamp() * 1000),
     )
     try:

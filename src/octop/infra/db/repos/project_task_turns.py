@@ -30,6 +30,7 @@ class ProjectTaskTurnRow:
     input_tokens: int = 0
     output_tokens: int = 0
     pk: int = 0
+    reasoning: str = ""
 
     @classmethod
     def from_row(cls, r: DbRow) -> ProjectTaskTurnRow:
@@ -51,6 +52,7 @@ class ProjectTaskTurnRow:
             input_tokens=strict_int(r["input_tokens"]),
             output_tokens=strict_int(r["output_tokens"]),
             pk=strict_int(r["id"]),
+            reasoning=str(r["reasoning"]),
         )
 
 
@@ -61,6 +63,33 @@ class ProjectTaskTurnRepo:
     def list(self, task_id: str) -> builtins.list[ProjectTaskTurnRow]:
         with self._db.connect() as conn:
             return self.list_in_transaction(conn, task_id)
+
+    def context(self, task_id: str) -> tuple[int, str] | None:
+        with self._db.connect() as conn:
+            row = conn.execute(
+                "SELECT t.id, c.messages_json FROM project_task_contexts c "
+                "JOIN project_task_turns t ON t.turn_id=c.turn_id WHERE c.task_id=?",
+                (task_id,),
+            ).fetchone()
+        return (strict_int(row["id"]), str(row["messages_json"])) if row else None
+
+    def save_context(self, turn_id: str, worker_id: str, messages_json: str) -> bool:
+        with self._db.transaction() as conn:
+            # Take the same lease row lock as progress/finalization. A stale worker
+            # cannot overwrite context after recovery or a subsequent turn.
+            row = conn.execute(
+                "UPDATE project_task_turns SET worker_id=worker_id "
+                "WHERE turn_id=? AND worker_id=? AND status='running' RETURNING task_id",
+                (turn_id, worker_id),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "INSERT INTO project_task_contexts(task_id,turn_id,messages_json) VALUES (?,?,?) "
+                "ON CONFLICT(task_id) DO UPDATE SET turn_id=excluded.turn_id, messages_json=excluded.messages_json",
+                (row["task_id"], turn_id, messages_json),
+            )
+            return True
 
     @staticmethod
     def list_in_transaction(conn: Any, task_id: str) -> builtins.list[ProjectTaskTurnRow]:
@@ -146,25 +175,42 @@ class ProjectTaskTurnRepo:
             ProjectTaskRepo.start(conn, turn.task_id, turn.turn_id, now)
             return turn
 
-    def progress(self, turn_id: str, worker_id: str, reply: str, activity: str, now: int) -> bool:
+    def progress(
+        self,
+        turn_id: str,
+        worker_id: str,
+        reply: str,
+        activity: str,
+        now: int,
+        *,
+        reasoning: str | None = None,
+    ) -> bool:
         with self._db.connect() as conn:
             r = conn.execute(
-                "UPDATE project_task_turns SET reply=?, activity=?, updated_at=? "
+                "UPDATE project_task_turns SET reply=?, activity=?, updated_at=?, reasoning=COALESCE(?,reasoning) "
                 "WHERE turn_id=? AND worker_id=? AND status='running' RETURNING cancel_requested",
-                (reply, activity, now, turn_id, worker_id),
+                (reply, activity, now, reasoning, turn_id, worker_id),
             ).fetchone()
         return r is None or bool(r["cancel_requested"])
 
     @staticmethod
     def finish(
-        conn: Any, turn_id: str, worker_id: str, status: str, reply: str, error_code: str, now: int
+        conn: Any,
+        turn_id: str,
+        worker_id: str,
+        status: str,
+        reply: str,
+        error_code: str,
+        now: int,
+        *,
+        reasoning: str | None = None,
     ) -> bool:
         return bool(
             conn.execute(
                 "UPDATE project_task_turns SET status=CASE WHEN cancel_requested=1 "
-                "THEN 'cancelled' ELSE ? END, reply=?, error_code=?, activity='', updated_at=? "
+                "THEN 'cancelled' ELSE ? END, reply=?, error_code=?, activity='', updated_at=?, reasoning=COALESCE(?,reasoning) "
                 "WHERE turn_id=? AND worker_id=? AND status='running'",
-                (status, reply, error_code, now, turn_id, worker_id),
+                (status, reply, error_code, now, reasoning, turn_id, worker_id),
             ).rowcount
             == 1
         )

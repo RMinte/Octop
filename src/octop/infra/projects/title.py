@@ -15,7 +15,8 @@ from octop.i18n import tr
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.repos.project_task_titles import TaskTitleJob
 from octop.infra.db.services import SharedServices
-from octop.infra.projects.tasks import now_ms
+from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.tasks import TaskDetail, detail, now_ms
 from octop.infra.projects.title_policy import normalized_title
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.llm_text import llm_text_content
@@ -24,6 +25,34 @@ from octop.infra.utils.ulid import new_ulid
 
 logger = logging.getLogger(__name__)
 _GENERATION_TIMEOUT = 30.0
+
+
+def open_task(services: SharedServices, owner_id: int, task_id: str) -> TaskDetail:
+    """Explicit user attention can admit one naming attempt, without replaying the task."""
+    with services.db.transaction() as conn:
+        tasks, titles = services.project_task_repo, services.project_task_title_repo
+        if not tasks.lock_owner(conn, owner_id):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
+        if tasks.get_in_transaction(conn, task_id, owner_id) is None:
+            raise OctopError.localized(ErrorCode.NOT_FOUND)
+        state = titles.state(conn, task_id)
+        if state is not None:
+            # v36 preserved existing titles as manual. A later explicit rename
+            # always advances title_revision, even if its text did not change.
+            legacy_default = (
+                state.source == "manual"
+                and state.revision == 1
+                and state.status is None
+                and state.title == state.prompt[:80]
+            )
+            eligible = state.source == "provisional" or legacy_default
+            if eligible and state.status is None:
+                if legacy_default:
+                    tasks.allow_legacy_title_generation(conn, task_id, owner_id, state.revision)
+                titles.enqueue(conn, task_id, title_revision=state.revision, attempt_limit=1)
+            elif eligible and state.status == "failed" and state.retry_at <= now_ms():
+                titles.retry_on_open(conn, task_id, now_ms())
+    return detail(services, owner_id, task_id)
 
 
 @dataclass(frozen=True)

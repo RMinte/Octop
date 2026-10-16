@@ -56,7 +56,7 @@ async def list_projects(
 @router.get(
     "/resources",
     response_model=ProjectResources,
-    summary="列出项目可关联的目录、Skill 和 MCP",
+    summary="列出项目可用的目录、Skill、MCP、插件和子代理角色",
     description="返回共享技能库和本人有权使用的 MCP 连接。只返回引用和配置状态，不返回密钥，不连接 MCP。",
 )
 async def project_resources(
@@ -73,7 +73,7 @@ async def project_resources(
     response_model=ProjectView,
     status_code=201,
     summary="新建独立项目",
-    description="必须提供 Idempotency-Key 请求头；同一用户、同一标识和相同内容重试返回首次创建结果，内容不同返回 409。保存两类目录、多个 Skill/MCP 引用和行动指南；不创建专家，不上传或访问客户端文件。同名项目返回 409。",
+    description="必须提供 Idempotency-Key 请求头；同一用户、同一标识和相同内容重试返回首次创建结果，内容不同返回 409。保存两类目录、Skill/MCP、插件和子代理引用、记忆与团队配置及行动指南；不创建专家，不上传或访问客户端文件。同名项目返回 409。",
 )
 async def create_project(
     body: ProjectFields,
@@ -175,7 +175,7 @@ async def get_project(
     "/{project_id}",
     response_model=ProjectView,
     summary="局部修改项目",
-    description="Octop 网页的项目编辑入口。只修改提交的字段；省略保持原值，目录传 null 解除关联，Skill/MCP 传 [] 清空。必须提交 expected_revision；版本冲突返回 409。名称、简介、行动指南、Skill/MCP 不接受 null。",
+    description="Octop 网页的项目编辑入口。只修改提交的字段；省略保持原值，目录传 null 解除关联，Skill/MCP、插件和子代理列表传 [] 清空。必须提交 expected_revision；版本冲突返回 409。名称、简介、行动指南、能力列表及记忆/团队开关不接受 null。",
 )
 async def patch_project(
     project_id: str,
@@ -309,7 +309,7 @@ async def list_standalone_tasks(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="创建任务并发送首条消息",
-    description="project_id 可为 null，创建无项目任务；也可指定本人项目。首条消息和任务原子保存，可用 options 选择本轮模型、Skill 和 MCP。request_id 重试不重复执行。",
+    description="project_id 可为 null，创建无项目任务；也可指定本人项目。首条消息和任务原子保存，可用 options 选择本轮模型、Skill、MCP、插件、子代理及记忆/团队设置。request_id 重试不重复执行。",
 )
 async def create_task(
     body: tasks.TaskCreate,
@@ -361,7 +361,7 @@ async def sync_standalone_tasks(
 @task_router.get(
     "/resources",
     response_model=tasks.TaskResources,
-    summary="读取本轮可选择的模型、Skill 和 MCP",
+    summary="读取本轮可选择的模型和项目能力",
     description="仅列出可用模型和本人可访问的资源引用，不返回密钥；选择仅影响本轮，不修改项目或全局默认值。",
 )
 async def task_resources(

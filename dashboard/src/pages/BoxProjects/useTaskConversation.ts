@@ -24,9 +24,14 @@ function mergeTurns(current: TaskTurn[], incoming: TaskTurn[]): TaskTurn[] {
     )
       continue;
     if (old?.status === "running" && turn.status === "queued") continue;
-    if (old && old.reply.length > turn.reply.length) continue;
     rows.set(turn.turn_id, {
       ...turn,
+      reply:
+        old && old.reply.length > turn.reply.length ? old.reply : turn.reply,
+      reasoning:
+        old && old.reasoning.length > turn.reasoning.length
+          ? old.reasoning
+          : turn.reasoning,
       cancel_requested: old?.cancel_requested || turn.cancel_requested,
     });
   }
@@ -91,6 +96,7 @@ export function useTaskConversation(
     let running = false;
     let stopped = false;
     let cursor: string | null = null;
+    let opened = false;
     let controller: AbortController | null = null;
     let timer: number | undefined;
     let delay = 1000;
@@ -114,7 +120,13 @@ export function useTaskConversation(
       controller = new AbortController();
       try {
         if (!cursor) {
-          const snapshot = await projectTasksApi.get(taskID);
+          let snapshot: TaskDetail;
+          if (opened) snapshot = await projectTasksApi.get(taskID);
+          else {
+            // A lost receipt may follow a successful admission. Recover by reading.
+            opened = true;
+            snapshot = await projectTasksApi.open(taskID);
+          }
           if (disposed) return;
           if (snapshot.project_id !== projectID)
             throw new Error(t("projects.tasks.wrongProject"));

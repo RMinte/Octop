@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     StringConstraints,
     field_validator,
@@ -69,6 +70,20 @@ class ProjectFields(ProjectModel):
     mcp_servers: list[Reference] = Field(
         default_factory=list, max_length=64, description="当前用户可用的 MCP 连接引用，不保存凭据。"
     )
+    plugins: list[Reference] = Field(
+        default_factory=list,
+        max_length=64,
+        description="已安装插件 ID；仅加载所选插件的工具、中间件和技能。",
+    )
+    subagents: list[Reference] = Field(
+        default_factory=list, max_length=16, description="内置子代理角色 slug；不创建或关联专家。"
+    )
+    memory_enabled: StrictBool = Field(
+        default=True, description="启用任务独立的持久记忆，不与其他任务共享。"
+    )
+    team_enabled: StrictBool = Field(
+        default=False, description="将所选子代理角色同时作为任务内团队成员，支持同步协作。"
+    )
 
     @field_validator("client_directory")
     @classmethod
@@ -92,6 +107,10 @@ class ProjectFields(ProjectModel):
             raise ValueError("duplicate Skill reference")
         if len(set(self.mcp_servers)) != len(self.mcp_servers):
             raise ValueError("duplicate MCP reference")
+        if len(set(self.plugins)) != len(self.plugins) or len(set(self.subagents)) != len(
+            self.subagents
+        ):
+            raise ValueError("duplicate capability reference")
         if any(ord(char) < 32 for char in self.name):
             raise ValueError("invalid project name")
         return self
@@ -137,6 +156,10 @@ class ProjectPatch(ProjectModel):
         Annotated[list[SkillBinding | SkillHubBinding], Field(max_length=64)] | SkipJsonSchema[None]
     ) = None
     mcp_servers: Annotated[list[Reference], Field(max_length=64)] | SkipJsonSchema[None] = None
+    plugins: Annotated[list[Reference], Field(max_length=64)] | SkipJsonSchema[None] = None
+    subagents: Annotated[list[Reference], Field(max_length=16)] | SkipJsonSchema[None] = None
+    memory_enabled: StrictBool | SkipJsonSchema[None] = None
+    team_enabled: StrictBool | SkipJsonSchema[None] = None
 
     @model_validator(mode="after")
     def validate_changes(self) -> Self:
@@ -166,7 +189,22 @@ class McpOption(ProjectModel):
     state: Literal["configured", "disabled", "authorization_required"]
 
 
+class PluginOption(ProjectModel):
+    plugin_id: str
+    name: str
+    description: str
+    available: bool
+
+
+class SubagentOption(ProjectModel):
+    slug: str
+    name: str
+    description: str
+
+
 class ProjectResources(ProjectModel):
     skills: list[SkillOption]
     mcp_servers: list[McpOption]
+    plugins: list[PluginOption] = Field(default_factory=list)
+    subagents: list[SubagentOption] = Field(default_factory=list)
     directory_roots: list[str] = Field(description="当前用户可浏览的服务端目录根路径。")

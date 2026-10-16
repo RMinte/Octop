@@ -11,6 +11,7 @@ from typing import Annotated, Literal, Self, cast
 from pydantic import Field, StrictBool, StrictInt, StringConstraints, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from octop.infra.agents.providers.reasoning import reasoning_request_parameters
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
@@ -40,6 +41,16 @@ TurnStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 
 class TaskExecutionOptions(ProjectModel):
+    reasoning_mode: Literal["auto", "enabled", "disabled"] | None = Field(
+        default=None,
+        description="本轮思考模式；省略或 null 使用所选模型默认值。不支持的设置返回 422。",
+    )
+    reasoning_effort: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)] | None
+    ) = Field(
+        default=None,
+        description="本轮思考强度，必须来自所选模型 reasoning_config.efforts；省略或 null 使用模型默认值。",
+    )
     model_ref: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
         | None
@@ -53,6 +64,20 @@ class TaskExecutionOptions(ProjectModel):
         default=None,
         max_length=64,
         description="本轮完整 MCP 选择；省略或 null 继承项目，[] 本轮禁用。",
+    )
+    plugins: list[Reference] | None = Field(
+        default=None, max_length=64, description="本轮插件；省略或 null 继承项目，[] 禁用。"
+    )
+    subagents: list[Reference] | None = Field(
+        default=None,
+        max_length=16,
+        description="本轮子代理角色；省略或 null 继承项目，[] 清空角色。",
+    )
+    memory_enabled: StrictBool | None = Field(
+        default=None, description="本轮是否启用任务持久记忆；省略或 null 继承项目。"
+    )
+    team_enabled: StrictBool | None = Field(
+        default=None, description="本轮是否启用任务内团队同步协作；省略或 null 继承项目。"
     )
 
     client_id: ClientID | None = Field(
@@ -68,7 +93,14 @@ class TaskExecutionOptions(ProjectModel):
             {
                 "name": "Task",
                 **self.model_dump(
-                    exclude_none=True, exclude={"model_ref", "client_id", "client_tools"}
+                    exclude_none=True,
+                    exclude={
+                        "model_ref",
+                        "client_id",
+                        "client_tools",
+                        "reasoning_mode",
+                        "reasoning_effort",
+                    },
                 ),
             }
         )
@@ -82,9 +114,22 @@ class TaskExecutionOptions(ProjectModel):
         return self
 
 
+class TaskReasoningCapability(ProjectModel):
+    supported: bool
+    toggle: bool
+    default_mode: Literal["auto", "enabled", "disabled"]
+    efforts: list[str]
+    default_effort: str | None
+    effort_type: Literal["enum", "token_budget"]
+    adapter: str
+
+
 class TaskModelOption(ProjectModel):
     model_ref: str
     name: str
+    reasoning_config: TaskReasoningCapability | None = Field(
+        default=None, description="模型的思考开关、强度及默认值；null 表示未声明思考能力。"
+    )
 
 
 class TaskResources(ProjectResources):
@@ -147,6 +192,9 @@ class TaskTurn(ProjectModel):
     request_id: str
     prompt: str
     reply: str
+    reasoning: str = Field(
+        description="模型实际返回的可展示思考文本；与正式回复分开保存。无内容时为空字符串。"
+    )
     status: TurnStatus
     error_code: str
     activity: str = Field(description="当前执行的工具名称；不包含参数、凭据或工具输出。")
@@ -156,7 +204,7 @@ class TaskTurn(ProjectModel):
     )
     model_ref: str
     options: TaskExecutionOptions = Field(
-        description="本轮实际采用的模型、Skill、MCP 和客户端工具。"
+        description="本轮实际采用的模型、Skill、MCP、插件、子代理、记忆/团队开关和客户端工具。"
     )
     cancel_requested: bool = Field(description="该轮已请求停止；运行中需等待 cancelled 终态。")
     retry_of_turn_id: str | None = Field(description="手动重试的原轮次；普通消息为 null。")
@@ -227,6 +275,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         request_id=t.request_id,
         prompt=t.prompt,
         reply=t.reply,
+        reasoning=t.reasoning,
         status=cast(TurnStatus, t.status),
         error_code=t.error_code,
         activity=t.activity,
@@ -234,8 +283,14 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         model_ref=t.model_ref,
         options=TaskExecutionOptions(
             model_ref=t.model_ref,
+            reasoning_mode=configuration.get("reasoning_mode"),
+            reasoning_effort=configuration.get("reasoning_effort"),
             skills=configuration.get("skills", []),
             mcp_servers=configuration.get("mcp_servers", []),
+            plugins=configuration.get("plugins", []),
+            subagents=configuration.get("subagents", []),
+            memory_enabled=configuration.get("memory_enabled", True),
+            team_enabled=configuration.get("team_enabled", False),
             client_id=configuration.get("execution_options", {}).get("client_id"),
             client_tools=configuration.get("execution_options", {}).get("client_tools"),
         ),
@@ -322,6 +377,34 @@ def updates(
     return result
 
 
+def _reasoning_configuration(
+    providers: ProviderStore, ref: str, options: TaskExecutionOptions
+) -> dict[str, object]:
+    capability = providers.get_model_reasoning_capability(ref)
+    if capability is None:
+        if options.reasoning_mode not in {None, "auto"} or options.reasoning_effort is not None:
+            raise OctopError.localized(ErrorCode.TASK_REASONING_INVALID, status=422)
+        return {"reasoning_mode": None, "reasoning_effort": None, "reasoning_overrides": {}}
+    mode = options.reasoning_mode or capability["default_mode"]
+    effort = options.reasoning_effort or capability["default_effort"]
+    if (
+        mode == "disabled" and (not capability["toggle"] or options.reasoning_effort is not None)
+    ) or (
+        options.reasoning_effort is not None
+        and options.reasoning_effort not in capability["efforts"]
+    ):
+        raise OctopError.localized(ErrorCode.TASK_REASONING_INVALID, status=422)
+    if mode == "disabled":
+        effort = None
+    if capability["adapter"] == "status_only":
+        mode = "enabled"
+    return {
+        "reasoning_mode": mode,
+        "reasoning_effort": effort,
+        "reasoning_overrides": reasoning_request_parameters(capability, mode=mode, effort=effort),
+    }
+
+
 def _configuration(
     services: SharedServices, owner_id: int, project_id: str | None, options: TaskExecutionOptions
 ) -> tuple[str, str]:
@@ -330,7 +413,8 @@ def _configuration(
     )
     snapshot = fields.model_dump(mode="json")
     overrides = options.model_dump(
-        exclude_none=True, exclude={"model_ref", "client_id", "client_tools"}
+        exclude_none=True,
+        exclude={"model_ref", "client_id", "client_tools", "reasoning_mode", "reasoning_effort"},
     )
     fields = ProjectFields.model_validate(
         {**fields.model_dump(include=set(ProjectFields.model_fields)), **overrides}
@@ -338,12 +422,14 @@ def _configuration(
     _validate(services, owner_id, fields)
     assert_token_quota_available(services.user_policy_repo, services.usage_repo, owner_id)
     ref = options.model_ref or resolve_model_ref(services)
-    if not ref or not ProviderStore(services.provider_repo).is_model_ref_usable(ref):
+    providers = ProviderStore(services.provider_repo)
+    if not ref or not providers.is_model_ref_usable(ref):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE, status=409)
     return json.dumps(
         {
             **snapshot,
             **fields.model_dump(),
+            **_reasoning_configuration(providers, ref, options),
             "execution_options": options.model_dump(exclude_none=True),
         }
     ), ref
@@ -516,7 +602,15 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
     providers = ProviderStore(services.provider_repo)
     models = [
         TaskModelOption(
-            model_ref=f"{provider.name}/{model['id']}", name=str(model.get("name") or model["id"])
+            model_ref=f"{provider.name}/{model['id']}",
+            name=str(model.get("name") or model["id"]),
+            reasoning_config=TaskReasoningCapability.model_validate(capability)
+            if (
+                capability := providers.get_model_reasoning_capability(
+                    f"{provider.name}/{model['id']}"
+                )
+            )
+            else None,
         )
         for provider in providers.iter_usable_rows()
         for model in provider.get_models()

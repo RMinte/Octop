@@ -10,6 +10,7 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Tabs,
   Tag,
   Typography,
@@ -43,6 +44,10 @@ const EMPTY: ProjectFields = {
   instructions: "",
   skills: [],
   mcp_servers: [],
+  plugins: [],
+  subagents: [],
+  memory_enabled: true,
+  team_enabled: false,
 };
 type FormValues = ProjectFields;
 
@@ -131,7 +136,9 @@ export default function BoxProjectsPage() {
     try {
       values = await form.validateFields();
     } catch {
-      setDetailTab("general");
+      setDetailTab(
+        form.getFieldError("subagents").length ? "capabilities" : "general",
+      );
       return;
     }
     setSaving(true);
@@ -144,6 +151,10 @@ export default function BoxProjectsPage() {
       instructions: values.instructions ?? "",
       skills: values.skills ?? [],
       mcp_servers: values.mcp_servers ?? [],
+      plugins: values.plugins ?? [],
+      subagents: values.subagents ?? [],
+      memory_enabled: values.memory_enabled ?? true,
+      team_enabled: values.team_enabled ?? false,
     };
     const body = JSON.stringify(fields);
     if (editing === "new" && creation.current?.body !== body)
@@ -346,6 +357,42 @@ export default function BoxProjectsPage() {
                           </Typography.Text>
                         </Card>
                         <div className={styles.capabilities}>
+                          <Card title={t("projects.plugins")} size="small">
+                            <Space wrap>
+                              {selected.plugins.map((id) => (
+                                <Tag key={id}>
+                                  {resources?.plugins.find(
+                                    (p) => p.plugin_id === id,
+                                  )?.name ?? id}
+                                </Tag>
+                              ))}
+                              {!selected.plugins.length && (
+                                <Typography.Text type="secondary">
+                                  {t("projects.none")}
+                                </Typography.Text>
+                              )}
+                            </Space>
+                          </Card>
+                          <Card
+                            title={t("projects.collaboration")}
+                            size="small"
+                          >
+                            <Space wrap>
+                              {selected.memory_enabled && (
+                                <Tag>{t("projects.memory")}</Tag>
+                              )}
+                              {selected.team_enabled && (
+                                <Tag>{t("projects.team")}</Tag>
+                              )}
+                              {selected.subagents.map((slug) => (
+                                <Tag key={slug}>
+                                  {resources?.subagents.find(
+                                    (s) => s.slug === slug,
+                                  )?.name ?? slug}
+                                </Tag>
+                              ))}
+                            </Space>
+                          </Card>
                           <Card title={t("projects.skills")} size="small">
                             {selected.skills.length ? (
                               <Space wrap>
@@ -530,6 +577,66 @@ export default function BoxProjectsPage() {
                         loading={!resources && !resourceError}
                         placeholder={t("projects.selectMcp")}
                       />
+                    </Form.Item>
+                    <Form.Item
+                      name="plugins"
+                      label={t("projects.plugins")}
+                      extra={t("projects.pluginsHint")}
+                    >
+                      <Select
+                        mode="multiple"
+                        showSearch
+                        optionFilterProp="label"
+                        options={resources?.plugins.map((p) => ({
+                          value: p.plugin_id,
+                          label: p.name,
+                          disabled: !p.available,
+                        }))}
+                        placeholder={t("projects.selectPlugins")}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="subagents"
+                      label={t("projects.subagents")}
+                      extra={t("projects.subagentsHint")}
+                      dependencies={["team_enabled"]}
+                      rules={[
+                        ({ getFieldValue }) => ({
+                          validator: (_, value: string[]) =>
+                            getFieldValue("team_enabled") && !value?.length
+                              ? Promise.reject(
+                                  new Error(t("projects.teamRolesRequired")),
+                                )
+                              : Promise.resolve(),
+                        }),
+                      ]}
+                    >
+                      <Select
+                        mode="multiple"
+                        showSearch
+                        optionFilterProp="label"
+                        maxCount={16}
+                        options={resources?.subagents.map((s) => ({
+                          value: s.slug,
+                          label: s.name,
+                        }))}
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="memory_enabled"
+                      label={t("projects.memory")}
+                      valuePropName="checked"
+                      extra={t("projects.memoryHint")}
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item
+                      name="team_enabled"
+                      label={t("projects.team")}
+                      valuePropName="checked"
+                      extra={t("projects.teamHint")}
+                    >
+                      <Switch />
                     </Form.Item>
                   </>
                 ),

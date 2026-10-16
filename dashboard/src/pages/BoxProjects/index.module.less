@@ -147,6 +147,22 @@
   height: min(720px, calc(100dvh - 310px));
   min-height: 360px;
 }
+.taskReasoning {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--fn-border-color, rgba(127, 127, 127, 0.18));
+  border-radius: 8px;
+  color: var(--fn-text-secondary);
+
+  summary {
+    cursor: pointer;
+    user-select: none;
+  }
+
+  &[open] summary {
+    margin-bottom: 10px;
+  }
+}
 .standaloneTasks {
   height: min(800px, calc(100dvh - 180px));
 }

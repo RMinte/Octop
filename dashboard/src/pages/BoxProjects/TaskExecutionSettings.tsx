@@ -34,6 +34,10 @@ export default function TaskExecutionSettings({
   const [open, setOpen] = useState(false);
   const [resources, setResources] = useState<TaskResources | null>(null);
   const [error, setError] = useState("");
+  const reasoning = resources?.models.find(
+    (model) =>
+      model.model_ref === (value.model_ref || resources.default_model_ref),
+  )?.reasoning_config;
   useEffect(() => {
     if (!open) return;
     let disposed = false;
@@ -90,10 +94,193 @@ export default function TaskExecutionSettings({
                           label: `${model.name} · ${model.model_ref}`,
                         }))}
                         onChange={(model_ref) =>
-                          onChange({ ...value, model_ref })
+                          onChange({
+                            ...value,
+                            model_ref,
+                            reasoning_mode: undefined,
+                            reasoning_effort: undefined,
+                          })
                         }
                       />
                     </Form.Item>
+                    {reasoning &&
+                      (reasoning.adapter === "status_only" ? (
+                        <Typography.Paragraph type="secondary">
+                          {t("chat.reasoningAlways")}
+                        </Typography.Paragraph>
+                      ) : (
+                        <>
+                          <Form.Item label={t("chat.reasoningMode")}>
+                            <Select
+                              aria-label={t("chat.reasoningMode")}
+                              disabled={disabled}
+                              value={value.reasoning_mode ?? "default"}
+                              options={[
+                                {
+                                  value: "default",
+                                  label: t("projects.tasks.reasoningDefault"),
+                                },
+                                {
+                                  value: "auto",
+                                  label: t("chat.reasoningAuto"),
+                                },
+                                {
+                                  value: "enabled",
+                                  label: t("chat.reasoningEnabled"),
+                                },
+                                ...(reasoning.toggle
+                                  ? [
+                                      {
+                                        value: "disabled",
+                                        label: t("chat.reasoningDisabled"),
+                                      },
+                                    ]
+                                  : []),
+                              ]}
+                              onChange={(mode) =>
+                                onChange({
+                                  ...value,
+                                  reasoning_mode:
+                                    mode === "default"
+                                      ? undefined
+                                      : (mode as TaskExecutionOptions["reasoning_mode"]),
+                                  reasoning_effort:
+                                    mode === "disabled" ||
+                                    (mode === "default" &&
+                                      reasoning.default_mode === "disabled")
+                                      ? undefined
+                                      : value.reasoning_effort,
+                                })
+                              }
+                            />
+                          </Form.Item>
+                          {reasoning.efforts.length > 0 && (
+                            <Form.Item label={t("chat.reasoningEffort")}>
+                              <Select
+                                aria-label={t("chat.reasoningEffort")}
+                                disabled={
+                                  disabled ||
+                                  (value.reasoning_mode ??
+                                    reasoning.default_mode) === "disabled"
+                                }
+                                allowClear
+                                value={value.reasoning_effort}
+                                placeholder={
+                                  reasoning.default_effort ||
+                                  t("projects.tasks.reasoningDefault")
+                                }
+                                options={reasoning.efforts.map((effort) => ({
+                                  value: effort,
+                                  label: effort,
+                                }))}
+                                onChange={(reasoning_effort) =>
+                                  onChange({ ...value, reasoning_effort })
+                                }
+                              />
+                            </Form.Item>
+                          )}
+                        </>
+                      ))}
+                    {(["plugins", "subagents"] as const).map((key) => (
+                      <Form.Item
+                        key={key}
+                        label={
+                          <Space>
+                            <Switch
+                              aria-label={t(
+                                `projects.tasks.custom${
+                                  key === "plugins" ? "Plugins" : "Subagents"
+                                }`,
+                              )}
+                              disabled={disabled}
+                              checked={value[key] !== undefined}
+                              onChange={(checked) =>
+                                onChange({
+                                  ...value,
+                                  [key]: checked
+                                    ? project?.[key] ?? []
+                                    : undefined,
+                                })
+                              }
+                            />
+                            {t(`projects.${key}`)}
+                          </Space>
+                        }
+                      >
+                        {value[key] === undefined ? (
+                          <Typography.Text type="secondary">
+                            {t("projects.tasks.inheritResources")}
+                          </Typography.Text>
+                        ) : (
+                          <Select
+                            mode="multiple"
+                            showSearch
+                            optionFilterProp="label"
+                            disabled={disabled}
+                            aria-label={t(`projects.${key}`)}
+                            value={value[key]}
+                            options={
+                              key === "plugins"
+                                ? resources.plugins.map((p) => ({
+                                    value: p.plugin_id,
+                                    label: p.name,
+                                    disabled: !p.available,
+                                  }))
+                                : resources.subagents.map((s) => ({
+                                    value: s.slug,
+                                    label: s.name,
+                                  }))
+                            }
+                            onChange={(selected) =>
+                              onChange({ ...value, [key]: selected })
+                            }
+                          />
+                        )}
+                      </Form.Item>
+                    ))}
+                    {(["memory_enabled", "team_enabled"] as const).map(
+                      (key) => (
+                        <Form.Item
+                          key={key}
+                          label={t(
+                            key === "memory_enabled"
+                              ? "projects.memory"
+                              : "projects.team",
+                          )}
+                        >
+                          <Select
+                            disabled={disabled}
+                            value={
+                              value[key] === undefined
+                                ? "inherit"
+                                : String(value[key])
+                            }
+                            aria-label={t(
+                              key === "memory_enabled"
+                                ? "projects.memory"
+                                : "projects.team",
+                            )}
+                            options={[
+                              {
+                                value: "inherit",
+                                label: t("projects.tasks.inheritResources"),
+                              },
+                              { value: "true", label: t("projects.enabled") },
+                              { value: "false", label: t("projects.disabled") },
+                            ]}
+                            onChange={(selected) =>
+                              onChange({
+                                ...value,
+                                [key]:
+                                  selected === "inherit"
+                                    ? undefined
+                                    : selected === "true",
+                              })
+                            }
+                          />
+                        </Form.Item>
+                      ),
+                    )}
                     <Form.Item
                       label={
                         <Space>
