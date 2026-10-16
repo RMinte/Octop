@@ -12,6 +12,7 @@ import zh from "../../locales/zh.json";
 import {
   projectTasksApi,
   type TaskDetail,
+  type TaskInputAttachment,
   type TaskStatus,
 } from "../../api/modules/projects";
 import TaskConversations from "./TaskConversations";
@@ -34,6 +35,8 @@ vi.mock("../../api/modules/projects", () => ({
     update: vi.fn(),
     delete: vi.fn(),
     downloadArtifact: vi.fn(),
+    uploadAttachment: vi.fn(),
+    attachmentPreview: vi.fn(),
   },
 }));
 vi.mock("../../hooks/useServerTimezone", () => ({
@@ -75,6 +78,7 @@ const fixture: TaskDetail = {
       turn_id: "turn_a",
       request_id: "request-first",
       prompt: "记住蓝鸟",
+      attachments: [],
       reply: "已记住蓝鸟",
       reasoning: "",
       content_blocks: [],
@@ -126,7 +130,7 @@ beforeEach(() => {
     plugins: [],
     subagents: [],
     directory_roots: [],
-    models: [{ model_ref: "glm/glm", name: "GLM" }],
+    models: [{ model_ref: "glm/glm", name: "GLM", supports_images: false }],
     approval: {
       allowed_modes: ["ask_for_approval", "approve_for_me", "full_access"],
       reviewer_ready: true,
@@ -144,7 +148,23 @@ beforeEach(() => {
   api.send.mockResolvedValue(fixture);
   api.cancel.mockResolvedValue({ ...fixture, active_turn_id: null });
   api.downloadArtifact.mockResolvedValue(new Blob(["report"]));
+  api.uploadAttachment.mockResolvedValue(imageAttachment);
+  api.attachmentPreview.mockResolvedValue(
+    new Blob(["image"], { type: "image/png" }),
+  );
+  let imageURL = 0;
+  URL.createObjectURL = vi.fn(() => `blob:task-image-${++imageURL}`);
+  URL.revokeObjectURL = vi.fn();
 });
+const imageAttachment: TaskInputAttachment = {
+  attachment_id: "image_a",
+  name: "截图.png",
+  media_type: "image/png",
+  byte_count: 5,
+  sha256: "a".repeat(64),
+  preview_url: "/api/project-tasks/attachments/image_a",
+  created_at: "2026-10-15T00:00:00Z",
+};
 function mount(query = "", projectID: string | null = "proj_a") {
   return render(
     <MemoryRouter initialEntries={["/box-projects/proj_a" + query]}>
@@ -154,6 +174,303 @@ function mount(query = "", projectID: string | null = "proj_a") {
 }
 
 describe("项目任务对话", () => {
+  it("上传完成后支持纯图片创建任务，并在发送期间冻结图片", async () => {
+    let finishUpload!: (value: TaskInputAttachment) => void;
+    api.uploadAttachment.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    let finishCreate!: (value: TaskDetail) => void;
+    api.create.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishCreate = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+    const input = await screen.findByLabelText("添加图片", {
+      selector: "input",
+    });
+    await waitFor(() => expect(input).toBeEnabled());
+    const file = new File(["image"], "截图.png", { type: "image/png" });
+    await user.upload(input, file);
+    expect(api.uploadAttachment).toHaveBeenCalledWith(
+      file,
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByAltText("截图.png")).toBeInTheDocument();
+    await act(async () => finishUpload(imageAttachment));
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(api.create).toHaveBeenCalledWith(
+      "proj_a",
+      expect.objectContaining({
+        prompt: "",
+        attachment_ids: ["image_a"],
+      }),
+    );
+    expect(screen.getByRole("button", { name: /移除图片/ })).toBeDisabled();
+    expect(input).toBeDisabled();
+    await act(async () => finishCreate(fixture));
+    await waitFor(() =>
+      expect(screen.queryByAltText("截图.png")).not.toBeInTheDocument(),
+    );
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:task-image-1");
+  });
+
+  it("图文追问沿用当前任务，不创建新任务", async () => {
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    await screen.findByText("已记住蓝鸟");
+    await user.upload(
+      screen.getByLabelText("添加图片", { selector: "input" }),
+      new File(["image"], "截图.png", { type: "image/png" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "任务消息" }),
+      "看看这张截图",
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "发送" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(api.send).toHaveBeenCalledWith(
+      "task_a",
+      expect.objectContaining({
+        prompt: "看看这张截图",
+        attachment_ids: ["image_a"],
+      }),
+    );
+    expect(api.create).not.toHaveBeenCalled();
+  });
+
+  it("网络重传保留同一图片引用，更换图片后使用新的发送标识", async () => {
+    api.create.mockRejectedValueOnce(new Error("network unavailable"));
+    api.create.mockRejectedValueOnce(new Error("network unavailable"));
+    api.uploadAttachment.mockResolvedValueOnce(imageAttachment);
+    api.uploadAttachment.mockResolvedValueOnce({
+      ...imageAttachment,
+      attachment_id: "image_b",
+      name: "新图.png",
+    });
+    const user = userEvent.setup();
+    mount();
+    const input = await screen.findByLabelText("添加图片", {
+      selector: "input",
+    });
+    await waitFor(() => expect(input).toBeEnabled());
+    await user.upload(
+      input,
+      new File(["image"], "截图.png", { type: "image/png" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "发送" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByText("network unavailable");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(api.create).toHaveBeenCalledTimes(2));
+    expect(api.create.mock.calls[0][1]).toEqual(api.create.mock.calls[1][1]);
+    expect(screen.getByAltText("截图.png")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /移除图片/ }));
+    await user.upload(
+      input,
+      new File(["new"], "新图.png", { type: "image/png" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "发送" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(api.create.mock.calls[2][1].attachment_ids).toEqual(["image_b"]);
+    expect(api.create.mock.calls[2][1].request_id).not.toBe(
+      api.create.mock.calls[0][1].request_id,
+    );
+    expect(api.uploadAttachment).toHaveBeenCalledTimes(2);
+  });
+
+  it("支持粘贴和拖入图片，并阻止失败上传的图片发送", async () => {
+    api.uploadAttachment.mockResolvedValueOnce(imageAttachment);
+    api.uploadAttachment.mockRejectedValueOnce(new Error("upload rejected"));
+    mount();
+    const composer = await screen.findByRole("textbox", { name: "任务消息" });
+    await waitFor(() => expect(composer).toBeEnabled());
+    fireEvent.paste(composer, {
+      clipboardData: {
+        files: [new File(["image"], "粘贴.png", { type: "image/png" })],
+      },
+    });
+    await waitFor(() => expect(api.uploadAttachment).toHaveBeenCalledTimes(1));
+    fireEvent.drop(composer, {
+      dataTransfer: {
+        files: [new File(["image"], "拖入.webp", { type: "image/webp" })],
+      },
+    });
+    await screen.findByText("upload rejected");
+    expect(api.uploadAttachment).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
+
+  it("切换任务时清空图片，中止上传并忽略迟到的结果", async () => {
+    let finishUpload!: (value: TaskInputAttachment) => void;
+    api.uploadAttachment.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    await screen.findByText("已记住蓝鸟");
+    await user.upload(
+      screen.getByLabelText("添加图片", { selector: "input" }),
+      new File(["image"], "旧任务.png", { type: "image/png" }),
+    );
+    const signal = api.uploadAttachment.mock.calls[0][1]!;
+    await user.click(screen.getByRole("button", { name: "新任务" }));
+    expect(signal.aborted).toBe(true);
+    expect(screen.queryByAltText("旧任务.png")).not.toBeInTheDocument();
+    await act(async () => finishUpload(imageAttachment));
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:task-image-1");
+    await user.type(
+      screen.getByRole("textbox", { name: "任务消息" }),
+      "新的文字任务",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(api.create.mock.calls[0][1].attachment_ids).toBeUndefined();
+  });
+
+  it("切换项目时清空图片并中止旧上传", async () => {
+    let finishUpload!: (value: TaskInputAttachment) => void;
+    api.uploadAttachment.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    const view = mount();
+    const input = await screen.findByLabelText("添加图片", {
+      selector: "input",
+    });
+    await waitFor(() => expect(input).toBeEnabled());
+    await user.upload(
+      input,
+      new File(["image"], "旧项目.png", { type: "image/png" }),
+    );
+    const signal = api.uploadAttachment.mock.calls[0][1]!;
+    view.rerender(
+      <MemoryRouter initialEntries={["/box-projects/proj_b"]}>
+        <TaskConversations projectID="proj_b" />
+      </MemoryRouter>,
+    );
+    expect(signal.aborted).toBe(true);
+    await act(async () => finishUpload(imageAttachment));
+    expect(screen.queryByAltText("旧项目.png")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
+
+  it("9 张图片可直接发送，第 10 张及不支持的文件不上传或发送", async () => {
+    api.uploadAttachment.mockImplementation(async (file) => ({
+      ...imageAttachment,
+      attachment_id: `image_${file.name}`,
+      name: file.name,
+    }));
+    const user = userEvent.setup();
+    mount();
+    const input = await screen.findByLabelText("添加图片", {
+      selector: "input",
+    });
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, {
+      target: {
+        files: [new File(["text"], "说明.txt", { type: "text/plain" })],
+      },
+    });
+    await screen.findByText("仅支持 JPEG、PNG、WebP 和 GIF 图片。");
+    const large = new File(["image"], "大图.png", { type: "image/png" });
+    Object.defineProperty(large, "size", { value: 25 * 1024 * 1024 + 1 });
+    fireEvent.change(input, { target: { files: [large] } });
+    await screen.findByText(
+      "每张图片不能超过 25 MiB；服务端可能设置更低的上传限额。",
+    );
+    expect(api.uploadAttachment).not.toHaveBeenCalled();
+    fireEvent.change(input, {
+      target: {
+        files: Array.from(
+          { length: 9 },
+          (_, i) => new File(["image"], `图片${i}.png`, { type: "image/png" }),
+        ),
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "发送" })).toBeEnabled(),
+    );
+    expect(api.uploadAttachment).toHaveBeenCalledTimes(9);
+    expect(input).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加图片" })).toBeDisabled();
+    expect(
+      screen.queryByText("每条消息最多添加 9 张图片。"),
+    ).not.toBeInTheDocument();
+    fireEvent.drop(screen.getByRole("textbox", { name: "任务消息" }), {
+      dataTransfer: {
+        files: [new File(["image"], "第十张.png", { type: "image/png" })],
+      },
+    });
+    await screen.findByText("每条消息最多添加 9 张图片。");
+    expect(api.uploadAttachment).toHaveBeenCalledTimes(9);
+    expect(screen.queryByAltText("第十张.png")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(api.create).toHaveBeenCalledWith(
+      "proj_a",
+      expect.objectContaining({
+        prompt: "",
+        attachment_ids: Array.from(
+          { length: 9 },
+          (_, i) => `image_图片${i}.png`,
+        ),
+      }),
+    );
+  });
+
+  it("历史图片通过鉴权接口加载，关闭对话时释放预览 URL", async () => {
+    api.open.mockResolvedValue({
+      ...fixture,
+      turns: [
+        { ...fixture.turns[0], prompt: "", attachments: [imageAttachment] },
+      ],
+    });
+    const view = mount("?task=task_a");
+    const image = await screen.findByAltText("截图.png");
+    await waitFor(() =>
+      expect(image).toHaveAttribute("src", "blob:task-image-1"),
+    );
+    expect(api.attachmentPreview).toHaveBeenCalledWith(
+      "image_a",
+      expect.any(AbortSignal),
+    );
+    const signal = api.attachmentPreview.mock.calls[0][1]!;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:task-image-1");
+  });
+
+  it("历史图片加载失败可重新加载", async () => {
+    api.attachmentPreview.mockRejectedValueOnce(
+      new Error("network unavailable"),
+    );
+    api.open.mockResolvedValue({
+      ...fixture,
+      turns: [{ ...fixture.turns[0], attachments: [imageAttachment] }],
+    });
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    await user.click(
+      await screen.findByRole("button", { name: "重新加载图片" }),
+    );
+    await screen.findByAltText("截图.png");
+    expect(api.attachmentPreview).toHaveBeenCalledTimes(2);
+  });
+
   it("首条发送创建任务，并打开持久化的对话", async () => {
     const user = userEvent.setup();
     mount();
@@ -857,7 +1174,9 @@ it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目
     plugins: [],
     subagents: [],
     directory_roots: [],
-    models: [{ model_ref: "other/model", name: "Other model" }],
+    models: [
+      { model_ref: "other/model", name: "Other model", supports_images: false },
+    ],
     approval: {
       allowed_modes: ["ask_for_approval", "approve_for_me", "full_access"],
       reviewer_ready: true,
@@ -1058,6 +1377,7 @@ it("模型支持时发送本轮思考模式与强度，切换模型后清除旧�
       {
         model_ref: "glm/glm",
         name: "GLM",
+        supports_images: false,
         reasoning_config: {
           supported: true,
           toggle: true,
@@ -1068,7 +1388,12 @@ it("模型支持时发送本轮思考模式与强度，切换模型后清除旧�
           adapter: "thinking",
         },
       },
-      { model_ref: "plain/model", name: "Plain model", reasoning_config: null },
+      {
+        model_ref: "plain/model",
+        name: "Plain model",
+        supports_images: false,
+        reasoning_config: null,
+      },
     ],
   });
   const user = userEvent.setup();

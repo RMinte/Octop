@@ -30,7 +30,8 @@ from octop.infra.connectors.service import ConnectorService
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import approval_policy, approval_runtime, interactions
+from octop.infra.gateway.media.attachment_hints import content_blocks_need_vision
+from octop.infra.projects import approval_policy, approval_runtime, input_attachments, interactions
 from octop.infra.projects.approval_reviewer import TaskApprovalReviewWorker
 from octop.infra.projects.artifacts import SERVER_ARTIFACT_TOOLS, TaskArtifactPublisher
 from octop.infra.projects.capabilities import plugin_capabilities, subagent_specs
@@ -46,6 +47,8 @@ from octop.infra.projects.collaboration import TaskTeam, guard_subagents
 from octop.infra.projects.content import TaskContent
 from octop.infra.projects.context import capture_memory, close_pending_tools
 from octop.infra.projects.control import ASK_USER, TaskControlMiddleware, question_tool
+from octop.infra.projects.image_middleware import TaskImageMaterializeMiddleware
+from octop.infra.projects.image_tools import READ_TASK_IMAGE, read_image_tool
 from octop.infra.projects.interaction_models import TaskInteraction
 from octop.infra.projects.models import ProjectFields, SkillBinding
 from octop.infra.projects.service import _validate
@@ -126,6 +129,19 @@ async def run_turn(
     providers = ProviderStore(services.provider_repo)
     if not await asyncio.to_thread(providers.is_model_ref_usable, turn.model_ref):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
+    user_content = input_attachments.content(turn.prompt, raw.get("attachment_ids", []))
+    needs_images = content_blocks_need_vision(user_content) or any(
+        content_blocks_need_vision(
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
+        for message in history
+    )
+    if needs_images and not await asyncio.to_thread(
+        providers.is_model_ref_multimodal, turn.model_ref
+    ):
+        raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
     configs_provider = await asyncio.to_thread(providers.build_harness_configs)
     runtime_dir = services.paths.root / "project-tasks" / turn.task_id
     workspace = Path(fields.directory) if fields.directory else runtime_dir / "workspace"
@@ -150,7 +166,7 @@ async def run_turn(
     ]
     broker = ClientToolBroker(services, owner_id, turn, options.get("client_id") or "", definitions)
     client_tools = broker.tools()
-    if ({tool.name for tool in client_tools} | SERVER_ARTIFACT_TOOLS) & {
+    if ({tool.name for tool in client_tools} | SERVER_ARTIFACT_TOOLS | {READ_TASK_IMAGE}) & {
         tool.name for tool in tools
     }:
         raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE)
@@ -159,6 +175,7 @@ async def run_turn(
         prompt += "\n\n" + tr("projects.client_tools_prompt", locale)
     publisher = TaskArtifactPublisher(services, owner_id, turn, workspace, locale)
     prompt += "\n\n" + tr("projects.artifacts_prompt", locale)
+    prompt += "\n\n" + tr("projects.task_images_prompt", locale)
     try:
         plugin_tools, plugin_middleware, plugin_skills = await asyncio.to_thread(
             plugin_capabilities,
@@ -177,6 +194,7 @@ async def run_turn(
                 "ls",
                 "glob",
                 "grep",
+                READ_TASK_IMAGE,
             },
         )
         roles = await asyncio.to_thread(subagent_specs, fields, locale)
@@ -214,6 +232,7 @@ async def run_turn(
             *plugin_middleware,
             TaskControlMiddleware(services, owner_id, turn, locale),
             ReasoningRequestMiddleware(summary=raw.get("reasoning_mode") not in {None, "disabled"}),
+            TaskImageMaterializeMiddleware(services, owner_id, turn.task_id),
         ],
         ask_user_enabled=False,
         protocol=TASK_PROTOCOL,
@@ -228,7 +247,12 @@ async def run_turn(
             }
         ),
         web_search_tools=False,
-        tools=[*publisher.tools(), *plugin_tools, question_tool(locale)],
+        tools=[
+            *publisher.tools(),
+            *plugin_tools,
+            question_tool(locale),
+            read_image_tool(services, owner_id, turn.task_id, locale),
+        ],
     )
     policy = await asyncio.to_thread(
         SecuritySettingsStore(settings_repo=services.settings_repo).load
@@ -314,7 +338,7 @@ async def run_turn(
                 prepare,
             )
         request = ChatRequest(
-            messages=[*history, {"role": "user", "content": turn.prompt}],
+            messages=[*history, {"role": "user", "content": user_content}],
             thread_id=turn.turn_id,
             agent_id=turn.task_id,
             user=str(owner_id),
@@ -627,7 +651,13 @@ class ProjectTaskWorker:
                     reply_text += "\n\n" + tr("projects.task_incomplete_context", locale)
                 history.extend(
                     [
-                        {"role": "user", "content": previous.prompt},
+                        {
+                            "role": "user",
+                            "content": input_attachments.content(
+                                previous.prompt,
+                                json.loads(previous.configuration_json).get("attachment_ids", []),
+                            ),
+                        },
                         {"role": "assistant", "content": reply_text},
                     ]
                 )

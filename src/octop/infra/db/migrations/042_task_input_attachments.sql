@@ -1,0 +1,18 @@
+-- Image inputs have stable task ownership, independent of each turn's workspace.
+CREATE TABLE IF NOT EXISTS project_task_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attachment_id TEXT NOT NULL UNIQUE,
+    owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES project_tasks(task_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    byte_count BIGINT NOT NULL,
+    sha256 TEXT NOT NULL,
+    content BLOB NOT NULL,
+    created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_task_attachments_task
+    ON project_task_attachments(owner_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_project_task_attachments_pending
+    ON project_task_attachments(owner_id, created_at) WHERE task_id IS NULL;
+UPDATE _schema_version SET version = 42;

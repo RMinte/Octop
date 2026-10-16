@@ -45,7 +45,9 @@ def open_task(services: SharedServices, owner_id: int, task_id: str) -> TaskDeta
                 and state.status is None
                 and state.title == state.prompt[:80]
             )
-            eligible = state.source == "provisional" or legacy_default
+            eligible = bool(state.prompt.strip()) and (
+                state.source == "provisional" or legacy_default
+            )
             if eligible and state.status is None:
                 if legacy_default:
                     tasks.allow_legacy_title_generation(conn, task_id, owner_id, state.revision)

@@ -6,18 +6,19 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Any, Literal, Self, cast
 
 from pydantic import Field, StrictBool, StrictInt, StringConstraints, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from octop.i18n import tr
 from octop.infra.agents.providers.reasoning import reasoning_request_parameters
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import approval_policy, artifacts, interactions
+from octop.infra.projects import approval_policy, artifacts, input_attachments, interactions
 from octop.infra.projects.approval_models import (
     ApprovalCapabilities,
     ApprovalMode,
@@ -27,6 +28,8 @@ from octop.infra.projects.artifact_models import TaskArtifact
 from octop.infra.projects.client_tool_models import ClientID, ClientToolDefinition
 from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
+from octop.infra.projects.image_tools import READ_TASK_IMAGE
+from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction, public_status
 from octop.infra.projects.models import (
     ProjectFields,
@@ -40,10 +43,11 @@ from octop.infra.projects.service import _validate, get_project
 from octop.infra.projects.service import resources as project_resources
 from octop.infra.projects.title_policy import provisional_title
 from octop.infra.users.resource_policy import assert_token_quota_available
+from octop.infra.utils.locale import normalize_locale
 from octop.infra.utils.ulid import new_ulid
 
 RequestID = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{8,128}$")]
-Prompt = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32768)]
+Prompt = Annotated[str, StringConstraints(strip_whitespace=True, max_length=32768)]
 TurnStatus = Literal[
     "queued",
     "running",
@@ -126,8 +130,10 @@ class TaskExecutionOptions(ProjectModel):
         names = [tool.name for tool in self.client_tools or []]
         if len(names) != len(set(names)):
             raise ValueError("duplicate client tool names")
-        if set(names) & artifacts.SERVER_ARTIFACT_TOOLS:
-            raise ValueError("artifact tools are server-owned and cannot be registered by clients")
+        if set(names) & (artifacts.SERVER_ARTIFACT_TOOLS | {READ_TASK_IMAGE}):
+            raise ValueError(
+                "task attachment tools are server-owned and cannot be registered by clients"
+            )
         return self
 
 
@@ -144,6 +150,9 @@ class TaskReasoningCapability(ProjectModel):
 class TaskModelOption(ProjectModel):
     model_ref: str
     name: str
+    supports_images: bool = Field(
+        description="模型是否支持图片输入；包含图片的任务须选择此类模型。"
+    )
     reasoning_config: TaskReasoningCapability | None = Field(
         default=None, description="模型的思考开关、强度及默认值；null 表示未声明思考能力。"
     )
@@ -179,11 +188,24 @@ class TaskMessage(ProjectModel):
     request_id: RequestID = Field(
         description="本次发送的唯一标识；网络重试必须复用，相同标识不会重复执行。"
     )
-    prompt: Prompt = Field(description="本轮用户消息。发送后开始一次执行。")
+    prompt: Prompt = Field(default="", description="本轮用户文字；可为空，但须提供图片附件。")
+    attachment_ids: list[Reference] = Field(
+        default_factory=list,
+        max_length=input_attachments.MAX_ATTACHMENTS,
+        description="已上传的本人图片 ID，按显示顺序排列，最多九张；首次发送后归属此任务。",
+    )
     options: TaskExecutionOptions = Field(
         default_factory=TaskExecutionOptions,
         description="本轮执行选项；省略时使用当前项目及默认模型，不修改项目。",
     )
+
+    @model_validator(mode="after")
+    def validate_message(self) -> Self:
+        if not self.prompt and not self.attachment_ids:
+            raise ValueError("text or image attachments are required")
+        if len(self.attachment_ids) != len(set(self.attachment_ids)):
+            raise ValueError("duplicate attachment IDs")
+        return self
 
 
 class TaskRetry(ProjectModel):
@@ -212,6 +234,10 @@ class TaskTurn(ProjectModel):
     turn_id: str
     request_id: str
     prompt: str
+    attachments: list[TaskInputAttachment] = Field(
+        default_factory=list,
+        description="本轮用户上传的图片，仅含元数据；预览通过鉴权 HTTP 获取。",
+    )
     reply: str
     reasoning: str = Field(
         description="模型实际返回的可展示思考文本；与正式回复分开保存。无内容时为空字符串。"
@@ -316,6 +342,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         turn_id=t.turn_id,
         request_id=t.request_id,
         prompt=t.prompt,
+        attachments=configuration.get("attachments", []),
         reply=t.reply,
         reasoning=t.reasoning,
         content_blocks=blocks,
@@ -510,6 +537,7 @@ def resolve_model_ref(services: SharedServices) -> str | None:
 def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: str | None) -> None:
     if (
         old.prompt != body.prompt
+        or json.loads(old.configuration_json).get("attachment_ids", []) != body.attachment_ids
         or json.loads(old.configuration_json).get("retry_of_turn_id") != retry_of_turn_id
         or json.loads(old.configuration_json).get("execution_options", {})
         != body.options.model_dump(exclude_none=True)
@@ -522,6 +550,29 @@ def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: s
         )
     ):
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
+
+
+def _input_configuration(
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    task_id: str,
+    body: TaskMessage,
+    configuration: str,
+    model_ref: str,
+) -> str:
+    attached = input_attachments.bind(services, conn, owner_id, task_id, body.attachment_ids)
+    if (
+        attached or services.project_task_attachment_repo.has_for_task(conn, owner_id, task_id)
+    ) and not ProviderStore(services.provider_repo).is_model_ref_multimodal(model_ref):
+        raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
+    return json.dumps(
+        {
+            **json.loads(configuration),
+            "attachment_ids": body.attachment_ids,
+            "attachments": [item.model_dump(mode="json") for item in attached],
+        }
+    )
 
 
 def send(
@@ -549,7 +600,10 @@ def send(
             if original is None or original.task_id != task_id:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
             body = TaskMessage(
-                request_id=body.request_id, prompt=original.prompt, options=body.options
+                request_id=body.request_id,
+                prompt=original.prompt,
+                attachment_ids=json.loads(original.configuration_json).get("attachment_ids", []),
+                options=body.options,
             )
         assert isinstance(body, TaskMessage)
         if task:
@@ -588,6 +642,9 @@ def send(
                         {**json.loads(configuration), "retry_of_turn_id": retry_of_turn_id}
                     )
                 turn_id, now = "turn_" + new_ulid(), now_ms()
+                configuration = _input_configuration(
+                    services, conn, owner_id, task.task_id, body, configuration, model_ref
+                )
                 if not tasks.activate(conn, task.task_id, turn_id, now):
                     raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
                 turns.insert(
@@ -622,13 +679,19 @@ def send(
                     "approval_policy_at_start": start_policy.model_dump(mode="json"),
                 }
             )
+            initial_title = body.prompt
+            if not initial_title:
+                user = services.user_repo.get(owner_id)
+                initial_title = tr(
+                    "projects.image_task_title", normalize_locale(user.locale if user else "zh")
+                )
             tasks.insert(
                 conn,
                 ProjectTaskRow(
                     task_id,
                     owner_id,
                     project_id,
-                    provisional_title(body.prompt),
+                    provisional_title(initial_title),
                     body.request_id,
                     turn_id,
                     now,
@@ -636,6 +699,9 @@ def send(
                     approval_mode=mode,
                     approval_updated_at=now,
                 ),
+            )
+            configuration = _input_configuration(
+                services, conn, owner_id, task_id, body, configuration, model_ref
             )
             turns.insert(
                 conn,
@@ -656,7 +722,8 @@ def send(
                     now,
                 ),
             )
-            services.project_task_title_repo.enqueue(conn, task_id)
+            if body.prompt:
+                services.project_task_title_repo.enqueue(conn, task_id)
     assert task_id is not None
     return detail(services, owner_id, task_id)
 
@@ -691,6 +758,7 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
         TaskModelOption(
             model_ref=f"{provider.name}/{model['id']}",
             name=str(model.get("name") or model["id"]),
+            supports_images=providers.is_model_ref_multimodal(f"{provider.name}/{model['id']}"),
             reasoning_config=TaskReasoningCapability.model_validate(capability)
             if (
                 capability := providers.get_model_reasoning_capability(

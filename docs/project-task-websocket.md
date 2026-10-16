@@ -4,7 +4,7 @@
 
 客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。模型执行槽保持串行，主 Task 等待客户端工具时保存检查点并释放执行槽，其他排队任务可以继续；生成中的正文按约 0.5 秒的保存节奏更新。
 
-这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字消息、独立的思考内容、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。主 Task 支持三档任务审批模式、远端独立 Reviewer、提问和手动暂停恢复；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)。
+这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字和图片输入、独立的思考内容、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。主 Task 支持三档任务审批模式、远端独立 Reviewer、提问和手动暂停恢复；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)，图片输入见[第 15 节](#15-图片输入)。
 
 - [JSON Schema](project-task-websocket.schema.json)：请求按实际 Pydantic 模型导出；服务端数据模型与 REST 共用定义。
 - [API 参考](api.md)：项目配置、任务列表、历史分页、改名与归档。
@@ -90,7 +90,7 @@ heartbeat 不需要回复。下文的 ping 命令用于主动检查请求与回�
 
 请求模型拒绝未声明字段。除明确允许 null 的字段外，不要用 null 代替省略；例如 options 可以省略，但 `options:null` 不合法。响应解析应忽略未知字段，并为未知错误码提供通用处理。
 
-服务端不使用命令 id 去重。网络重发可以换命令 id，但要保留 data.request_id、正文和 options。命令按连接上的接收顺序处理，回执和订阅事件可以交错出现。
+服务端不使用命令 id 去重。网络重发可以换命令 id，但要保留 data.request_id、正文、attachment_ids 及顺序和 options。命令按连接上的接收顺序处理，回执和订阅事件可以交错出现。
 
 ## 4 客户端命令
 
@@ -100,7 +100,7 @@ heartbeat 不需要回复。下文的 ping 命令用于主动检查请求与回�
 {"type":"task.create","id":"command-create-001","data":{"project_id":null,"request_id":"message-first-001","prompt":"请概括下一步工作"}}
 ```
 
-project_id 为 null 或省略时创建无项目任务；指定项目时必须属于当前用户。prompt 去除首尾空白后为 1–32768 个 Unicode 码点，还受帧字节限制。options 可省略，规则见第 7 节。
+project_id 为 null 或省略时创建无项目任务；指定项目时必须属于当前用户。prompt 去除首尾空白后最多 32768 个 Unicode 码点，还受帧字节限制；可省略或为空，但此时必须带非空 attachment_ids。图片先通过 HTTP 上传，每轮 attachment_ids 最多九个不重复 ID，规则见[第 15 节](#15-图片输入)。options 可省略，规则见第 7 节。
 
 成功 result.data 为 TaskDetail，通常包含 queued 的首轮。成功仅表示已保存和排队；模型或资源不满足要求时返回错误，不创建空任务。创建 Task 不会绑定或创建专家。
 
@@ -128,7 +128,7 @@ project_id 为 null 或省略时创建无项目任务；指定项目时必须属
 
 只能重试最后一个 failed/cancelled 轮次，且任务当前没有活动轮次。成功 result.data 为 TaskDetail：保留原记录，用原 prompt 和当前配置创建新 turn_id，记录 retry_of_turn_id。它会重新执行工作，可能重复已有工具操作，不能用于自动网络重连。
 
-同一次重试的网络重发仍使用原 request_id 和 options。要再次执行另一轮重试，使用新 request_id。
+同一次重试的网络重发仍使用原 request_id 和 options。要再次执行另一轮重试，使用新 request_id。图片输入沿用原轮次的附件和顺序，重试请求无需上传或重复提交 attachment_ids。
 
 ### 打开任务 task.open
 
@@ -327,6 +327,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | sequence | integer | 稳定排序序号 |
 | turn_id / request_id | string | 轮次与消息幂等身份 |
 | prompt / reply | string | 用户消息与已保存的累计回复 |
+| attachments | array | 本轮用户上传图片元数据，按提交顺序排列；预览需要鉴权 HTTP，字段见第 15 节 |
 | reasoning | string | 模型实际返回的可展示思考文本，与 reply 分开保存；无内容时为空字符串 |
 | content_blocks | TaskContentBlock[] | 按首次发生顺序排列的完整内容块快照；历史未记录时为空 |
 | content_revision | integer | 本轮内容块版本，独立于任务列表版本；客户端按此版本替换内容块 |
@@ -451,7 +452,7 @@ REST 首次详情默认最近 50 轮，最多 100 轮；历史页 event_cursor �
 
 ### 发送后没收到回执
 
-此时是否已保存未知，不自动换新 request_id 重发。保留原正文、options、project_id/task_id 和 request_id；用户选择重试时，用新命令 id 重发同一消息。服务端按消息身份返回原任务或轮次，不重复排队。内容、选项或重试来源变化却复用旧 request_id，会返回 TASK_REQUEST_CONFLICT。
+此时是否已保存未知，不自动换新 request_id 重发。保留原正文、attachment_ids 及顺序、options、project_id/task_id 和 request_id；用户选择重试时，用新命令 id 重发同一消息。服务端按消息身份返回原任务或轮次，不重复排队。内容、图片、选项或重试来源变化却复用旧 request_id，会返回 TASK_REQUEST_CONFLICT。
 
 连接断开不等于服务端进程重启。执行中断可能留下 failed/TASK_INTERRUPTED；重连只恢复持久状态，不承诺恢复模型工具执行现场。用户明确选择 task.retry 才会创建新执行轮次。
 
@@ -487,15 +488,19 @@ REST 首次详情默认最近 50 轮，最多 100 轮；历史页 event_cursor �
 | 403 / USER_DISABLED | 用户已停用，结束旧会话 |
 | 403 / FORBIDDEN、TOKEN_QUOTA_EXCEEDED | 权限或配额不足，不自动换账号 |
 | 404 / NOT_FOUND | 任务、轮次或项目不存在，或不属于当前用户 |
+| 404 / TASK_IMAGE_UNAVAILABLE | 图片不存在、已过期、不属于当前用户或已绑定其他任务 |
 | 409 / PROJECT_SYNC_RESET | 游标非法或不适用；跨账号游标也可能先报此错，重建该任务快照 |
 | 409 / TASK_BUSY | 已有活动轮次，等待或由用户停止 |
 | 409 / TASK_ARCHIVED | 先通过 REST 恢复归档任务 |
-| 409 / TASK_REQUEST_CONFLICT | 幂等标识与消息、options 或重试来源冲突，核对本地待发记录 |
+| 409 / TASK_REQUEST_CONFLICT | 幂等标识与消息、图片 ID 及顺序、options 或重试来源冲突，核对本地待发记录 |
 | 409 / TASK_RETRY_UNAVAILABLE | 指定轮次不能重试，刷新状态 |
 | 409 / TASK_MODEL_UNAVAILABLE | 当前模型不可用，刷新模型选择 |
 | 409 / CONTROL_PLANE_BUSY | worker 不接收新执行，稍后由用户重试；没有因此创建空任务 |
 | 422 / TASK_FRAME_INVALID | 格式错误或超过 32 个订阅，修正请求 |
 | 422 / TASK_REASONING_INVALID | 所选模型不支持该思考模式或强度，刷新模型能力并调整本轮设置 |
+| 422 / TASK_IMAGE_INVALID | 上传内容不是支持的有效图片；修正文件后重新上传 |
+| 413 / TASK_IMAGE_LIMIT | 图片超过服务端大小限制或无法压缩到模型可接收大小 |
+| 422 / TASK_IMAGE_MODEL_REQUIRED | 本轮或历史有图片，须明确选择支持图片的模型 |
 | 422 / PROJECT_RESOURCE_INVALID | 所选 Skill/MCP 无效或无权使用，刷新候选 |
 | 500 / INTERNAL_ERROR | 服务端异常，保留发送身份并按错误范围处理 |
 
@@ -592,7 +597,7 @@ func observeExampleTask(endpoint: URL, accessToken: String) async throws {
 - 停止、失败、完成及重连后，已收到的思考仍可查看；无思考内容时隐藏区块。
 - 模型选择只展示支持的思考设置；切换模型清除不适用的选择，关闭思考同时清除强度。
 - 断线后任务继续，重连补齐结果，没有额外创建任务或轮次。
-- 回执丢失后的显式重试保留原 request_id、正文和 options。
+- 回执丢失后的显式重试保留原 request_id、正文、attachment_ids 及顺序和 options。
 - 游标失效只重建对应任务；取消订阅和切换页面不停止任务。
 - 停止指定 turn_id，等待 cancelled；迟到停止不影响下一轮。
 - 续期沿用原凭据保存策略，切换账号后不处理旧连接数据。
@@ -839,3 +844,51 @@ result.data 为 ClientToolCall，review 可处于 queued/reviewing/completed/can
 review.decision 为 allow_once、deny、requires_user，reason_code 为稳定结果码。结果不会完成调用、恢复主模型或授权本机执行。执行电脑须核对 action_digest/context_digest、manual_review_required、本机授权及本机安全边界，派发前再次 tool.get 检查 dispatch_allowed；暂停、取消或截止后禁止新派发。执行后仍用原 tool.result 回传。拒绝或执行状态不明也须回传明确的 is_error=true 结果。重连、模式改变和审查结果均不得造成副作用重放。
 
 服务端已完成协议与模拟客户端验证。AgentComputer 本次未修改，本机授权、执行记录和界面接入要求见[交接文档](agentcomputer-task-interactions.md)。
+
+## 15 图片输入
+
+图片字节通过已鉴权的 HTTP 上传，WebSocket 只传图片 ID。首条消息、同一任务追问和无项目任务使用相同规则，不依赖专家或运行中的 Agent。
+
+### 15.1 上传与发送
+
+使用 `POST /api/project-tasks/attachments`，请求头携带 `Authorization: Bearer <access token>`，body 为 multipart/form-data，文件字段名为 `file`。成功返回 HTTP 201：
+
+```json
+{
+  "attachment_id":"input_example",
+  "name":"截图.png",
+  "media_type":"image/png",
+  "byte_count":12345,
+  "sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "preview_url":"/api/project-tasks/attachments/input_example",
+  "created_at":"2026-10-16T08:00:00Z"
+}
+```
+
+仅接受可实际解码的 PNG、JPEG、GIF、WebP，media_type 按图片真实内容识别，不信任客户端 MIME 声明。每张原图最多为 `min(服务端 max_upload_bytes, 25 MiB)`；模型调用时复用普通聊天的图片大小处理，无法压到模型可接收大小时拒绝上传。SVG、伪图片或损坏图片返回 `TASK_IMAGE_INVALID`，大小限制返回 `TASK_IMAGE_LIMIT`。
+
+上传完成后提交：
+
+```json
+{"type":"task.create","id":"image-create-001","data":{"request_id":"image-message-001","prompt":"请解释截图里的报错","attachment_ids":["input_example"],"options":{"model_ref":"provider/vision-model"}}}
+```
+
+只发送图片时，prompt 可省略或为 `""`。文字和图片至少提供一种；每轮最多九个不重复的 attachment_ids，数组顺序就是显示顺序。追问使用相同的 data 结构和 task.message。REST 的 `POST /api/project-tasks`、`POST /api/projects/{project_id}/tasks`、`POST /api/project-tasks/{task_id}/messages` 共用此契约。
+
+只有当前轮次选择的模型支持图片时才能发送图片；任务历史已有图片时，即使本轮仅发文字也须使用视觉模型，否则返回 `422 TASK_IMAGE_MODEL_REQUIRED`。资源接口 `models[].supports_images` 提供能力标识，服务端不会替用户自动切换模型。
+
+### 15.2 归属、重试与历史
+
+上传文件先属于当前用户，尚未发送的图片在 24 小时后失效。首条引用成功发送时，与创建轮次在同一事务内绑定任务；发送被拒绝不会占用图片。已绑定图片可在同一任务再次引用，不能用于另一个任务。跨任务、跨账号、不存在或已过期的 ID 返回 `404 TASK_IMAGE_UNAVAILABLE`。
+
+网络重试保留 request_id、prompt、attachment_ids 及其顺序和 options；换图片或调整顺序复用原 request_id 会返回 `TASK_REQUEST_CONFLICT`。手动 task.retry 沿用原轮次的图片，不重新上传，不在重试请求中提交 attachment_ids。
+
+TaskTurn 的 `attachments` 为上述元数据数组，无图片时为 `[]`；`artifacts` 仍表示模型通过工具正式交付的输出附件。REST 详情、历史分页、WebSocket result/snapshot/turn 使用同一数据结构，均不包含图片字节或 data URI。图片保存独立于项目工作目录，更改目录后仍可预览和追问旧图；原图不写入 `client_directory`。
+
+### 15.3 鉴权预览与恢复
+
+使用 `GET preview_url` 并携带当前账号 Bearer token 获取原始图片，响应具有真实图片 Content-Type、`Cache-Control: no-store` 和 `X-Content-Type-Options: nosniff`。浏览器需要先鉴权获取 Blob，再创建本地预览 URL；不能依赖不带凭据的 img URL。退出或切换账号时清理对应 Blob URL。
+
+断线只恢复 task.subscribe，无需重新上传或重发消息。失败、停止和手动重试都保留已提交图片。服务端仅在模型调用前读取并临时构造 image_url data URI；历史上下文、模型消息与原生检查点持久化 `task-image://<attachment_id>` 引用，恢复后按当前任务和账号重新鉴权读取原图。
+
+长对话压缩后，摘要可能只保留图片引用而不包含原图片内容块。运行时向模型提供只读工具 `read_task_image(attachment_id?)`：省略 ID 时列出当前任务图片元数据，指定 ID 时重新读取该图。模型需要重新查看旧图时通过该工具读取；服务端检查图片属于当前用户和任务，工具结果与持久化历史仍只含引用和元数据，指定图片后的下一次模型请求才临时展开原图。列目录不会把所有图片一起发送给模型；重读不会发布输出附件或读取项目、客户端目录。

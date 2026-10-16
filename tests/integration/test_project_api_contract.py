@@ -5,8 +5,14 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 
-async def test_project_task_contract_is_documented_without_dedicated_protocol(env):
-    client, _, _ = env
+async def test_project_task_contract_is_documented_without_dedicated_protocol(env, monkeypatch):
+    from dataclasses import replace
+
+    import httpx
+
+    from octop.api.app import build_app
+
+    client, server, _ = env
     schema = client._octop_app.openapi()
     project_tag = next(tag for tag in schema["tags"] if tag["name"] == "projects")
     assert "/api/project-tasks/ws" in project_tag["description"]
@@ -23,6 +29,8 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
     assert "/api/projects/{project_id}/tasks/sync" in project_paths
     assert "/api/project-tasks/sync" in project_paths
     assert "/api/project-tasks/resources" in project_paths
+    assert "post" in project_paths["/api/project-tasks/attachments"]
+    assert "get" in project_paths["/api/project-tasks/attachments/{attachment_id}"]
     assert "patch" in project_paths["/api/project-tasks/{task_id}"]
     for path in ("/api/projects/{project_id}", "/api/project-tasks/{task_id}"):
         deletion = project_paths[path]["delete"]
@@ -39,6 +47,24 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
         "approval_policy_at_start",
     } <= set(turn["required"])
     assert turn["properties"]["content_blocks"]["items"]["$ref"].endswith("/TaskContentBlock")
+    assert turn["properties"]["attachments"]["items"]["$ref"].endswith("/TaskInputAttachment")
+    message = schema["components"]["schemas"]["TaskMessage"]
+    assert message["properties"]["attachment_ids"]["maxItems"] == 9
+    assert message["properties"]["prompt"]["default"] == ""
+    assert "supports_images" in schema["components"]["schemas"]["TaskModelOption"]["required"]
+    assert (
+        "multipart/form-data"
+        in project_paths["/api/project-tasks/attachments"]["post"]["requestBody"]["content"]
+    )
+    assert project_paths["/api/project-tasks/attachments"]["post"]["responses"]["201"]["content"][
+        "application/json"
+    ]["schema"]["$ref"].endswith("/TaskInputAttachment")
+    assert (
+        "image/png"
+        in project_paths["/api/project-tasks/attachments/{attachment_id}"]["get"]["responses"][
+            "200"
+        ]["content"]
+    )
     assert "patch" in paths["/api/projects/{project_id}/archive"]
     assert "archived" in schema["components"]["schemas"]["ProjectView"]["properties"]
     task_summary = schema["components"]["schemas"]["TaskSummary"]
@@ -85,6 +111,16 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
         p["in"] == "header" and p["name"] == "idempotency-key" and p["required"]
         for p in paths["/api/projects"]["post"]["parameters"]
     )
+    monkeypatch.setattr(
+        server,
+        "services",
+        replace(server.services, config=replace(server.services.config, enable_api_docs=True)),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(server)), base_url="http://testserver"
+    ) as docs_client:
+        docs = await docs_client.get("/api/docs")
+        assert docs.status_code == 200 and "/api/openapi.json" in docs.text
 
 
 async def test_retired_protocol_routes_are_unavailable_and_never_relay(env, monkeypatch):

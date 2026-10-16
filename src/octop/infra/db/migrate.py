@@ -1911,7 +1911,7 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
 def _ensure_independent_projects_schema(db: DatabasePool) -> None:
     """Apply only the independent project/task DDL, preserving historical tables.
 
-    Versions 21–27 belonged to the retired expert-bound model. Keep 28–41
+    Versions 21–27 belonged to the retired expert-bound model. Keep 28–42
     numbered as applied locally; never replay that model or lower its watermark.
     """
     tables = {
@@ -1920,8 +1920,9 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
         32: ("project_create_requests",),
         35: ("project_task_tool_calls",),
         37: ("project_task_artifacts",),
+        42: ("project_task_attachments",),
     }
-    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 41]
+    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 42]
     for version, path in versions:
         if version == 29:
             _ensure_column(db, "projects", "client_directory", "TEXT")
@@ -2025,7 +2026,7 @@ def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
     for version, path in _discover(db.dialect):
-        if 28 <= version <= 41 or version <= _current_version(db):
+        if 28 <= version <= 42 or version <= _current_version(db):
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.

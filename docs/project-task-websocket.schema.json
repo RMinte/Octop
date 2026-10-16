@@ -782,11 +782,22 @@
           "type": "string"
         },
         "prompt": {
-          "description": "本轮用户消息。发送后开始一次执行。",
+          "default": "",
+          "description": "本轮用户文字；可为空，但须提供图片附件。",
           "maxLength": 32768,
-          "minLength": 1,
           "title": "Prompt",
           "type": "string"
+        },
+        "attachment_ids": {
+          "description": "已上传的本人图片 ID，按显示顺序排列，最多九张；首次发送后归属此任务。",
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 9,
+          "title": "Attachment Ids",
+          "type": "array"
         },
         "options": {
           "$ref": "#/$defs/TaskExecutionOptions",
@@ -818,8 +829,7 @@
         }
       },
       "required": [
-        "request_id",
-        "prompt"
+        "request_id"
       ],
       "title": "TaskCreate",
       "type": "object"
@@ -1027,11 +1037,22 @@
           "type": "string"
         },
         "prompt": {
-          "description": "本轮用户消息。发送后开始一次执行。",
+          "default": "",
+          "description": "本轮用户文字；可为空，但须提供图片附件。",
           "maxLength": 32768,
-          "minLength": 1,
           "title": "Prompt",
           "type": "string"
+        },
+        "attachment_ids": {
+          "description": "已上传的本人图片 ID，按显示顺序排列，最多九张；首次发送后归属此任务。",
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 9,
+          "title": "Attachment Ids",
+          "type": "array"
         },
         "options": {
           "$ref": "#/$defs/TaskExecutionOptions",
@@ -1039,8 +1060,7 @@
         }
       },
       "required": [
-        "request_id",
-        "prompt"
+        "request_id"
       ],
       "title": "TaskMessage",
       "type": "object"
@@ -1838,6 +1858,52 @@
       "title": "TaskContentBlock",
       "type": "object"
     },
+    "TaskInputAttachment": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "title": "Attachment Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "media_type": {
+          "title": "Media Type",
+          "type": "string"
+        },
+        "byte_count": {
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "preview_url": {
+          "description": "需要当前账号鉴权的图片预览地址；不包含令牌。",
+          "title": "Preview Url",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attachment_id",
+        "name",
+        "media_type",
+        "byte_count",
+        "sha256",
+        "preview_url",
+        "created_at"
+      ],
+      "title": "TaskInputAttachment",
+      "type": "object"
+    },
     "TaskInteraction": {
       "additionalProperties": false,
       "properties": {
@@ -1976,6 +2042,14 @@
         "prompt": {
           "title": "Prompt",
           "type": "string"
+        },
+        "attachments": {
+          "description": "本轮用户上传的图片，仅含元数据；预览通过鉴权 HTTP 获取。",
+          "items": {
+            "$ref": "#/$defs/TaskInputAttachment"
+          },
+          "title": "Attachments",
+          "type": "array"
         },
         "reply": {
           "title": "Reply",

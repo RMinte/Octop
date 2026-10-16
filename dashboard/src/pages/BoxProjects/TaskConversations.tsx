@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Empty,
+  Image,
   Input,
   Modal,
   Segmented,
@@ -15,6 +16,7 @@ import {
   Archive,
   ArchiveRestore,
   Download,
+  ImagePlus,
   MessageSquare,
   Plus,
   Pause,
@@ -22,6 +24,7 @@ import {
   Send,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
@@ -45,6 +48,12 @@ import TaskExecutionSettings from "./TaskExecutionSettings";
 import TaskTurnContent from "./TaskTurnContent";
 import TaskInteractions from "./TaskInteractions";
 import TaskApprovalModePicker from "./TaskApprovalMode";
+import TaskInputImages from "./TaskInputImages";
+import {
+  MAX_TASK_IMAGES,
+  TASK_IMAGE_TYPES,
+  useTaskImages,
+} from "./useTaskImages";
 
 export default function TaskConversations({
   projectID,
@@ -92,6 +101,8 @@ export default function TaskConversations({
     };
   }, []);
   const [draft, setDraft] = useState("");
+  const images = useTaskImages(`${projectID ?? ""}:${taskID ?? "new"}`);
+  const imageInput = useRef<HTMLInputElement>(null);
   const [options, setOptions] = useState<TaskExecutionOptions>({});
   const [approvalMode, setApprovalMode] =
     useState<TaskApprovalMode>("ask_for_approval");
@@ -151,6 +162,12 @@ export default function TaskConversations({
     }
   };
   const projectArchived = !!project?.archived;
+  const composerDisabled =
+    sending ||
+    loading ||
+    !!detail?.archived ||
+    projectArchived ||
+    !!(taskID && !detail);
   const listSummary = useRef("");
   const renameRevision = useRef<number | null>(null);
   const taskDeleted = !!taskID && isDeleted(taskID);
@@ -261,8 +278,10 @@ export default function TaskConversations({
 
   const send = async () => {
     const prompt = draft.trim();
+    const attachmentIDs = images.attachmentIDs;
     if (
-      !prompt ||
+      (!prompt && !attachmentIDs.length) ||
+      images.blocked ||
       busy ||
       detail?.archived ||
       projectArchived ||
@@ -280,6 +299,8 @@ export default function TaskConversations({
     if (
       pending.current?.target !== target ||
       pending.current.body.prompt !== prompt ||
+      JSON.stringify(pending.current.body.attachment_ids ?? []) !==
+        JSON.stringify(attachmentIDs) ||
       JSON.stringify(pending.current.body.options ?? {}) !==
         JSON.stringify(options) ||
       (!taskID &&
@@ -290,6 +311,7 @@ export default function TaskConversations({
         body: {
           request_id: crypto.randomUUID(),
           prompt,
+          ...(attachmentIDs.length ? { attachment_ids: attachmentIDs } : {}),
           ...(!taskID ? { approval_mode: approvalMode } : {}),
           ...(JSON.stringify(options) !== "{}" ? { options } : {}),
         },
@@ -311,6 +333,7 @@ export default function TaskConversations({
       upsertTask(result);
       applyWrite(result);
       setDraft("");
+      images.clear();
       setOptions({});
       pending.current = null;
       if (!taskID) selectTask(result.task_id);
@@ -674,6 +697,7 @@ export default function TaskConversations({
                       {t("projects.tasks.you")}
                     </Typography.Text>
                     <div>{turn.prompt}</div>
+                    <TaskInputImages attachments={turn.attachments ?? []} />
                   </div>
                   <div className={styles.assistantMessage}>
                     <Space size="small">
@@ -766,7 +790,19 @@ export default function TaskConversations({
           )}
           <div ref={end} />
         </div>
-        <div className={styles.composer}>
+        <div
+          className={styles.composer}
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes("Files"))
+              event.preventDefault();
+          }}
+          onDrop={(event) => {
+            if (!event.dataTransfer.files.length) return;
+            event.preventDefault();
+            if (!composerDisabled)
+              images.add(Array.from(event.dataTransfer.files));
+          }}
+        >
           <TaskApprovalModePicker
             key={`${projectID ?? ""}:${taskID ?? "new"}`}
             task={detail}
@@ -793,19 +829,22 @@ export default function TaskConversations({
             value={draft}
             maxLength={32768}
             autoSize={{ minRows: 3, maxRows: 8 }}
-            disabled={
-              sending ||
-              loading ||
-              !!detail?.archived ||
-              projectArchived ||
-              !!(taskID && !detail)
-            }
+            disabled={composerDisabled}
             placeholder={t(
               detail
                 ? "projects.tasks.continuePlaceholder"
                 : "projects.tasks.placeholder",
             )}
             onChange={(event) => setDraft(event.target.value)}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.files).filter(
+                (file) => file.type.startsWith("image/"),
+              );
+              if (files.length) {
+                event.preventDefault();
+                if (!composerDisabled) images.add(files);
+              }
+            }}
             onKeyDown={(event) => {
               if (
                 event.key === "Enter" &&
@@ -817,6 +856,75 @@ export default function TaskConversations({
               }
             }}
           />
+          {!!images.items.length && (
+            <div className={styles.inputImages}>
+              {images.items.map((image) => (
+                <div className={styles.inputImage} key={image.id}>
+                  <Image
+                    src={image.url}
+                    alt={image.name}
+                    width={112}
+                    height={88}
+                  />
+                  <Button
+                    className={styles.removeImage}
+                    size="small"
+                    icon={<X size={14} />}
+                    aria-label={t("projects.tasks.removeImage", {
+                      name: image.name,
+                    })}
+                    disabled={sending}
+                    onClick={() => images.remove(image.id)}
+                  />
+                  <Typography.Text ellipsis title={image.name}>
+                    {image.name}
+                  </Typography.Text>
+                  {image.error ? (
+                    <Typography.Text type="danger" role="alert">
+                      {image.error}
+                    </Typography.Text>
+                  ) : !image.attachment ? (
+                    <Typography.Text type="secondary">
+                      <Spin size="small" /> {t("projects.tasks.imageUploading")}
+                    </Typography.Text>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+          {images.error && (
+            <Alert type="error" showIcon message={images.error} />
+          )}
+          <div className={styles.imageUpload}>
+            <input
+              ref={imageInput}
+              className={styles.imageFileInput}
+              type="file"
+              accept={TASK_IMAGE_TYPES}
+              multiple
+              aria-label={t("projects.tasks.addImages")}
+              disabled={
+                composerDisabled || images.items.length >= MAX_TASK_IMAGES
+              }
+              onChange={(event) => {
+                images.add(Array.from(event.target.files ?? []));
+                event.target.value = "";
+              }}
+            />
+            <Button
+              size="small"
+              icon={<ImagePlus size={15} />}
+              disabled={
+                composerDisabled || images.items.length >= MAX_TASK_IMAGES
+              }
+              onClick={() => imageInput.current?.click()}
+            >
+              {t("projects.tasks.addImages")}
+            </Button>
+            <Typography.Text type="secondary">
+              {t("projects.tasks.imageHint")}
+            </Typography.Text>
+          </div>
           <div className={styles.composerFooter}>
             <Typography.Text type="secondary">
               {t(
@@ -869,7 +977,8 @@ export default function TaskConversations({
                 icon={<Send size={16} />}
                 loading={sending}
                 disabled={
-                  !draft.trim() ||
+                  (!draft.trim() && !images.attachmentIDs.length) ||
+                  images.blocked ||
                   approvalSaving ||
                   loading ||
                   !!detail?.archived ||

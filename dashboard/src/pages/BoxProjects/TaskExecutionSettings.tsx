@@ -91,7 +91,11 @@ export default function TaskExecutionSettings({
                         }
                         options={resources.models.map((model) => ({
                           value: model.model_ref,
-                          label: `${model.name} · ${model.model_ref}`,
+                          label: `${model.name} · ${model.model_ref}${
+                            model.supports_images
+                              ? ` · ${t("projects.tasks.supportsImages")}`
+                              : ""
+                          }`,
                         }))}
                         onChange={(model_ref) =>
                           onChange({

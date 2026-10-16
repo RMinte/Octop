@@ -19,6 +19,7 @@ from octop.infra.db.repos.knowledge import KnowledgeRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
 from octop.infra.db.repos.project_sync import ProjectSyncRepo
 from octop.infra.db.repos.project_task_artifacts import ProjectTaskArtifactRepo
+from octop.infra.db.repos.project_task_attachments import ProjectTaskAttachmentRepo
 from octop.infra.db.repos.project_task_reviews import ProjectTaskReviewRepo
 from octop.infra.db.repos.project_task_titles import ProjectTaskTitleRepo
 from octop.infra.db.repos.project_task_tool_calls import ProjectTaskToolCallRepo
@@ -51,6 +52,7 @@ class RepoBundle:
     project_task_title_repo: ProjectTaskTitleRepo
     project_task_review_repo: ProjectTaskReviewRepo
     project_task_artifact_repo: ProjectTaskArtifactRepo
+    project_task_attachment_repo: ProjectTaskAttachmentRepo
     project_task_tool_call_repo: ProjectTaskToolCallRepo
     project_task_turn_repo: ProjectTaskTurnRepo
     project_repo: ProjectRepo
@@ -91,6 +93,7 @@ class RepoBundle:
             project_task_turn_repo=ProjectTaskTurnRepo(db),
             project_task_tool_call_repo=ProjectTaskToolCallRepo(),
             project_task_artifact_repo=ProjectTaskArtifactRepo(),
+            project_task_attachment_repo=ProjectTaskAttachmentRepo(),
             project_repo=ProjectRepo(db),
             user_repo=UserRepo(db),
             user_policy_repo=UserPolicyRepo(db),
@@ -149,6 +152,10 @@ class SharedServices:
     @property
     def project_task_artifact_repo(self) -> ProjectTaskArtifactRepo:
         return self.repos.project_task_artifact_repo
+
+    @property
+    def project_task_attachment_repo(self) -> ProjectTaskAttachmentRepo:
+        return self.repos.project_task_attachment_repo
 
     @property
     def project_task_tool_call_repo(self) -> ProjectTaskToolCallRepo:

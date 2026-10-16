@@ -7,15 +7,25 @@ import json
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Header, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 from octop.api.common.content_disposition import content_disposition
+from octop.api.common.upload_limit import read_upload_capped
 from octop.api.deps import current_user, get_server, require_database
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import approval_policy, artifacts, interactions, service, sync, tasks
+from octop.infra.projects import (
+    approval_policy,
+    artifacts,
+    input_attachments,
+    interactions,
+    service,
+    sync,
+    tasks,
+)
 from octop.infra.projects.approval_models import ApprovalPolicyUpdate
+from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import InteractionResponse, TaskControl
 from octop.infra.projects.models import (
     ProjectArchive,
@@ -315,6 +325,66 @@ def _task_worker(server: OctopServer) -> ProjectTaskWorker:
 
 
 task_router = APIRouter(prefix="/project-tasks")
+
+
+@task_router.post(
+    "/attachments",
+    response_model=TaskInputAttachment,
+    status_code=201,
+    summary="上传任务输入图片",
+    description="上传 PNG、JPEG、WebP 或 GIF 图片；无需预先创建任务或运行专家。最多 25 MiB，且不超过管理员上传限制。使用返回的 attachment_id 发送首条消息或追问，首次发送后归属该任务。未发送的图片 24 小时后过期。",
+)
+async def upload_task_image(
+    response: Response,
+    file: UploadFile = File(...),  # noqa: B008
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> TaskInputAttachment:
+    services = _services(server)
+    content = await read_upload_capped(
+        file,
+        max_bytes=input_attachments.max_upload_bytes(services),
+        code=ErrorCode.TASK_IMAGE_LIMIT,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        input_attachments.save, services, user.id, file.filename or "image", content
+    )
+
+
+@task_router.get(
+    "/attachments/{attachment_id}",
+    response_class=Response,
+    summary="预览任务输入图片",
+    description="需要图片所属账号鉴权。读取不可变的上传内容，不访问客户端或当前项目目录。不存在、过期或他人图片返回 404。",
+    responses={
+        200: {
+            "description": "上传图片原始内容；Content-Type 使用服务端识别的图片格式。",
+            "content": {
+                media: {"schema": {"type": "string", "format": "binary"}}
+                for media in ("image/png", "image/jpeg", "image/webp", "image/gif")
+            },
+        }
+    },
+)
+async def preview_task_image(
+    attachment_id: str,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> Response:
+    attachment, content = await asyncio.to_thread(
+        input_attachments.download, _services(server), user.id, attachment_id
+    )
+    return Response(
+        content=content,
+        media_type=attachment.media_type,
+        headers={
+            "Content-Disposition": content_disposition(attachment.name, disposition="inline"),
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        },
+    )
 
 
 @task_router.get(

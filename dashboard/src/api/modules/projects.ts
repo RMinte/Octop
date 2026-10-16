@@ -1,4 +1,4 @@
-import { request, requestBlob } from "../request";
+import { request, requestBlob, requestUpload } from "../request";
 import { projectTaskSocket } from "./projectTaskSocket";
 import type { ReasoningCapability } from "../types/provider";
 
@@ -154,6 +154,15 @@ export interface TaskArtifact {
   download_url: string;
   created_at: string;
 }
+export interface TaskInputAttachment {
+  attachment_id: string;
+  name: string;
+  media_type: string;
+  byte_count: number;
+  sha256: string;
+  preview_url: string;
+  created_at: string;
+}
 export interface TaskContentBlock {
   block_id: string;
   type: "text" | "reasoning" | "reasoning_summary" | "tool";
@@ -218,6 +227,7 @@ export interface TaskTurn {
   turn_id: string;
   request_id: string;
   prompt: string;
+  attachments: TaskInputAttachment[];
   reply: string;
   reasoning: string;
   content_blocks: TaskContentBlock[];
@@ -268,6 +278,7 @@ export interface TaskResources extends ProjectResources {
   models: {
     model_ref: string;
     name: string;
+    supports_images: boolean;
     reasoning_config?: ReasoningCapability | null;
   }[];
   default_model_ref: string | null;
@@ -275,6 +286,7 @@ export interface TaskResources extends ProjectResources {
 export interface TaskMessage {
   request_id: string;
   prompt: string;
+  attachment_ids?: string[];
   options?: TaskExecutionOptions;
 }
 export interface TaskCreate extends TaskMessage {
@@ -315,6 +327,20 @@ const taskListPath = (projectID: string | null) =>
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
 export const projectTasksApi = {
+  uploadAttachment: (file: File, signal?: AbortSignal) => {
+    const body = new FormData();
+    body.append("file", file);
+    return requestUpload<TaskInputAttachment>(
+      "/project-tasks/attachments",
+      body,
+      { signal },
+    );
+  },
+  attachmentPreview: (id: string, signal?: AbortSignal) =>
+    requestBlob(`/project-tasks/attachments/${encodeURIComponent(id)}`, {
+      signal,
+      cache: "no-store",
+    }),
   setApproval: (id: string, body: TaskApprovalUpdate) =>
     projectTaskSocket.command<TaskDetail>("task.approval.set", {
       task_id: id,
