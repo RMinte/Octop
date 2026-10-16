@@ -407,10 +407,7 @@ export default function TaskConversations({
     setDeleting(true);
     setDeleteError("");
     try {
-      await projectTasksApi.delete(
-        deleteTarget.task_id,
-        deleteTarget.list_revision,
-      );
+      await projectTasksApi.delete(deleteTarget.task_id);
       removeTask(deleteTarget.task_id, deleteTarget.list_revision);
       if (!alive.current) return;
       setDeleteTarget(null);
@@ -599,6 +596,11 @@ export default function TaskConversations({
                   </Button>
                 </Space>
               </Space>
+              {busy && (
+                <Typography.Paragraph type="secondary">
+                  {t("projects.tasks.deleteBusy")}
+                </Typography.Paragraph>
+              )}
               {detail.archived && (
                 <Alert type="info" message={t("projects.tasks.archivedHint")} />
               )}

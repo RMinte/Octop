@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 
+from octop.i18n import error_message
 from octop.infra.projects import service, tasks
 from octop.infra.projects.models import ProjectFields
 from tests.support.auth import create_user, resolve_user_id
@@ -82,13 +83,12 @@ async def test_delete_task_cleans_children_and_sync_without_deleting_project(
     base = f"/api/project-tasks/{task.task_id}"
     list_path = f"/api/projects/{project_id}/tasks" if project_id else "/api/project-tasks"
     page = (await client.get(list_path, headers=auth)).json()
-    response = await client.delete(
-        base, headers=auth, params={"expected_revision": task.list_revision}
-    )
+    response = await client.delete(base, headers=auth)
     assert response.status_code == 204 and response.content == b""
     assert response.headers["cache-control"] == "no-store"
     assert_task_deleted(services, task.task_id)
     assert (await client.get(base, headers=auth)).status_code == 404
+    assert (await client.delete(base, headers=auth)).status_code == 404
     assert (
         await client.get(base + f"/artifacts/artifact_{task.task_id}/download", headers=auth)
     ).status_code == 404
@@ -139,14 +139,13 @@ async def test_delete_project_cascades_active_and_archived_tasks_but_keeps_files
             services, owner, project.project_id, project.revision, True
         )
     base = f"/api/projects/{project.project_id}"
-    response = await client.delete(
-        base, headers=auth, params={"expected_revision": project.revision}
-    )
+    response = await client.delete(base, headers=auth)
     assert response.status_code == 204, response.text
     assert_task_deleted(services, first.task_id)
     assert_task_deleted(services, archived.task_id)
     assert file.read_text() == "keep me"
     assert (await client.get(base, headers=auth)).status_code == 404
+    assert (await client.delete(base, headers=auth)).status_code == 404
     assert (await client.get("/api/projects", headers=auth)).json() == []
     assert (
         await client.get(f"/api/project-tasks/{unrelated.task_id}", headers=auth)
@@ -171,8 +170,13 @@ async def test_delete_project_cascades_active_and_archived_tasks_but_keeps_files
     )
 
 
-async def test_deletion_checks_ownership_revisions_and_busy_tasks_before_any_removal(deletion_env):
+@pytest.mark.parametrize("status", ["queued", "running"])
+@pytest.mark.parametrize("locale", ["zh", "en"])
+async def test_deletion_checks_ownership_and_reports_busy_reason_before_any_removal(
+    deletion_env, status, locale
+):
     client, services, auth, owner = deletion_env
+    auth = {**auth, "Accept-Language": locale}
     project = service.create_project(
         services, owner, ProjectFields(name="Busy project"), str(uuid4())
     )
@@ -183,30 +187,27 @@ async def test_deletion_checks_ownership_revisions_and_busy_tasks_before_any_rem
         tasks.TaskMessage(request_id="queued-deletion", prompt="Still queued"),
         project_id=project.project_id,
     )
+    if status == "running":
+        with services.db.transaction() as conn:
+            services.project_task_repo.start(conn, queued.task_id, queued.active_turn_id, 2)
     alice = await create_user(client, auth, username="deletion-alice")
     project_path = f"/api/projects/{project.project_id}"
     task_path = f"/api/project-tasks/{saved.task_id}"
     for path in (project_path, task_path):
-        assert (await client.delete(path, headers=auth)).status_code == 422
-        assert (
-            await client.delete(path, headers=alice, params={"expected_revision": 1})
-        ).status_code == 404
-        stale = await client.delete(path, headers=auth, params={"expected_revision": 999})
-        assert stale.status_code == 409 and stale.json()["error"]["code"].endswith(
-            "REVISION_CONFLICT"
-        )
-    busy_project = await client.delete(project_path, headers=auth, params={"expected_revision": 1})
+        assert (await client.delete(path, headers=alice)).status_code == 404
+    busy_project = await client.delete(project_path, headers=auth)
     assert busy_project.status_code == 409
     assert busy_project.json()["error"]["code"] == "PROJECT_TASKS_BUSY"
-    busy_task = await client.delete(
-        f"/api/project-tasks/{queued.task_id}",
-        headers=auth,
-        params={"expected_revision": queued.list_revision},
-    )
+    assert busy_project.json()["error"]["message"] == error_message("PROJECT_TASKS_BUSY", locale)
+    busy_task = await client.delete(f"/api/project-tasks/{queued.task_id}", headers=auth)
     assert busy_task.status_code == 409 and busy_task.json()["error"]["code"] == "TASK_BUSY"
+    assert busy_task.json()["error"]["message"] == error_message("TASK_BUSY", locale)
+    with services.db.connect() as conn:
+        for task_id in (saved.task_id, queued.task_id):
+            assert conn.execute(
+                "SELECT 1 FROM project_task_turns WHERE task_id=?", (task_id,)
+            ).fetchone()
     assert (await client.get(task_path, headers=auth)).status_code == 200
     assert (await client.get(project_path, headers=auth)).status_code == 200
     tasks.cancel(services, owner, queued.task_id, queued.active_turn_id)
-    assert (
-        await client.delete(project_path, headers=auth, params={"expected_revision": 1})
-    ).status_code == 204
+    assert (await client.delete(project_path, headers=auth)).status_code == 204

@@ -229,13 +229,13 @@ describe("独立项目正式页面", () => {
     ).toBeEnabled();
   });
 
-  it("删除项目需确认全部任务范围，失败保留项目并可重试", async () => {
+  it("删除项目需确认全部任务范围，任务忙时说明原因并保留项目供重试", async () => {
     const normal = api.getMockImplementation()!;
     let fail = true;
     api.mockImplementation(async (url, init) => {
       if (init?.method === "DELETE" && fail) {
         fail = false;
-        throw new Error("offline");
+        throw new Error('409 - {"error":{"code":"PROJECT_TASKS_BUSY"}}');
       }
       return normal(url, init);
     });
@@ -249,13 +249,15 @@ describe("独立项目正式页面", () => {
     await user.click(screen.getByRole("button", { name: /取\s*消/ }));
     await user.click(screen.getByRole("button", { name: "删除项目" }));
     await user.click(screen.getByRole("button", { name: "确认删除" }));
-    expect(await screen.findByText("offline")).toBeTruthy();
+    expect(
+      await screen.findByText(zh.apiErrors.PROJECT_TASKS_BUSY),
+    ).toBeTruthy();
     expect(screen.getByRole("heading", { name: initial.name })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "确认删除" }));
     await waitFor(() =>
       expect(screen.queryByRole("heading", { name: initial.name })).toBeNull(),
     );
-    expect(api).toHaveBeenCalledWith("/projects/proj_a?expected_revision=1", {
+    expect(api).toHaveBeenCalledWith("/projects/proj_a", {
       method: "DELETE",
     });
     expect(rows).toEqual([]);

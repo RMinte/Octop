@@ -507,7 +507,7 @@
     "TASK_RETRY_UNAVAILABLE": "只能重新尝试最后一个失败或已停止的轮次，请刷新任务。",
     "TASK_ARCHIVED": "任务已归档，请恢复后继续对话。",
     "TASK_REVISION_CONFLICT": "任务已发生变化，请刷新后重新修改。",
-    "TASK_BUSY": "任务正在执行，请等待完成或停止后再操作。",
+    "TASK_BUSY": "任务正在排队或执行，请等待完成或先停止任务后再操作。",
     "TASK_ARTIFACT_INVALID": "附件名称、格式或服务端工作目录路径不合法；不支持符号链接。",
     "TASK_ARTIFACT_LIMIT": "附件超过大小或本轮数量限制。",
     "TASK_ARTIFACT_CONFLICT": "该工具调用已发布不同的附件内容或参数。",
@@ -525,7 +525,7 @@
     "TASK_EXECUTION_FAILED": "本轮执行失败，可重新发送消息；已完成的历史仍然保留。",
     "TASK_INTERRUPTED": "服务重启或执行中断，本轮未自动重试。可重新发送消息。",
     "TASK_RESOURCE_UNAVAILABLE": "项目的目录、Skill 或 MCP 无法加载，请检查项目配置和连接。",
-    "PROJECT_TASKS_BUSY": "项目中有任务正在执行，请先停止所有运行中的任务再归档或删除项目。",
+    "PROJECT_TASKS_BUSY": "项目中有任务正在排队或执行，暂时无法归档或删除项目。请等待完成或先停止所有任务。",
     "PROJECT_ARCHIVED": "项目已归档，请恢复项目后再继续执行任务。"
   },
   "desktop": {

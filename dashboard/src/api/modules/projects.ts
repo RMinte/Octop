@@ -102,13 +102,8 @@ export const projectsApi = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  delete: (id: string, expectedRevision: number) =>
-    request<void>(
-      `/projects/${encodeURIComponent(
-        id,
-      )}?expected_revision=${expectedRevision}`,
-      { method: "DELETE" },
-    ),
+  delete: (id: string) =>
+    request<void>(`/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
 };
 
 export type TaskStatus =
@@ -237,8 +232,8 @@ const taskListPath = (projectID: string | null) =>
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
 export const projectTasksApi = {
-  delete: (id: string, expectedRevision: number) =>
-    request<void>(`${taskPath(id)}?expected_revision=${expectedRevision}`, {
+  delete: (id: string) =>
+    request<void>(taskPath(id), {
       method: "DELETE",
     }),
   downloadArtifact: (taskID: string, artifactID: string) =>

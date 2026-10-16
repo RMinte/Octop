@@ -171,16 +171,13 @@ class ProjectRepo:
         return saved
 
     @staticmethod
-    def delete(conn: Any, row: ProjectRow, expected_revision: int) -> bool:
+    def delete(conn: Any, row: ProjectRow) -> None:
         conn.execute(
             "DELETE FROM project_create_requests WHERE project_id=? AND owner_id=?",
             (row.project_id, row.owner_id),
         )
-        deleted = conn.execute(
-            "DELETE FROM projects WHERE project_id=? AND owner_id=? AND revision=? RETURNING *",
-            (row.project_id, row.owner_id, expected_revision),
-        ).fetchone()
-        if deleted is None:
-            return False
+        conn.execute(
+            "DELETE FROM projects WHERE project_id=? AND owner_id=?",
+            (row.project_id, row.owner_id),
+        )
         record_change(conn, row.owner_id, "projects", row.project_id, row, deleted=True)
-        return True

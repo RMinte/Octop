@@ -729,7 +729,7 @@ it.each(["proj_a", null])(
     await user.click(screen.getByRole("button", { name: /取\s*消/ }));
     await user.click(screen.getByRole("button", { name: "删除任务" }));
     await user.click(screen.getByRole("button", { name: "确认删除" }));
-    await waitFor(() => expect(api.delete).toHaveBeenCalledWith("task_a", 1));
+    await waitFor(() => expect(api.delete).toHaveBeenCalledWith("task_a"));
     await waitFor(() =>
       expect(screen.queryByRole("heading", { name: fixture.title })).toBeNull(),
     );
@@ -750,18 +750,35 @@ it("删除失败保留任务和对话，可重试", async () => {
   await waitFor(() => expect(screen.queryByText("已记住蓝鸟")).toBeNull());
 });
 
-it("运行中的任务不能删除", async () => {
-  api.open.mockResolvedValue({
-    ...fixture,
-    active_turn_id: "turn_a",
-    status: "running",
-  });
+it("删除时服务端发现任务忙，显示具体原因并保留任务和对话", async () => {
+  api.delete.mockRejectedValueOnce(
+    new Error('409 - {"error":{"code":"TASK_BUSY"}}'),
+  );
+  const user = userEvent.setup();
   mount("?task=task_a");
-  expect(
-    await screen.findByRole("button", { name: "删除任务" }),
-  ).toBeDisabled();
-  expect(api.delete).not.toHaveBeenCalled();
+  await user.click(await screen.findByRole("button", { name: "删除任务" }));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(await screen.findByText(zh.apiErrors.TASK_BUSY)).toBeTruthy();
+  expect(screen.getByText("已记住蓝鸟")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "确认删除" })).toBeEnabled();
 });
+
+it.each(["queued", "running"] as const)(
+  "%s 任务不能删除并显示原因",
+  async (status) => {
+    api.open.mockResolvedValue({
+      ...fixture,
+      active_turn_id: "turn_a",
+      status,
+    });
+    mount("?task=task_a");
+    expect(
+      await screen.findByRole("button", { name: "删除任务" }),
+    ).toBeDisabled();
+    expect(screen.getByText(zh.projects.tasks.deleteBusy)).toBeTruthy();
+    expect(api.delete).not.toHaveBeenCalled();
+  },
+);
 
 it("删除增量后，迟到的历史分页和会话更新不能恢复列表项", async () => {
   api.list.mockResolvedValueOnce({

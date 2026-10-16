@@ -13,7 +13,7 @@
 | `GET /api/projects/{project_id}` | 获取项目完整配置和 `revision` | 服务端自动化通过 |
 | `PATCH /api/projects/{project_id}` | 局部修改；未提交字段保持原值，以 `expected_revision` 防止覆盖修改 | 定向自动化通过 |
 | `PUT /api/projects/{project_id}` | 显式完整替换；必须提交全部项目字段，局部请求返回 422 | 定向自动化通过 |
-| `DELETE /api/projects/{project_id}?expected_revision=…` | 永久删除项目及其全部任务；成功返回 204 | 定向自动化覆盖 |
+| `DELETE /api/projects/{project_id}` | 按 ID 永久删除项目及其全部任务，无需版本参数；成功返回 204 | 定向自动化覆盖 |
 | `PATCH /api/projects/{project_id}/archive` | 以 archived 和 expected_revision 归档或恢复项目，保留全部任务及其归档状态 | 定向自动化覆盖 |
 | `GET /api/projects/resources` | 获取可选 Skill、当前用户 MCP 连接和目录浏览范围 | 服务端自动化通过 |
 
@@ -51,7 +51,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
 | GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
 | PATCH | `/api/project-tasks/{task_id}` | 修改名称、归档或恢复，校验 expected_revision |
-| DELETE | `/api/project-tasks/{task_id}?expected_revision=…` | 永久删除任务及会话、附件和工具记录；成功返回 204 |
+| DELETE | `/api/project-tasks/{task_id}` | 按 ID 永久删除任务及会话、附件和工具记录，无需版本参数；成功返回 204 |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
 | GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
 | GET | `/api/project-tasks/{task_id}/events` | 订阅实时轮次状态，支持游标或 Last-Event-ID 续接 |
@@ -79,9 +79,9 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 分页与增量响应交错时，使用 `list_revision` 保留较新的任务摘要；项目使用 `revision`。自己写入成功也不能跳过期间其他变化，直接推进同步位置。无效游标返回 HTTP 409 `PROJECT_SYNC_RESET`，重新建立项目快照或对应任务第一页即可。后台任务完成、取消和中断恢复的摘要更新与变更记录同事务提交；回复正文和心跳不产生列表变更。删除项目或任务时，同一事务写入 `operation=delete`、`data=null` 的同步记录；任务删除记录携带递增的 `list_revision`。客户端移除对应项并保存删除标记，防止旧分页或迟到的会话事件重新加入任务。仍不提供自动历史清理，备份恢复流程仍需可靠推进 `restoreEpoch` 后才能使旧游标失效。
 
-删除接口必须提供当前版本作为查询参数 `expected_revision`（项目为 `revision`，任务为 `list_revision`），版本过期返回对应的 `409 *_REVISION_CONFLICT`。排队或运行中的任务须先停止，单任务删除返回 `409 TASK_BUSY`；项目中存在此类任务则返回 `409 PROJECT_TASKS_BUSY`，整个项目及其任务均保持原样。删除项目会原子清理全部任务及会话、附件、工具记录和上下文；其他项目和无项目任务不受影响。删除操作保留工作目录中的文件，包括自动分配的任务工作区，不回滚已执行的工具操作。已删除资源再次读取返回 404；项目名称和创建请求标识随项目删除而释放。
+删除接口按 ID 操作，不要求 `expected_revision`，不因标题、状态或配置版本变化而拒绝删除；编辑和归档仍保留各自的版本检查。排队或运行中的任务须等待完成或先停止，单任务删除返回 `409 TASK_BUSY`；项目中存在此类任务则返回 `409 PROJECT_TASKS_BUSY`，整个项目及其任务均保持原样。错误响应中的本地化消息说明禁止操作的原因及处理方式，网页在删除确认框中显示具体错误；任务执行期间同时直接显示无法删除的原因。删除项目会原子清理全部任务及会话、附件、工具记录和上下文；其他项目和无项目任务不受影响。删除操作保留工作目录中的文件，包括自动分配的任务工作区，不回滚已执行的工具操作。已删除资源再次读取返回 404；项目名称和创建请求标识随项目删除而释放。
 
-网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
+客户端删除请求、错误响应和提示要求见[项目和任务删除接口接入说明](project-task-deletion.md)。网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
 
 项目、任务和轮次 ID 都是不透明字符串，例如 `proj_…`、`task_…`、`turn_…`；调用方应原样保存和传回，不能转成 UUID。时间字段为 UTC ISO 8601，界面使用 `GET /api/settings/timezone` 返回的服务端时区。
 

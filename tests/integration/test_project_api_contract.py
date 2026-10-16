@@ -27,9 +27,7 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
     for path in ("/api/projects/{project_id}", "/api/project-tasks/{task_id}"):
         deletion = project_paths[path]["delete"]
         assert "204" in deletion["responses"]
-        assert any(
-            p["name"] == "expected_revision" and p["required"] for p in deletion["parameters"]
-        )
+        assert not any(p["name"] == "expected_revision" for p in deletion["parameters"])
     assert "TaskExecutionOptions" in schema["components"]["schemas"]
     turn = schema["components"]["schemas"]["TaskTurn"]
     assert {"content_blocks", "content_revision"} <= set(turn["required"])

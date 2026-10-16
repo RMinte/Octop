@@ -229,7 +229,7 @@ export default function BoxProjectsPage() {
     setDeleting(true);
     setDeleteError("");
     try {
-      await projectsApi.delete(deleteTarget.project_id, deleteTarget.revision);
+      await projectsApi.delete(deleteTarget.project_id);
       removeProject(deleteTarget.project_id);
       setDeleteTarget(null);
       void message.success(t("projects.deleted"));

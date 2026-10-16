@@ -143,9 +143,7 @@ def get_project(services: SharedServices, owner_id: int, project_id: str) -> Pro
     return _view(row)
 
 
-def delete_project(
-    services: SharedServices, owner_id: int, project_id: str, expected_revision: int
-) -> None:
+def delete_project(services: SharedServices, owner_id: int, project_id: str) -> None:
     with services.db.transaction() as conn:
         repo = services.project_repo
         if not repo.lock_owner(conn, owner_id):
@@ -153,15 +151,12 @@ def delete_project(
         row = repo.get_in_transaction(conn, project_id, owner_id)
         if row is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
-        if row.revision != expected_revision:
-            raise OctopError.localized(ErrorCode.PROJECT_REVISION_CONFLICT)
         tasks = services.project_task_repo.for_project(conn, project_id, owner_id)
         if any(task.active_turn_id for task in tasks):
             raise OctopError.localized(ErrorCode.PROJECT_TASKS_BUSY)
         for task in tasks:
             services.project_task_repo.delete(conn, task)
-        if not repo.delete(conn, row, expected_revision):
-            raise OctopError.localized(ErrorCode.PROJECT_REVISION_CONFLICT)
+        repo.delete(conn, row)
 
 
 def archive_project(

@@ -662,7 +662,7 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
     return detail(services, owner_id, task_id)
 
 
-def delete(services: SharedServices, owner_id: int, task_id: str, expected_revision: int) -> None:
+def delete(services: SharedServices, owner_id: int, task_id: str) -> None:
     with services.db.transaction() as conn:
         repo = services.project_task_repo
         if not repo.lock_owner(conn, owner_id):
@@ -670,8 +670,6 @@ def delete(services: SharedServices, owner_id: int, task_id: str, expected_revis
         row = repo.get_in_transaction(conn, task_id, owner_id)
         if row is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
-        if row.list_revision != expected_revision:
-            raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
         if row.active_turn_id:
             raise OctopError.localized(ErrorCode.TASK_BUSY)
         repo.delete(conn, row)

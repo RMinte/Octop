@@ -240,17 +240,14 @@ async def archive_project(
     status_code=204,
     response_class=Response,
     summary="删除项目及其全部任务",
-    description="永久删除本人项目，以及其中全部任务的会话、附件和工具记录。项目中有排队或执行中的任务时返回 409 PROJECT_TASKS_BUSY，须先停止。必须传 expected_revision；版本冲突返回 409。保留服务端与客户端工作目录中的文件。其他用户的项目返回 404。",
+    description="按 ID 永久删除本人项目，以及其中全部任务的会话、附件和工具记录，无需版本参数。项目中有排队或执行中的任务时返回 409 PROJECT_TASKS_BUSY，须等待完成或先停止。保留服务端与客户端工作目录中的文件。其他用户的项目返回 404。",
 )
 async def delete_project(
     project_id: str,
-    expected_revision: int = Query(ge=1, description="确认删除时的项目 revision。"),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
 ) -> Response:
-    await asyncio.to_thread(
-        service.delete_project, _services(server), user.id, project_id, expected_revision
-    )
+    await asyncio.to_thread(service.delete_project, _services(server), user.id, project_id)
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
@@ -439,15 +436,14 @@ async def patch_task(
     status_code=204,
     response_class=Response,
     summary="永久删除任务",
-    description="删除本人任务及全部会话轮次、已发布附件和工具记录，支持项目内和无项目任务。排队或执行中的任务须先停止，返回 409 TASK_BUSY。必须传 expected_revision（list_revision），版本冲突返回 409。保留工作目录中的文件。其他用户的任务返回 404。",
+    description="按 ID 删除本人任务及全部会话轮次、已发布附件和工具记录，无需版本参数，支持项目内和无项目任务。排队或执行中的任务返回 409 TASK_BUSY，须等待完成或先停止。保留工作目录中的文件。其他用户的任务返回 404。",
 )
 async def delete_task(
     task_id: str,
-    expected_revision: int = Query(ge=1, description="确认删除时的任务 list_revision。"),
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
 ) -> Response:
-    await asyncio.to_thread(tasks.delete, _services(server), user.id, task_id, expected_revision)
+    await asyncio.to_thread(tasks.delete, _services(server), user.id, task_id)
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
