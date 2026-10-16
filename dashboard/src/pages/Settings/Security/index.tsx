@@ -24,6 +24,7 @@ import TabBar, { type TabBarItem } from "../../../components/TabLabel/TabBar";
 import AuditLogPanel from "./AuditLogPanel";
 import HitlToolsPicker from "./HitlToolsPicker";
 import ToolGuardRulesPanel from "./ToolGuardRulesPanel";
+import TaskApprovalsPanel from "./TaskApprovalsPanel";
 import styles from "./index.module.less";
 import ForbiddenPage from "../../../components/ForbiddenPage";
 import { useGatedSearchTabs } from "../../../hooks/useGatedSearchTabs";
@@ -247,6 +248,7 @@ export default function SecuritySettingsPage() {
               </Form.Item>
             </div>
             {saveFooter}
+            <TaskApprovalsPanel />
           </>
         );
       case "filesystem":

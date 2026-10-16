@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from octop_harness.security.models import DEFAULT_HITL_TOOLS, SecurityPolicy
 from pydantic import BaseModel, Field
 
-from octop.api.deps import get_server, require_permission
+from octop.api.deps import get_server, require_database, require_permission
 from octop.i18n.domains.tools import hitl_tool_catalog
 from octop.infra.db.repos.audit import ACTOR_ADMIN
+from octop.infra.projects import approval_policy
+from octop.infra.projects.approval_models import TaskApprovalSettings
 
 router = APIRouter()
 
@@ -202,3 +205,35 @@ async def get_security_defaults(
         ],
         tool_guard_rules=[ToolGuardRuleItem(**item) for item in raw],
     )
+
+
+@router.get("/task-approvals", summary="读取任务审批模式设置")
+async def get_task_approval_settings(
+    _: Any = Depends(require_permission("security")),
+    server: Any = Depends(get_server),
+) -> TaskApprovalSettings:
+    require_database(server)
+    assert server.services is not None
+    return await asyncio.to_thread(approval_policy.settings, server.services)
+
+
+@router.put(
+    "/task-approvals",
+    summary="设置任务可用审批模式",
+    description="仅管理员可修改。任务模式不能覆盖强制人工工具或执行端资源授权；默认仅开放请求批准。",
+)
+async def put_task_approval_settings(
+    body: TaskApprovalSettings,
+    _: Any = Depends(require_permission("security")),
+    server: Any = Depends(get_server),
+) -> TaskApprovalSettings:
+    require_database(server)
+    assert server.services is not None
+    result = await asyncio.to_thread(approval_policy.save_settings, server.services, body)
+    await asyncio.to_thread(
+        server.services.audit_repo.write,
+        actor=ACTOR_ADMIN,
+        action="security.task_approvals.update",
+        target="global",
+    )
+    return result

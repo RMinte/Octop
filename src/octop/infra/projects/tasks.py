@@ -17,11 +17,17 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import artifacts
+from octop.infra.projects import approval_policy, artifacts, interactions
+from octop.infra.projects.approval_models import (
+    ApprovalCapabilities,
+    ApprovalMode,
+    TaskApprovalPolicy,
+)
 from octop.infra.projects.artifact_models import TaskArtifact
 from octop.infra.projects.client_tool_models import ClientID, ClientToolDefinition
 from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
+from octop.infra.projects.interaction_models import TaskInteraction, public_status
 from octop.infra.projects.models import (
     ProjectFields,
     ProjectModel,
@@ -38,7 +44,17 @@ from octop.infra.utils.ulid import new_ulid
 
 RequestID = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{8,128}$")]
 Prompt = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32768)]
-TurnStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+TurnStatus = Literal[
+    "queued",
+    "running",
+    "waiting_approval",
+    "waiting_answer",
+    "waiting_client_tool",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+]
 
 
 class TaskExecutionOptions(ProjectModel):
@@ -136,6 +152,7 @@ class TaskModelOption(ProjectModel):
 class TaskResources(ProjectResources):
     models: list[TaskModelOption]
     default_model_ref: str | None
+    approval: ApprovalCapabilities
 
 
 class TaskPatch(ProjectModel):
@@ -185,6 +202,9 @@ class TaskCancel(ProjectModel):
 
 class TaskCreate(TaskMessage):
     project_id: str | None = Field(default=None, description="所属独立项目；null 创建无项目任务。")
+    approval_mode: ApprovalMode = Field(
+        default="ask_for_approval", description="任务审批模式；必须在管理员允许范围内。"
+    )
 
 
 class TaskTurn(ProjectModel):
@@ -200,6 +220,13 @@ class TaskTurn(ProjectModel):
         description="按发生顺序排列的完整内容块快照；历史未记录分段时为空，不推测原始顺序。"
     )
     content_revision: int = Field(description="本轮内容块版本；只有内容块或块状态变化才递增。")
+    interactions: list[TaskInteraction] = Field(
+        description="本轮审批和提问完整快照，包含已处理项。"
+    )
+    interaction_revision: int = Field(description="交互及暂停意图版本；独立于内容版本，单调递增。")
+    pause_requested: bool = Field(
+        description="用户暂停意图；只有 status=paused 表示已到达安全边界。"
+    )
     status: TurnStatus
     error_code: str
     activity: str = Field(description="当前执行的工具名称；不包含参数、凭据或工具输出。")
@@ -208,6 +235,9 @@ class TaskTurn(ProjectModel):
         description="该轮已成功发布的不可变附件；仅含元数据，内容使用鉴权 HTTP 下载。",
     )
     model_ref: str
+    approval_policy_at_start: TaskApprovalPolicy = Field(
+        description="本轮入队时的任务审批模式快照；之后切换模式不会改写该快照。"
+    )
     options: TaskExecutionOptions = Field(
         description="本轮实际采用的模型、Skill、MCP、插件、子代理、记忆/团队开关和客户端工具。"
     )
@@ -230,6 +260,7 @@ class TaskSummary(ProjectModel):
     )
     active_turn_id: str | None
     list_revision: int = Field(description="任务摘要版本；仅列表字段变化时递增。")
+    approval_policy: TaskApprovalPolicy
     created_at: datetime
     updated_at: datetime
 
@@ -264,9 +295,10 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
         project_id=row.project_id,
         title=row.title,
         archived=row.archived,
-        status=cast(TurnStatus, row.status),
+        status=cast(TurnStatus, public_status(row.status, row.wait_kind)),
         active_turn_id=row.active_turn_id,
         list_revision=row.list_revision,
+        approval_policy=approval_policy.view(row),
         created_at=_datetime(row.created_at),
         updated_at=_datetime(row.updated_at),
     )
@@ -288,11 +320,23 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         reasoning=t.reasoning,
         content_blocks=blocks,
         content_revision=t.content_revision,
-        status=cast(TurnStatus, t.status),
+        interactions=interactions.load(t),
+        interaction_revision=t.interaction_revision,
+        pause_requested=t.pause_requested,
+        status=cast(
+            TurnStatus,
+            public_status(
+                t.status, ("user" if t.pause_requested else t.wait_kind) if t.is_waiting else ""
+            ),
+        ),
         error_code=t.error_code,
         activity=t.activity,
         artifacts=attachments or [],
         model_ref=t.model_ref,
+        approval_policy_at_start=TaskApprovalPolicy.model_validate(
+            configuration.get("approval_policy_at_start")
+            or {"mode": "ask_for_approval", "revision": 1, "updated_at": _datetime(t.created_at)}
+        ),
         options=TaskExecutionOptions(
             model_ref=t.model_ref,
             reasoning_mode=configuration.get("reasoning_mode"),
@@ -469,6 +513,13 @@ def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: s
         or json.loads(old.configuration_json).get("retry_of_turn_id") != retry_of_turn_id
         or json.loads(old.configuration_json).get("execution_options", {})
         != body.options.model_dump(exclude_none=True)
+        or (
+            isinstance(body, TaskCreate)
+            and json.loads(old.configuration_json)
+            .get("approval_policy_at_start", {})
+            .get("mode", "ask_for_approval")
+            != body.approval_mode
+        )
     ):
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
 
@@ -524,6 +575,14 @@ def send(
                 configuration, model_ref = _configuration(
                     services, owner_id, task.project_id, body.options
                 )
+                configuration = json.dumps(
+                    {
+                        **json.loads(configuration),
+                        "approval_policy_at_start": approval_policy.view(task).model_dump(
+                            mode="json"
+                        ),
+                    }
+                )
                 if retry_of_turn_id is not None:
                     configuration = json.dumps(
                         {**json.loads(configuration), "retry_of_turn_id": retry_of_turn_id}
@@ -554,6 +613,15 @@ def send(
         else:
             configuration, model_ref = _configuration(services, owner_id, project_id, body.options)
             task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
+            mode = body.approval_mode if isinstance(body, TaskCreate) else "ask_for_approval"
+            approval_policy.assert_available(services, mode, model_ref)
+            start_policy = TaskApprovalPolicy(mode=mode, revision=1, updated_at=_datetime(now))
+            configuration = json.dumps(
+                {
+                    **json.loads(configuration),
+                    "approval_policy_at_start": start_policy.model_dump(mode="json"),
+                }
+            )
             tasks.insert(
                 conn,
                 ProjectTaskRow(
@@ -565,6 +633,8 @@ def send(
                     turn_id,
                     now,
                     now,
+                    approval_mode=mode,
+                    approval_updated_at=now,
                 ),
             )
             turns.insert(
@@ -606,6 +676,10 @@ def cancel(services: SharedServices, owner_id: int, task_id: str, turn_id: str) 
             turns.cancel(conn, turn_id, now_ms())
             turn = turns.get_in_transaction(conn, turn_id)
             if turn is not None and turn.status == "cancelled":
+                interactions.close(services, conn, turn, now_ms())
+                services.project_task_tool_call_repo.close_turn(
+                    conn, turn_id, "cancelled", "", now_ms()
+                )
                 tasks.finish(conn, task_id, turn.turn_id, now_ms())
     return detail(services, owner_id, task_id)
 
@@ -630,7 +704,10 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
         if providers.is_model_ref_usable(f"{provider.name}/{model['id']}")
     ]
     return TaskResources(
-        **available.model_dump(), models=models, default_model_ref=resolve_model_ref(services)
+        **available.model_dump(),
+        models=models,
+        default_model_ref=resolve_model_ref(services),
+        approval=approval_policy.capabilities(services),
     )
 
 

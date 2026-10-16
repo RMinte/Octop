@@ -16,7 +16,7 @@ async def connected(client, auth):
     session = ws_connect(client._octop_app, "/api/project-tasks/ws")
     ws = await session.__aenter__()
     await ws.send_json({"type": "authenticate", "token": ws_token(auth)})
-    assert await ws.receive_json() == {"type": "ready", "protocol_version": 1}
+    assert await ws.receive_json() == {"type": "ready", "protocol_version": 3}
     return session, ws
 
 

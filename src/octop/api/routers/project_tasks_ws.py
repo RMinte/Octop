@@ -15,13 +15,23 @@ from pydantic import Field, StringConstraints, TypeAdapter, ValidationError
 from octop.api.deps import extract_raw_token, maybe_sliding_renew_token, resolve_user_from_token
 from octop.api.routers.projects import _services, _task_worker
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import client_tools, tasks, title
+from octop.infra.projects import (
+    approval_policy,
+    client_reviews,
+    client_tools,
+    interactions,
+    tasks,
+    title,
+)
+from octop.infra.projects.approval_models import ApprovalPolicyUpdate
 from octop.infra.projects.client_tool_models import (
     ClientID,
     ClientToolCall,
     ClientToolClaim,
     ClientToolResult,
+    ClientToolReviewRequest,
 )
+from octop.infra.projects.interaction_models import InteractionResponse, TaskControl
 from octop.infra.projects.models import ProjectModel, Reference
 from octop.infra.utils.locale import resolve_locale, resolve_request_locale
 
@@ -65,6 +75,26 @@ class CancelFrame(CommandFrame):
     type: Literal["task.cancel"]
     task_id: Reference
     data: tasks.TaskCancel
+
+
+class PauseFrame(CommandFrame):
+    type: Literal["task.pause", "task.resume"]
+    task_id: Reference
+    data: TaskControl
+
+
+class ApprovalPolicyFrame(CommandFrame):
+    type: Literal["task.approval.set"]
+    task_id: Reference
+    data: ApprovalPolicyUpdate
+
+
+class InteractionFrame(CommandFrame):
+    type: Literal["task.interaction.respond"]
+    task_id: Reference
+    turn_id: Reference
+    interaction_id: Reference
+    data: InteractionResponse
 
 
 class SubscribeFrame(CommandFrame):
@@ -112,11 +142,19 @@ class ToolResultFrame(ToolIdentityFrame):
     data: ClientToolResult
 
 
+class ToolReviewFrame(ToolIdentityFrame):
+    type: Literal["tool.review"]
+    data: ClientToolReviewRequest
+
+
 TaskCommand = Annotated[
     CreateFrame
     | MessageFrame
     | RetryFrame
     | CancelFrame
+    | PauseFrame
+    | ApprovalPolicyFrame
+    | InteractionFrame
     | OpenFrame
     | SubscribeFrame
     | UnsubscribeFrame
@@ -124,7 +162,8 @@ TaskCommand = Annotated[
     | AttachFrame
     | ToolGetFrame
     | ToolClaimFrame
-    | ToolResultFrame,
+    | ToolResultFrame
+    | ToolReviewFrame,
     Field(discriminator="type"),
 ]
 _command: TypeAdapter[TaskCommand] = TypeAdapter(TaskCommand)
@@ -244,7 +283,7 @@ async def task_websocket(websocket: WebSocket) -> None:
                 raise OctopError.localized(ErrorCode.AUTH_FAILED) from None
         user = await asyncio.to_thread(resolve_user_from_token, server, token)
         locale = resolve_locale(user_locale=user.locale, explicit=locale)
-        await websocket.send_json({"type": "ready", "protocol_version": 1})
+        await websocket.send_json({"type": "ready", "protocol_version": 3})
         pump = asyncio.create_task(push_updates())
         while True:
             raw = await websocket.receive_text()
@@ -284,7 +323,13 @@ async def task_websocket(websocket: WebSocket) -> None:
                             frame.call_id,
                         )
                         receipt: ClientToolCall | ClientToolClaim
-                        if isinstance(frame, ToolClaimFrame):
+                        if isinstance(frame, ToolReviewFrame):
+                            receipt = await asyncio.to_thread(
+                                client_reviews.request_review, *args, frame.data
+                            )
+                            if server.project_task_worker is not None:
+                                server.project_task_worker.review_worker.wake()
+                        elif isinstance(frame, ToolClaimFrame):
                             receipt = await asyncio.to_thread(
                                 client_tools.claim_call, *args, frame.request_id
                             )
@@ -329,6 +374,41 @@ async def task_websocket(websocket: WebSocket) -> None:
                         subscriptions[frame.task_id] = cursor
                     elif isinstance(frame, UnsubscribeFrame):
                         subscriptions.pop(frame.task_id, None)
+                    elif isinstance(frame, ApprovalPolicyFrame):
+                        detail = await asyncio.to_thread(
+                            approval_policy.set_policy,
+                            services,
+                            user.id,
+                            frame.task_id,
+                            frame.data,
+                        )
+                        result = detail.model_dump(mode="json")
+                    elif isinstance(frame, (PauseFrame, InteractionFrame)):
+                        if isinstance(frame, PauseFrame):
+                            await asyncio.to_thread(
+                                interactions.control,
+                                services,
+                                user.id,
+                                frame.task_id,
+                                frame.data,
+                                paused=frame.type == "task.pause",
+                            )
+                        else:
+                            await asyncio.to_thread(
+                                interactions.respond,
+                                services,
+                                user.id,
+                                frame.task_id,
+                                frame.turn_id,
+                                frame.interaction_id,
+                                frame.data,
+                            )
+                        if server.project_task_worker is not None:
+                            server.project_task_worker.wake()
+                        detail = await asyncio.to_thread(
+                            tasks.detail, services, user.id, frame.task_id
+                        )
+                        result = detail.model_dump(mode="json")
                     elif isinstance(frame, CancelFrame):
                         detail = await asyncio.to_thread(
                             tasks.cancel, services, user.id, frame.task_id, frame.data.turn_id

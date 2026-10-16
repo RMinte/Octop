@@ -138,6 +138,21 @@ beforeEach(() => {
         next_page_cursor: null,
         sync_cursor: "tasks_first",
       } as never;
+    if (url === "/project-tasks/resources")
+      return {
+        skills: [],
+        mcp_servers: [],
+        plugins: [],
+        subagents: [],
+        directory_roots: [],
+        models: [],
+        default_model_ref: null,
+        approval: {
+          allowed_modes: ["ask_for_approval"],
+          reviewer_ready: false,
+          execution_profile: "host_process",
+        },
+      } as never;
     if (url === "/projects/resources")
       return {
         skills: [],

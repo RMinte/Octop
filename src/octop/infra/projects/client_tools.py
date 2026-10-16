@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import secrets
@@ -18,8 +19,11 @@ from octop.infra.db.repos.project_task_tool_calls import ProjectTaskToolCallRow
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects import approval_policy, interactions
+from octop.infra.projects.approval_runtime import review_view
 from octop.infra.projects.client_tool_models import (
     CallStatus,
+    ClientApprovalContext,
     ClientToolCall,
     ClientToolClaim,
     ClientToolDefinition,
@@ -35,7 +39,35 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
-def view(row: ProjectTaskToolCallRow) -> ClientToolCall:
+def _previous_denial(
+    services: SharedServices,
+    conn: Any,
+    turn_id: str,
+    client_id: str,
+    name: str,
+    arguments: dict[str, Any],
+) -> bool:
+    return any(
+        json.loads(encoded) == arguments
+        for encoded in services.project_task_review_repo.denied_client_arguments(
+            conn, turn_id, client_id, name
+        )
+    )
+
+
+def view(row: ProjectTaskToolCallRow, services: SharedServices, conn: Any) -> ClientToolCall:
+    context = json.loads(row.approval_context_json)
+    if not context:
+        context = {
+            "mode": "ask_for_approval",
+            "revision": 1,
+            "action_digest": interactions.digest(
+                {"call_id": row.call_id, "arguments": row.arguments_json}
+            ),
+        }
+    turn = services.project_task_turn_repo.get_in_transaction(conn, row.turn_id)
+    review = services.project_task_review_repo.get(conn, "client", row.call_id)
+    settings = approval_policy.settings(services)
     return ClientToolCall(
         call_id=row.call_id,
         task_id=row.task_id,
@@ -43,6 +75,20 @@ def view(row: ProjectTaskToolCallRow) -> ClientToolCall:
         client_id=row.client_id,
         name=row.name,
         arguments=json.loads(row.arguments_json),
+        approval_context=ClientApprovalContext.model_validate(context),
+        dispatch_allowed=bool(
+            turn
+            and turn.status in {"queued", "running"}
+            and not turn.pause_requested
+            and not turn.cancel_requested
+            and row.status in {"pending", "claimed"}
+        ),
+        manual_review_required=bool(
+            context.get("requires_user")
+            or row.name in settings.require_human_tools
+            or "client__" + row.name in settings.require_human_tools
+        ),
+        review=review_view(review) if review else None,
         status=cast(CallStatus, row.status),
         error_code=row.error_code,
         created_at=datetime.fromtimestamp(row.created_at / 1000, UTC),
@@ -60,10 +106,16 @@ def _normalize(
     now, status, error = _now(), "", ""
     if turn is None or turn.cancel_requested or turn.status == "cancelled":
         status = "cancelled"
-    elif turn.status != "running" or turn.updated_at < now - 90_000:
+    elif turn.status not in {"running", "queued"} or (
+        turn.status == "running" and not turn.is_waiting and turn.updated_at < now - 90_000
+    ):
         status, error = "interrupted", "TASK_INTERRUPTED"
     elif row.expires_at <= now:
         status, error = "expired", "TASK_CLIENT_TOOL_TIMEOUT"
+    context = json.loads(row.approval_context_json)
+    settings = approval_policy.settings(services)
+    if not status and context.get("mode", "ask_for_approval") not in settings.allowed_modes:
+        status, error = "interrupted", "TASK_APPROVAL_MODE_UNAVAILABLE"
     if status:
         services.project_task_tool_call_repo.close(conn, row.call_id, status, error, now)
         return replace(row, status=status, error_code=error, updated_at=now)
@@ -99,7 +151,9 @@ def get_call(
     call_id: str,
 ) -> ClientToolCall:
     with services.db.transaction() as conn:
-        return view(_load(services, conn, owner_id, client_id, task_id, turn_id, call_id))
+        return view(
+            _load(services, conn, owner_id, client_id, task_id, turn_id, call_id), services, conn
+        )
 
 
 def open_calls(services: SharedServices, owner_id: int, client_id: str) -> list[ClientToolCall]:
@@ -107,7 +161,7 @@ def open_calls(services: SharedServices, owner_id: int, client_id: str) -> list[
         if not services.project_task_repo.lock_owner(conn, owner_id):
             raise OctopError.localized(ErrorCode.FORBIDDEN)
         return [
-            view(_normalize(services, conn, row))
+            view(_normalize(services, conn, row), services, conn)
             for row in services.project_task_tool_call_repo.open_for_client(
                 conn, owner_id, client_id
             )
@@ -142,7 +196,10 @@ def claim_call(
             error = ErrorCode.TASK_CLIENT_TOOL_CLAIMED
     if error:
         raise OctopError.localized(error)
-    return ClientToolClaim(call=view(row), claim_token=row.claim_token)
+    return ClientToolClaim(
+        call=get_call(services, owner_id, client_id, task_id, turn_id, call_id),
+        claim_token=row.claim_token,
+    )
 
 
 def submit_result(
@@ -177,7 +234,7 @@ def submit_result(
             row = replace(row, status="completed", result_json=encoded, updated_at=now)
     if error:
         raise OctopError.localized(error)
-    return view(row)
+    return get_call(services, owner_id, client_id, task_id, turn_id, call_id)
 
 
 class ClientToolBroker:
@@ -195,10 +252,23 @@ class ClientToolBroker:
         self.client_id, self.definitions = client_id, definitions
         self.failure: ErrorCode | None = None
 
-    def _create(self, definition: ClientToolDefinition, arguments: dict[str, Any]) -> str:
+    def _create(
+        self,
+        definition: ClientToolDefinition,
+        arguments: dict[str, Any],
+        tool_call_id: str = "",
+    ) -> str:
+        Draft202012Validator(definition.input_schema).validate(arguments)
+        if len(json.dumps(arguments, allow_nan=False).encode()) > 128 * 1024:
+            raise OctopError.localized(ErrorCode.TASK_CLIENT_TOOL_ARGUMENTS_INVALID)
         now = _now()
+        identifier = (
+            hashlib.sha256(f"{self.turn.turn_id}:{tool_call_id}".encode()).hexdigest()
+            if tool_call_id
+            else new_ulid()
+        )
         row = ProjectTaskToolCallRow(
-            "call_" + new_ulid(),
+            "call_" + identifier,
             self.turn.task_id,
             self.turn.turn_id,
             self.owner_id,
@@ -225,6 +295,44 @@ class ClientToolBroker:
                 or current.worker_id != self.turn.worker_id
             ):
                 raise OctopError.localized(ErrorCode.TASK_CLIENT_TOOL_CLOSED)
+            existing = self.services.project_task_tool_call_repo.get(conn, row.call_id)
+            if existing is not None:
+                if (
+                    existing.turn_id != row.turn_id
+                    or existing.client_id != row.client_id
+                    or existing.name != row.name
+                    or json.loads(existing.arguments_json) != arguments
+                ):
+                    raise OctopError.localized(ErrorCode.TASK_CLIENT_TOOL_CLOSED)
+                return existing.call_id
+            if _previous_denial(
+                self.services, conn, row.turn_id, row.client_id, row.name, arguments
+            ):
+                # Changing native call ids or Task modes cannot retry a denied
+                # proposal in this turn, including a switch to full access.
+                raise OctopError.localized(ErrorCode.TASK_CLIENT_TOOL_CLOSED)
+            policy = approval_policy.snapshot(conn, self.services, self.turn.task_id, self.owner_id)
+            settings = approval_policy.settings(self.services)
+            context = ClientApprovalContext(
+                mode=policy.mode,
+                revision=policy.revision,
+                action_digest=interactions.digest(
+                    {
+                        "call_id": row.call_id,
+                        "owner": self.owner_id,
+                        "task_id": row.task_id,
+                        "turn_id": row.turn_id,
+                        "client_id": row.client_id,
+                        "name": row.name,
+                        "arguments": arguments,
+                        "configuration": self.turn.configuration_json,
+                        "policy": policy.model_dump(mode="json"),
+                    }
+                ),
+                requires_user=row.name in settings.require_human_tools
+                or "client__" + row.name in settings.require_human_tools,
+            )
+            row = replace(row, approval_context_json=context.model_dump_json())
             self.services.project_task_tool_call_repo.insert(conn, row)
         return row.call_id
 

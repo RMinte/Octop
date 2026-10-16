@@ -30,6 +30,16 @@ class TaskContent:
         self._text: TaskContentBlock | None = None
         self._tools: dict[str, TaskContentBlock] = {}
 
+    @classmethod
+    def restore(cls, turn_id: str, blocks: list[Any], revision: int) -> TaskContent:
+        content = cls(turn_id)
+        content.blocks = [TaskContentBlock.model_validate(block) for block in blocks]
+        content.revision = revision
+        content._tools = {
+            block.tool_call_id or "": block for block in content.blocks if block.type == "tool"
+        }
+        return content
+
     def end_text(self) -> None:
         if self._text is not None:
             self._text.status = "completed"

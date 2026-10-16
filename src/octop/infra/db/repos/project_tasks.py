@@ -23,6 +23,11 @@ class ProjectTaskRow:
     list_revision: int = 1
     archived: bool = False
     status: str = "queued"
+    wait_kind: str = ""
+    approval_mode: str = "ask_for_approval"
+    approval_revision: int = 1
+    approval_updated_at: int = 0
+    approval_requests_json: str = "[]"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -38,6 +43,11 @@ class ProjectTaskRow:
             strict_int(row["list_revision"]),
             bool(row["archived"]),
             str(row["status"]),
+            str(row["wait_kind"]),
+            str(row["approval_mode"]),
+            strict_int(row["approval_revision"]),
+            strict_int(row["approval_updated_at"]),
+            str(row["approval_requests_json"]),
         )
 
 
@@ -137,8 +147,9 @@ class ProjectTaskRepo:
     def insert(conn: Any, row: ProjectTaskRow) -> None:
         conn.execute(
             "INSERT INTO project_tasks(task_id, owner_id, project_id, title, request_id, "
-            "active_turn_id, created_at, updated_at, status, title_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional')",
+            "active_turn_id, created_at, updated_at, status, title_source, "
+            "approval_mode, approval_revision, approval_updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?)",
             (
                 row.task_id,
                 row.owner_id,
@@ -149,9 +160,35 @@ class ProjectTaskRepo:
                 row.created_at,
                 row.updated_at,
                 row.status,
+                row.approval_mode,
+                row.approval_revision,
+                row.approval_updated_at,
             ),
         )
         record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
+
+    @staticmethod
+    def update_approval(
+        conn: Any,
+        row: ProjectTaskRow,
+        mode: str,
+        requests_json: str,
+        now: int,
+    ) -> ProjectTaskRow | None:
+        result = conn.execute(
+            "UPDATE project_tasks SET approval_mode=?,approval_revision=approval_revision+1,"
+            "approval_updated_at=?,approval_requests_json=?,updated_at=?,"
+            "list_revision=list_revision+1 "
+            "WHERE task_id=? AND owner_id=? AND approval_revision=? RETURNING *",
+            (mode, now, requests_json, now, row.task_id, row.owner_id, row.approval_revision),
+        ).fetchone()
+        if result is None:
+            return None
+        updated = ProjectTaskRow.from_row(result)
+        record_change(
+            conn, updated.owner_id, task_scope(updated.project_id), updated.task_id, updated
+        )
+        return updated
 
     @staticmethod
     def activate(conn: Any, task_id: str, turn_id: str, now: int) -> bool:
@@ -170,8 +207,8 @@ class ProjectTaskRepo:
     @staticmethod
     def start(conn: Any, task_id: str, turn_id: str, now: int) -> None:
         result = conn.execute(
-            "UPDATE project_tasks SET status='running', updated_at=?, list_revision=list_revision+1 "
-            "WHERE task_id=? AND active_turn_id=? AND status='queued' RETURNING *",
+            "UPDATE project_tasks SET status='running',wait_kind='', updated_at=?, list_revision=list_revision+1 "
+            "WHERE task_id=? AND active_turn_id=? AND (status='queued' OR wait_kind<>'') RETURNING *",
             (now, task_id, turn_id),
         ).fetchone()
         if result is not None:
@@ -182,9 +219,20 @@ class ProjectTaskRepo:
     def finish(conn: Any, task_id: str, turn_id: str, now: int) -> None:
         result = conn.execute(
             "UPDATE project_tasks SET status=(SELECT status FROM project_task_turns WHERE turn_id=?), "
-            "active_turn_id=NULL, updated_at=?, list_revision=list_revision+1 "
+            "active_turn_id=NULL,wait_kind='', updated_at=?, list_revision=list_revision+1 "
             "WHERE task_id=? AND active_turn_id=? RETURNING *",
             (turn_id, now, task_id, turn_id),
+        ).fetchone()
+        if result is not None:
+            row = ProjectTaskRow.from_row(result)
+            record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
+
+    @staticmethod
+    def wait(conn: Any, task_id: str, turn_id: str, kind: str, now: int) -> None:
+        result = conn.execute(
+            "UPDATE project_tasks SET wait_kind=?,updated_at=?,list_revision=list_revision+1 "
+            "WHERE task_id=? AND active_turn_id=? AND wait_kind<>? RETURNING *",
+            (kind, now, task_id, turn_id, kind),
         ).fetchone()
         if result is not None:
             row = ProjectTaskRow.from_row(result)

@@ -17,6 +17,8 @@ import {
   Download,
   MessageSquare,
   Plus,
+  Pause,
+  Play,
   Send,
   Square,
   Trash2,
@@ -26,6 +28,8 @@ import { useSearchParams } from "react-router-dom";
 import {
   projectTasksApi,
   type TaskMessage,
+  type TaskCreate,
+  type TaskApprovalMode,
   type TaskExecutionOptions,
   type TaskArtifact,
   type Project,
@@ -39,6 +43,8 @@ import { useTaskList } from "./useProjectLists";
 import { useTaskConversation } from "./useTaskConversation";
 import TaskExecutionSettings from "./TaskExecutionSettings";
 import TaskTurnContent from "./TaskTurnContent";
+import TaskInteractions from "./TaskInteractions";
+import TaskApprovalModePicker from "./TaskApprovalMode";
 
 export default function TaskConversations({
   projectID,
@@ -87,6 +93,9 @@ export default function TaskConversations({
   }, []);
   const [draft, setDraft] = useState("");
   const [options, setOptions] = useState<TaskExecutionOptions>({});
+  const [approvalMode, setApprovalMode] =
+    useState<TaskApprovalMode>("ask_for_approval");
+  const [approvalSaving, setApprovalSaving] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<TaskSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -95,7 +104,10 @@ export default function TaskConversations({
   const [stopping, setStopping] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
   const inFlight = useRef(false);
-  const pending = useRef<{ target: string; body: TaskMessage } | null>(null);
+  const pending = useRef<{
+    target: string;
+    body: TaskMessage | TaskCreate;
+  } | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const followOutput = useRef(true);
   const retryRequest = useRef<{
@@ -103,7 +115,41 @@ export default function TaskConversations({
     requestID: string;
     optionsKey: string;
   } | null>(null);
+  const [controlling, setControlling] = useState(false);
+  const controlRequest = useRef<{ key: string; requestID: string } | null>(
+    null,
+  );
+  const controlInFlight = useRef(false);
+  const activeTurn = detail?.turns.find(
+    (turn) => turn.turn_id === detail.active_turn_id,
+  );
   const busy = !!detail?.active_turn_id;
+  const control = async () => {
+    if (!detail || !activeTurn || controlInFlight.current) return;
+    controlInFlight.current = true;
+    setControlling(true);
+    const paused = !(
+      activeTurn.pause_requested || activeTurn.status === "paused"
+    );
+    const key = `${detail.task_id}:${activeTurn.turn_id}:${paused}`;
+    if (controlRequest.current?.key !== key)
+      controlRequest.current = { key, requestID: crypto.randomUUID() };
+    try {
+      const incoming = await projectTasksApi.control(
+        detail.task_id,
+        activeTurn.turn_id,
+        paused,
+        controlRequest.current.requestID,
+      );
+      if (selectedTaskID.current === incoming.task_id) applyWrite(incoming);
+      setError("");
+    } catch (err) {
+      setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+    } finally {
+      setControlling(false);
+      controlInFlight.current = false;
+    }
+  };
   const projectArchived = !!project?.archived;
   const listSummary = useRef("");
   const renameRevision = useRef<number | null>(null);
@@ -130,6 +176,8 @@ export default function TaskConversations({
     setError("");
     setDraft("");
     setOptions({});
+    setApprovalMode("ask_for_approval");
+    setApprovalSaving(false);
     pending.current = null;
     retryRequest.current = null;
     followOutput.current = true;
@@ -220,6 +268,7 @@ export default function TaskConversations({
       projectArchived ||
       deleteTarget ||
       sending ||
+      approvalSaving ||
       inFlight.current ||
       (taskID && !detail)
     )
@@ -232,13 +281,16 @@ export default function TaskConversations({
       pending.current?.target !== target ||
       pending.current.body.prompt !== prompt ||
       JSON.stringify(pending.current.body.options ?? {}) !==
-        JSON.stringify(options)
+        JSON.stringify(options) ||
+      (!taskID &&
+        (pending.current.body as TaskCreate).approval_mode !== approvalMode)
     ) {
       pending.current = {
         target,
         body: {
           request_id: crypto.randomUUID(),
           prompt,
+          ...(!taskID ? { approval_mode: approvalMode } : {}),
           ...(JSON.stringify(options) !== "{}" ? { options } : {}),
         },
       };
@@ -246,7 +298,10 @@ export default function TaskConversations({
     try {
       const result = taskID
         ? await projectTasksApi.send(taskID, pending.current.body)
-        : await projectTasksApi.create(projectID, pending.current.body);
+        : await projectTasksApi.create(
+            projectID,
+            pending.current.body as TaskCreate,
+          );
       if (
         !alive.current ||
         selectedTaskID.current !== taskID ||
@@ -639,6 +694,28 @@ export default function TaskConversations({
                       {t("projects.tasks.modelUsed", { model: turn.model_ref })}
                     </Typography.Paragraph>
                     <TaskTurnContent turn={turn} />
+                    {!!turn.interactions?.length && (
+                      <TaskInteractions
+                        taskID={detail.task_id}
+                        items={turn.interactions}
+                        disabled={
+                          reconnecting ||
+                          turn.cancel_requested ||
+                          turn.turn_id !== detail.active_turn_id
+                        }
+                        onChange={(incoming) => {
+                          if (selectedTaskID.current === incoming.task_id)
+                            applyWrite(incoming);
+                        }}
+                      />
+                    )}
+                    {turn.pause_requested &&
+                      turn.status !== "paused" &&
+                      turn.turn_id === detail.active_turn_id && (
+                        <Typography.Paragraph type="secondary">
+                          {t("projects.tasks.pausing")}
+                        </Typography.Paragraph>
+                      )}
                     {turn.artifacts?.length > 0 && (
                       <Space
                         direction="vertical"
@@ -690,6 +767,21 @@ export default function TaskConversations({
           <div ref={end} />
         </div>
         <div className={styles.composer}>
+          <TaskApprovalModePicker
+            key={`${projectID ?? ""}:${taskID ?? "new"}`}
+            task={detail}
+            draft={approvalMode}
+            onDraftChange={setApprovalMode}
+            onChange={applyWrite}
+            onBusyChange={setApprovalSaving}
+            disabled={
+              sending ||
+              reconnecting ||
+              !!detail?.archived ||
+              projectArchived ||
+              !!(taskID && !detail)
+            }
+          />
           <TaskExecutionSettings
             value={options}
             onChange={setOptions}
@@ -734,18 +826,43 @@ export default function TaskConversations({
               )}
             </Typography.Text>
             {busy ? (
-              <Button
-                icon={<Square size={15} />}
-                loading={stopping}
-                disabled={detail?.turns.some(
-                  (turn) =>
-                    turn.turn_id === detail.active_turn_id &&
-                    turn.cancel_requested,
-                )}
-                onClick={() => void stop()}
-              >
-                {t("projects.tasks.stop")}
-              </Button>
+              <Space>
+                <Button
+                  icon={
+                    activeTurn?.pause_requested ||
+                    activeTurn?.status === "paused" ? (
+                      <Play size={15} />
+                    ) : (
+                      <Pause size={15} />
+                    )
+                  }
+                  loading={controlling}
+                  disabled={
+                    reconnecting || stopping || activeTurn?.cancel_requested
+                  }
+                  title={t("projects.tasks.controlHint")}
+                  onClick={() => void control()}
+                >
+                  {t(
+                    activeTurn?.pause_requested ||
+                      activeTurn?.status === "paused"
+                      ? "projects.tasks.resume"
+                      : "projects.tasks.pause",
+                  )}
+                </Button>
+                <Button
+                  icon={<Square size={15} />}
+                  loading={stopping}
+                  disabled={detail?.turns.some(
+                    (turn) =>
+                      turn.turn_id === detail.active_turn_id &&
+                      turn.cancel_requested,
+                  )}
+                  onClick={() => void stop()}
+                >
+                  {t("projects.tasks.stop")}
+                </Button>
+              </Space>
             ) : (
               <Button
                 type="primary"
@@ -753,6 +870,7 @@ export default function TaskConversations({
                 loading={sending}
                 disabled={
                   !draft.trim() ||
+                  approvalSaving ||
                   loading ||
                   !!detail?.archived ||
                   projectArchived ||

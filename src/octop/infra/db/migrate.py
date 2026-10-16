@@ -1911,7 +1911,7 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
 def _ensure_independent_projects_schema(db: DatabasePool) -> None:
     """Apply only the independent project/task DDL, preserving historical tables.
 
-    Versions 21–27 belonged to the retired expert-bound model. Keep 28–40
+    Versions 21–27 belonged to the retired expert-bound model. Keep 28–41
     numbered as applied locally; never replay that model or lower its watermark.
     """
     tables = {
@@ -1921,7 +1921,7 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
         35: ("project_task_tool_calls",),
         37: ("project_task_artifacts",),
     }
-    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 40]
+    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 41]
     for version, path in versions:
         if version == 29:
             _ensure_column(db, "projects", "client_directory", "TEXT")
@@ -1978,6 +1978,36 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
             _ensure_column(
                 db, "project_task_turns", "content_revision", "BIGINT NOT NULL DEFAULT 0"
             )
+        elif version == 41:
+            _ensure_column(db, "project_task_turns", "checkpoint_id", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(db, "project_task_turns", "pause_json", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(
+                db, "project_task_turns", "interactions_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            _ensure_column(
+                db, "project_task_turns", "interaction_revision", "BIGINT NOT NULL DEFAULT 0"
+            )
+            _ensure_column(
+                db, "project_task_turns", "pause_requested", "INTEGER NOT NULL DEFAULT 0"
+            )
+            _ensure_column(db, "project_task_turns", "wait_kind", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(db, "project_task_turns", "requests_json", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(db, "project_tasks", "wait_kind", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(
+                db, "project_tasks", "approval_mode", "TEXT NOT NULL DEFAULT 'ask_for_approval'"
+            )
+            _ensure_column(db, "project_tasks", "approval_revision", "BIGINT NOT NULL DEFAULT 1")
+            _ensure_column(db, "project_tasks", "approval_updated_at", "BIGINT NOT NULL DEFAULT 0")
+            _ensure_column(
+                db, "project_tasks", "approval_requests_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            _ensure_column(
+                db, "project_task_tool_calls", "approval_context_json", "TEXT NOT NULL DEFAULT '{}'"
+            )
+            with db.transaction() as conn:
+                for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
+                    if not stmt.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
+                        conn.execute(stmt)
         elif any(not _table_exists(db, table) for table in tables[version]):
             with db.transaction() as conn:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
@@ -1995,7 +2025,7 @@ def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
     for version, path in _discover(db.dialect):
-        if 28 <= version <= 40 or version <= _current_version(db):
+        if 28 <= version <= 41 or version <= _current_version(db):
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.

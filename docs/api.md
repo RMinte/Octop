@@ -63,11 +63,27 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 每轮采用发送时项目配置的快照：行动指南进入系统提示；服务端目录作为实际工作目录；所选已安装技能和 SkillHub 包通过 Harness 工作区加载；仅装配所选 MCP 和插件能力，凭据沿用连接管理。子代理角色、长期记忆和团队协作配置同样按轮保存。项目修改在下一轮生效，已保存轮次的 `project_revision` 保留原值。客户端目录仍然只记录路径。无项目任务使用服务端自动分配的独立工作区。
 
-未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。需要审批的工具当前会结束本轮并提示失败，不绕过审批；任务提供文字对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器、桌面、审批恢复和附件上传未接入。
+未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器、桌面和附件上传未接入。
 
-状态为 `queued/running/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 WebSocket 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的模型消息、工具调用和结果用作后续上下文；历史仅有问答文本的记录继续保留文本；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
+状态为 `queued/running/waiting_approval/waiting_answer/waiting_client_tool/paused/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 WebSocket 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的模型消息、工具调用和结果用作后续上下文；历史仅有问答文本的记录继续保留文本；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
+
+主 Task 已接入原生暂停恢复：审批、提问和客户端工具等待时保存检查点并释放执行槽，全部结果到齐后继续同一轮，Worker 重建不重复派发已登记调用。协议版本为 3，合法等待不按运行心跳过期处理；手动暂停在安全边界生效，继续不替代审批。嵌套人工中断恢复尚未支持。
+
+新增 `POST /api/project-tasks/{task_id}/pause`、`/resume`，body 为 `{turn_id,request_id}`；回应入口为 `POST /api/project-tasks/{task_id}/turns/{turn_id}/interactions/{interaction_id}/respond`。等价 WebSocket 命令、数据结构和幂等规则见[交互协议](project-task-interactions.md)，客户端后续接线见 [AgentComputer 交接文档](agentcomputer-task-interactions.md)。本机工具保留领取、本机授权、执行和结果链路；远端审查回执只提供建议，不替代本机许可。
 
 验证：任务 HTTP/持久化/多轮/幂等/用户隔离/取消/崩溃恢复集成用例通过；真实 Harness 配合本地模拟模型完成项目文件读取及模拟 MCP 调用，并验证 Skill/行动指南进入提示。8088 已登录正式页面使用现有 GLM-5 完成项目内首轮、同 Task 追问及刷新后历史恢复；无项目任务同样返回真实回复。真实 MCP 供应商连接、PostgreSQL 与 Ubuntu 盒子尚未实机点验。
+
+### 任务审批模式与远端 Reviewer
+
+TaskSummary/TaskDetail 返回 `approval_policy={mode,revision,updated_at}`，轮次返回 `approval_policy_at_start`。创建任务可用顶层 `approval_mode` 选择 `ask_for_approval`、`approve_for_me`、`full_access`；默认人工审批。已建任务用 `PUT /api/project-tasks/{task_id}/approval-policy` 提交 `{request_id,expected_revision,mode}`，或等价 `task.approval.set`。版本取审批模式的独立 revision；网络重试复用原请求。新请求版本冲突返回 `TASK_APPROVAL_POLICY_CONFLICT`，模式未开放或 Reviewer 不可用返回 `TASK_APPROVAL_MODE_UNAVAILABLE`。切换不放行已有人工卡。
+
+`GET /api/project-tasks/resources` 增加 `approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}`。管理员通过 `GET/PUT /api/admin/security/task-approvals` 保存 `{allowed_modes,require_human_tools}`，默认只开放人工审批，人工档始终保留。网页在选择完全访问前说明服务端命令使用 Octop 主机进程权限；本机权限仍由执行电脑授予。
+
+首版三档模式覆盖服务端 `execute` 与客户端 `exec_command`；其他需审批的工具保持人工，强制人工列表始终生效。自动审批使用 Octop 上独立且无工具的 Reviewer，沿用该轮已保存模型，只接收固定动作和本轮目标。45 秒超时、格式非法、不可用或配额不足均转人工。审查不占主任务执行槽，用量独立保存并计入用户累计配额。重启后不重复请求状态不明的已派发审查；取消后迟到结果只登记用量。
+
+客户端新增领取凭证绑定的 `tool.review`，结果位于原 `ClientToolCall.review`，不会完成原调用或自动恢复模型。执行电脑须保留本机授权，核对动作和上下文摘要，并在派发前通过 `tool.get` 检查 `dispatch_allowed`、`manual_review_required`、暂停/取消和截止时间。服务端不探测客户端路径。完整字段见[任务协议](project-task-websocket.md#142-客户端远端审查-toolreview)及[客户端交接](agentcomputer-task-interactions.md)。本次未修改 AgentComputer。
+
+成对的 SQLite/PostgreSQL schema 41 包含断点、交互、任务模式与审查记录；已记录 41 的本地库也幂等补齐缺失列和表。已有任务默认人工审批，已有数据保留。本轮使用 SQLite 与模拟模型验证，未发起真实供应商审查或进行 PostgreSQL 实机验收。
 
 ### 项目同步和任务列表分页
 
@@ -192,7 +208,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-消息只支持文字：`prompt` 去首尾空白后为 1–32768 字符，`request_id` 为 8–128 位字母、数字、短横线或下划线。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；附件和权限模式尚未接入。未覆盖的资源继承发送时的项目配置。
+消息只支持文字：`prompt` 去首尾空白后为 1–32768 字符，`request_id` 为 8–128 位字母、数字、短横线或下划线。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；附件上传尚未接入；创建任务可在顶层设置 approval_mode。未覆盖的资源继承发送时的项目配置。
 
 通过 `GET /api/project-tasks/task_example` 读取 `TaskDetail`，默认最近 50 轮。`limit` 为 1–100；使用 `next_page_cursor` 作为下一次的 `page_cursor` 读取更早轮次，每页内部按创建顺序正序排列。首屏与实时基线来自同一数据库快照，历史页的 `event_cursor=null`，不能用历史页推进实时位置。以下是单轮已完成时的示意，创建响应的轮次通常处于 queued：
 
@@ -221,6 +237,9 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
       "activity": "",
       "model_ref": "provider/model",
       "options": {"model_ref": "provider/model", "skills": [], "mcp_servers": []},
+      "interactions": [],
+      "interaction_revision": 0,
+      "pause_requested": false,
       "cancel_requested": false,
       "retry_of_turn_id": null,
       "input_tokens": 120,
@@ -241,6 +260,10 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 | --- | --- | --- |
 | `queued` | 已保存，等待执行 | 显示排队，继续订阅状态 |
 | `running` | 正在生成回复或调用工具 | 使用已保存的 reply 和 activity 展示进度 |
+| `waiting_approval` | 等待服务端审批 | 显示全部 pending approval |
+| `waiting_answer` | 等待问题回应 | 显示全部 pending question |
+| `waiting_client_tool` | 等待客户端工具结果 | 执行电脑保留本机 journal 与审批 |
+| `paused` | 用户暂停已到达安全边界 | 可继续或停止，仍保留活动轮次 |
 | `completed` | 本轮完成 | 可以继续发送下一条消息，保留任务状态订阅 |
 | `failed` | 本轮失败或中断 | 保留已存正文，读取 error_code，不自动重发工具操作 |
 | `cancelled` | 本轮已取消 | 保留历史，可以继续发送消息 |
@@ -279,7 +302,7 @@ model_ref 省略或 null 使用发送时的默认选择；显式指定不可用�
 
 options 也接受 plugins、subagents、memory_enabled、team_enabled。省略或 null 继承发送时的项目值；无项目任务默认 plugins/subagents=[]、memory_enabled=true、team_enabled=false。列表 [] 清空本轮选择，布尔值 false 仅关闭本轮能力。资源接口增加 plugins（plugin_id/name/description/available）和 subagents（slug/name/description）；全局禁用或未成功加载的插件不可选择。turns[].options 返回全部实际选择。保存项目只保存引用，不安装插件、执行工具或创建专家。
 
-服务端按任务保存完整模型消息及工具调用/结果，追问在新执行环境中恢复这些消息；不会把工具参数和结果加入公开历史响应。停止或失败时，将没有结果的工具调用补成中断结果供下轮理解，不自动重放。原有只含问答文本的记录保持原样。长期记忆的原始对话捕获与搜索保存在任务独立存储中，切换项目服务端目录不影响记忆。团队只包含当前任务选择的角色，成员不进入专家列表；成员结果供主任务汇总，模型用量计入当前轮次。目前支持同步成员调用，不支持后台成员派工或审批续跑。
+服务端按任务保存完整模型消息及工具调用/结果，追问在新执行环境中恢复这些消息；常规工具参数和结果不加入公开历史响应；审批交互会向本人展示该提案的固定参数。停止或失败时，将没有结果的工具调用补成中断结果供下轮理解，不自动重放。原有只含问答文本的记录保持原样。长期记忆的原始对话捕获与搜索保存在任务独立存储中，切换项目服务端目录不影响记忆。团队只包含当前任务选择的角色，成员不进入专家列表；成员结果供主任务汇总，模型用量计入当前轮次。目前支持同步成员调用，不支持后台成员派工或嵌套人工中断恢复。
 
 options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort。省略或 null 使用所选模型的默认值，不继承前轮；资源接口 models[].reasoning_config 返回模型支持的模式、强度和默认值，不支持的设置返回 422 TASK_REASONING_INVALID。只有始终推理能力的模型不提供关闭或强度选择。轮次 options 返回实际采用的设置，供应商请求参数随轮次快照固定。
 
@@ -307,7 +330,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 {"type":"authenticate","token":"<access token>","locale":"zh"}
 ```
 
-原生客户端也可在升级请求中携带 `Authorization: Bearer <access token>`，无需 authenticate 帧。两种方式都不把 token 放进 URL。认证成功返回 `{"type":"ready","protocol_version":1}`。连接绑定当前账号；每条命令和约每 10 秒重新检查登录态，滑动续期通过 `{"type":"session","access_token":"<renewed token>"}` 返回，客户端应按原来的记住登录偏好保存。认证失败返回错误后以 4401 关闭；数据库未就绪时拒绝连接。账号切换或退出时关闭旧连接，不能把旧账号事件交给新账号。
+原生客户端也可在升级请求中携带 `Authorization: Bearer <access token>`，无需 authenticate 帧。两种方式都不把 token 放进 URL。认证成功返回 `{"type":"ready","protocol_version":3}`。连接绑定当前账号；每条命令和约每 10 秒重新检查登录态，滑动续期通过 `{"type":"session","access_token":"<renewed token>"}` 返回，客户端应按原来的记住登录偏好保存。认证失败返回错误后以 4401 关闭；数据库未就绪时拒绝连接。账号切换或退出时关闭旧连接，不能把旧账号事件交给新账号。
 
 所有命令携带 `id`（8–128 位字母、数字、短横线或下划线），用于匹配本次响应。`data.request_id` 是持久化的消息幂等标识，与命令 id 分开：断线后手动重发可换命令 id，但必须保留原 request_id、正文和 options。
 
@@ -324,6 +347,8 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 | `tool.get` | `task_id`、`turn_id`、`call_id` | ClientToolCall |
 | `tool.claim` | 上述调用标识、稳定的 `request_id` | ClientToolClaim（含 claim_token） |
 | `tool.result` | 上述调用标识、`data: {claim_token,output,is_error?}` | ClientToolCall |
+| `tool.review` | 三个调用标识、`data: {request_id,claim_token,action_digest,context}` | ClientToolCall；审查建议不授权本机执行 |
+| `task.approval.set` | `task_id`、`data: {request_id,expected_revision,mode}` | TaskDetail |
 
 例如创建无项目任务并发送首条消息：
 
@@ -405,7 +430,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 
 此前专用协议和 Bridge 的验证记录仅反映历史实现，不代表现行可用接口。当前路由契约验证覆盖标准项目/任务入口，以及已移除地址不可用、不触发转发的边界。完整 `make all` 按约定后置。
 
-本轮已补齐会话历史分页、可续接轮次状态流、精确取消和失败/取消后的继续及手动重试。任务列表分页和摘要同步已有实现。本轮继续补齐任务改名、归档/恢复和逐轮模型、Skill/MCP 选择。后续仍需改造：执行权限模式、附件产物与审批。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
+本轮已补齐会话历史分页、可续接轮次状态流、精确取消和失败/取消后的继续及手动重试。任务列表分页和摘要同步已有实现。本轮继续补齐任务改名、归档/恢复和逐轮模型、Skill/MCP 选择。已提供服务端附件产物、任务审批模式与独立 Reviewer；客户端接入见专门交接文档。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
 
 每轮还返回 `content_blocks`（按发生顺序的摘要、思考、回答和工具活动）及 `content_revision`（内容版本）。内容块是完整快照，客户端按版本替换并保留 block_id 的展示状态；有块时不重复渲染累计 reply/reasoning。历史未记录分段时数组为空，继续展示原文。公开摘要来自模型实际返回，GLM 的 reasoning_content 保持思考类型。字段与恢复规则见 [有序内容块](project-task-websocket.md#有序内容块)。
 

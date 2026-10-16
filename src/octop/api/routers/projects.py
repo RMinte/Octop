@@ -14,7 +14,9 @@ from octop.api.common.content_disposition import content_disposition
 from octop.api.deps import current_user, get_server, require_database
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import artifacts, service, sync, tasks
+from octop.infra.projects import approval_policy, artifacts, interactions, service, sync, tasks
+from octop.infra.projects.approval_models import ApprovalPolicyUpdate
+from octop.infra.projects.interaction_models import InteractionResponse, TaskControl
 from octop.infra.projects.models import (
     ProjectArchive,
     ProjectFields,
@@ -367,6 +369,25 @@ async def create_task(
     return result
 
 
+@task_router.put(
+    "/{task_id}/approval-policy",
+    response_model=tasks.TaskDetail,
+    summary="切换任务审批模式",
+    description="只修改本人任务后续动作的审批模式，不放行已存在的审批。expected_revision 校验审批模式版本；request_id 保证重试幂等，重复标识的内容不同返回 409。模式必须在管理员允许范围内。",
+)
+async def update_task_approval_policy(
+    task_id: str,
+    body: ApprovalPolicyUpdate,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        approval_policy.set_policy, _services(server), user.id, task_id, body
+    )
+
+
 @task_router.get(
     "/sync",
     response_model=sync.TaskSyncPage,
@@ -537,6 +558,74 @@ async def cancel_task(
 ) -> tasks.TaskDetail:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(tasks.cancel, _services(server), user.id, task_id, body.turn_id)
+
+
+@task_router.post(
+    "/{task_id}/pause",
+    response_model=tasks.TaskDetail,
+    summary="暂停指定轮次",
+    description="记录幂等暂停意图，在模型或工具安全边界保存断点并释放执行槽；不回滚已开始的操作。必须指定 turn_id 和稳定 request_id。",
+)
+async def pause_task(
+    task_id: str,
+    body: TaskControl,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    response.headers["Cache-Control"] = "no-store"
+    await asyncio.to_thread(
+        interactions.control, _services(server), user.id, task_id, body, paused=True
+    )
+    if server.project_task_worker is not None:
+        server.project_task_worker.wake()
+    return await asyncio.to_thread(tasks.detail, _services(server), user.id, task_id)
+
+
+@task_router.post(
+    "/{task_id}/resume",
+    response_model=tasks.TaskDetail,
+    summary="恢复指定轮次",
+    description="解除用户暂停意图，继续同一轮次及其原始配置；待审批、待回答或客户端结果尚未齐全时继续等待。复用 request_id 可安全重发。",
+)
+async def resume_task(
+    task_id: str,
+    body: TaskControl,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    response.headers["Cache-Control"] = "no-store"
+    await asyncio.to_thread(
+        interactions.control, _services(server), user.id, task_id, body, paused=False
+    )
+    if server.project_task_worker is not None:
+        server.project_task_worker.wake()
+    return await asyncio.to_thread(tasks.detail, _services(server), user.id, task_id)
+
+
+@task_router.post(
+    "/{task_id}/turns/{turn_id}/interactions/{interaction_id}/respond",
+    response_model=tasks.TaskDetail,
+    summary="回复审批或提问",
+    description="本人任务内的持久交互。提交稳定 request_id、expected_revision 及明确类型的 response；审批必须回传 action_digest。冲突或迟到返回 409；同一请求相同内容重发返回当前状态。提问答案不能授予操作权限。",
+)
+async def respond_task_interaction(
+    task_id: str,
+    turn_id: str,
+    interaction_id: str,
+    body: InteractionResponse,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    response.headers["Cache-Control"] = "no-store"
+    await asyncio.to_thread(
+        interactions.respond, _services(server), user.id, task_id, turn_id, interaction_id, body
+    )
+    if server.project_task_worker is not None:
+        server.project_task_worker.wake()
+    return await asyncio.to_thread(tasks.detail, _services(server), user.id, task_id)
 
 
 @task_router.post(

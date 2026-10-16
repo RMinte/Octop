@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,12 +11,38 @@ from typing import Any, cast
 
 from deepagents import SubAgent
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import ToolMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.types import Command
 from octop_harness import HarnessAgent, HarnessAgentConfig
 from octop_harness.middleware.filesystem_guard import FilesystemGuardMiddleware
 from octop_harness.middleware.tool_guard import ToolGuardMiddleware
 from octop_harness.middleware.tools_filter import ToolsFilterMiddleware
 from octop_harness.registry import AgentEntry, AgentRegistry
 from octop_harness.teams.team_manager import TeamManager
+
+from octop.i18n import tr
+
+
+class SubagentCommandGate(AgentMiddleware[Any, Any]):
+    """Nested command interrupts cannot borrow a root task's approval receipt."""
+
+    def __init__(self, locale: str) -> None:
+        self.locale = locale
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        if request.tool_call["name"] == "execute":
+            return ToolMessage(
+                content=tr("projects.approval_not_granted", self.locale),
+                tool_call_id=str(request.tool_call["id"]),
+                status="error",
+            )
+        return await handler(request)
 
 
 def guard_subagents(cfg: HarnessAgentConfig) -> None:
@@ -44,7 +70,11 @@ def guard_subagents(cfg: HarnessAgentConfig) -> None:
                     enabled=True, mode=cfg.tool_guard_mode, rules_dir=cfg.tool_guard_rules_dir
                 ),
             )
+        chain.insert(0, SubagentCommandGate(cfg.language))
         spec["middleware"] = chain
+        spec["interrupt_on"] = {
+            name: value for name, value in (cfg.interrupt_on or {}).items() if name != "execute"
+        }
     cfg.subagents = specs
 
 
@@ -88,6 +118,14 @@ class TaskTeam:
                     "db_path": str(runtime_dir / "team" / slug / "memory.sqlite")
                 },
                 team_enabled=False,
+                middleware=[SubagentCommandGate(cfg.language), *(cfg.middleware or [])],
+                # Root task checkpoints own the durable client handoff. Peer
+                # streams retain the existing broker until nested resume is wired.
+                interrupt_on={
+                    name: value
+                    for name, value in (cfg.interrupt_on or {}).items()
+                    if not name.startswith("client__") and name != "execute"
+                },
                 subagents=[],
                 tools_disabled=cfg.tools_disabled | {"task"},
             )

@@ -55,7 +55,7 @@ const ready = async () => {
   await flush();
   const ws = FakeSocket.instances.at(-1)!;
   ws.open();
-  ws.receive({ type: "ready", protocol_version: 1 });
+  ws.receive({ type: "ready", protocol_version: 3 });
   await flush();
   return ws;
 };
@@ -225,4 +225,16 @@ describe("shared task WebSocket", () => {
     controller.abort();
     await stream;
   });
+});
+
+it("rejects incompatible task protocol versions before sending commands", async () => {
+  const connection = new ProjectTaskSocket();
+  const pending = connection.command("task.open", { task_id: "a" });
+  const rejected = expect(pending).rejects.toThrow("protocolMismatch");
+  await flush();
+  const ws = FakeSocket.instances.at(-1)!;
+  ws.open();
+  ws.receive({ type: "ready", protocol_version: 1 });
+  await rejected;
+  expect(ws.sent.some((frame) => frame.type === "task.open")).toBe(false);
 });

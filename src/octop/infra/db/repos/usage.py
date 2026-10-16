@@ -499,7 +499,9 @@ class UsageRepo:
                 "+ (SELECT COALESCE(SUM(r.input_tokens + r.output_tokens), 0) "
                 "FROM project_task_turns r JOIN project_tasks t ON t.task_id=r.task_id WHERE t.owner_id=?) "
                 "+ (SELECT COALESCE(SUM(j.input_tokens + j.output_tokens), 0) "
-                "FROM project_task_titles j JOIN project_tasks t ON t.task_id=j.task_id WHERE t.owner_id=?) AS total",
-                (user_id, user_id, user_id),
+                "FROM project_task_titles j JOIN project_tasks t ON t.task_id=j.task_id WHERE t.owner_id=?) "
+                "+ (SELECT COALESCE(SUM(input_tokens + output_tokens), 0) "
+                "FROM project_task_reviews WHERE owner_id=?) AS total",
+                (user_id, user_id, user_id, user_id),
             ).fetchone()
         return int(row["total"] if row is not None else 0)

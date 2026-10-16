@@ -1,14 +1,16 @@
 # 任务 WebSocket 客户端接入指南
 
-协议版本：`1`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 16 日。
+协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 16 日。
 
-客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。当前后台仍串行执行，正文按约 0.5 秒的保存节奏更新。
+客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。模型执行槽保持串行，主 Task 等待客户端工具时保存检查点并释放执行槽，其他排队任务可以继续；生成中的正文按约 0.5 秒的保存节奏更新。
 
-这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字消息、独立的思考内容、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。审批续跑尚未接入；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)。
+这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字消息、独立的思考内容、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。主 Task 支持三档任务审批模式、远端独立 Reviewer、提问和手动暂停恢复；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)。
 
 - [JSON Schema](project-task-websocket.schema.json)：请求按实际 Pydantic 模型导出；服务端数据模型与 REST 共用定义。
 - [API 参考](api.md)：项目配置、任务列表、历史分页、改名与归档。
 - [列表增量同步](project-task-incremental-sync.md)：侧栏任务状态同步。
+- [审批、提问及暂停恢复](project-task-interactions.md)：v3 已实现契约及语义。
+- [AgentComputer 交接文档](agentcomputer-task-interactions.md)：客户端接线说明，本次未修改客户端。
 - 网页参考实现：[连接管理](../dashboard/src/api/modules/projectTaskSocket.ts)、[命令封装](../dashboard/src/api/modules/projects.ts)、[状态合并和恢复](../dashboard/src/pages/BoxProjects/useTaskConversation.ts)。
 
 目录：[最短流程](#1-最短接入流程) · [连接与鉴权](#2-连接与鉴权) · [标识约定](#3-标识与公共约定) · [客户端命令](#4-客户端命令) · [服务端事件](#5-服务端事件与完整示例) · [数据合并](#6-数据模型与状态合并) · [本轮设置](#7-本轮模型与资源) · [APP 思考接入](#app-思考内容接入) · [断线恢复](#8-断线恢复与多任务复用) · [错误与关闭](#9-错误与关闭) · [Swift 示例](#10-原生客户端最小连接示例) · [联调检查](#11-客户端联调检查) · [客户端工具](#12-客户端工具完整接入协议)。
@@ -51,7 +53,7 @@ token 必填，长度 1–16384 字符。locale 可省略或为 null，非空时
 不要把凭据放进 URL 的 token/access_token 查询参数，当前入口不读取它们。鉴权成功返回：
 
 ```json
-{"type":"ready","protocol_version":1}
+{"type":"ready","protocol_version":3}
 ```
 
 连接绑定首次认证的用户，不能重新发送 authenticate 切换身份。退出登录或切换账号时，关闭旧连接并清理该账号的内存订阅和待处理命令。
@@ -229,6 +231,9 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "artifacts":[],
       "model_ref":"provider/model",
       "options":{"model_ref":"provider/model","reasoning_mode":null,"reasoning_effort":null,"skills":[],"mcp_servers":[]},
+      "interactions": [],
+      "interaction_revision": 0,
+      "pause_requested": false,
       "cancel_requested":false,
       "retry_of_turn_id":null,
       "input_tokens":0,
@@ -273,6 +278,9 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "artifacts":[],
       "model_ref":"provider/model",
       "options":{"model_ref":"provider/model","reasoning_mode":"enabled","reasoning_effort":null,"skills":[],"mcp_servers":[]},
+      "interactions": [],
+      "interaction_revision": 0,
+      "pause_requested": false,
       "cancel_requested":false,
       "retry_of_turn_id":null,
       "input_tokens":0,
@@ -306,9 +314,10 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | --- | --- | --- |
 | task_id / project_id | string / string 或 null | 任务与可选项目身份 |
 | title / archived | string / boolean | 标题与归档状态 |
-| status | string | 当前或最近一轮的 queued、running、completed、failed、cancelled |
+| status | string | 当前或最近一轮的 queued、running、waiting_approval、waiting_answer、waiting_client_tool、paused、completed、failed、cancelled |
 | active_turn_id | string 或 null | 活动轮次，null 表示暂时没有活动轮次 |
 | list_revision | integer | 摘要版本，仅列表字段变化时递增 |
+| approval_policy | object | 任务共享的 mode、独立 revision、updated_at；按其 revision 合并 |
 | created_at / updated_at | datetime string | 任务创建与最近摘要更新时间 |
 
 ### TaskTurn
@@ -325,6 +334,9 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | activity | string | 当前工具名称；空字符串表示无活动摘要，不含参数或工具结果 |
 | model_ref | string | 实际模型引用 |
 | options | TaskExecutionOptions | 本轮实际模型与资源，继承部分已解析为实际选择 |
+| approval_policy_at_start | object | 本轮开始时的模式；动作采用各自创建时的冻结版本 |
+| interactions / interaction_revision | array / int | 完整交互列表与独立版本，见交互协议 |
+| pause_requested | boolean | 已请求暂停，status=paused 才表示已生效 |
 | cancel_requested | boolean | 已请求停止，仍须等待终态 |
 | retry_of_turn_id | string 或 null | 手动重试来源 |
 | input_tokens / output_tokens | integer | 本轮用量，执行中可能仍为零 |
@@ -336,7 +348,7 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 合并规则：
 
 1. 按 task_id 找任务，摘要保留较大的 list_revision。不能用历史 turn.status 覆盖任务的当前 status。
-2. 按 turn_id 合并轮次，按 sequence 排序。终态不回退为 queued/running，running 不回退为 queued；cancel_requested=true 不被迟到的 false 清除。
+2. 按 turn_id 合并轮次，按 sequence 排序。终态不回退；恢复等待允许重新排队，不能用 running 永不退回 queued 的旧规则；cancel_requested=true 不被迟到的 false 清除。
 3. 同一轮的累计 reply 和 reasoning 分别合并，不接受迟到短文本覆盖。迟到的 REST 写入回执和历史页使用相同规则。终态正文可能为空，例如排队时被取消。
 4. 回复、思考和工具活动变化不递增 list_revision；同一个摘要版本下仍要应用新 turn。
 5. 应用 turn 后保存其 cursor。已有订阅时，不用迟到写入回执的 event_cursor 跳过尚未应用的事件。
@@ -529,7 +541,7 @@ func observeExampleTask(endpoint: URL, accessToken: String) async throws {
         }
         switch type {
         case "ready":
-            guard frame["protocol_version"] as? Int == 1 else {
+            guard frame["protocol_version"] as? Int == 3 else {
                 throw URLError(.cannotParseResponse)
             }
             try await send([
@@ -644,7 +656,7 @@ client_id 是当前登录用户下的**路由标识**，不是独立的设备认
 绑定后，服务端约每 0.5 秒检查该用户、该 client_id 的未结束调用。无需订阅任务，连接也能收到：
 
 ```json
-{"type":"tool.call","data":{"call_id":"call_example","task_id":"task_example","turn_id":"turn_example","client_id":"mac-install-001","name":"read_note","arguments":{"path":"note.md"},"status":"pending","error_code":"","created_at":"2026-10-15T08:00:00Z","updated_at":"2026-10-15T08:00:00Z","expires_at":"2026-10-15T08:10:00Z"}}
+{"type":"tool.call","data":{"call_id":"call_example","task_id":"task_example","turn_id":"turn_example","client_id":"mac-install-001","name":"read_note","arguments":{"path":"note.md"},"approval_context":{"mode":"ask_for_approval","revision":1,"action_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","requires_user":false},"dispatch_allowed":true,"manual_review_required":false,"review":null,"status":"pending","error_code":"","created_at":"2026-10-15T08:00:00Z","updated_at":"2026-10-15T08:00:00Z","expires_at":"2026-10-15T08:10:00Z"}}
 ```
 
 call_id 为服务端生成的不透明标识，客户端以它做持久化去重。task_id、turn_id、call_id 三项必须一起原样回传；它不等于模型内部的 function call ID。arguments 已经由服务端按声明的 input_schema 验证，序列化后最多 128 KiB；客户端仍须按自己的权限检查参数和路径。
@@ -679,22 +691,22 @@ call_id 为服务端生成的不透明标识，客户端以它做持久化去重
 
 | status | 含义 | 客户端处理 |
 | --- | --- | --- |
-| pending | 等待领取 | 本地保存领取 request_id，领取成功后才执行 |
+| pending | 等待领取 | 保存领取 request_id，领取成功并完成派发前检查后才执行 |
 | claimed | 已领取，等待结果 | 从本地记录恢复；没有执行证据时不要自动重做 |
 | completed | 已接收结果，包括工具错误 | 保存回执；等待任务文字和终态 |
 | cancelled | 用户已停止该轮 | 停止尚未开始的操作，对运行中的操作尽力取消 |
 | expired | 调用创建后十分钟未收到结果 | 调用失效，该轮 failed，错误 TASK_CLIENT_TOOL_TIMEOUT |
 | interrupted | 轮次或服务进程中断 | 不自动重放操作；告知用户核对已发生的副作用 |
 
-截止时间从服务端创建调用开始计算；领取、重连、心跳都不延长。等待客户端期间该轮仍是 running，继续占用原有串行执行队列；其他任务排队，但所有连接的文字订阅、停止和心跳仍可用。一次模型响应可能提出多个工具调用，客户端必须按 call_id 分别处理，不按工具名去重。
+截止时间从服务端创建调用开始计算；领取、重连、心跳都不延长。主 Task 等待客户端期间该轮为 waiting_client_tool、保留活动轮次，但释放模型执行槽，其他任务可以推进。Octop 保存原生检查点和工具调用顺序，全部结果到齐后继续同一轮；不会额外创建工具调用或用户消息。一次模型响应可能提出多个工具调用，客户端必须按 call_id 分别处理，不按工具名去重。子代理和团队成员内部的客户端调用尚未接入嵌套检查点恢复，保留原有等待方式。
 
 已经在该连接上推送的调用进入终态后，服务端发送 tool.closed，data 结构与 tool.call 一致。它可能与 tool.result 的回执交错到达，不能阻塞唯一的接收循环。
 
 ```json
-{"type":"tool.closed","data":{"call_id":"call_example","task_id":"task_example","turn_id":"turn_example","client_id":"mac-install-001","name":"read_note","arguments":{"path":"note.md"},"status":"cancelled","error_code":"","created_at":"2026-10-15T08:00:00Z","updated_at":"2026-10-15T08:01:00Z","expires_at":"2026-10-15T08:10:00Z"}}
+{"type":"tool.closed","data":{"call_id":"call_example","task_id":"task_example","turn_id":"turn_example","client_id":"mac-install-001","name":"read_note","arguments":{"path":"note.md"},"approval_context":{"mode":"ask_for_approval","revision":1,"action_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","requires_user":false},"dispatch_allowed":false,"manual_review_required":false,"review":null,"status":"cancelled","error_code":"","created_at":"2026-10-15T08:00:00Z","updated_at":"2026-10-15T08:01:00Z","expires_at":"2026-10-15T08:10:00Z"}}
 ```
 
-取消不回滚客户端已发生的副作用。已取消、超时或中断的调用拒绝迟到的首次结果，返回 TASK_CLIENT_TOOL_CLOSED，不能恢复旧轮次或影响下一轮。已经 completed 的相同结果重传仍然允许。进程异常退出后，失效运行租约约 90 秒被恢复为中断；工具调用不会自动重新执行。
+取消不回滚客户端已发生的副作用。已取消、超时或中断的调用拒绝迟到的首次结果，返回 TASK_CLIENT_TOOL_CLOSED，不能恢复旧轮次或影响下一轮。已经 completed 的相同结果重传仍然允许。保存成功的主 Task 等待不受 90 秒运行租约回收影响，Worker 重建后可继续等待或消费已保存结果；检查点缺失或不符时以 TASK_INTERRUPTED 结束，不重发消息。执行中异常退出的失效运行租约仍约 90 秒被恢复为中断，工具不会自动重新执行。
 
 ### 12.5 断线与本地执行记录
 
@@ -712,7 +724,7 @@ call_id 为服务端生成的不透明标识，客户端以它做持久化去重
 {"type":"tool.get","id":"tool-get-command-001","task_id":"task_example","turn_id":"turn_example","call_id":"call_example"}
 ```
 
-tool.get 也要求先 client.attach；result.data=ClientToolCall，只返回调用状态、参数、标识和时间，不返回结果正文或 claim_token。可查询 completed/cancelled/expired/interrupted 等终态。未知调用或不属于当前用户返回 NOT_FOUND，绑定了其他 client_id 返回 FORBIDDEN。
+tool.get 也要求先 client.attach；result.data=ClientToolCall，返回状态、固定参数、标识、时间、approval_context、dispatch_allowed、manual_review_required 和可选 review，不返回结果正文或 claim_token。可查询 completed/cancelled/expired/interrupted 等终态。未知调用或不属于当前用户返回 NOT_FOUND，绑定了其他 client_id 返回 FORBIDDEN。
 
 服务端保证领取互斥和结果幂等；网络协议无法保证客户端外部副作用严格只发生一次。客户端工具最好也接受 call_id 作为内部幂等键；执行记录和本地权限控制是接入的一部分。
 
@@ -797,3 +809,33 @@ Authorization: Bearer <access token>
 工具错误供模型读取；下载接口错误使用标准错误信封。客户端声明这两个保留工具名会被拒绝：WebSocket 为 TASK_FRAME_INVALID，REST 为标准 422 参数校验响应。
 
 客户端联调应覆盖：无项目文本附件、多个文件、中文文件名、正文未变化时出现附件、任务完成前下载、断线恢复、历史分页、归档后下载、源文件删除后仍可下载、跨账号拒绝访问，以及工具失败时不生成附件卡。当前没有客户端文件上传或附件发布命令；客户端只消费服务端发布的附件。
+
+## 14 v3 交互与控制命令
+
+新增 task.interaction.respond、task.pause、task.resume，均返回当前 TaskDetail。回应绑定 task/turn/interaction 及 expected_revision，审批回传 action_digest；控制命令绑定 turn。data.request_id 持久幂等，重发保持完整载荷并仅换命令 id。具体示例、默认值、期限、错误和页面语义见[交互协议](project-task-interactions.md)。
+
+### 14.1 任务模式
+
+创建时可在 data 顶层设置 approval_mode，默认 ask_for_approval；options 内没有该字段。已建任务切换使用：
+
+```json
+{"type":"task.approval.set","id":"mode-command-001","task_id":"task_example","data":{"request_id":"mode-request-001","expected_revision":1,"mode":"approve_for_me"}}
+```
+
+结果为最新 TaskDetail。expected_revision 来自 approval_policy.revision；成功写入增加此版本和列表版本。同一 request_id 重传完整原载荷，异体返回 TASK_REQUEST_CONFLICT；新请求版本冲突返回 TASK_APPROVAL_POLICY_CONFLICT。切换不改变已有人工卡及已有调用的冻结模式。REST 等价入口为 PUT /api/project-tasks/{task_id}/approval-policy。
+
+资源接口增加 approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}。默认仅开放人工档，管理员通过 GET/PUT /api/admin/security/task-approvals 保存 allowed_modes 和 require_human_tools。网页完全访问确认说明服务端主机进程权限；本机权限须另行授予。实际范围与边界见[审批模式文档](project-task-approval-modes.md)。
+
+### 14.2 客户端远端审查 tool.review
+
+已领取的 exec_command 在冻结模式为 approve_for_me 时可以请求审查。原 command 参数须为非空字符串数组；请求不接受新的工具参数。目录与授权摘要仅作审查文本，Octop 不读取客户端路径。
+
+```json
+{"type":"tool.review","id":"review-command-001","task_id":"task_example","turn_id":"turn_example","call_id":"call_example","data":{"request_id":"review-request-001","claim_token":"example_claim_token_replace_with_receipt","action_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","context":{"working_directory":"/Users/example/project","workspace_authorization_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","command_authorization_id":"local-grant-001","execution_profile":"workspace_write","context_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
+```
+
+result.data 为 ClientToolCall，review 可处于 queued/reviewing/completed/cancelled。原调用与全部固定事实相同只创建一次审查；修改 action_digest 或 context 返回 TASK_APPROVAL_REVIEW_CONFLICT。request_id 校验格式，持久去重范围是原 call 与完整审查事实。tool.get 和后续 tool.call 更新同一回执，不重复请求 Reviewer。
+
+review.decision 为 allow_once、deny、requires_user，reason_code 为稳定结果码。结果不会完成调用、恢复主模型或授权本机执行。执行电脑须核对 action_digest/context_digest、manual_review_required、本机授权及本机安全边界，派发前再次 tool.get 检查 dispatch_allowed；暂停、取消或截止后禁止新派发。执行后仍用原 tool.result 回传。拒绝或执行状态不明也须回传明确的 is_error=true 结果。重连、模式改变和审查结果均不得造成副作用重放。
+
+服务端已完成协议与模拟客户端验证。AgentComputer 本次未修改，本机授权、执行记录和界面接入要求见[交接文档](agentcomputer-task-interactions.md)。

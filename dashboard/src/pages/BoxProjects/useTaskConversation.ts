@@ -12,20 +12,34 @@ const terminal = (turn: TaskTurn) =>
   turn.status === "failed" ||
   turn.status === "cancelled";
 
+const approvalPolicy = (
+  old: TaskDetail,
+  incoming: Pick<TaskDetail, "approval_policy">,
+) =>
+  old.approval_policy.revision > incoming.approval_policy.revision
+    ? old.approval_policy
+    : incoming.approval_policy;
+
 function mergeTurns(current: TaskTurn[], incoming: TaskTurn[]): TaskTurn[] {
   const rows = new Map(current.map((turn) => [turn.turn_id, turn]));
   for (const turn of incoming) {
     const old = rows.get(turn.turn_id);
-    if (
+    const base =
       old &&
       (terminal(old) ||
         (!terminal(turn) &&
           Date.parse(old.updated_at) > Date.parse(turn.updated_at)))
-    )
-      continue;
-    if (old?.status === "running" && turn.status === "queued") continue;
+        ? old
+        : turn;
+    const interaction =
+      old && (old.interaction_revision ?? 0) > (turn.interaction_revision ?? 0)
+        ? old
+        : turn;
     rows.set(turn.turn_id, {
-      ...turn,
+      ...base,
+      interactions: interaction.interactions,
+      interaction_revision: interaction.interaction_revision,
+      pause_requested: interaction.pause_requested,
       reply:
         old && old.reply.length > turn.reply.length ? old.reply : turn.reply,
       reasoning:
@@ -70,6 +84,7 @@ export function useTaskConversation(
         old.list_revision > incoming.list_revision ? old : incoming;
       return {
         ...summary,
+        approval_policy: approvalPolicy(old, incoming),
         turns: mergeTurns(old.turns, incoming.turns),
         next_page_cursor: old.next_page_cursor,
         event_cursor: old.event_cursor,
@@ -141,7 +156,11 @@ export function useTaskConversation(
           // A reset replaces the loaded range rather than keeping an unknown gap.
           historyRequest.current = null;
           setLoadingHistory(false);
-          setDetail(snapshot);
+          setDetail((old) =>
+            old?.task_id === snapshot.task_id
+              ? { ...snapshot, approval_policy: approvalPolicy(old, snapshot) }
+              : snapshot,
+          );
           cursor = snapshot.event_cursor;
           setLoading(false);
           setError("");
@@ -153,7 +172,14 @@ export function useTaskConversation(
           (event) => {
             if (disposed || controller?.signal.aborted) return;
             if (event.type === "snapshot") {
-              setDetail(event.data);
+              setDetail((old) =>
+                old?.task_id === event.data.task_id
+                  ? {
+                      ...event.data,
+                      approval_policy: approvalPolicy(old, event.data),
+                    }
+                  : event.data,
+              );
               cursor = event.data.event_cursor;
             } else {
               const { task, turn } = event.data;
@@ -162,6 +188,7 @@ export function useTaskConversation(
                   ? {
                       ...old,
                       ...(task.list_revision >= old.list_revision ? task : {}),
+                      approval_policy: approvalPolicy(old, task),
                       turns: mergeTurns(old.turns, [turn]),
                     }
                   : old,
@@ -180,6 +207,7 @@ export function useTaskConversation(
             }
           },
         );
+        if (controller.signal.aborted) return;
         setReconnecting(false);
         delay = 1000;
       } catch (err) {
@@ -206,8 +234,10 @@ export function useTaskConversation(
     };
     const resume = () => {
       window.clearTimeout(timer);
-      if (document.hidden || !navigator.onLine) controller?.abort();
-      else void connect();
+      if (document.hidden || !navigator.onLine) {
+        setReconnecting(true);
+        controller?.abort();
+      } else void connect();
     };
     void connect();
     document.addEventListener("visibilitychange", resume);

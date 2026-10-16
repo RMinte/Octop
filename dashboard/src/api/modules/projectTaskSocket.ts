@@ -14,6 +14,7 @@ type Listener = {
 };
 type Frame = {
   type: string;
+  protocol_version?: number;
   id?: string;
   task_id?: string;
   data?: unknown;
@@ -108,6 +109,13 @@ export class ProjectTaskSocket {
           return;
         }
         if (frame.type === "ready") {
+          if (frame.protocol_version !== 3) {
+            this.fail(
+              new Error(i18n.t("projects.tasks.protocolMismatch")),
+              socket,
+            );
+            return;
+          }
           this.rejectReady = null;
           resolve();
         } else if (frame.type === "session" && frame.access_token) {

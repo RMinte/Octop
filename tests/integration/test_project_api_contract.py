@@ -30,19 +30,38 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
         assert not any(p["name"] == "expected_revision" for p in deletion["parameters"])
     assert "TaskExecutionOptions" in schema["components"]["schemas"]
     turn = schema["components"]["schemas"]["TaskTurn"]
-    assert {"content_blocks", "content_revision"} <= set(turn["required"])
+    assert {
+        "content_blocks",
+        "content_revision",
+        "interactions",
+        "interaction_revision",
+        "pause_requested",
+        "approval_policy_at_start",
+    } <= set(turn["required"])
     assert turn["properties"]["content_blocks"]["items"]["$ref"].endswith("/TaskContentBlock")
     assert "patch" in paths["/api/projects/{project_id}/archive"]
     assert "archived" in schema["components"]["schemas"]["ProjectView"]["properties"]
     task_summary = schema["components"]["schemas"]["TaskSummary"]
     assert "status" in task_summary["required"]
+    assert "approval_policy" in task_summary["required"]
+    assert "/api/project-tasks/{task_id}/approval-policy" in project_paths
     assert task_summary["properties"]["status"]["enum"] == [
         "queued",
         "running",
+        "waiting_approval",
+        "waiting_answer",
+        "waiting_client_tool",
+        "paused",
         "completed",
         "failed",
         "cancelled",
     ]
+    assert "/api/project-tasks/{task_id}/pause" in project_paths
+    assert "/api/project-tasks/{task_id}/resume" in project_paths
+    assert (
+        "/api/project-tasks/{task_id}/turns/{turn_id}/interactions/{interaction_id}/respond"
+        in project_paths
+    )
     assert "/api/project-tasks/{task_id}/messages" in project_paths
     assert "/api/project-tasks/{task_id}/events" in project_paths
     assert "/api/project-tasks/{task_id}/turns/{turn_id}/retry" in project_paths

@@ -258,3 +258,7 @@
 - `src/octop/infra/projects/tasks.py`：任务摘要与会话详情边界。
 - `src/octop/infra/projects/runtime.py`：后台执行、结束和中断恢复对任务摘要的更新。
 - `dashboard/src/pages/BoxProjects/TaskConversations.tsx`：约每 30 秒同步任务列表；`useTaskConversation.ts` 管理会话分页和实时续接。
+
+任务协议 v3 的 waiting_approval、waiting_answer、waiting_client_tool、paused 同样通过 list_revision 进入列表增量同步，均保留 active_turn_id。具体交互规则见[审批、提问和暂停恢复](project-task-interactions.md)。
+
+任务摘要还包含 approval_policy={mode,revision,updated_at}。切换模式递增 list_revision 并写入列表增量；模式按独立 approval_policy.revision 合并，迟到历史页和普通轮次事件不得覆盖更新的模式。浏览器任务列表缓存升为 3，旧缓存失效后重建。

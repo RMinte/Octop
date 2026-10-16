@@ -25,6 +25,7 @@ class ProjectTaskToolCallRow:
     created_at: int
     updated_at: int
     expires_at: int
+    approval_context_json: str = "{}"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskToolCallRow:
@@ -44,6 +45,7 @@ class ProjectTaskToolCallRow:
             created_at=strict_int(row["created_at"]),
             updated_at=strict_int(row["updated_at"]),
             expires_at=strict_int(row["expires_at"]),
+            approval_context_json=str(row["approval_context_json"]),
         )
 
 
@@ -68,7 +70,7 @@ class ProjectTaskToolCallRepo:
     def insert(conn: Any, row: ProjectTaskToolCallRow) -> None:
         conn.execute(
             "INSERT INTO project_task_tool_calls(call_id,task_id,turn_id,owner_id,client_id,name,"
-            "arguments_json,status,created_at,updated_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "arguments_json,status,created_at,updated_at,expires_at,approval_context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 row.call_id,
                 row.task_id,
@@ -81,6 +83,7 @@ class ProjectTaskToolCallRepo:
                 row.created_at,
                 row.updated_at,
                 row.expires_at,
+                row.approval_context_json,
             ),
         )
 

@@ -25,6 +25,9 @@ vi.mock("../../api/modules/projects", () => ({
     create: vi.fn(),
     send: vi.fn(),
     cancel: vi.fn(),
+    control: vi.fn(),
+    respond: vi.fn(),
+    setApproval: vi.fn(),
     events: vi.fn(),
     retry: vi.fn(),
     resources: vi.fn(),
@@ -57,6 +60,11 @@ const fixture: TaskDetail = {
   status: "completed",
   active_turn_id: null,
   list_revision: 1,
+  approval_policy: {
+    mode: "ask_for_approval",
+    revision: 1,
+    updated_at: "2026-10-15T00:00:00Z",
+  },
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
   next_page_cursor: null,
@@ -79,7 +87,15 @@ const fixture: TaskDetail = {
       options: {},
       retry_of_turn_id: null,
       cancel_requested: false,
+      pause_requested: false,
+      interactions: [],
+      interaction_revision: 0,
       project_revision: 1,
+      approval_policy_at_start: {
+        mode: "ask_for_approval",
+        revision: 1,
+        updated_at: "2026-10-15T00:00:00Z",
+      },
       created_at: "2026-10-15T00:00:00Z",
       updated_at: "2026-10-15T00:00:00Z",
     },
@@ -111,9 +127,15 @@ beforeEach(() => {
     subagents: [],
     directory_roots: [],
     models: [{ model_ref: "glm/glm", name: "GLM" }],
+    approval: {
+      allowed_modes: ["ask_for_approval", "approve_for_me", "full_access"],
+      reviewer_ready: true,
+      execution_profile: "host_process",
+    },
     default_model_ref: "glm/glm",
   });
   api.update.mockResolvedValue(fixture);
+  api.setApproval.mockResolvedValue(fixture);
   api.delete.mockResolvedValue(undefined);
   api.retry.mockResolvedValue(fixture);
   api.open.mockResolvedValue(fixture);
@@ -144,6 +166,7 @@ describe("项目任务对话", () => {
         "proj_a",
         expect.objectContaining({
           prompt: "记住蓝鸟",
+          approval_mode: "ask_for_approval",
           request_id: expect.any(String),
         }),
       ),
@@ -835,6 +858,11 @@ it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目
     subagents: [],
     directory_roots: [],
     models: [{ model_ref: "other/model", name: "Other model" }],
+    approval: {
+      allowed_modes: ["ask_for_approval", "approve_for_me", "full_access"],
+      reviewer_ready: true,
+      execution_profile: "host_process",
+    },
     default_model_ref: "glm/glm",
   });
   const user = userEvent.setup();
@@ -1020,6 +1048,11 @@ it("模型支持时发送本轮思考模式与强度，切换模型后清除旧�
     plugins: [],
     subagents: [],
     directory_roots: [],
+    approval: {
+      allowed_modes: ["ask_for_approval", "approve_for_me", "full_access"],
+      reviewer_ready: true,
+      execution_profile: "host_process",
+    },
     default_model_ref: "glm/glm",
     models: [
       {
@@ -1168,4 +1201,406 @@ it("downloads a published attachment through the authenticated API using its res
   } finally {
     click.mockRestore();
   }
+});
+
+it("审批丢回执重试使用原请求；迟到正文不重开已处理卡片", async () => {
+  const item = {
+    interaction_id: "interaction_server",
+    task_id: "task_a",
+    turn_id: "turn_a",
+    tool_call_id: "call_a",
+    kind: "approval" as const,
+    status: "pending" as const,
+    revision: 1,
+    payload: {
+      tool_name: "execute",
+      arguments: { command: "example" },
+      action_digest: "fixed-digest",
+      allowed_decisions: ["allow_once", "deny"] as ("allow_once" | "deny")[],
+    },
+    resolution: null,
+    created_at: fixture.created_at,
+    expires_at: fixture.created_at,
+    resolved_at: null,
+  };
+  const waiting: TaskDetail = {
+    ...fixture,
+    status: "waiting_approval",
+    active_turn_id: "turn_a",
+    turns: [
+      {
+        ...fixture.turns[0],
+        status: "waiting_approval",
+        interactions: [item],
+        interaction_revision: 1,
+      },
+    ],
+  };
+  api.open.mockResolvedValue(waiting);
+  api.respond.mockRejectedValueOnce(new Error("Lost receipt"));
+  api.respond.mockResolvedValueOnce({
+    ...waiting,
+    turns: [
+      {
+        ...waiting.turns[0],
+        interaction_revision: 2,
+        interactions: [
+          {
+            ...item,
+            status: "resolved",
+            revision: 2,
+            resolution: { outcome: "allow_once", source: "user", answer: null },
+          },
+        ],
+      },
+    ],
+  });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await user.click(
+    await screen.findByRole("button", { name: zh.projects.tasks.allowOnce }),
+  );
+  await waitFor(() => expect(api.respond).toHaveBeenCalledTimes(1));
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.allowOnce }),
+  );
+  await waitFor(() => expect(api.respond).toHaveBeenCalledTimes(2));
+  expect(api.respond.mock.calls[0]).toEqual(api.respond.mock.calls[1]);
+  expect(api.respond.mock.calls[0][3]).toMatchObject({
+    expected_revision: 1,
+    response: { action_digest: "fixed-digest", decision: "allow_once" },
+  });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: zh.projects.tasks.allowOnce }),
+    ).not.toBeInTheDocument(),
+  );
+  const receive = api.events.mock.calls[0][2];
+  await act(async () =>
+    receive({
+      type: "turn",
+      data: {
+        task: waiting,
+        turn: { ...waiting.turns[0], reply: "Longer old reply" },
+        cursor: "old",
+      },
+    }),
+  );
+  expect(
+    screen.queryByRole("button", { name: zh.projects.tasks.allowOnce }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText("Longer old reply")).toBeVisible();
+});
+
+it("暂停与继续绑定原轮次，暂停意图确认后显示继续", async () => {
+  const running: TaskDetail = {
+    ...fixture,
+    active_turn_id: "turn_a",
+    status: "running",
+    turns: [{ ...fixture.turns[0], status: "running" }],
+  };
+  api.open.mockResolvedValue(running);
+  api.control.mockResolvedValueOnce({
+    ...running,
+    turns: [
+      { ...running.turns[0], pause_requested: true, interaction_revision: 1 },
+    ],
+  });
+  api.control.mockResolvedValueOnce({
+    ...running,
+    turns: [{ ...running.turns[0], interaction_revision: 2 }],
+  });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await user.click(
+    await screen.findByRole("button", { name: zh.projects.tasks.pause }),
+  );
+  expect(api.control.mock.calls[0].slice(0, 3)).toEqual([
+    "task_a",
+    "turn_a",
+    true,
+  ]);
+  await user.click(
+    await screen.findByRole("button", { name: zh.projects.tasks.resume }),
+  );
+  expect(api.control.mock.calls[1].slice(0, 3)).toEqual([
+    "task_a",
+    "turn_a",
+    false,
+  ]);
+});
+
+it("任务模式切换丢回执后显式重试原请求，确认前保留远端模式", async () => {
+  const approved: TaskDetail = {
+    ...fixture,
+    list_revision: 2,
+    approval_policy: {
+      ...fixture.approval_policy,
+      mode: "approve_for_me",
+      revision: 2,
+    },
+  };
+  api.setApproval.mockRejectedValueOnce(new Error("Lost mode receipt"));
+  api.setApproval.mockResolvedValueOnce(approved);
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const selector = await screen.findByRole("combobox", {
+    name: zh.projects.tasks.approvalMode.label,
+  });
+  await waitFor(() => expect(selector).toBeEnabled());
+  await user.click(selector);
+  await user.click(
+    await screen.findByText(zh.projects.tasks.approvalMode.approve_for_me),
+  );
+  await screen.findByText("Lost mode receipt");
+  expect(selector.closest(".ant-select")).toHaveTextContent(
+    zh.projects.tasks.approvalMode.ask_for_approval,
+  );
+  expect(selector).toBeDisabled();
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.approvalMode.retry }),
+  );
+  await waitFor(() => expect(api.setApproval).toHaveBeenCalledTimes(2));
+  expect(api.setApproval.mock.calls[0]).toEqual(api.setApproval.mock.calls[1]);
+  expect(api.setApproval.mock.calls[0][1]).toMatchObject({
+    expected_revision: 1,
+    mode: "approve_for_me",
+    request_id: expect.any(String),
+  });
+  await waitFor(() =>
+    expect(selector.closest(".ant-select")).toHaveTextContent(
+      zh.projects.tasks.approvalMode.approve_for_me,
+    ),
+  );
+  await act(async () =>
+    api.events.mock.calls[0][2]({
+      type: "turn",
+      data: {
+        task: { ...fixture, list_revision: 3 },
+        turn: fixture.turns[0],
+        cursor: "old-mode-new-body",
+      },
+    }),
+  );
+  expect(selector.closest(".ant-select")).toHaveTextContent(
+    zh.projects.tasks.approvalMode.approve_for_me,
+  );
+});
+
+it("新任务完全访问先确认服务端真实范围，模式通过创建顶层字段发送", async () => {
+  const user = userEvent.setup();
+  mount();
+  const selector = await screen.findByRole("combobox", {
+    name: zh.projects.tasks.approvalMode.label,
+  });
+  await waitFor(() => expect(selector).toBeEnabled());
+  await user.click(selector);
+  await user.click(
+    await screen.findByText(zh.projects.tasks.approvalMode.full_access),
+  );
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).toHaveTextContent(zh.projects.tasks.approvalMode.hostScope);
+  expect(selector.closest(".ant-select")).toHaveTextContent(
+    zh.projects.tasks.approvalMode.ask_for_approval,
+  );
+  expect(api.setApproval).not.toHaveBeenCalled();
+  await user.click(
+    screen.getByRole("button", {
+      name: zh.projects.tasks.approvalMode.confirm,
+    }),
+  );
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "检查服务端项目",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(api.create).toHaveBeenCalledWith(
+      "proj_a",
+      expect.objectContaining({ approval_mode: "full_access" }),
+    ),
+  );
+  expect(api.create.mock.calls[0][1].options).toBeUndefined();
+});
+
+it("自动审查中没有人工批准按钮，自动结果仅留折叠记录", async () => {
+  const item = {
+    interaction_id: "review_a",
+    task_id: "task_a",
+    turn_id: "turn_a",
+    tool_call_id: "call_a",
+    kind: "approval" as const,
+    status: "reviewing" as const,
+    revision: 1,
+    payload: {
+      tool_name: "execute",
+      action_digest: "digest",
+      approval_mode: "approve_for_me" as const,
+      approval_revision: 2,
+      allowed_decisions: ["allow_once", "deny"] as ("allow_once" | "deny")[],
+    },
+    resolution: null,
+    created_at: fixture.created_at,
+    expires_at: fixture.created_at,
+    resolved_at: null,
+  };
+  const reviewing: TaskDetail = {
+    ...fixture,
+    status: "running",
+    active_turn_id: "turn_a",
+    turns: [
+      {
+        ...fixture.turns[0],
+        status: "running",
+        interactions: [item],
+        interaction_revision: 1,
+      },
+    ],
+  };
+  api.open.mockResolvedValue(reviewing);
+  mount("?task=task_a");
+  await screen.findByText(zh.projects.tasks.approvalMode.reviewing);
+  expect(
+    screen.queryByRole("button", { name: zh.projects.tasks.allowOnce }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(zh.projects.tasks.approvalTitle),
+  ).not.toBeInTheDocument();
+  await act(async () =>
+    api.events.mock.calls[0][2]({
+      type: "turn",
+      data: {
+        task: reviewing,
+        turn: {
+          ...reviewing.turns[0],
+          interaction_revision: 2,
+          interactions: [
+            {
+              ...item,
+              status: "resolved",
+              revision: 2,
+              resolution: {
+                source: "auto_reviewer",
+                outcome: "allow_once",
+                answer: null,
+              },
+            },
+          ],
+        },
+        cursor: "review-finished",
+      },
+    }),
+  );
+  const summary = screen.getByText(/AI 审批记录/).closest("details")!;
+  expect(summary).not.toHaveAttribute("open");
+  expect(
+    screen.queryByText(zh.projects.tasks.approvalMode.reviewing),
+  ).not.toBeInTheDocument();
+  expect(api.respond).not.toHaveBeenCalled();
+});
+
+it.each([
+  {
+    allowed_modes: ["ask_for_approval"] as const,
+    reviewer_ready: true,
+    reason: zh.projects.tasks.approvalMode.adminDisabled,
+  },
+  {
+    allowed_modes: ["ask_for_approval", "approve_for_me"] as const,
+    reviewer_ready: false,
+    reason: zh.projects.tasks.approvalMode.reviewerUnavailable,
+  },
+])(
+  "未开放或未就绪的自动模式不能选择，显示原因 $reason",
+  async ({ allowed_modes, reviewer_ready, reason }) => {
+    api.resources.mockResolvedValue({
+      skills: [],
+      mcp_servers: [],
+      plugins: [],
+      subagents: [],
+      directory_roots: [],
+      models: [],
+      default_model_ref: null,
+      approval: {
+        allowed_modes: [...allowed_modes],
+        reviewer_ready,
+        execution_profile: "host_process",
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const selector = await screen.findByRole("combobox", {
+      name: zh.projects.tasks.approvalMode.label,
+    });
+    await waitFor(() => expect(selector).toBeEnabled());
+    await user.click(selector);
+    const option = await screen.findByText(
+      `${zh.projects.tasks.approvalMode.approve_for_me} · ${reason}`,
+    );
+    expect(option.closest(".ant-select-item-option")).toHaveClass(
+      "ant-select-item-option-disabled",
+    );
+    await user.click(option);
+    expect(api.setApproval).not.toHaveBeenCalled();
+    expect(selector.closest(".ant-select")).toHaveTextContent(
+      zh.projects.tasks.approvalMode.ask_for_approval,
+    );
+  },
+);
+
+it("Reviewer 转人工时在原卡显示稳定原因并保留人工决定入口", async () => {
+  const item = {
+    interaction_id: "review_manual",
+    task_id: "task_a",
+    turn_id: "turn_a",
+    tool_call_id: "call_a",
+    kind: "approval" as const,
+    status: "pending" as const,
+    revision: 2,
+    payload: {
+      tool_name: "execute",
+      action_digest: "digest",
+      allowed_decisions: ["allow_once", "deny"] as ("allow_once" | "deny")[],
+    },
+    resolution: null,
+    created_at: fixture.created_at,
+    expires_at: fixture.created_at,
+    resolved_at: null,
+    review: {
+      review_id: "review_work",
+      status: "completed" as const,
+      decision: "requires_user" as const,
+      reason_code: "review_timeout",
+      action_digest: "digest",
+      context_digest: null,
+      model_ref: "glm/glm",
+      profile_version: 1 as const,
+      created_at: fixture.created_at,
+      updated_at: fixture.created_at,
+      expires_at: fixture.created_at,
+    },
+  };
+  api.open.mockResolvedValue({
+    ...fixture,
+    status: "waiting_approval",
+    active_turn_id: "turn_a",
+    turns: [
+      {
+        ...fixture.turns[0],
+        status: "waiting_approval",
+        interactions: [item],
+        interaction_revision: 2,
+      },
+    ],
+  });
+  mount("?task=task_a");
+  await screen.findByText(
+    zh.projects.tasks.approvalMode.reviewReason.review_timeout,
+  );
+  expect(
+    screen.getByRole("button", { name: zh.projects.tasks.allowOnce }),
+  ).toBeEnabled();
+  expect(
+    screen.getByRole("button", { name: /^\u62d2\s*\u7edd$/ }),
+  ).toBeEnabled();
 });

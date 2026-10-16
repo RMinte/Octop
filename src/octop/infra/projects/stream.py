@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
+from langgraph.types import Command
 from octop_harness.protocols import register_protocol
 from octop_harness.protocols.langgraph import LangGraphProtocol
 from octop_harness.protocols.think_splitter import ThinkSplitter
@@ -12,6 +14,39 @@ TASK_PROTOCOL = "octop-project-task"
 
 
 class TaskStreamProtocol(LangGraphProtocol):
+    def _project_chunk(
+        self, chunk: dict[str, Any], splitter: ThinkSplitter
+    ) -> list[dict[str, Any]]:
+        events = super()._project_chunk(chunk, splitter)
+        if chunk.get("interrupts"):
+            events = [event for event in events if event["type"] != "hitl_required"]
+            for item in chunk["interrupts"]:
+                request = getattr(item, "value", item)
+                identifier = getattr(item, "id", None)
+                if isinstance(request, dict) and isinstance(request.get("value"), dict):
+                    identifier = identifier or request.get("id")
+                    request = request["value"]
+                if isinstance(request, dict):
+                    events.append(
+                        {"type": "hitl_required", "request": request, "interrupt_id": identifier}
+                    )
+        return events
+
+    async def resume(
+        self, values: dict[str, Any], config: dict[str, Any]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        splitter = ThinkSplitter()
+        async for chunk in self._graph.astream(
+            Command(resume=values),
+            config=config,
+            stream_mode=["values", "updates", "messages", "custom"],
+            version="v2",
+        ):
+            for event in self._project_chunk(chunk, splitter):
+                yield event
+        for event in self._drain_splitter(splitter):
+            yield event
+
     def _project_messages_chunk(self, data: Any, splitter: ThinkSplitter) -> list[dict[str, Any]]:
         message, metadata = data
         # Let Harness filter tool/human/internal-compaction streams before adding boundaries.

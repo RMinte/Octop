@@ -10,7 +10,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from pydantic import Field, JsonValue, StrictBool, StringConstraints, model_validator
 
+from octop.infra.projects.approval_models import ApprovalMode, RequestID
 from octop.infra.projects.models import ProjectModel
+from octop.infra.projects.review_models import ApprovalReview
 
 ClientID = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{8,128}$")]
 ToolName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,47}$")]
@@ -51,6 +53,35 @@ class ClientToolDefinition(ProjectModel):
         return self
 
 
+class ClientApprovalContext(ProjectModel):
+    mode: ApprovalMode
+    revision: int = Field(ge=1)
+    action_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    requires_user: bool = False
+
+
+class ClientReviewContext(ProjectModel):
+    working_directory: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="执行电脑固定的工作目录；服务端只审查文本，不探测该路径。",
+    )
+    workspace_authorization_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    command_authorization_id: str = Field(min_length=1, max_length=128)
+    execution_profile: Literal["workspace_write", "full_access"]
+    context_digest: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="客户端原执行计划摘要，须覆盖参数、目录、授权身份、实际执行配置；审查不代替本机核对。",
+    )
+
+
+class ClientToolReviewRequest(ProjectModel):
+    request_id: RequestID
+    claim_token: str = Field(pattern=r"^[A-Za-z0-9_-]{16,256}$")
+    action_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    context: ClientReviewContext
+
+
 class ClientToolCall(ProjectModel):
     call_id: str
     task_id: str
@@ -58,6 +89,14 @@ class ClientToolCall(ProjectModel):
     client_id: str
     name: str = Field(description="客户端声明的原始工具名；模型侧使用 client__ 前缀。")
     arguments: dict[str, JsonValue]
+    approval_context: ClientApprovalContext
+    dispatch_allowed: bool = Field(
+        description="当前原轮次未暂停/取消且调用有效；执行电脑应在派发前用 tool.get 重新核对。"
+    )
+    manual_review_required: bool = Field(
+        description="本机操作仍须由用户明确批准；任务模式及 Reviewer 结果均不能覆盖。"
+    )
+    review: ApprovalReview | None = None
     status: CallStatus
     error_code: str
     created_at: datetime

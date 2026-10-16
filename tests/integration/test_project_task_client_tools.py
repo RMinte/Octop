@@ -149,7 +149,7 @@ async def test_real_harness_waits_for_client_and_receives_actual_result(
         task, call = await start_call(ws)
         await command(ws, "task.subscribe", "subscribe-tool-001", task_id=task["task_id"])
         live = (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()
-        assert live["status"] == "running"
+        assert live["status"] in {"running", "waiting_client_tool"}
         assert len(observed) == 1  # No second model request before a tool result.
         if mode == "timeout":
             done = await settled(client, auth, task["task_id"])
@@ -247,7 +247,10 @@ async def test_pending_call_survives_disconnect_and_does_not_block_text_or_queue
             if live["turns"][0]["reply"]:
                 break
             await asyncio.sleep(0.01)
-        assert live["status"] == "running" and live["turns"][0]["reply"] == "正在读取"
+        assert (
+            live["status"] in {"running", "waiting_client_tool"}
+            and live["turns"][0]["reply"] == "正在读取"
+        )
         await command(
             ws,
             "task.cancel",

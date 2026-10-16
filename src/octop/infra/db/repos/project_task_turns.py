@@ -33,6 +33,17 @@ class ProjectTaskTurnRow:
     reasoning: str = ""
     content_blocks_json: str = "[]"
     content_revision: int = 0
+    checkpoint_id: str = ""
+    pause_json: str = ""
+    interactions_json: str = "[]"
+    interaction_revision: int = 0
+    pause_requested: bool = False
+    wait_kind: str = ""
+    requests_json: str = "[]"
+
+    @property
+    def is_waiting(self) -> bool:
+        return self.status == "running" and not self.worker_id and bool(self.checkpoint_id)
 
     @classmethod
     def from_row(cls, r: DbRow) -> ProjectTaskTurnRow:
@@ -57,6 +68,13 @@ class ProjectTaskTurnRow:
             reasoning=str(r["reasoning"]),
             content_blocks_json=str(r["content_blocks_json"]),
             content_revision=strict_int(r["content_revision"]),
+            checkpoint_id=str(r["checkpoint_id"]),
+            pause_json=str(r["pause_json"]),
+            interactions_json=str(r["interactions_json"]),
+            interaction_revision=strict_int(r["interaction_revision"]),
+            pause_requested=bool(r["pause_requested"]),
+            wait_kind=str(r["wait_kind"]),
+            requests_json=str(r["requests_json"]),
         )
 
 
@@ -169,7 +187,7 @@ class ProjectTaskTurnRepo:
             if row is None:
                 return None
             r = conn.execute(
-                "UPDATE project_task_turns SET status='running', worker_id=?, updated_at=? "
+                "UPDATE project_task_turns SET status='running',wait_kind='', worker_id=?, updated_at=? "
                 "WHERE turn_id=? AND status='queued' RETURNING *",
                 (worker_id, now, row["turn_id"]),
             ).fetchone()
@@ -248,15 +266,91 @@ class ProjectTaskTurnRepo:
     def cancel(conn: Any, turn_id: str, now: int) -> None:
         conn.execute(
             "UPDATE project_task_turns SET cancel_requested=1, updated_at=?, "
-            "status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END "
-            "WHERE turn_id=? AND status IN ('queued', 'running')",
+            "status=CASE WHEN status='queued' OR (worker_id='' AND checkpoint_id<>'') "
+            "THEN 'cancelled' ELSE status END WHERE turn_id=? AND status IN ('queued', 'running')",
             (now, turn_id),
+        )
+
+    @staticmethod
+    def pause(
+        conn: Any,
+        turn_id: str,
+        worker_id: str,
+        checkpoint_id: str,
+        pause_json: str,
+        reply: str,
+        reasoning: str,
+        content_blocks_json: str,
+        content_revision: int,
+        now: int,
+        wait_kind: str = "client_tool",
+        interactions_json: str | None = None,
+    ) -> bool:
+        return bool(
+            conn.execute(
+                "UPDATE project_task_turns SET worker_id='',wait_kind=?,"
+                "checkpoint_id=?,pause_json=?,reply=?,reasoning=?,content_blocks_json=?,"
+                "content_revision=?,updated_at=?,interactions_json=COALESCE(?,interactions_json),"
+                "interaction_revision=interaction_revision+CASE WHEN ? IS NULL THEN 0 ELSE 1 END "
+                "WHERE turn_id=? AND worker_id=? "
+                "AND status='running' AND cancel_requested=0",
+                (
+                    wait_kind,
+                    checkpoint_id,
+                    pause_json,
+                    reply,
+                    reasoning,
+                    content_blocks_json,
+                    content_revision,
+                    now,
+                    interactions_json,
+                    interactions_json,
+                    turn_id,
+                    worker_id,
+                ),
+            ).rowcount
+            == 1
+        )
+
+    @staticmethod
+    def save_interactions(conn: Any, turn_id: str, interactions_json: str, now: int) -> None:
+        conn.execute(
+            "UPDATE project_task_turns SET interactions_json=?,interaction_revision=interaction_revision+1,updated_at=? WHERE turn_id=?",
+            (interactions_json, now, turn_id),
+        )
+
+    @staticmethod
+    def save_request(conn: Any, turn_id: str, requests_json: str, pause_requested: bool) -> None:
+        conn.execute(
+            "UPDATE project_task_turns SET requests_json=?,pause_requested=?,interaction_revision=interaction_revision+1 WHERE turn_id=?",
+            (requests_json, int(pause_requested), turn_id),
+        )
+
+    def waiting(self) -> builtins.list[ProjectTaskTurnRow]:
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM project_task_turns WHERE status='running' "
+                "AND worker_id='' AND checkpoint_id<>'' ORDER BY id"
+            ).fetchall()
+        return [ProjectTaskTurnRow.from_row(row) for row in rows]
+
+    @staticmethod
+    def resume_wait(conn: Any, turn_id: str, now: int, error: str = "") -> bool:
+        return bool(
+            conn.execute(
+                "UPDATE project_task_turns SET status=?,error_code=?,updated_at=? "
+                "WHERE turn_id=? AND status='running' AND worker_id='' "
+                "AND checkpoint_id<>'' AND cancel_requested=0",
+                ("failed" if error else "queued", error, now, turn_id),
+            ).rowcount
+            == 1
         )
 
     def stale(self, before: int) -> builtins.list[ProjectTaskTurnRow]:
         with self._db.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM project_task_turns WHERE status='running' AND updated_at<?",
+                "SELECT * FROM project_task_turns WHERE status='running' AND updated_at<? "
+                "AND NOT (worker_id='' AND checkpoint_id<>'')",
                 (before,),
             ).fetchall()
         return [ProjectTaskTurnRow.from_row(r) for r in rows]
@@ -266,7 +360,8 @@ class ProjectTaskTurnRepo:
         return bool(
             conn.execute(
                 "UPDATE project_task_turns SET status='failed', error_code='TASK_INTERRUPTED', "
-                "activity='', updated_at=? WHERE turn_id=? AND status='running' AND updated_at<?",
+                "activity='', updated_at=? WHERE turn_id=? AND status='running' AND updated_at<? "
+                "AND NOT (worker_id='' AND checkpoint_id<>'')",
                 (now, turn_id, before),
             ).rowcount
             == 1

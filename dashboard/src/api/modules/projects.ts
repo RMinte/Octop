@@ -109,9 +109,27 @@ export const projectsApi = {
 export type TaskStatus =
   | "queued"
   | "running"
+  | "waiting_approval"
+  | "waiting_answer"
+  | "waiting_client_tool"
+  | "paused"
   | "completed"
   | "failed"
   | "cancelled";
+export type TaskApprovalMode =
+  | "ask_for_approval"
+  | "approve_for_me"
+  | "full_access";
+export interface TaskApprovalPolicy {
+  mode: TaskApprovalMode;
+  revision: number;
+  updated_at: string;
+}
+export interface TaskApprovalCapabilities {
+  allowed_modes: TaskApprovalMode[];
+  reviewer_ready: boolean;
+  execution_profile: "host_process";
+}
 export interface TaskSummary {
   task_id: string;
   project_id: string | null;
@@ -120,6 +138,7 @@ export interface TaskSummary {
   status: TaskStatus;
   active_turn_id: string | null;
   list_revision: number;
+  approval_policy: TaskApprovalPolicy;
   created_at: string;
   updated_at: string;
 }
@@ -143,6 +162,57 @@ export interface TaskContentBlock {
   tool_call_id: string | null;
   tool_name: string | null;
 }
+export interface TaskInteraction {
+  interaction_id: string;
+  task_id: string;
+  turn_id: string;
+  tool_call_id: string;
+  revision: number;
+  status: "pending" | "reviewing" | "resolved" | "cancelled" | "expired";
+  kind: "approval" | "question";
+  payload: {
+    tool_name?: string;
+    arguments?: Record<string, unknown>;
+    execution_host?: "server";
+    reason?: string;
+    action_digest?: string;
+    allowed_decisions?: ("allow_once" | "deny")[];
+    approval_mode?: TaskApprovalMode;
+    approval_revision?: number;
+    question?: string;
+    header?: string | null;
+    options?: { label: string; description: string }[];
+  };
+  resolution: { outcome: string; source: string; answer: string | null } | null;
+  review?: {
+    review_id: string;
+    status: "queued" | "reviewing" | "completed" | "cancelled";
+    decision: "allow_once" | "deny" | "requires_user" | null;
+    reason_code: string;
+    action_digest: string;
+    context_digest: string | null;
+    model_ref: string;
+    profile_version: 1;
+    created_at: string;
+    updated_at: string;
+    expires_at: string;
+  } | null;
+  created_at: string;
+  expires_at: string;
+  resolved_at: string | null;
+}
+export type InteractionResponse = {
+  request_id: string;
+  expected_revision: number;
+  response:
+    | {
+        kind: "approval";
+        decision: "allow_once" | "deny";
+        action_digest: string;
+      }
+    | { kind: "question"; action: "answer"; answer: string }
+    | { kind: "question"; action: "skip" | "use_default" };
+};
 export interface TaskTurn {
   sequence: number;
   turn_id: string;
@@ -159,8 +229,12 @@ export interface TaskTurn {
   model_ref: string;
   options: TaskExecutionOptions;
   project_revision: number | null;
+  approval_policy_at_start: TaskApprovalPolicy;
   retry_of_turn_id: string | null;
   cancel_requested: boolean;
+  pause_requested: boolean;
+  interactions: TaskInteraction[];
+  interaction_revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -190,6 +264,7 @@ export interface TaskExecutionOptions {
   team_enabled?: boolean;
 }
 export interface TaskResources extends ProjectResources {
+  approval: TaskApprovalCapabilities;
   models: {
     model_ref: string;
     name: string;
@@ -201,6 +276,14 @@ export interface TaskMessage {
   request_id: string;
   prompt: string;
   options?: TaskExecutionOptions;
+}
+export interface TaskCreate extends TaskMessage {
+  approval_mode: TaskApprovalMode;
+}
+export interface TaskApprovalUpdate {
+  request_id: string;
+  expected_revision: number;
+  mode: TaskApprovalMode;
 }
 const taskPath = (id: string) => `/project-tasks/${encodeURIComponent(id)}`;
 export interface TaskListPage {
@@ -232,6 +315,31 @@ const taskListPath = (projectID: string | null) =>
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
 export const projectTasksApi = {
+  setApproval: (id: string, body: TaskApprovalUpdate) =>
+    projectTaskSocket.command<TaskDetail>("task.approval.set", {
+      task_id: id,
+      data: body,
+    }),
+  respond: (
+    id: string,
+    turnID: string,
+    interactionID: string,
+    body: InteractionResponse,
+  ) =>
+    projectTaskSocket.command<TaskDetail>("task.interaction.respond", {
+      task_id: id,
+      turn_id: turnID,
+      interaction_id: interactionID,
+      data: body,
+    }),
+  control: (id: string, turnID: string, paused: boolean, requestID: string) =>
+    projectTaskSocket.command<TaskDetail>(
+      paused ? "task.pause" : "task.resume",
+      {
+        task_id: id,
+        data: { turn_id: turnID, request_id: requestID },
+      },
+    ),
   delete: (id: string) =>
     request<void>(taskPath(id), {
       method: "DELETE",
@@ -286,7 +394,7 @@ export const projectTasksApi = {
   open: (id: string) =>
     projectTaskSocket.command<TaskDetail>("task.open", { task_id: id }),
   events: projectTaskSocket.events.bind(projectTaskSocket),
-  create: (projectID: string | null, body: TaskMessage) =>
+  create: (projectID: string | null, body: TaskCreate) =>
     projectTaskSocket.command<TaskDetail>("task.create", {
       data: { ...body, project_id: projectID },
     }),

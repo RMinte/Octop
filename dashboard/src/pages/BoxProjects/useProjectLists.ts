@@ -82,7 +82,7 @@ function reset<T>(cache: Cache<T>) {
 function useCache<T>(scope: string) {
   const user = useCurrentUser();
   const key = user
-    ? `octop:project-lists:v2:${getApiUrl("/")}:${user.id}:${
+    ? `octop:project-lists:v3:${getApiUrl("/")}:${user.id}:${
         user.username
       }:${scope}`
     : null;
@@ -309,6 +309,7 @@ export function useTaskList(projectID: string | null, archived = false) {
         status,
         active_turn_id,
         list_revision,
+        approval_policy,
         created_at,
         updated_at,
       } = item;
@@ -323,6 +324,7 @@ export function useTaskList(projectID: string | null, archived = false) {
             status,
             active_turn_id,
             list_revision,
+            approval_policy,
             created_at,
             updated_at,
           },

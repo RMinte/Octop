@@ -1,4 +1,10 @@
 import { request } from "../request";
+import type { TaskApprovalMode } from "./projects";
+
+export interface TaskApprovalSettings {
+  allowed_modes: TaskApprovalMode[];
+  require_human_tools: string[];
+}
 
 export interface HitlPolicy {
   enabled: boolean;
@@ -81,6 +87,15 @@ export interface SecurityPolicy {
 }
 
 export const securityApi = {
+  getTaskApprovals(): Promise<TaskApprovalSettings> {
+    return request<TaskApprovalSettings>("/admin/security/task-approvals");
+  },
+  saveTaskApprovals(body: TaskApprovalSettings): Promise<TaskApprovalSettings> {
+    return request<TaskApprovalSettings>("/admin/security/task-approvals", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  },
   getPolicy(): Promise<SecurityPolicy> {
     return request<SecurityPolicy>("/admin/security");
   },
