@@ -12,8 +12,8 @@ from pydantic import Field
 
 from octop.i18n import tr
 from octop.infra.db.services import SharedServices
-from octop.infra.errors import OctopError
-from octop.infra.projects.input_attachments import IMAGE_SCHEME, download, for_task
+from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.input_attachments import IMAGE_SCHEME, download, for_task, is_image
 from octop.infra.projects.models import ProjectModel, Reference
 
 READ_TASK_IMAGE = "read_task_image"
@@ -34,7 +34,12 @@ def read_image_tool(
                 attachments = await asyncio.to_thread(for_task, services, owner_id, task_id)
                 return ToolMessage(
                     content=json.dumps(
-                        [item.model_dump(mode="json") for item in attachments], ensure_ascii=False
+                        [
+                            item.model_dump(mode="json")
+                            for item in attachments
+                            if is_image(item.media_type)
+                        ],
+                        ensure_ascii=False,
                     ),
                     tool_call_id=call_id,
                     name=READ_TASK_IMAGE,
@@ -42,6 +47,8 @@ def read_image_tool(
             metadata, _ = await asyncio.to_thread(
                 download, services, owner_id, attachment_id, task_id=task_id
             )
+            if not is_image(metadata.media_type):
+                raise OctopError.localized(ErrorCode.TASK_IMAGE_INVALID)
             return ToolMessage(
                 content=tr(
                     "projects.task_image_loaded",

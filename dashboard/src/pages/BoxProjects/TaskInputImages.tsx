@@ -1,11 +1,73 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Image, Spin, Typography } from "antd";
+import { Download, FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   projectTasksApi,
   type TaskInputAttachment,
 } from "../../api/modules/projects";
 import styles from "./index.module.less";
+import { isTaskImage } from "./useTaskImages";
+
+function TaskInputFile({ attachment }: { attachment: TaskInputAttachment }) {
+  const { t } = useTranslation();
+  const [downloading, setDownloading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const downloadController = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => downloadController.current?.abort(),
+    [attachment.attachment_id],
+  );
+  const download = async () => {
+    const controller = new AbortController();
+    downloadController.current?.abort();
+    downloadController.current = controller;
+    setDownloading(true);
+    setFailed(false);
+    try {
+      const blob = await projectTasksApi.attachmentPreview(
+        attachment.attachment_id,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = attachment.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      if (!controller.signal.aborted) setFailed(true);
+    } finally {
+      if (!controller.signal.aborted) setDownloading(false);
+    }
+  };
+  return (
+    <div className={styles.inputImage}>
+      <div className={styles.inputFilePreview}>
+        <FileText size={32} />
+      </div>
+      <Typography.Text ellipsis title={attachment.name}>
+        {attachment.name}
+      </Typography.Text>
+      <Button
+        size="small"
+        icon={<Download size={14} />}
+        loading={downloading}
+        onClick={() => void download()}
+      >
+        {t("common.download")}
+      </Button>
+      {failed && (
+        <Typography.Text type="danger" role="alert">
+          {t("projects.tasks.artifactDownloadFailed")}
+        </Typography.Text>
+      )}
+    </div>
+  );
+}
 
 function TaskInputImage({ attachment }: { attachment: TaskInputAttachment }) {
   const { t } = useTranslation();
@@ -58,12 +120,19 @@ export default function TaskInputImages({
   if (!attachments.length) return null;
   return (
     <div className={styles.inputImages}>
-      {attachments.map((attachment) => (
-        <TaskInputImage
-          key={attachment.attachment_id}
-          attachment={attachment}
-        />
-      ))}
+      {attachments.map((attachment) =>
+        isTaskImage(attachment.media_type) ? (
+          <TaskInputImage
+            key={attachment.attachment_id}
+            attachment={attachment}
+          />
+        ) : (
+          <TaskInputFile
+            key={attachment.attachment_id}
+            attachment={attachment}
+          />
+        ),
+      )}
     </div>
   );
 }

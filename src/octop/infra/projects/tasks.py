@@ -188,11 +188,11 @@ class TaskMessage(ProjectModel):
     request_id: RequestID = Field(
         description="本次发送的唯一标识；网络重试必须复用，相同标识不会重复执行。"
     )
-    prompt: Prompt = Field(default="", description="本轮用户文字；可为空，但须提供图片附件。")
+    prompt: Prompt = Field(default="", description="本轮用户文字；可为空，但须提供附件。")
     attachment_ids: list[Reference] = Field(
         default_factory=list,
         max_length=input_attachments.MAX_ATTACHMENTS,
-        description="已上传的本人图片 ID，按显示顺序排列，最多九张；首次发送后归属此任务。",
+        description="已上传的本人附件 ID，按显示顺序排列，图片和其他文件合计最多九个；首次发送后归属此任务。",
     )
     options: TaskExecutionOptions = Field(
         default_factory=TaskExecutionOptions,
@@ -202,7 +202,7 @@ class TaskMessage(ProjectModel):
     @model_validator(mode="after")
     def validate_message(self) -> Self:
         if not self.prompt and not self.attachment_ids:
-            raise ValueError("text or image attachments are required")
+            raise ValueError("text or attachments are required")
         if len(self.attachment_ids) != len(set(self.attachment_ids)):
             raise ValueError("duplicate attachment IDs")
         return self
@@ -236,7 +236,7 @@ class TaskTurn(ProjectModel):
     prompt: str
     attachments: list[TaskInputAttachment] = Field(
         default_factory=list,
-        description="本轮用户上传的图片，仅含元数据；预览通过鉴权 HTTP 获取。",
+        description="本轮用户上传的附件，仅含元数据；图片预览和文件下载通过鉴权 HTTP 获取。",
     )
     reply: str
     reasoning: str = Field(
@@ -562,9 +562,11 @@ def _input_configuration(
     model_ref: str,
 ) -> str:
     attached = input_attachments.bind(services, conn, owner_id, task_id, body.attachment_ids)
-    if (
-        attached or services.project_task_attachment_repo.has_for_task(conn, owner_id, task_id)
-    ) and not ProviderStore(services.provider_repo).is_model_ref_multimodal(model_ref):
+    has_images = any(
+        input_attachments.is_image(row.media_type)
+        for row in services.project_task_attachment_repo.for_task(conn, owner_id, task_id)
+    )
+    if has_images and not ProviderStore(services.provider_repo).is_model_ref_multimodal(model_ref):
         raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
     return json.dumps(
         {
@@ -683,7 +685,8 @@ def send(
             if not initial_title:
                 user = services.user_repo.get(owner_id)
                 initial_title = tr(
-                    "projects.image_task_title", normalize_locale(user.locale if user else "zh")
+                    "projects.attachment_task_title",
+                    normalize_locale(user.locale if user else "zh"),
                 )
             tasks.insert(
                 conn,

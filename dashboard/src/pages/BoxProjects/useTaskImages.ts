@@ -6,14 +6,23 @@ import {
 } from "../../api/modules/projects";
 import { apiErrorMessage } from "../../utils/apiError";
 
-export const TASK_IMAGE_TYPES = "image/jpeg,image/png,image/webp,image/gif";
-const IMAGE_TYPES = new Set(TASK_IMAGE_TYPES.split(","));
+const IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
 export const MAX_TASK_IMAGES = 9;
-const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+export function isTaskImage(mediaType: string) {
+  return IMAGE_TYPES.has(mediaType);
+}
 
 export interface TaskDraftImage {
   id: string;
   name: string;
+  isImage: boolean;
   url: string;
   controller: AbortController;
   attachment?: TaskInputAttachment;
@@ -57,14 +66,7 @@ export function useTaskImages(scope: string) {
     let validationError = "";
     const added: { item: TaskDraftImage; file: File }[] = [];
     for (const file of files) {
-      if (
-        !IMAGE_TYPES.has(file.type) &&
-        !/\.(jpe?g|png|webp|gif)$/i.test(file.name)
-      ) {
-        validationError = t("projects.tasks.imageType");
-        continue;
-      }
-      if (file.size > MAX_IMAGE_BYTES) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
         validationError = t("projects.tasks.imageSize");
         continue;
       }
@@ -77,6 +79,7 @@ export function useTaskImages(scope: string) {
         item: {
           id: crypto.randomUUID(),
           name: file.name,
+          isImage: isTaskImage(file.type),
           url: URL.createObjectURL(file),
           controller: new AbortController(),
         },
@@ -103,7 +106,12 @@ export function useTaskImages(scope: string) {
     for (const { item, file } of added) {
       void projectTasksApi
         .uploadAttachment(file, item.controller.signal)
-        .then((attachment) => update(item.id, { attachment }))
+        .then((attachment) =>
+          update(item.id, {
+            attachment,
+            isImage: isTaskImage(attachment.media_type),
+          }),
+        )
         .catch((err) =>
           update(item.id, {
             error: apiErrorMessage(

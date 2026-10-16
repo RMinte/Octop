@@ -16,7 +16,8 @@ import {
   Archive,
   ArchiveRestore,
   Download,
-  ImagePlus,
+  FileText,
+  Paperclip,
   MessageSquare,
   Plus,
   Pause,
@@ -49,11 +50,7 @@ import TaskTurnContent from "./TaskTurnContent";
 import TaskInteractions from "./TaskInteractions";
 import TaskApprovalModePicker from "./TaskApprovalMode";
 import TaskInputImages from "./TaskInputImages";
-import {
-  MAX_TASK_IMAGES,
-  TASK_IMAGE_TYPES,
-  useTaskImages,
-} from "./useTaskImages";
+import { MAX_TASK_IMAGES, useTaskImages } from "./useTaskImages";
 
 export default function TaskConversations({
   projectID,
@@ -837,9 +834,7 @@ export default function TaskConversations({
             )}
             onChange={(event) => setDraft(event.target.value)}
             onPaste={(event) => {
-              const files = Array.from(event.clipboardData.files).filter(
-                (file) => file.type.startsWith("image/"),
-              );
+              const files = Array.from(event.clipboardData.files);
               if (files.length) {
                 event.preventDefault();
                 if (!composerDisabled) images.add(files);
@@ -860,12 +855,18 @@ export default function TaskConversations({
             <div className={styles.inputImages}>
               {images.items.map((image) => (
                 <div className={styles.inputImage} key={image.id}>
-                  <Image
-                    src={image.url}
-                    alt={image.name}
-                    width={112}
-                    height={88}
-                  />
+                  {image.isImage ? (
+                    <Image
+                      src={image.url}
+                      alt={image.name}
+                      width={112}
+                      height={88}
+                    />
+                  ) : (
+                    <div className={styles.inputFilePreview}>
+                      <FileText size={32} />
+                    </div>
+                  )}
                   <Button
                     className={styles.removeImage}
                     size="small"
@@ -879,6 +880,16 @@ export default function TaskConversations({
                   <Typography.Text ellipsis title={image.name}>
                     {image.name}
                   </Typography.Text>
+                  {!image.isImage && (
+                    <Button
+                      size="small"
+                      icon={<Download size={14} />}
+                      href={image.url}
+                      download={image.name}
+                    >
+                      {t("common.download")}
+                    </Button>
+                  )}
                   {image.error ? (
                     <Typography.Text type="danger" role="alert">
                       {image.error}
@@ -900,7 +911,6 @@ export default function TaskConversations({
               ref={imageInput}
               className={styles.imageFileInput}
               type="file"
-              accept={TASK_IMAGE_TYPES}
               multiple
               aria-label={t("projects.tasks.addImages")}
               disabled={
@@ -913,7 +923,7 @@ export default function TaskConversations({
             />
             <Button
               size="small"
-              icon={<ImagePlus size={15} />}
+              icon={<Paperclip size={15} />}
               disabled={
                 composerDisabled || images.items.length >= MAX_TASK_IMAGES
               }

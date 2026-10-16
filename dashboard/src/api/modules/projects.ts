@@ -161,6 +161,7 @@ export interface TaskInputAttachment {
   byte_count: number;
   sha256: string;
   preview_url: string;
+  workspace_path?: string | null;
   created_at: string;
 }
 export interface TaskContentBlock {

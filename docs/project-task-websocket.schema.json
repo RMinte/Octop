@@ -783,13 +783,13 @@
         },
         "prompt": {
           "default": "",
-          "description": "本轮用户文字；可为空，但须提供图片附件。",
+          "description": "本轮用户文字；可为空，但须提供附件。",
           "maxLength": 32768,
           "title": "Prompt",
           "type": "string"
         },
         "attachment_ids": {
-          "description": "已上传的本人图片 ID，按显示顺序排列，最多九张；首次发送后归属此任务。",
+          "description": "已上传的本人附件 ID，按显示顺序排列，图片和其他文件合计最多九个；首次发送后归属此任务。",
           "items": {
             "maxLength": 256,
             "minLength": 1,
@@ -1038,13 +1038,13 @@
         },
         "prompt": {
           "default": "",
-          "description": "本轮用户文字；可为空，但须提供图片附件。",
+          "description": "本轮用户文字；可为空，但须提供附件。",
           "maxLength": 32768,
           "title": "Prompt",
           "type": "string"
         },
         "attachment_ids": {
-          "description": "已上传的本人图片 ID，按显示顺序排列，最多九张；首次发送后归属此任务。",
+          "description": "已上传的本人附件 ID，按显示顺序排列，图片和其他文件合计最多九个；首次发送后归属此任务。",
           "items": {
             "maxLength": 256,
             "minLength": 1,
@@ -1882,9 +1882,22 @@
           "type": "string"
         },
         "preview_url": {
-          "description": "需要当前账号鉴权的图片预览地址；不包含令牌。",
+          "description": "需要当前账号鉴权的附件原始内容地址；不包含令牌。",
           "title": "Preview Url",
           "type": "string"
+        },
+        "workspace_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "普通文件在本轮服务端工作目录中的相对路径；视觉图片为 null。",
+          "title": "Workspace Path"
         },
         "created_at": {
           "format": "date-time",
@@ -2044,7 +2057,7 @@
           "type": "string"
         },
         "attachments": {
-          "description": "本轮用户上传的图片，仅含元数据；预览通过鉴权 HTTP 获取。",
+          "description": "本轮用户上传的附件，仅含元数据；图片预览和文件下载通过鉴权 HTTP 获取。",
           "items": {
             "$ref": "#/$defs/TaskInputAttachment"
           },

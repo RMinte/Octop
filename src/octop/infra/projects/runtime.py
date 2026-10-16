@@ -49,6 +49,7 @@ from octop.infra.projects.context import capture_memory, close_pending_tools
 from octop.infra.projects.control import ASK_USER, TaskControlMiddleware, question_tool
 from octop.infra.projects.image_middleware import TaskImageMaterializeMiddleware
 from octop.infra.projects.image_tools import READ_TASK_IMAGE, read_image_tool
+from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction
 from octop.infra.projects.models import ProjectFields, SkillBinding
 from octop.infra.projects.service import _validate
@@ -129,7 +130,14 @@ async def run_turn(
     providers = ProviderStore(services.provider_repo)
     if not await asyncio.to_thread(providers.is_model_ref_usable, turn.model_ref):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
-    user_content = input_attachments.content(turn.prompt, raw.get("attachment_ids", []))
+    user = await asyncio.to_thread(services.user_repo.get, owner_id)
+    locale = normalize_locale(user.locale if user else "zh")
+    user_content = input_attachments.content(
+        turn.prompt,
+        raw.get("attachment_ids", []),
+        [TaskInputAttachment.model_validate(item) for item in raw.get("attachments", [])],
+        locale=locale,
+    )
     needs_images = content_blocks_need_vision(user_content) or any(
         content_blocks_need_vision(
             message.get("content")
@@ -152,8 +160,6 @@ async def run_turn(
         system_prefix = system_dir.relative_to(workspace).as_posix()
     except ValueError:
         system_prefix = f".octop/tasks/{turn.task_id}/{turn.turn_id}"
-    user = await asyncio.to_thread(services.user_repo.get, owner_id)
-    locale = normalize_locale(user.locale if user else "zh")
     await asyncio.to_thread(
         assert_token_quota_available, services.user_policy_repo, services.usage_repo, owner_id
     )
@@ -176,6 +182,25 @@ async def run_turn(
     publisher = TaskArtifactPublisher(services, owner_id, turn, workspace, locale)
     prompt += "\n\n" + tr("projects.artifacts_prompt", locale)
     prompt += "\n\n" + tr("projects.task_images_prompt", locale)
+    task_files = [
+        item
+        for item in await asyncio.to_thread(
+            input_attachments.for_task, services, owner_id, turn.task_id
+        )
+        if item.workspace_path is not None
+    ]
+    if task_files:
+        prompt += "\n\n" + tr("projects.task_files_prompt", locale)
+        prompt += "\n\n" + "\n\n".join(
+            tr(
+                "projects.task_file_hint",
+                locale,
+                name=item.name,
+                attachment_id=item.attachment_id,
+                path=item.workspace_path,
+            )
+            for item in task_files
+        )
     try:
         plugin_tools, plugin_middleware, plugin_skills = await asyncio.to_thread(
             plugin_capabilities,
@@ -287,6 +312,7 @@ async def run_turn(
     events: AsyncIterator[dict[str, Any]] | None = None
 
     async def prepare(agent: HarnessAgent) -> None:
+        await input_attachments.materialize_files(services, owner_id, turn.task_id, agent.workspace)
         for slug, entries in files:
             for name, data in entries:
                 await agent.workspace.aupload_bytes(
@@ -656,6 +682,13 @@ class ProjectTaskWorker:
                             "content": input_attachments.content(
                                 previous.prompt,
                                 json.loads(previous.configuration_json).get("attachment_ids", []),
+                                [
+                                    TaskInputAttachment.model_validate(item)
+                                    for item in json.loads(previous.configuration_json).get(
+                                        "attachments", []
+                                    )
+                                ],
+                                locale=locale,
                             ),
                         },
                         {"role": "assistant", "content": reply_text},

@@ -1,4 +1,4 @@
-"""SQL-only storage for immutable task image inputs."""
+"""SQL-only storage for immutable task file inputs."""
 
 from __future__ import annotations
 

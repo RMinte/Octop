@@ -80,6 +80,7 @@ async def test_image_only_create_and_followup_restore_input_metadata(
         "byte_count",
         "sha256",
         "preview_url",
+        "workspace_path",
         "created_at",
     }
     assert image["name"] == "截图.png" and image["media_type"] == "image/png"
@@ -270,7 +271,7 @@ async def test_attachment_ownership_binding_and_idempotency(task_env):
         json={"request_id": "foreign-image-001", "attachment_ids": [image["attachment_id"]]},
     )
     assert foreign.status_code == 404
-    assert foreign.json()["error"]["code"] == "TASK_IMAGE_UNAVAILABLE"
+    assert foreign.json()["error"]["code"] == "TASK_ATTACHMENT_UNAVAILABLE"
     body = {
         "request_id": "bound-image-001",
         "prompt": "Describe",
@@ -291,7 +292,7 @@ async def test_attachment_ownership_binding_and_idempotency(task_env):
         "/api/project-tasks", headers=auth, json={**body, "request_id": "cross-task-image-001"}
     )
     assert cross_task.status_code == 404
-    assert cross_task.json()["error"]["code"] == "TASK_IMAGE_UNAVAILABLE"
+    assert cross_task.json()["error"]["code"] == "TASK_ATTACHMENT_UNAVAILABLE"
     same_task = await client.post(
         f"/api/project-tasks/{task['task_id']}/messages",
         headers=auth,
@@ -320,7 +321,7 @@ async def test_nine_images_keep_order_and_reordered_replay_conflicts(task_env, t
     owner = await resolve_user_id(client, auth, "admin")
     with pytest.raises(OctopError) as rejected:
         tasks.send(server.services, owner, tasks.TaskMessage.model_construct(**invalid))
-    assert rejected.value.code == ErrorCode.TASK_IMAGE_LIMIT
+    assert rejected.value.code == ErrorCode.TASK_ATTACHMENT_LIMIT
     response = await client.post("/api/project-tasks", headers=auth, json=invalid)
     assert response.status_code == 422, response.text
     assert (await client.get("/api/project-tasks", headers=auth)).json()["items"] == []
@@ -532,7 +533,6 @@ async def test_invalid_images_limits_and_message_references(task_env, monkeypatc
     client, server, auth, calls = task_env
     for content, filename, media_type in [
         (b"not an image", "fake.png", "image/png"),
-        (b'<svg xmlns="http://www.w3.org/2000/svg"/>', "vector.svg", "image/svg+xml"),
         (b'<svg xmlns="http://www.w3.org/2000/svg"/>', "disguised.png", "image/png"),
     ]:
         response = await client.post(
@@ -553,7 +553,7 @@ async def test_invalid_images_limits_and_message_references(task_env, monkeypatc
         files={"file": ("large.png", image_bytes() + b"\0" * (1024 * 1024), "image/png")},
     )
     assert too_large.status_code == 413
-    assert too_large.json()["error"]["code"] == "TASK_IMAGE_LIMIT"
+    assert too_large.json()["error"]["code"] == "TASK_ATTACHMENT_LIMIT"
     image = await upload(client, auth)
     for body in [
         {"request_id": "empty-message-001", "prompt": "  "},
@@ -568,7 +568,7 @@ async def test_invalid_images_limits_and_message_references(task_env, monkeypatc
         json={"request_id": "missing-image-001", "attachment_ids": ["image-does-not-exist"]},
     )
     assert missing.status_code == 404
-    assert missing.json()["error"]["code"] == "TASK_IMAGE_UNAVAILABLE"
+    assert missing.json()["error"]["code"] == "TASK_ATTACHMENT_UNAVAILABLE"
     assert calls == []
 
 

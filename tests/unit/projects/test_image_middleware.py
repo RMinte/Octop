@@ -88,7 +88,7 @@ async def test_model_cannot_resolve_a_different_tasks_image(stored_image):
     middleware = TaskImageMaterializeMiddleware(services, owner_id, "another-task")
     with pytest.raises(OctopError) as caught:
         middleware.wrap_model_call(request, handler)
-    assert caught.value.code == ErrorCode.TASK_IMAGE_UNAVAILABLE
+    assert caught.value.code == ErrorCode.TASK_ATTACHMENT_UNAVAILABLE
     handler.assert_not_called()
 
 
@@ -192,5 +192,5 @@ async def test_image_tool_ownership_errors_are_recoverable(stored_image, attachm
     )
     assert isinstance(result, ToolMessage)
     assert result.status == "error" and result.tool_call_id == "failed-read"
-    assert json.loads(result.content)["error_code"] == "TASK_IMAGE_UNAVAILABLE"
+    assert json.loads(result.content)["error_code"] == "TASK_ATTACHMENT_UNAVAILABLE"
     assert TASK_IMAGE_KEY not in result.additional_kwargs

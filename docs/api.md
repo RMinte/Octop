@@ -48,8 +48,8 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | POST | `/api/projects/{project_id}/tasks` | 在项目中发送首条消息，原子创建任务和首轮，返回 202 |
 | GET | `/api/project-tasks` | 分页列出无项目任务；archived=true 查看归档任务 |
 | GET | `/api/project-tasks/resources` | 本轮可用的模型、Skill 和 MCP 引用 |
-| POST | `/api/project-tasks/attachments` | multipart 的 file 上传本人任务图片，返回 201 和附件元数据 |
-| GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入图片的鉴权预览，返回原始图片 |
+| POST | `/api/project-tasks/attachments` | multipart 的 file 上传本人任务输入附件，返回 201 和附件元数据 |
+| GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入附件的鉴权读取，图片预览、其他文件下载 |
 | WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
 | GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
 | PATCH | `/api/project-tasks/{task_id}` | 修改名称、归档或恢复，校验 expected_revision |
@@ -61,11 +61,11 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | POST | `/api/project-tasks/{task_id}/cancel` | 指定 turn_id 停止对应回复，保留已有正文 |
 | POST | `/api/project-tasks/{task_id}/turns/{turn_id}/retry` | 重新尝试最后一个失败或取消轮次，创建新轮次 |
 
-发送体：`{"request_id":"每次发送唯一的UUID","prompt":"用户消息","attachment_ids":[]}`。通用创建接口另接受 `project_id`。prompt 可省略或为空，但文字和图片至少提供一种；attachment_ids 可省略，每轮最多九张且不能重复。网络重试必须复用 `request_id`、消息、图片 ID 顺序和原 options；标识与消息、图片、执行选项或重试来源冲突返回 409。执行中发送新消息返回 `TASK_BUSY`，停止或结束后可继续。所有读写均按当前登录用户隔离；其他用户的资源返回 404。读取带 `Cache-Control: no-store`。
+发送体：`{"request_id":"每次发送唯一的UUID","prompt":"用户消息","attachment_ids":[]}`。通用创建接口另接受 `project_id`。prompt 可省略或为空，但文字和附件至少提供一种；attachment_ids 可省略，图片和其他文件合计每轮最多九个且不能重复。网络重试必须复用 `request_id`、消息、附件 ID 顺序和原 options；标识与消息、附件、执行选项或重试来源冲突返回 409。执行中发送新消息返回 `TASK_BUSY`，停止或结束后可继续。所有读写均按当前登录用户隔离；其他用户的资源返回 404。读取带 `Cache-Control: no-store`。
 
 每轮采用发送时项目配置的快照：行动指南进入系统提示；服务端目录作为实际工作目录；所选已安装技能和 SkillHub 包通过 Harness 工作区加载；仅装配所选 MCP 和插件能力，凭据沿用连接管理。子代理角色、长期记忆和团队协作配置同样按轮保存。项目修改在下一轮生效，已保存轮次的 `project_revision` 保留原值。客户端目录仍然只记录路径。无项目任务使用服务端自动分配的独立工作区。
 
-未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。有当前或历史图片输入时，所选模型须支持图片，不能用纯文字模型继续，也不会自动切换模型。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字和图片对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器和桌面未接入。
+未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。有当前或历史图片输入时，所选模型须支持图片，不能用纯文字模型继续，也不会自动切换模型。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字、图片和通用文件对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器和桌面未接入。
 
 状态为 `queued/running/waiting_approval/waiting_answer/waiting_client_tool/paused/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 WebSocket 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的模型消息、工具调用和结果用作后续上下文；历史仅有问答文本的记录继续保留文本；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
 
@@ -210,7 +210,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-消息支持文字、图片或图文混合：`prompt` 去首尾空白后最多 32768 字符；文字为空时必须提供 attachment_ids。`request_id` 为 8–128 位字母、数字、短横线或下划线。图片先通过独立上传接口取得 ID，每轮最多九张。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；创建任务可在顶层设置 approval_mode。未覆盖的资源继承发送时的项目配置。
+消息支持文字、图片和通用文件，可混合发送：`prompt` 去首尾空白后最多 32768 字符；文字为空时必须提供 attachment_ids。`request_id` 为 8–128 位字母、数字、短横线或下划线。附件先通过独立上传接口取得 ID，图片和其他文件合计每轮最多九个。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；创建任务可在顶层设置 approval_mode。未覆盖的资源继承发送时的项目配置。
 
 通过 `GET /api/project-tasks/task_example` 读取 `TaskDetail`，默认最近 50 轮。`limit` 为 1–100；使用 `next_page_cursor` 作为下一次的 `page_cursor` 读取更早轮次，每页内部按创建顺序正序排列。首屏与实时基线来自同一数据库快照，历史页的 `event_cursor=null`，不能用历史页推进实时位置。以下是单轮已完成时的示意，创建响应的轮次通常处于 queued：
 
@@ -316,13 +316,19 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 未发布的数据库 schema 34 包含分页索引和任务状态摘要，状态从活动轮次或最近一轮初始化；本地已记录 schema 34 但缺少状态列的库也会补齐。归档标记及任务、轮次和正文保留。任务列表游标及网页任务缓存版本随状态字段更新，旧游标返回 `PROJECT_SYNC_RESET`，客户端重建第一页；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
 
-### 任务图片输入
+### 任务输入附件
 
-先使用 `POST /api/project-tasks/attachments`，以 multipart `file` 提交图片并取得 `{attachment_id,name,media_type,byte_count,sha256,preview_url,created_at}`，再在 REST 创建、继续消息或 WebSocket `task.create/task.message` 的 `attachment_ids` 引用。支持真实 PNG、JPEG、GIF、WebP，每张上限为服务端上传设置与 25 MiB 的较小值；SVG 和伪造图片返回 `422 TASK_IMAGE_INVALID`，超限或无法压到模型可接收大小返回 `413 TASK_IMAGE_LIMIT`。
+独立上传、发送、历史展示与多轮文件处理的接入步骤见[任务通用附件接入说明](project-task-input-attachments.md)。
 
-上传文件先归当前用户暂存，未发送的图片 24 小时后不可用；发送成功与首次绑定任务在同一事务完成。同一任务可再次引用或手动重试沿用原图，跨任务、跨账号、过期或不存在的 ID 返回 `404 TASK_IMAGE_UNAVAILABLE`。原图独立于项目工作目录保存，修改目录后追问仍可使用旧图。纯图任务使用本地化图片任务标题，不把图片交给标题模型。
+先使用 `POST /api/project-tasks/attachments`，以 multipart `file` 提交文件并取得 `{attachment_id,name,media_type,byte_count,sha256,preview_url,workspace_path,created_at}`，再在 REST 创建、继续消息或 WebSocket `task.create/task.message` 的 `attachment_ids` 引用。支持文档、表格、PDF、文本、代码、压缩包等通用文件；每条消息图片和其他文件合计最多九个，每个上限为服务端上传设置与 25 MiB 的较小值，单文件大小超限返回 `413 TASK_ATTACHMENT_LIMIT`。消息附件超过九个、ID 为空或重复时，REST 返回 `422` 请求校验响应，WebSocket 返回 `422 TASK_FRAME_INVALID`。
 
-TaskTurn 的 `attachments` 保存本轮输入图片元数据；任务输出附件继续位于 `artifacts`。刷新、分页、实时事件和断线恢复使用同一形状，均不内嵌图片字节。预览使用 `GET preview_url` 并附带 Bearer token，响应 `Cache-Control: no-store` 与 `X-Content-Type-Options: nosniff`。本轮或历史含图时，非视觉模型返回 `422 TASK_IMAGE_MODEL_REQUIRED`。模型调用前临时读取图片，持久化上下文和检查点只保存 `task-image://` 引用。完整接入与示例见[任务 WebSocket 指南第 15 节](project-task-websocket.md#15-图片输入)。
+真实 PNG、JPEG、GIF、WebP 作为视觉输入，`workspace_path` 为 null；伪造或损坏图片返回 `422 TASK_IMAGE_INVALID`，无法压到模型可接收大小返回 `413 TASK_IMAGE_LIMIT`。SVG、BMP 等其他格式作为普通文件。普通文件不要求视觉模型；本轮或历史含视觉图片时，非视觉模型返回 `422 TASK_IMAGE_MODEL_REQUIRED`。
+
+上传文件先归当前用户暂存，未发送的附件 24 小时后不可用；首次发送成功与绑定任务在同一事务完成。同一任务可再次引用，手动重试沿用原附件。跨任务、跨账号、过期或不存在的 ID 返回 `404 TASK_ATTACHMENT_UNAVAILABLE`。TaskTurn 的 `attachments` 保存输入元数据，任务输出仍位于 `artifacts`；纯附件任务使用本地化附件任务标题。
+
+普通文件执行前放入服务端工作区的 `workspace_path`，供文件工具、脚本和 Skill 使用；不会自动执行、解压或保证所有格式自动解析。后续轮次保留工作副本的编辑，项目目录变更后恢复缺失文件；每轮提供任务文件清单，支持长对话压缩后重新定位。原始内容随任务保存，与项目目录独立，`client_directory` 不被访问。
+
+使用 `GET preview_url` 并附带 Bearer token 读取原始内容。视觉图片内联预览，其他文件作为附件下载；响应包含 `Cache-Control: private, no-store`、`X-Content-Type-Options: nosniff` 和受限 CSP。刷新、分页、实时事件和断线恢复均不内嵌文件字节。图片持久化 `task-image://` 引用，模型调用前临时展开；`read_task_image` 仅列出、读取当前任务视觉图片。完整接入见[任务 WebSocket 指南第 15 节](project-task-websocket.md#15-输入附件)。
 
 ### 服务端附件交付
 

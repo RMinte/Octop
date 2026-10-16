@@ -331,10 +331,10 @@ task_router = APIRouter(prefix="/project-tasks")
     "/attachments",
     response_model=TaskInputAttachment,
     status_code=201,
-    summary="上传任务输入图片",
-    description="上传 PNG、JPEG、WebP 或 GIF 图片；无需预先创建任务或运行专家。最多 25 MiB，且不超过管理员上传限制。使用返回的 attachment_id 发送首条消息或追问，首次发送后归属该任务。未发送的图片 24 小时后过期。",
+    summary="上传任务输入附件",
+    description="上传图片、文档或其他文件；无需预先创建任务或运行专家。单个文件最多 25 MiB，且不超过管理员上传限制。每条消息最多 9 个附件，使用返回的 attachment_id 发送首条消息或追问，首次发送后归属该任务。未发送的附件 24 小时后过期。PNG、JPEG、WebP 和 GIF 经过真实格式校验并提供视觉输入；其他文件在本轮服务端工作目录的 inbound/ 下提供给工具读取，不访问客户端目录。",
 )
-async def upload_task_image(
+async def upload_task_attachment(
     response: Response,
     file: UploadFile = File(...),  # noqa: B008
     server: OctopServer = Depends(get_server),
@@ -344,30 +344,41 @@ async def upload_task_image(
     content = await read_upload_capped(
         file,
         max_bytes=input_attachments.max_upload_bytes(services),
-        code=ErrorCode.TASK_IMAGE_LIMIT,
+        code=ErrorCode.TASK_ATTACHMENT_LIMIT,
     )
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(
-        input_attachments.save, services, user.id, file.filename or "image", content
+        input_attachments.save,
+        services,
+        user.id,
+        file.filename or "upload.bin",
+        content,
+        file.content_type,
     )
 
 
 @task_router.get(
     "/attachments/{attachment_id}",
     response_class=Response,
-    summary="预览任务输入图片",
-    description="需要图片所属账号鉴权。读取不可变的上传内容，不访问客户端或当前项目目录。不存在、过期或他人图片返回 404。",
+    summary="读取任务输入附件",
+    description="需要附件所属账号鉴权。读取不可变的上传内容，不访问客户端或当前项目目录。不存在、过期或他人附件返回 404。视觉图片以内联方式预览，其他文件作为附件下载。",
     responses={
         200: {
-            "description": "上传图片原始内容；Content-Type 使用服务端识别的图片格式。",
+            "description": "上传附件原始内容；视觉图片的 Content-Type 使用服务端识别的真实格式。",
             "content": {
                 media: {"schema": {"type": "string", "format": "binary"}}
-                for media in ("image/png", "image/jpeg", "image/webp", "image/gif")
+                for media in (
+                    "application/octet-stream",
+                    "image/png",
+                    "image/jpeg",
+                    "image/webp",
+                    "image/gif",
+                )
             },
         }
     },
 )
-async def preview_task_image(
+async def download_task_attachment(
     attachment_id: str,
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
@@ -379,7 +390,12 @@ async def preview_task_image(
         content=content,
         media_type=attachment.media_type,
         headers={
-            "Content-Disposition": content_disposition(attachment.name, disposition="inline"),
+            "Content-Disposition": content_disposition(
+                attachment.name,
+                disposition="inline"
+                if input_attachments.is_image(attachment.media_type)
+                else "attachment",
+            ),
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
