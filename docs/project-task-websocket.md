@@ -221,6 +221,8 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "prompt":"请概括下一步工作",
       "reply":"",
       "reasoning":"",
+      "content_blocks":[],
+      "content_revision":0,
       "status":"queued",
       "error_code":"",
       "activity":"",
@@ -263,6 +265,8 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "prompt":"请概括下一步工作",
       "reply":"",
       "reasoning":"先确认项目目标，再整理下一步。",
+      "content_blocks":[{"block_id":"turn_example:1","type":"reasoning","text":"先确认项目目标，再整理下一步。","status":"streaming","tool_call_id":null,"tool_name":null}],
+      "content_revision":1,
       "status":"running",
       "error_code":"",
       "activity":"",
@@ -285,6 +289,8 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
 上例是只有思考内容的推送：reply 仍为空，APP 也应更新思考区块。思考没有独立的 reasoning 事件，始终随 turn 完整状态发送。
 
 reply 和 reasoning 各自是累计全文。例如 reasoning 第一次为“先确认项目目标”，第二次为“先确认项目目标，再整理下一步。”。客户端分别替换累计文本，或确认前缀一致后仅追加新增部分，不能直接拼接两次累计文本。
+
+新轮次还提供 `content_blocks` 和 `content_revision`，用于按发生顺序展示摘要、思考、工具活动与回答。它们随同一条 turn 完整状态发送，不是增量事件。展示规则见下文“有序内容块”。
 
 snapshot.data 与创建回执的 result.data 使用相同 TaskDetail 结构，没有 data.task 包装。识别任务分别用 `snapshot.data.task_id` 和 `turn.data.task.task_id`。
 
@@ -313,6 +319,8 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | turn_id / request_id | string | 轮次与消息幂等身份 |
 | prompt / reply | string | 用户消息与已保存的累计回复 |
 | reasoning | string | 模型实际返回的可展示思考文本，与 reply 分开保存；无内容时为空字符串 |
+| content_blocks | TaskContentBlock[] | 按首次发生顺序排列的完整内容块快照；历史未记录时为空 |
+| content_revision | integer | 本轮内容块版本，独立于任务列表版本；客户端按此版本替换内容块 |
 | status / error_code | string | 轮次状态；错误码为空字符串时无错误 |
 | activity | string | 当前工具名称；空字符串表示无活动摘要，不含参数或工具结果 |
 | model_ref | string | 实际模型引用 |
@@ -362,6 +370,28 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 options 只影响本轮，不写回项目。相同 request_id 的网络重发保持原 options，不在重连时重新计算继承结果。
 
 ### APP 思考内容接入
+
+#### 有序内容块
+
+`TaskTurn.content_blocks` 是按首次发生顺序排列的完整快照，`content_revision` 是本轮单调递增的内容版本。WebSocket、SSE、REST 详情和历史分页使用同一结构。客户端仅用版本不小于已保存版本的快照替换内容块；与 `list_revision` 独立，不按文字总长度裁决。终态仍以 `turn.status` 判断，收到终态时停止所有流式动画。
+
+| 字段 | 含义 |
+| --- | --- |
+| block_id | 本轮内稳定的标识；追加文字、结束或刷新后保持一致 |
+| type | `text` 回答文字；`reasoning` 可展示思考；`reasoning_summary` 供应商返回的思考摘要；`tool` 工具活动 |
+| text | 本块累计文字，客户端替换，不重复追加 |
+| status | `streaming` 仍在生成/执行；`completed` 此块结束；`failed` 工具返回错误；`interrupted` 未完成即停止或中断 |
+| tool_call_id / tool_name | 工具调用标识和名称；非工具块为 null。不包含工具参数、输出或凭据 |
+
+例如同一轮可以依次收到“摘要① → 工具 A → 摘要② → 回答① → 回答②”。模型响应、供应商摘要项、思考/正文切换和工具调用是分段边界，网络 token 批次与 Markdown 换行不是分段依据。并行工具各有独立标识，完成顺序不改变其原始位置。`completed` 只表示当前内容块结束，不表示任务完成，也不代表回答内容已经通过验证。
+
+有内容块时按数组顺序渲染，思考/摘要可折叠，工具显示名称及状态；不要再同时渲染累计 `reply`、`reasoning` 或当前 `activity`，否则会重复。这些累计字段继续保存。历史没有记录分段的轮次返回 `content_blocks: []`、`content_revision: 0`，直接展示原有累计文本，不推测旧工具顺序、不改写历史数据。
+
+OpenAI 官方端点或已使用 Responses 的模型，在启用思考且声明相应能力时请求 `reasoning.summary: auto`，保存其公开摘要；加密推理内容只用于模型上下文续接，不发给客户端。GLM 等 Chat Completions 接口继续读取 `reasoning_content`，保存为 `reasoning` 块，不冒充供应商摘要，不额外调用模型改写。两种来源均支持工具前后的独立分段。
+
+失败、取消与断线恢复保留已生成的块；进程异常退出留下的 streaming 块在终态读取时标记 interrupted。重试会创建新轮次及新内容块，不续写旧块。
+
+#### 累计思考文本
 
 APP 在轮次数据模型中增加 `reasoning: string`，按 task_id/turn_id 保存并与 reply 分开渲染；非空时显示可折叠的“思考过程”，为空时隐藏。不要以 reply 非空或 list_revision 增长作为处理 turn 的条件，思考可能先于正式回复出现。
 

@@ -20,6 +20,7 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import artifacts
 from octop.infra.projects.artifact_models import TaskArtifact
 from octop.infra.projects.client_tool_models import ClientID, ClientToolDefinition
+from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
 from octop.infra.projects.models import (
     ProjectFields,
@@ -195,6 +196,10 @@ class TaskTurn(ProjectModel):
     reasoning: str = Field(
         description="模型实际返回的可展示思考文本；与正式回复分开保存。无内容时为空字符串。"
     )
+    content_blocks: list[TaskContentBlock] = Field(
+        description="按发生顺序排列的完整内容块快照；历史未记录分段时为空，不推测原始顺序。"
+    )
+    content_revision: int = Field(description="本轮内容块版本；只有内容块或块状态变化才递增。")
     status: TurnStatus
     error_code: str
     activity: str = Field(description="当前执行的工具名称；不包含参数、凭据或工具输出。")
@@ -269,6 +274,11 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
 
 def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = None) -> TaskTurn:
     configuration = json.loads(t.configuration_json)
+    blocks = [TaskContentBlock.model_validate(block) for block in json.loads(t.content_blocks_json)]
+    if t.status not in {"queued", "running"}:
+        for block in blocks:
+            if block.status == "streaming":
+                block.status = "interrupted"
     return TaskTurn(
         sequence=t.pk,
         turn_id=t.turn_id,
@@ -276,6 +286,8 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         prompt=t.prompt,
         reply=t.reply,
         reasoning=t.reasoning,
+        content_blocks=blocks,
+        content_revision=t.content_revision,
         status=cast(TurnStatus, t.status),
         error_code=t.error_code,
         activity=t.activity,

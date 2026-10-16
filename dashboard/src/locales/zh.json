@@ -6602,6 +6602,7 @@
       "archiveBusy": "请先结束或停止当前回复再归档",
       "archivedHint": "此任务已归档，恢复后可继续对话。",
       "reasoning": "思考过程",
+      "reasoningSummary": "思考摘要",
       "reasoningDefault": "模型默认",
       "executionOptions": "本轮设置",
       "customPlugins": "自定义本轮插件",

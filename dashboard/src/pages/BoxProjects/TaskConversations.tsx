@@ -31,7 +31,6 @@ import {
   type Project,
   type TaskSummary,
 } from "../../api/modules/projects";
-import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { apiErrorMessage } from "../../utils/apiError";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
@@ -39,6 +38,7 @@ import styles from "./index.module.less";
 import { useTaskList } from "./useProjectLists";
 import { useTaskConversation } from "./useTaskConversation";
 import TaskExecutionSettings from "./TaskExecutionSettings";
+import TaskTurnContent from "./TaskTurnContent";
 
 export default function TaskConversations({
   projectID,
@@ -636,26 +636,7 @@ export default function TaskConversations({
                     <Typography.Paragraph type="secondary">
                       {t("projects.tasks.modelUsed", { model: turn.model_ref })}
                     </Typography.Paragraph>
-                    {turn.reasoning && (
-                      <details className={styles.taskReasoning}>
-                        <summary>{t("projects.tasks.reasoning")}</summary>
-                        <LazyMarkdown
-                          content={turn.reasoning}
-                          isStreaming={turn.status === "running"}
-                        />
-                      </details>
-                    )}
-                    {turn.reply && (
-                      <LazyMarkdown
-                        content={turn.reply}
-                        isStreaming={turn.status === "running"}
-                      />
-                    )}
-                    {turn.activity && (
-                      <Typography.Text type="secondary">
-                        {t("projects.tasks.tool", { name: turn.activity })}
-                      </Typography.Text>
-                    )}
+                    <TaskTurnContent turn={turn} />
                     {turn.artifacts?.length > 0 && (
                       <Space
                         direction="vertical"

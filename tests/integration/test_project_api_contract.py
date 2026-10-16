@@ -31,6 +31,9 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
             p["name"] == "expected_revision" and p["required"] for p in deletion["parameters"]
         )
     assert "TaskExecutionOptions" in schema["components"]["schemas"]
+    turn = schema["components"]["schemas"]["TaskTurn"]
+    assert {"content_blocks", "content_revision"} <= set(turn["required"])
+    assert turn["properties"]["content_blocks"]["items"]["$ref"].endswith("/TaskContentBlock")
     assert "patch" in paths["/api/projects/{project_id}/archive"]
     assert "archived" in schema["components"]["schemas"]["ProjectView"]["properties"]
     task_summary = schema["components"]["schemas"]["TaskSummary"]

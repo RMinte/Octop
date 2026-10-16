@@ -1121,6 +1121,8 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
             assert after_task == before_task
             after_turn = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
             assert after_turn.pop("reasoning") == ""
+            assert after_turn.pop("content_blocks_json") == "[]"
+            assert after_turn.pop("content_revision") == 0
             assert after_turn == before_turn
             assert conn.execute("SELECT COUNT(*) FROM project_sync_changes").fetchone()[0] == 0
             assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 40
@@ -1256,6 +1258,34 @@ def test_recorded_v39_repairs_reasoning_column_and_preserves_existing_turn(db):
             == "Saved provider reasoning"
         )
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_recorded_v40_adds_content_columns_without_rewriting_turns(db):
+    from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRepo
+
+    with db.transaction() as conn:
+        owner = conn.execute(
+            "INSERT INTO users(username,password_hash,role,created_at) VALUES('content-owner','x','user',1) RETURNING id"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO project_tasks(task_id,owner_id,title,request_id,created_at,updated_at) VALUES('content-task',?,'Preserved','content-request',123,456)",
+            (owner,),
+        )
+        conn.execute(
+            "INSERT INTO project_task_turns(turn_id,task_id,request_id,prompt,reply,reasoning,status,configuration_json,model_ref,created_at,updated_at) "
+            "VALUES('content-turn','content-task','content-request','Keep prompt','Keep reply','Keep thinking','completed','{}','fixture/model',123,456)"
+        )
+        conn.execute("ALTER TABLE project_task_turns DROP COLUMN content_blocks_json")
+        conn.execute("ALTER TABLE project_task_turns DROP COLUMN content_revision")
+        before = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
+    run_migrations(db)
+    run_migrations(db)
+    with db.connect() as conn:
+        after = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
+        assert after.pop("content_blocks_json") == "[]"
+        assert after.pop("content_revision") == 0
+        assert after == before
+    assert ProjectTaskTurnRepo(db).get("content-turn").reply == "Keep reply"
 
 
 def test_project_archive_upgrade_preserves_projects_and_task_archive_state(tmp_path, monkeypatch):

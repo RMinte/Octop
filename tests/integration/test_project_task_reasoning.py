@@ -79,6 +79,8 @@ async def test_real_task_harness_applies_reasoning_settings_and_saves_separate_o
     turn = task["turns"][0]
     assert turn["reasoning"] == "模型返回的思考内容"
     assert turn["reply"] == "正式回复"
+    assert [block["type"] for block in turn["content_blocks"]] == ["reasoning", "text"]
+    assert [block["text"] for block in turn["content_blocks"]] == ["模型返回的思考内容", "正式回复"]
     assert turn["options"]["reasoning_mode"] == "enabled"
     assert turn["options"]["reasoning_effort"] == "high"
     assert observed == ["high"]
@@ -128,6 +130,8 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
             lambda f: f["type"] == "turn" and f["data"]["turn"]["reasoning"] == "先核对已有信息。",
         )
         assert live["data"]["turn"]["reply"] == ""
+        first_block = live["data"]["turn"]["content_blocks"][0]
+        assert first_block["type"] == "reasoning" and first_block["status"] == "streaming"
         first.set()
         longer = await until(
             ws,
@@ -138,6 +142,8 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
         )
         assert longer["data"]["task"]["list_revision"] == live["data"]["task"]["list_revision"]
         assert longer["data"]["cursor"] != live["data"]["cursor"]
+        assert longer["data"]["turn"]["content_blocks"][0]["block_id"] == first_block["block_id"]
+        assert longer["data"]["turn"]["content_revision"] > live["data"]["turn"]["content_revision"]
         cursor = longer["data"]["cursor"]
         if status == "cancelled":
             await client.post(
@@ -151,6 +157,7 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
         assert done["status"] == status, done
         assert done["turns"][0]["reasoning"] == "先核对已有信息。再确认结论。"
         assert done["turns"][0]["reply"] == ("正式答案" if status == "completed" else "")
+        assert all(block["status"] != "streaming" for block in done["turns"][0]["content_blocks"])
     finally:
         first.set()
         finish.set()
@@ -169,8 +176,79 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
             ws, lambda f: f["type"] == "turn" and f["data"]["turn"]["status"] == status
         )
         assert restored["data"]["turn"]["reasoning"] == done["turns"][0]["reasoning"]
+        assert restored["data"]["turn"]["content_blocks"] == done["turns"][0]["content_blocks"]
     finally:
         await session.__aexit__(None, None, None)
+
+
+@pytest.mark.parametrize("source", ["responses", "glm"])
+async def test_summary_and_tool_rounds_survive_persistence_and_reopen(
+    env_with_provider, monkeypatch, source
+):
+    client, server, auth = env_with_provider
+
+    def summary(text):
+        return {
+            "type": "reasoning",
+            "index": 0,
+            "summary": [{"type": "summary_text", "index": 0, "text": text}],
+            "encrypted_content": "must-not-be-public",
+        }
+
+    def message(reasoning_text, text, **kwargs):
+        if source == "glm":
+            return AIMessage(
+                content=text, additional_kwargs={"reasoning_content": reasoning_text}, **kwargs
+            )
+        return AIMessage(
+            content=[summary(reasoning_text), {"type": "text", "index": 1, "text": text}], **kwargs
+        )
+
+    harness_models(
+        monkeypatch,
+        [
+            message(
+                "先准备报告。",
+                "正在整理。",
+                tool_calls=[
+                    {
+                        "id": "report",
+                        "name": "create_artifact",
+                        "args": {"name": "report.md", "content": "report"},
+                    }
+                ],
+            ),
+            message("报告已生成。", "请查看附件。"),
+        ],
+    )
+    task = await create_task(client, auth)
+    assert task["status"] == "completed", task
+    turn = task["turns"][0]
+    blocks = turn["content_blocks"]
+    reasoning_kind = "reasoning_summary" if source == "responses" else "reasoning"
+    assert [block["type"] for block in blocks] == [
+        reasoning_kind,
+        "text",
+        "tool",
+        reasoning_kind,
+        "text",
+    ]
+    assert [block["text"] for block in blocks] == [
+        "先准备报告。",
+        "正在整理。",
+        "",
+        "报告已生成。",
+        "请查看附件。",
+    ]
+    assert blocks[2]["tool_call_id"] == "report" and blocks[2]["tool_name"] == "create_artifact"
+    assert all(block["status"] == "completed" for block in blocks)
+    assert "must-not-be-public" not in json.dumps(task)
+    assert turn["reasoning"] == "先准备报告。报告已生成。"
+    saved = server.services.project_task_turn_repo.get(turn["turn_id"])
+    assert json.loads(saved.content_blocks_json) == blocks
+    reopened = (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()
+    assert reopened["turns"][0]["content_blocks"] == blocks
+    assert reopened["turns"][0]["content_revision"] == turn["content_revision"]
 
 
 async def test_invalid_reasoning_settings_do_not_create_tasks(env_with_provider, monkeypatch):

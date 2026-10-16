@@ -6602,6 +6602,7 @@
       "archiveBusy": "Finish or stop the current reply before archiving",
       "archivedHint": "This task is archived. Restore it to continue.",
       "reasoning": "Thinking",
+      "reasoningSummary": "Reasoning summary",
       "reasoningDefault": "Model default",
       "executionOptions": "Turn settings",
       "customPlugins": "Customize plugins for this turn",

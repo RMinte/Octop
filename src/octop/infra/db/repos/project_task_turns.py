@@ -31,6 +31,8 @@ class ProjectTaskTurnRow:
     output_tokens: int = 0
     pk: int = 0
     reasoning: str = ""
+    content_blocks_json: str = "[]"
+    content_revision: int = 0
 
     @classmethod
     def from_row(cls, r: DbRow) -> ProjectTaskTurnRow:
@@ -53,6 +55,8 @@ class ProjectTaskTurnRow:
             output_tokens=strict_int(r["output_tokens"]),
             pk=strict_int(r["id"]),
             reasoning=str(r["reasoning"]),
+            content_blocks_json=str(r["content_blocks_json"]),
+            content_revision=strict_int(r["content_revision"]),
         )
 
 
@@ -184,12 +188,24 @@ class ProjectTaskTurnRepo:
         now: int,
         *,
         reasoning: str | None = None,
+        content_blocks_json: str | None = None,
+        content_revision: int | None = None,
     ) -> bool:
         with self._db.connect() as conn:
             r = conn.execute(
-                "UPDATE project_task_turns SET reply=?, activity=?, updated_at=?, reasoning=COALESCE(?,reasoning) "
+                "UPDATE project_task_turns SET reply=?, activity=?, updated_at=?, reasoning=COALESCE(?,reasoning), "
+                "content_blocks_json=COALESCE(?,content_blocks_json), content_revision=COALESCE(?,content_revision) "
                 "WHERE turn_id=? AND worker_id=? AND status='running' RETURNING cancel_requested",
-                (reply, activity, now, reasoning, turn_id, worker_id),
+                (
+                    reply,
+                    activity,
+                    now,
+                    reasoning,
+                    content_blocks_json,
+                    content_revision,
+                    turn_id,
+                    worker_id,
+                ),
             ).fetchone()
         return r is None or bool(r["cancel_requested"])
 
@@ -204,13 +220,26 @@ class ProjectTaskTurnRepo:
         now: int,
         *,
         reasoning: str | None = None,
+        content_blocks_json: str | None = None,
+        content_revision: int | None = None,
     ) -> bool:
         return bool(
             conn.execute(
                 "UPDATE project_task_turns SET status=CASE WHEN cancel_requested=1 "
-                "THEN 'cancelled' ELSE ? END, reply=?, error_code=?, activity='', updated_at=?, reasoning=COALESCE(?,reasoning) "
+                "THEN 'cancelled' ELSE ? END, reply=?, error_code=?, activity='', updated_at=?, reasoning=COALESCE(?,reasoning), "
+                "content_blocks_json=COALESCE(?,content_blocks_json), content_revision=COALESCE(?,content_revision) "
                 "WHERE turn_id=? AND worker_id=? AND status='running'",
-                (status, reply, error_code, now, reasoning, turn_id, worker_id),
+                (
+                    status,
+                    reply,
+                    error_code,
+                    now,
+                    reasoning,
+                    content_blocks_json,
+                    content_revision,
+                    turn_id,
+                    worker_id,
+                ),
             ).rowcount
             == 1
         )

@@ -140,6 +140,14 @@ export interface TaskArtifact {
   download_url: string;
   created_at: string;
 }
+export interface TaskContentBlock {
+  block_id: string;
+  type: "text" | "reasoning" | "reasoning_summary" | "tool";
+  text: string;
+  status: "streaming" | "completed" | "failed" | "interrupted";
+  tool_call_id: string | null;
+  tool_name: string | null;
+}
 export interface TaskTurn {
   sequence: number;
   turn_id: string;
@@ -147,6 +155,8 @@ export interface TaskTurn {
   prompt: string;
   reply: string;
   reasoning: string;
+  content_blocks: TaskContentBlock[];
+  content_revision: number;
   status: TaskStatus;
   error_code: string;
   activity: string;

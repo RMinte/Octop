@@ -1972,6 +1972,12 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
             _ensure_column(
                 db, "projects", "archived", "INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))"
             )
+            _ensure_column(
+                db, "project_task_turns", "content_blocks_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            _ensure_column(
+                db, "project_task_turns", "content_revision", "BIGINT NOT NULL DEFAULT 0"
+            )
         elif any(not _table_exists(db, table) for table in tables[version]):
             with db.transaction() as conn:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):

@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from octop.infra.projects import runtime
+from octop.infra.projects.content import TaskContent
 from octop.infra.projects.tasks import TaskMessage, now_ms, send
 from tests.support.auth import create_user, resolve_user_id
 
@@ -245,10 +246,34 @@ async def test_queued_cancel_and_abandoned_worker_recovery(task_env):
     task = send(services, owner, TaskMessage(request_id="lost-worker", prompt="Work"))
     claimed = services.project_task_turn_repo.claim("dead-process", now_ms() - 100_000)
     assert claimed is not None
+    content = TaskContent(claimed.turn_id)
+    content.append("reasoning_summary", "准备读取。")
+    content.start_tool("read", "read_file")
+    content.append("text", "尚未完成的回答。")
+    saved_blocks = content.dump()
+    services.project_task_turn_repo.progress(
+        claimed.turn_id,
+        "dead-process",
+        "尚未完成的回答。",
+        "read_file",
+        now_ms() - 100_000,
+        content_blocks_json=json.dumps(saved_blocks),
+        content_revision=content.revision,
+    )
     worker._recover()
     done = (await client.get(f"/api/project-tasks/{task.task_id}", headers=auth)).json()
     assert done["active_turn_id"] is None and done["turns"][0]["error_code"] == "TASK_INTERRUPTED"
     assert done["status"] == "failed"
+    assert [block["status"] for block in done["turns"][0]["content_blocks"]] == [
+        "completed",
+        "interrupted",
+        "interrupted",
+    ]
+    assert done["turns"][0]["content_revision"] == content.revision
+    assert (
+        json.loads(services.project_task_turn_repo.get(claimed.turn_id).content_blocks_json)
+        == saved_blocks
+    )
     assert calls == []  # Recovery does not rerun possibly effective tools.
 
 

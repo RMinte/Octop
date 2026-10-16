@@ -1018,6 +1018,75 @@
       "title": "TaskArtifact",
       "type": "object"
     },
+    "TaskContentBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "block_id": {
+          "description": "轮次内稳定的内容块标识；追加文字和状态更新不会改变标识。",
+          "title": "Block Id",
+          "type": "string"
+        },
+        "type": {
+          "description": "回答文字、可展示思考、供应商思考摘要或工具活动。",
+          "enum": [
+            "text",
+            "reasoning",
+            "reasoning_summary",
+            "tool"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "description": "该块的累计公开文字；不含私有推理、工具参数或输出。",
+          "title": "Text",
+          "type": "string"
+        },
+        "status": {
+          "description": "块状态；completed 只表示该块结束，不表示整轮完成。",
+          "enum": [
+            "streaming",
+            "completed",
+            "failed",
+            "interrupted"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Call Id"
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Name"
+        }
+      },
+      "required": [
+        "block_id",
+        "type",
+        "status"
+      ],
+      "title": "TaskContentBlock",
+      "type": "object"
+    },
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
@@ -1046,6 +1115,19 @@
           "description": "模型实际返回的可展示思考文本；与正式回复分开保存。无内容时为空字符串。",
           "title": "Reasoning",
           "type": "string"
+        },
+        "content_blocks": {
+          "description": "按发生顺序排列的完整内容块快照；历史未记录分段时为空，不推测原始顺序。",
+          "items": {
+            "$ref": "#/$defs/TaskContentBlock"
+          },
+          "title": "Content Blocks",
+          "type": "array"
+        },
+        "content_revision": {
+          "description": "本轮内容块版本；只有内容块或块状态变化才递增。",
+          "title": "Content Revision",
+          "type": "integer"
         },
         "status": {
           "enum": [
@@ -1140,6 +1222,8 @@
         "prompt",
         "reply",
         "reasoning",
+        "content_blocks",
+        "content_revision",
         "status",
         "error_code",
         "activity",

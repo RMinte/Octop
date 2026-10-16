@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, message_to_dict, messages_from_dict
+from langchain_core.messages import AIMessage, ToolMessage, message_to_dict, messages_from_dict
 from octop_harness import HarnessAgent, HarnessAgentConfig
 from octop_harness.mcp import aload_mcp_tools
 from octop_harness.messages import extract_call_response
@@ -35,9 +35,11 @@ from octop.infra.projects.capabilities import plugin_capabilities, subagent_spec
 from octop.infra.projects.client_tool_models import ClientToolDefinition
 from octop.infra.projects.client_tools import ClientToolBroker
 from octop.infra.projects.collaboration import TaskTeam, guard_subagents
+from octop.infra.projects.content import TaskContent
 from octop.infra.projects.context import capture_memory, close_pending_tools
 from octop.infra.projects.models import ProjectFields, SkillBinding
 from octop.infra.projects.service import _validate
+from octop.infra.projects.stream import TASK_PROTOCOL
 from octop.infra.projects.tasks import now_ms
 from octop.infra.projects.title import TaskTitleWorker
 from octop.infra.skills.install import prepare_skillhub_package
@@ -197,7 +199,10 @@ async def run_turn(
         subagents_auto_load=False,
         team_enabled=fields.team_enabled,
         peer_invoke_mode="sync",
-        middleware=[*plugin_middleware, ReasoningRequestMiddleware()],
+        middleware=[
+            *plugin_middleware,
+            ReasoningRequestMiddleware(summary=raw.get("reasoning_mode") not in {None, "disabled"}),
+        ],
         ask_user_enabled=False,
         media_offload_enabled=False,
         tools_disabled=frozenset(
@@ -292,7 +297,7 @@ async def run_turn(
             configurable={CONFIG_KEY: raw.get("reasoning_overrides", {})},
         )
         delegating = False
-        async for event in agent.stream(request, protocol="langgraph"):
+        async for event in agent.stream(request, protocol=TASK_PROTOCOL):
             if broker.failure:
                 raise OctopError.localized(broker.failure)
             kind = event.get("type")
@@ -300,23 +305,49 @@ async def run_turn(
                 if not delegating:
                     content = str(event.get("content") or "")
                     reply_text += content
-                    yield {"type": "token", "content": content}
-            elif kind == "reasoning":
+                    yield {
+                        "type": "token",
+                        "content": content,
+                        "block_key": event.get("block_key", ""),
+                    }
+            elif kind in {"reasoning", "reasoning_summary"}:
                 if not delegating:
-                    yield {"type": "reasoning", "content": str(event.get("content") or "")}
-            elif kind == "tool_call_chunk" and event.get("name"):
+                    yield {
+                        "type": kind,
+                        "content": str(event.get("content") or ""),
+                        "block_key": event.get("block_key", ""),
+                    }
+            elif kind == "message_end":
+                if not delegating:
+                    yield event
+            elif kind == "tool_call_chunk" and event.get("name") and event.get("id"):
                 if event["name"] in {"task", "ask_agent"}:
                     delegating = True
-                yield {"type": "activity", "name": str(event["name"])}
+                yield {
+                    "type": "tool_start",
+                    "name": str(event["name"]),
+                    "call_id": str(event.get("id") or ""),
+                }
             elif kind == "tool_result":
                 delegating = False
-                yield {"type": "activity", "name": ""}
+                for message in event.get("messages", []):
+                    if isinstance(message, ToolMessage):
+                        yield {
+                            "type": "tool_end",
+                            "call_id": message.tool_call_id,
+                            "failed": message.status == "error",
+                        }
             elif kind == "state_update":
                 for message in (event.get("data") or {}).get("messages", []):
-                    if isinstance(message, AIMessage) and any(
-                        call["name"] in {"task", "ask_agent"} for call in message.tool_calls
-                    ):
-                        delegating = True
+                    if isinstance(message, AIMessage):
+                        for call in message.tool_calls:
+                            if call["name"] in {"task", "ask_agent"}:
+                                delegating = True
+                            yield {
+                                "type": "tool_start",
+                                "name": call["name"],
+                                "call_id": call["id"],
+                            }
             elif kind == "usage":
                 usage[str(event.get("call_id") or "model")] = dict(event.get("usage") or {})
             elif kind == "hitl_required":
@@ -421,6 +452,7 @@ class ProjectTaskWorker:
         reply: str,
         error: str,
         reasoning: str | None = None,
+        content: TaskContent | None = None,
     ) -> None:
         now = now_ms()
         owner = self.services.project_task_repo.runtime_owner(turn.task_id)
@@ -437,6 +469,10 @@ class ProjectTaskWorker:
                 error,
                 now,
                 reasoning=reasoning,
+                content_blocks_json=json.dumps(content.dump(), ensure_ascii=False)
+                if content
+                else None,
+                content_revision=content.revision if content else None,
             ):
                 final = self.services.project_task_turn_repo.get_in_transaction(conn, turn.turn_id)
                 cancelled = final is not None and final.status == "cancelled"
@@ -451,6 +487,7 @@ class ProjectTaskWorker:
 
     async def _execute(self, turn: ProjectTaskTurnRow) -> None:
         reply, reasoning, activity, status, error = "", "", "", "completed", ""
+        content = TaskContent(turn.turn_id)
 
         async def heartbeat() -> None:
             while True:
@@ -463,6 +500,8 @@ class ProjectTaskWorker:
                     activity,
                     now_ms(),
                     reasoning=reasoning,
+                    content_blocks_json=json.dumps(content.dump(), ensure_ascii=False),
+                    content_revision=content.revision,
                 )
                 if cancelled or self.closing:
                     assert self._current is not None
@@ -506,10 +545,24 @@ class ProjectTaskWorker:
             async for event in run_turn(self.services, task, turn, history):
                 if event["type"] == "token":
                     reply += event["content"]
-                elif event["type"] == "reasoning":
+                    content.append("text", event["content"], event.get("block_key", ""))
+                elif event["type"] in {"reasoning", "reasoning_summary"}:
                     reasoning += event["content"]
-                else:
+                    content.append(event["type"], event["content"], event.get("block_key", ""))
+                elif event["type"] == "message_end":
+                    content.end_text()
+                elif event["type"] == "tool_start":
                     activity = event["name"]
+                    content.start_tool(event["call_id"], activity)
+                elif event["type"] == "tool_end":
+                    content.end_tool(event["call_id"], failed=event["failed"])
+                    activity = ""
+                elif event["type"] == "activity":
+                    activity = event["name"]
+                    if activity:
+                        content.start_tool("", activity)
+                    else:
+                        content.end_tool("")
             if not reply.strip():
                 raise OctopError.localized(ErrorCode.TASK_EXECUTION_FAILED)
         except asyncio.CancelledError:
@@ -529,4 +582,5 @@ class ProjectTaskWorker:
             beat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await beat
-            await asyncio.to_thread(self._finish, turn, status, reply, error, reasoning)
+            content.finish(completed=status == "completed")
+            await asyncio.to_thread(self._finish, turn, status, reply, error, reasoning, content)

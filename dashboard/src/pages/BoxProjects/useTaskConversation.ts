@@ -32,6 +32,14 @@ function mergeTurns(current: TaskTurn[], incoming: TaskTurn[]): TaskTurn[] {
         old && old.reasoning.length > turn.reasoning.length
           ? old.reasoning
           : turn.reasoning,
+      content_blocks:
+        old && old.content_revision > turn.content_revision
+          ? old.content_blocks
+          : turn.content_blocks,
+      content_revision: Math.max(
+        old?.content_revision ?? 0,
+        turn.content_revision,
+      ),
       cancel_requested: old?.cancel_requested || turn.cancel_requested,
     });
   }

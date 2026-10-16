@@ -407,6 +407,8 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 
 本轮已补齐会话历史分页、可续接轮次状态流、精确取消和失败/取消后的继续及手动重试。任务列表分页和摘要同步已有实现。本轮继续补齐任务改名、归档/恢复和逐轮模型、Skill/MCP 选择。后续仍需改造：执行权限模式、附件产物与审批。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
 
+每轮还返回 `content_blocks`（按发生顺序的摘要、思考、回答和工具活动）及 `content_revision`（内容版本）。内容块是完整快照，客户端按版本替换并保留 block_id 的展示状态；有块时不重复渲染累计 reply/reasoning。历史未记录分段时数组为空，继续展示原文。公开摘要来自模型实际返回，GLM 的 reasoning_content 保持思考类型。字段与恢复规则见 [有序内容块](project-task-websocket.md#有序内容块)。
+
 当前实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
 
 

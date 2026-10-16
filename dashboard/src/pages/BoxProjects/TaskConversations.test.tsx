@@ -69,6 +69,8 @@ const fixture: TaskDetail = {
       prompt: "记住蓝鸟",
       reply: "已记住蓝鸟",
       reasoning: "",
+      content_blocks: [],
+      content_revision: 0,
       status: "completed",
       error_code: "",
       activity: "",
@@ -888,6 +890,109 @@ it("独立展示思考内容并合并实时更新，迟到内容不截断已收�
   );
   expect(screen.getByText(reasoning)).toBeVisible();
   expect(screen.getByText("已记住蓝鸟")).toBeVisible();
+  expect(fold).toHaveAttribute("open");
+});
+
+it("摘要与工具按顺序展示，稳定标识保留展开状态，迟到快照不会覆盖新内容块", async () => {
+  const running: TaskDetail = {
+    ...fixture,
+    active_turn_id: "turn_a",
+    turns: [
+      {
+        ...fixture.turns[0],
+        status: "running",
+        reply: "",
+        reasoning: "准备检查。",
+        content_revision: 1,
+        content_blocks: [
+          {
+            block_id: "summary-1",
+            type: "reasoning_summary",
+            text: "准备检查。",
+            status: "streaming",
+            tool_call_id: null,
+            tool_name: null,
+          },
+        ],
+      },
+    ],
+  };
+  api.open.mockResolvedValue(running);
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+  await user.click(screen.getByText("思考摘要"));
+  const fold = screen.getByText("思考摘要").closest("details")!;
+  const blocks: TaskDetail["turns"][number]["content_blocks"] = [
+    {
+      ...running.turns[0].content_blocks[0],
+      text: "准备检查。先核对目录。",
+      status: "completed",
+    },
+    {
+      block_id: "tool-1",
+      type: "tool",
+      text: "",
+      status: "completed",
+      tool_call_id: "read",
+      tool_name: "read_file",
+    },
+    {
+      block_id: "summary-2",
+      type: "reasoning_summary",
+      text: "检查已完成。",
+      status: "streaming",
+      tool_call_id: null,
+      tool_name: null,
+    },
+    {
+      block_id: "answer-1",
+      type: "text",
+      text: "正式交付。",
+      status: "streaming",
+      tool_call_id: null,
+      tool_name: null,
+    },
+  ];
+  const receive = api.events.mock.calls[0][2];
+  await act(async () =>
+    receive({
+      type: "turn",
+      data: {
+        task: running,
+        turn: {
+          ...running.turns[0],
+          content_revision: 4,
+          content_blocks: blocks,
+        },
+        cursor: "blocks-newer",
+      },
+    }),
+  );
+  expect(fold).toHaveAttribute("open");
+  expect(screen.getByText("准备检查。先核对目录。")).toBeVisible();
+  expect(screen.getAllByText("思考摘要")).toHaveLength(2);
+  expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
+  const tool = screen.getByText(zh.projects.tasks.tool);
+  expect(
+    fold.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    tool.compareDocumentPosition(screen.getByText("正式交付。")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  await act(async () =>
+    receive({
+      type: "turn",
+      data: {
+        task: fixture,
+        turn: { ...running.turns[0], status: "completed", content_revision: 2 },
+        cursor: "blocks-old-terminal",
+      },
+    }),
+  );
+  expect(screen.getByText("正式交付。")).toBeVisible();
+  expect(screen.getByText("准备检查。先核对目录。")).toBeVisible();
   expect(fold).toHaveAttribute("open");
 });
 
