@@ -63,6 +63,7 @@ const fixture: TaskDetail = {
   status: "completed",
   active_turn_id: null,
   list_revision: 1,
+  web_search_enabled: false,
   approval_policy: {
     mode: "ask_for_approval",
     revision: 1,
@@ -89,6 +90,7 @@ const fixture: TaskDetail = {
       artifacts: [],
       model_ref: "glm/glm",
       options: {},
+      web_search_enabled: false,
       retry_of_turn_id: null,
       cancel_requested: false,
       pause_requested: false,
@@ -585,6 +587,7 @@ describe("项目任务对话", () => {
         expect.objectContaining({
           prompt: "记住蓝鸟",
           approval_mode: "ask_for_approval",
+          web_search_enabled: true,
           request_id: expect.any(String),
         }),
       ),
@@ -1754,6 +1757,240 @@ it("暂停与继续绑定原轮次，暂停意图确认后显示继续", async (
     "turn_a",
     false,
   ]);
+});
+
+it("新任务默认开启网络搜索并保存到创建顶层字段，后续消息沿用任务配置", async () => {
+  const enabled = { ...fixture, web_search_enabled: true };
+  api.create.mockResolvedValue(enabled);
+  api.open.mockResolvedValue(enabled);
+  api.send.mockResolvedValue(enabled);
+  const user = userEvent.setup();
+  mount();
+  const toggle = await screen.findByRole("switch", { name: "网络搜索" });
+  expect(toggle).toBeChecked();
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "搜索资料",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(api.create).toHaveBeenCalledWith(
+      "proj_a",
+      expect.objectContaining({ web_search_enabled: true }),
+    ),
+  );
+  expect(api.create.mock.calls[0][1].options).toBeUndefined();
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "网络搜索" })).toBeChecked(),
+  );
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "继续搜索",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(api.send).toHaveBeenCalledTimes(1));
+  expect(api.send.mock.calls[0][1]).not.toHaveProperty("web_search_enabled");
+  expect(api.send.mock.calls[0][1].options).toBeUndefined();
+});
+
+it("主动关闭搜索后创建和追问保留关闭状态，切回新任务恢复默认开启", async () => {
+  const user = userEvent.setup();
+  mount();
+  const toggle = await screen.findByRole("switch", { name: "网络搜索" });
+  expect(toggle).toBeChecked();
+  await user.click(toggle);
+  expect(toggle).not.toBeChecked();
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "只看本地资料",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(api.create).toHaveBeenCalledWith(
+      "proj_a",
+      expect.objectContaining({ web_search_enabled: false }),
+    ),
+  );
+  await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_a"));
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "网络搜索" })).not.toBeChecked(),
+  );
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "继续本地分析",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(api.send).toHaveBeenCalledTimes(1));
+  expect(api.send.mock.calls[0][1]).not.toHaveProperty("web_search_enabled");
+  expect(api.send.mock.calls[0][1].options).toBeUndefined();
+  expect(screen.getByRole("switch", { name: "网络搜索" })).not.toBeChecked();
+  await user.click(screen.getByRole("button", { name: "新任务" }));
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "网络搜索" })).toBeChecked(),
+  );
+  expect(api.update).not.toHaveBeenCalled();
+});
+
+it("任务运行中可保存网络搜索开关，切换任务和重新打开时恢复各自配置", async () => {
+  const running: TaskDetail = {
+    ...fixture,
+    active_turn_id: "turn_a",
+    status: "running",
+    turns: [{ ...fixture.turns[0], status: "running" }],
+  };
+  const enabled = { ...running, list_revision: 2, web_search_enabled: true };
+  const other = { ...fixture, task_id: "task_b", title: "另一任务" };
+  api.list.mockResolvedValue({
+    items: [running, other],
+    next_page_cursor: null,
+    sync_cursor: "sync_first",
+  });
+  api.open
+    .mockResolvedValueOnce(running)
+    .mockResolvedValueOnce(other)
+    .mockResolvedValueOnce(enabled);
+  api.update.mockResolvedValue(enabled);
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const toggle = await screen.findByRole("switch", { name: "网络搜索" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  await user.click(toggle);
+  await waitFor(() =>
+    expect(api.update).toHaveBeenCalledWith("task_a", {
+      expected_revision: 1,
+      web_search_enabled: true,
+    }),
+  );
+  await waitFor(() => expect(toggle).toBeChecked());
+  expect(api.send).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: /另一任务/ }));
+  await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_b"));
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "网络搜索" })).not.toBeChecked(),
+  );
+  await user.click(screen.getByRole("button", { name: /第一项任务/ }));
+  await waitFor(() => expect(api.open).toHaveBeenCalledTimes(3));
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "网络搜索" })).toBeChecked(),
+  );
+});
+
+it("网络搜索保存期间阻止发送和重试，冲突后保留实际值并支持刷新", async () => {
+  const failed: TaskDetail = {
+    ...fixture,
+    turns: [{ ...fixture.turns[0], status: "failed" }],
+  };
+  api.open.mockResolvedValue(failed);
+  let reject!: (error: Error) => void;
+  api.update.mockReturnValueOnce(
+    new Promise((_resolve, no) => {
+      reject = no;
+    }),
+  );
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const toggle = await screen.findByRole("switch", { name: "网络搜索" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  await user.type(screen.getByRole("textbox", { name: "任务消息" }), "继续");
+  await user.click(toggle);
+  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: zh.projects.tasks.retry }),
+  ).toBeDisabled();
+  await user.type(screen.getByRole("textbox", { name: "任务消息" }), "{Enter}");
+  expect(api.send).not.toHaveBeenCalled();
+  await act(async () =>
+    reject(new Error('409 - {"error":{"code":"TASK_REVISION_CONFLICT"}}')),
+  );
+  await screen.findByText("任务已发生变化，请刷新后重新修改。");
+  expect(toggle).not.toBeChecked();
+  expect(toggle).toBeDisabled();
+  api.get.mockResolvedValue({
+    ...failed,
+    list_revision: 2,
+    web_search_enabled: true,
+  });
+  await user.click(
+    screen.getByRole("button", {
+      name: zh.projects.tasks.approvalMode.refresh,
+    }),
+  );
+  await waitFor(() => expect(toggle).toBeChecked());
+  expect(toggle).toBeEnabled();
+  expect(api.update).toHaveBeenCalledTimes(1);
+});
+
+it("网络搜索保存中切到另一任务再返回，旧请求完成前继续冻结该任务", async () => {
+  const enabled = { ...fixture, list_revision: 2, web_search_enabled: true };
+  const other = { ...fixture, task_id: "task_b", title: "另一任务" };
+  api.list.mockResolvedValue({
+    items: [fixture, other],
+    next_page_cursor: null,
+    sync_cursor: "sync_first",
+  });
+  api.open
+    .mockResolvedValueOnce(fixture)
+    .mockResolvedValueOnce(other)
+    .mockResolvedValueOnce(enabled);
+  let finish!: (value: TaskDetail) => void;
+  api.update.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const toggle = await screen.findByRole("switch", { name: "网络搜索" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  await user.click(toggle);
+  await user.click(screen.getByRole("button", { name: /另一任务/ }));
+  await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_b"));
+  await waitFor(() =>
+    expect(screen.getByRole("switch", { name: "网络搜索" })).toBeEnabled(),
+  );
+  await user.click(screen.getByRole("button", { name: /第一项任务/ }));
+  await waitFor(() => expect(api.open).toHaveBeenCalledTimes(3));
+  const restored = screen.getByRole("switch", { name: "网络搜索" });
+  expect(restored).toBeChecked();
+  expect(restored).toBeDisabled();
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "保存后继续",
+  );
+  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  await user.type(screen.getByRole("textbox", { name: "任务消息" }), "{Enter}");
+  expect(api.send).not.toHaveBeenCalled();
+  expect(api.update).toHaveBeenCalledTimes(1);
+  await act(async () => finish(enabled));
+  await waitFor(() => expect(restored).toBeEnabled());
+  expect(restored).toBeChecked();
+  expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+});
+
+it("网络搜索保存失败时重试同一版本，迟到的旧事件不能覆盖配置", async () => {
+  const enabled = { ...fixture, list_revision: 2, web_search_enabled: true };
+  api.update
+    .mockRejectedValueOnce(new Error("Lost search receipt"))
+    .mockResolvedValueOnce(enabled);
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const toggle = await screen.findByRole("switch", { name: "网络搜索" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  await user.click(toggle);
+  await screen.findByText("Lost search receipt");
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.approvalMode.retry }),
+  );
+  await waitFor(() => expect(toggle).toBeChecked());
+  expect(api.update).toHaveBeenCalledTimes(2);
+  expect(api.update.mock.calls[0]).toEqual(api.update.mock.calls[1]);
+  await act(async () =>
+    api.events.mock.calls[0][2]({
+      type: "turn",
+      data: { task: fixture, turn: fixture.turns[0], cursor: "old-search" },
+    }),
+  );
+  expect(toggle).toBeChecked();
 });
 
 it("任务模式切换丢回执后显式重试原请求，确认前保留远端模式", async () => {

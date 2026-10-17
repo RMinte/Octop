@@ -1,6 +1,6 @@
 # 任务 WebSocket 客户端接入指南
 
-协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 16 日。
+协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 17 日。
 
 客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。模型执行槽保持串行，主 Task 等待客户端工具时保存检查点并释放执行槽，其他排队任务可以继续；生成中的正文按约 0.5 秒的保存节奏更新。
 
@@ -101,6 +101,8 @@ heartbeat 不需要回复。下文的 ping 命令用于主动检查请求与回�
 ```
 
 project_id 为 null 或省略时创建无项目任务；指定项目时必须属于当前用户。prompt 去除首尾空白后最多 32768 个 Unicode 码点，还受帧字节限制；可省略或为空，但此时必须带非空 attachment_ids。附件先通过 HTTP 上传，每轮 attachment_ids 最多九个不重复 ID，图片与其他文件合计计数，规则见[第 15 节](#15-输入附件)。options 可省略，规则见第 7 节。
+
+data 顶层可传 `web_search_enabled:true/false`，默认 true，用户显式传 false 才关闭。它随任务保存，TaskSummary/TaskDetail 的同名字段返回当前值；`turns[].web_search_enabled` 返回该轮入队时的快照。修改已有任务用 REST `PATCH /api/project-tasks/{task_id}`，提交 `expected_revision`（当前 list_revision）和 `web_search_enabled`，再继续发送消息。追问和手动重试自动沿用任务当前值，保留用户主动关闭的状态，无需在 options 中设置。修改仅影响之后入队的轮次；已入队或暂停后继续的轮次保持原值。关闭只停用内置网络搜索工具，不禁止其他工具联网。
 
 成功 result.data 为 TaskDetail，通常包含 queued 的首轮。成功仅表示已保存和排队；模型或资源不满足要求时返回错误，不创建空任务。创建 Task 不会绑定或创建专家。
 

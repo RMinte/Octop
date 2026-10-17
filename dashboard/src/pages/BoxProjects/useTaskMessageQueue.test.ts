@@ -46,6 +46,7 @@ function detail(
     status,
     active_turn_id: activeID,
     list_revision: revision,
+    web_search_enabled: false,
     approval_policy: approval,
     created_at: "2026-10-16T00:00:00Z",
     updated_at: "2026-10-16T00:00:00Z",
@@ -68,6 +69,7 @@ function detail(
         artifacts: [],
         model_ref: "provider/model",
         options: {},
+        web_search_enabled: false,
         retry_of_turn_id: null,
         cancel_requested: false,
         pause_requested: false,
@@ -143,6 +145,25 @@ afterEach(() => {
 });
 
 describe("任务消息队列", () => {
+  it("保存任务配置期间暂停队列派发，释放后核对最新任务再发送", async () => {
+    const hook = renderHook(() => useTaskMessageQueue());
+    await enqueue(hook);
+    act(() => hook.result.current.hold("task_a", true));
+    act(() => hook.result.current.hold("task_a", true));
+    await snapshot(detail(2, null));
+    expect(api.send).not.toHaveBeenCalled();
+    act(() => hook.result.current.hold("task_a", false));
+    expect(hook.result.current.isHeld("task_a")).toBe(true);
+    expect(api.send).not.toHaveBeenCalled();
+    api.get.mockResolvedValue({ ...detail(3, null), web_search_enabled: true });
+    await act(async () => hook.result.current.hold("task_a", false));
+    expect(hook.result.current.isHeld("task_a")).toBe(false);
+    await waitFor(() =>
+      expect(api.send).toHaveBeenCalledWith("task_a", body("next_1")),
+    );
+    expect(api.send.mock.calls[0][1]).not.toHaveProperty("web_search_enabled");
+  });
+
   it("逐轮 FIFO 派发，并在服务端确认接收前保留队首", async () => {
     const sent = deferred<TaskDetail>();
     api.send.mockReturnValueOnce(sent.promise);

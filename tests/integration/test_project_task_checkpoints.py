@@ -103,9 +103,9 @@ async def parked(server, turn_id):
     pytest.fail("native wait was not persisted")
 
 
-async def start_native(client, server, auth):
+async def start_native(client, server, auth, *, web_search_enabled=True):
     session, ws = await connected(client, auth)
-    task, first = await start_call(ws)
+    task, first = await start_call(ws, web_search_enabled=web_search_enabled)
     second = (
         await until(
             ws,
@@ -120,11 +120,25 @@ async def start_native(client, server, auth):
 
 async def test_wait_releases_execution_slot_and_resumes_after_worker_restart(native_wait_env):
     client, server, auth, generations, agents = native_wait_env
-    session, ws, task, calls, turn = await start_native(client, server, auth)
+    session, ws, task, calls, turn = await start_native(
+        client, server, auth, web_search_enabled=False
+    )
     try:
         assert not turn.worker_id and turn.checkpoint_id
         assert len(agents) == 1
         assert json.loads(turn.pause_json)["calls"] == [call["call_id"] for call in calls]
+        current = (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()
+        changed = await client.patch(
+            f"/api/project-tasks/{task['task_id']}",
+            headers=auth,
+            json={
+                "expected_revision": current["list_revision"],
+                "web_search_enabled": True,
+            },
+        )
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["web_search_enabled"] is True
+        assert changed.json()["turns"][0]["web_search_enabled"] is False
         # An old wait is not a crashed worker and keeps the original deadline.
         with server.services.db.transaction() as conn:
             conn.execute(
@@ -155,6 +169,9 @@ async def test_wait_releases_execution_slot_and_resumes_after_worker_restart(nat
         assert final["turns"][0]["input_tokens"] == 14
         assert final["turns"][0]["output_tokens"] == 6
         assert len(agents) == 3
+        assert final["web_search_enabled"] is True
+        assert final["turns"][0]["web_search_enabled"] is False
+        assert agents[-1].config.web_search_tools is False
         assert (
             len(
                 [

@@ -42,6 +42,7 @@ export function useTaskMessageQueue() {
   const [delivered, setDelivered] = useState<Record<string, TaskDetail>>({});
   const current = useRef(queues);
   const monitors = useRef(new Map<string, QueueMonitor>());
+  const heldTasks = useRef(new Map<string, number>());
   const mounted = useRef(true);
   const translate = useRef(t);
   translate.current = t;
@@ -133,6 +134,21 @@ export function useTaskMessageQueue() {
   const retry = useCallback((taskID: string) => {
     monitors.current.get(taskID)?.retry();
   }, []);
+
+  const hold = useCallback(
+    (taskID: string, held: boolean) => {
+      const count = (heldTasks.current.get(taskID) ?? 0) + (held ? 1 : -1);
+      if (count > 0) heldTasks.current.set(taskID, count);
+      else heldTasks.current.delete(taskID);
+      writeQueues({ ...current.current });
+      if (!heldTasks.current.has(taskID)) monitors.current.get(taskID)?.pump();
+    },
+    [writeQueues],
+  );
+  const isHeld = useCallback(
+    (taskID: string) => heldTasks.current.has(taskID),
+    [],
+  );
 
   useEffect(() => {
     mounted.current = true;
@@ -291,6 +307,7 @@ export function useTaskMessageQueue() {
         if (
           !live() ||
           stopped ||
+          heldTasks.current.has(taskID) ||
           checking ||
           !canSend() ||
           !snapshot ||
@@ -408,7 +425,17 @@ export function useTaskMessageQueue() {
     }
   }, [queues, dropQueue, writeQueues]);
 
-  return { queues, delivered, enqueue, remove, reclaim, clear, retry };
+  return {
+    queues,
+    delivered,
+    enqueue,
+    remove,
+    reclaim,
+    clear,
+    retry,
+    hold,
+    isHeld,
+  };
 }
 
 export type TaskMessageQueue = ReturnType<typeof useTaskMessageQueue>;

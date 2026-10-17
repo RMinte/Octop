@@ -52,7 +52,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入附件的鉴权读取，图片预览、其他文件下载 |
 | WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
 | GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
-| PATCH | `/api/project-tasks/{task_id}` | 修改名称、归档或恢复，校验 expected_revision |
+| PATCH | `/api/project-tasks/{task_id}` | 修改名称、网络搜索开关、归档或恢复，校验 expected_revision |
 | DELETE | `/api/project-tasks/{task_id}` | 按 ID 永久删除任务及会话、附件和工具记录，无需版本参数；成功返回 204 |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
 | GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
@@ -193,11 +193,12 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 {
   "project_id": "proj_example",
   "request_id": "9fca322b-4884-4acd-bdfd-67428aeac735",
-  "prompt": "请先概括项目目标，再列出下一步。"
+  "prompt": "请先概括项目目标，再列出下一步。",
+  "web_search_enabled": true
 }
 ```
 
-创建无项目任务时，仍使用上述入口，把 `project_id` 传 null 或省略。也可使用 `POST /api/projects/{project_id}/tasks`，此时请求体只含 `request_id` 和 `prompt`，不再重复传 `project_id`。
+创建无项目任务时，仍使用上述入口，把 `project_id` 传 null 或省略。也可使用 `POST /api/projects/{project_id}/tasks`，此时不再重复传 `project_id`，仍可设置 `web_search_enabled`、`approval_mode` 和 `options`。
 
 这两个创建入口都返回 HTTP 202 和 `TaskDetail`，表示任务及首轮已保存并排队，不表示模型已执行完成。执行不要求预先创建专家或单独创建会话。
 
@@ -210,7 +211,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-消息支持文字、图片和通用文件，可混合发送：`prompt` 去首尾空白后最多 32768 字符；文字为空时必须提供 attachment_ids。`request_id` 为 8–128 位字母、数字、短横线或下划线。附件先通过独立上传接口取得 ID，图片和其他文件合计每轮最多九个。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；创建任务可在顶层设置 approval_mode。未覆盖的资源继承发送时的项目配置。
+消息支持文字、图片和通用文件，可混合发送：`prompt` 去首尾空白后最多 32768 字符；文字为空时必须提供 attachment_ids。`request_id` 为 8–128 位字母、数字、短横线或下划线。附件先通过独立上传接口取得 ID，图片和其他文件合计每轮最多九个。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；创建任务可在顶层设置 approval_mode 和 web_search_enabled。未覆盖的资源继承发送时的项目配置。
 
 通过 `GET /api/project-tasks/task_example` 读取 `TaskDetail`，默认最近 50 轮。`limit` 为 1–100；使用 `next_page_cursor` 作为下一次的 `page_cursor` 读取更早轮次，每页内部按创建顺序正序排列。首屏与实时基线来自同一数据库快照，历史页的 `event_cursor=null`，不能用历史页推进实时位置。以下是单轮已完成时的示意，创建响应的轮次通常处于 queued：
 
@@ -220,6 +221,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
   "project_id": "proj_example",
   "title": "请先概括项目目标，再列出下一步。",
   "archived": false,
+  "web_search_enabled": true,
   "status": "completed",
   "active_turn_id": null,
   "list_revision": 3,
@@ -238,6 +240,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
       "error_code": "",
       "activity": "",
       "model_ref": "provider/model",
+      "web_search_enabled": true,
       "options": {"model_ref": "provider/model", "skills": [], "mcp_servers": []},
       "interactions": [],
       "interaction_revision": 0,
@@ -278,11 +281,17 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 
 ### 任务名称、归档与恢复
 
-`PATCH /api/project-tasks/{task_id}` 接受 `expected_revision`（当前 list_revision）以及可选的 title、archived，至少提供一个修改字段；省略保持原值，不接受 null。名称去首尾空白后为 1–128 字符。版本冲突返回 409 `TASK_REVISION_CONFLICT`，应刷新后重新编辑，不能直接覆盖。相同字段值不递增版本。
+`PATCH /api/project-tasks/{task_id}` 接受 `expected_revision`（当前 list_revision）以及可选的 title、archived、web_search_enabled，至少提供一个修改字段；省略保持原值，不接受 null。名称去首尾空白后为 1–128 字符。版本冲突返回 409 `TASK_REVISION_CONFLICT`，应刷新后重新编辑，不能直接覆盖。相同字段值不递增版本。
 
 例如 `{"expected_revision":2,"title":"需求整理","archived":true}` 会修改名称并归档。归档保存全部会话和执行记录，没有删除业务数据；`archived:false` 恢复任务。任务排队或运行时归档返回 `TASK_BUSY`，须先结束或停止；归档状态不自动取消执行。归档任务可以读取历史，但新消息和新重试返回 `TASK_ARCHIVED`，需恢复后继续。已成功发送的 request_id 幂等重传仍返回原任务。
 
 项目内与无项目的任务列表都接受 `archived=false/true`，默认只显示未归档任务，归档任务仍按游标分页读取。两种视图的历史及同步游标不能混用。增量会返回变过任务的完整摘要，包含 archived；任务归档或恢复时，旧视图据此移出任务，新视图据此加入任务。保留较高 list_revision 的摘要，包括不属于当前显示筛选的摘要，防止迟到历史页重新加入旧状态。改名、归档、恢复与列表变更在同一事务提交，并可通过当前会话的实时连接获取最新摘要。
+
+### 任务网络搜索
+
+网络搜索是随任务持久保存的布尔设置 `web_search_enabled`，省略时默认开启；用户显式设置 false 才关闭。创建时在顶层传入；之后使用 `PATCH /api/project-tasks/{task_id}`，例如 `{"expected_revision":3,"web_search_enabled":false}`。任务摘要、详情和列表同步均返回当前值，刷新、重启和后续追问会保留，已保存的关闭状态不会被默认值覆盖。不写入项目配置，也不在每轮 options 中重复提交。
+
+每轮入队时固定该任务当时的值，`turns[].web_search_enabled` 返回本轮快照。切换可在任务运行中保存，只影响之后入队的追问或手动重试；已入队、运行或暂停后继续的轮次维持原值。开启后装载已配置的搜索服务及免配置搜索工具，关闭后不装载内置搜索工具。此开关不控制网页读取、所选 MCP 或命令的网络访问。
 
 ### 本轮执行选项
 

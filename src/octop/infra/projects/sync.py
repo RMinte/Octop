@@ -209,6 +209,7 @@ def task_sync(
     changes = []
     for row in rows:
         payload = json.loads(row.payload_json)
+        payload.setdefault("web_search_enabled", True)
         deleted = payload.pop("deleted", False)
         data = summary(ProjectTaskRow.from_row(payload))
         changes.append(

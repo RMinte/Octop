@@ -217,7 +217,7 @@ def test_v20_database_receives_independent_tables_without_changing_existing_sche
         run_migrations(pool)
         run_migrations(pool)
         with pool.connect() as conn:
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
             assert conn.execute("SELECT username FROM users").fetchone()[0] == "preserved-user"
             after = {
                 tuple(row)
@@ -311,7 +311,7 @@ def test_retired_agentcomputer_schema_and_data_are_preserved(
                 )
             }
             assert names == {"ac_projects", "ac_tasks"}
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -337,7 +337,7 @@ def test_high_watermark_repairs_missing_independent_tables(tmp_path: Path, monke
     run_migrations(pool)
     run_migrations(pool)
     with pool.connect() as conn:
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
         names = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -373,7 +373,7 @@ def test_run_migrations_idempotent(db: SqlitePool):
         sso_indexes = {
             r["name"] for r in conn.execute("PRAGMA index_list(sso_providers)").fetchall()
         }
-    assert v == 42
+    assert v == 43
     assert "login_failed_count" in cols
     assert "login_locked_until" in cols
     assert "preferences_json" in cols
@@ -455,7 +455,7 @@ def test_migration_002_idempotent_when_column_already_present(tmp_path: Path) ->
     with pool.connect() as conn:
         v = conn.execute("SELECT version FROM _schema_version").fetchone()[0]
         cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)").fetchall()}
-    assert v == 42
+    assert v == 43
     assert "mcp_servers" in cron_cols
     assert "skill_packages" in {
         r["name"]
@@ -594,7 +594,7 @@ def test_stuck_version_6_without_permissions_column_is_repaired(tmp_path: Path) 
     with pool.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
         version = conn.execute("SELECT version FROM _schema_version").fetchone()[0]
-    assert version == 42
+    assert version == 43
     assert "permissions" in cols
 
 
@@ -619,7 +619,7 @@ def test_schema_v10_without_projection_tables_is_repaired(tmp_path: Path) -> Non
         }
         kb_cols = {r["name"] for r in conn.execute("PRAGMA table_info(knowledge_bases)").fetchall()}
         cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)").fetchall()}
-    assert version == 42
+    assert version == 43
     assert {"thread_messages", "thread_history_projection", "trajectory_events"}.issubset(
         table_names
     )
@@ -654,7 +654,7 @@ def test_ahead_of_max_schema_version_clamps_to_max(tmp_path: Path) -> None:
             r["name"]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
-    assert version == 42
+    assert version == 43
     assert "skill_package_id" in pkg_cols
     assert "published_expert_id" in pub_cols
     assert "user_invites" in invite_tables
@@ -737,7 +737,7 @@ def test_pre_squash_schema_version_clamped_and_knowledge_tables_filled(
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-    assert version == 42
+    assert version == 43
     assert "permissions" in user_cols
     assert {
         "published_experts",
@@ -943,7 +943,7 @@ def test_v14_to_v15_adds_sso_provider_kind_without_rebuilding(tmp_path: Path) ->
         bound = conn.execute(
             "SELECT sso_provider_id FROM users WHERE username = 'sso-admin'"
         ).fetchone()[0]
-    assert version == 42
+    assert version == 43
     assert int(row["id"]) == int(provider_id)
     assert row["kind"] == "oidc"
     assert row["extra"] == "{}"
@@ -1055,7 +1055,7 @@ def test_project_client_directory_upgrade_preserves_existing_project(
             assert after.pop("capabilities_json") == "{}"
             assert after.pop("archived") == 0
             assert after == before
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -1126,6 +1126,7 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
             assert after_task.pop("approval_revision") == 1
             assert after_task.pop("approval_updated_at") == 0
             assert after_task.pop("approval_requests_json") == "[]"
+            assert after_task.pop("web_search_enabled") == 1
             assert after_task == before_task
             after_turn = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
             assert after_turn.pop("reasoning") == ""
@@ -1140,7 +1141,7 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
             assert after_turn.pop("requests_json") == "[]"
             assert after_turn == before_turn
             assert conn.execute("SELECT COUNT(*) FROM project_sync_changes").fetchone()[0] == 0
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -1189,9 +1190,10 @@ def test_v35_title_upgrade_preserves_existing_titles(tmp_path, monkeypatch, dire
             assert after.pop("approval_revision") == 1
             assert after.pop("approval_updated_at") == 0
             assert after.pop("approval_requests_json") == "[]"
+            assert after.pop("web_search_enabled") == 1
             assert after == before
             assert conn.execute("SELECT COUNT(*) FROM project_task_titles").fetchone()[0] == 0
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -1241,7 +1243,7 @@ def test_v37_title_retry_upgrade_preserves_job_counters(tmp_path, monkeypatch, d
             after = dict(conn.execute("SELECT * FROM project_task_titles").fetchone())
             assert after.pop("attempt_limit") == 2
             assert after == before
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -1269,7 +1271,7 @@ def test_recorded_v39_repairs_reasoning_column_and_preserves_existing_turn(db):
         after = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
         assert after.pop("reasoning") == ""
         assert after == before
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
         conn.execute("UPDATE project_task_turns SET reasoning='Saved provider reasoning'")
     run_migrations(db)
     with db.connect() as conn:
@@ -1351,8 +1353,9 @@ def test_project_archive_upgrade_preserves_projects_and_task_archive_state(tmp_p
             assert after_task.pop("approval_revision") == 1
             assert after_task.pop("approval_updated_at") == 0
             assert after_task.pop("approval_requests_json") == "[]"
+            assert after_task.pop("web_search_enabled") == 1
             assert after_task == before_task
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -1395,7 +1398,7 @@ def test_checkpoint_columns_repair_without_rewriting_saved_turn(db, missing, def
         after = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
         assert after.pop(missing) == default
         assert after == before
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
 
 
 @pytest.mark.parametrize(
@@ -1405,6 +1408,7 @@ def test_checkpoint_columns_repair_without_rewriting_saved_turn(db, missing, def
         ("approval_revision", 1),
         ("approval_updated_at", 0),
         ("approval_requests_json", "[]"),
+        ("web_search_enabled", 1),
     ],
 )
 def test_task_approval_columns_repair_preserves_task(db, missing, default):
@@ -1419,6 +1423,8 @@ def test_task_approval_columns_repair_preserves_task(db, missing, default):
             (owner,),
         )
         conn.execute(f"ALTER TABLE project_tasks DROP COLUMN {missing}")
+        if missing == "web_search_enabled":
+            conn.execute("UPDATE _schema_version SET version=42")
         before = dict(conn.execute("SELECT * FROM project_tasks").fetchone())
     run_migrations(db)
     run_migrations(db)
@@ -1426,7 +1432,13 @@ def test_task_approval_columns_repair_preserves_task(db, missing, default):
         after = dict(conn.execute("SELECT * FROM project_tasks").fetchone())
         assert after.pop(missing) == default
         assert after == before
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
+    if missing == "web_search_enabled":
+        with db.transaction() as conn:
+            conn.execute("UPDATE project_tasks SET web_search_enabled=0")
+        run_migrations(db)
+        with db.connect() as conn:
+            assert conn.execute("SELECT web_search_enabled FROM project_tasks").fetchone()[0] == 0
 
 
 def test_task_review_schema_repaired_at_current_watermark(db):
@@ -1455,5 +1467,5 @@ def test_task_image_schema_repaired_at_current_watermark(db):
             "idx_project_task_attachments_task",
             "idx_project_task_attachments_pending",
         } <= {row["name"] for row in conn.execute("PRAGMA index_list(project_task_attachments)")}
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 42
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 43
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

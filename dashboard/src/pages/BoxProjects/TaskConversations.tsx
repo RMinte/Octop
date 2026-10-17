@@ -49,6 +49,7 @@ import TaskExecutionSettings from "./TaskExecutionSettings";
 import TaskTurnContent from "./TaskTurnContent";
 import TaskInteractions from "./TaskInteractions";
 import TaskApprovalModePicker from "./TaskApprovalMode";
+import TaskWebSearch from "./TaskWebSearch";
 import TaskInputImages from "./TaskInputImages";
 import { MAX_TASK_IMAGES, useTaskImages } from "./useTaskImages";
 import {
@@ -116,6 +117,8 @@ export default function TaskConversations({
   const [approvalMode, setApprovalMode] =
     useState<TaskApprovalMode>("ask_for_approval");
   const [approvalSaving, setApprovalSaving] = useState(false);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(true);
+  const webSearchSaving = !!taskID && queue.isHeld(taskID);
   const [updating, setUpdating] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<TaskSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -216,6 +219,7 @@ export default function TaskConversations({
     setOptions({});
     setApprovalMode("ask_for_approval");
     setApprovalSaving(false);
+    setWebSearchEnabled(true);
     pending.current = null;
     retryRequest.current = null;
     followOutput.current = true;
@@ -308,6 +312,7 @@ export default function TaskConversations({
       deleteTarget ||
       sending ||
       approvalSaving ||
+      webSearchSaving ||
       inFlight.current ||
       (taskID && !detail)
     )
@@ -321,7 +326,9 @@ export default function TaskConversations({
       JSON.stringify(pending.current.body.options ?? {}) !==
         JSON.stringify(options) ||
       (!taskID &&
-        (pending.current.body as TaskCreate).approval_mode !== approvalMode)
+        ((pending.current.body as TaskCreate).approval_mode !== approvalMode ||
+          (pending.current.body as TaskCreate).web_search_enabled !==
+            webSearchEnabled))
     ) {
       pending.current = {
         target,
@@ -329,7 +336,12 @@ export default function TaskConversations({
           request_id: crypto.randomUUID(),
           prompt,
           ...(attachmentIDs.length ? { attachment_ids: attachmentIDs } : {}),
-          ...(!taskID ? { approval_mode: approvalMode } : {}),
+          ...(!taskID
+            ? {
+                approval_mode: approvalMode,
+                web_search_enabled: webSearchEnabled,
+              }
+            : {}),
           ...(JSON.stringify(options) !== "{}" ? { options } : {}),
         },
       };
@@ -460,6 +472,8 @@ export default function TaskConversations({
       projectArchived ||
       deleteTarget ||
       sending ||
+      approvalSaving ||
+      webSearchSaving ||
       inFlight.current
     )
       return;
@@ -512,7 +526,8 @@ export default function TaskConversations({
     },
     expectedRevision?: number,
   ) => {
-    if (!taskID || !detail || updating || deleteTarget) return;
+    if (!taskID || !detail || updating || webSearchSaving || deleteTarget)
+      return;
     if (changes.title !== undefined && !changes.title.trim()) {
       setError(t("projects.tasks.titleRequired"));
       return;
@@ -852,7 +867,10 @@ export default function TaskConversations({
                           <Button
                             loading={sending}
                             disabled={
-                              queuedItems.length > 0 || !!queued?.sendingID
+                              queuedItems.length > 0 ||
+                              !!queued?.sendingID ||
+                              approvalSaving ||
+                              webSearchSaving
                             }
                             onClick={() => void retry(turn.turn_id)}
                           >
@@ -889,6 +907,31 @@ export default function TaskConversations({
             onBusyChange={setApprovalSaving}
             disabled={
               sending ||
+              webSearchSaving ||
+              reconnecting ||
+              !!detail?.archived ||
+              projectArchived ||
+              !!(taskID && !detail)
+            }
+          />
+          <TaskWebSearch
+            key={`web-search:${projectID ?? ""}:${taskID ?? "new"}`}
+            task={detail}
+            draft={webSearchEnabled}
+            onDraftChange={setWebSearchEnabled}
+            onChange={(incoming) => {
+              upsertTask(incoming);
+              applyWrite(incoming);
+            }}
+            onBusyChange={(saving) => {
+              if (taskID) queue.hold(taskID, saving);
+            }}
+            disabled={
+              sending ||
+              webSearchSaving ||
+              approvalSaving ||
+              updating ||
+              !!queued?.sendingID ||
               reconnecting ||
               !!detail?.archived ||
               projectArchived ||
@@ -1142,6 +1185,7 @@ export default function TaskConversations({
                   (!draft.trim() && !images.attachmentIDs.length) ||
                   images.blocked ||
                   approvalSaving ||
+                  webSearchSaving ||
                   !!deleteTarget ||
                   loading ||
                   !!detail?.archived ||

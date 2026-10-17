@@ -310,6 +310,7 @@ export function useTaskList(projectID: string | null, archived = false) {
         active_turn_id,
         list_revision,
         approval_policy,
+        web_search_enabled,
         created_at,
         updated_at,
       } = item;
@@ -325,6 +326,7 @@ export function useTaskList(projectID: string | null, archived = false) {
             active_turn_id,
             list_revision,
             approval_policy,
+            web_search_enabled,
             created_at,
             updated_at,
           },

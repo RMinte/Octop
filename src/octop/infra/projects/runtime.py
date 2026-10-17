@@ -271,7 +271,7 @@ async def run_turn(
                 "write_env_file",
             }
         ),
-        web_search_tools=False,
+        web_search_tools=raw.get("web_search_enabled", True),
         tools=[
             *publisher.tools(),
             *plugin_tools,

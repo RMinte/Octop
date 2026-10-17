@@ -299,11 +299,11 @@ async def list_project_tasks(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="在项目中发送首条消息并创建任务",
-    description="保存任务及首条消息后排队执行，返回任务详情。每轮采用发送时的项目配置及本轮 options；不创建专家。request_id 用于幂等重试。模型或资源未配置时不会创建空任务。",
+    description="保存任务及首条消息后排队执行，返回任务详情。web_search_enabled 设置任务网络搜索开关，默认开启，用户显式关闭后追问沿用。每轮采用发送时的项目配置及本轮 options；不创建专家。request_id 用于幂等重试。模型或资源未配置时不会创建空任务。",
 )
 async def create_project_task(
     project_id: str,
-    body: tasks.TaskMessage,
+    body: tasks.ProjectTaskCreate,
     response: Response,
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
@@ -438,7 +438,7 @@ async def list_standalone_tasks(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="创建任务并发送首条消息",
-    description="project_id 可为 null，创建无项目任务；也可指定本人项目。首条消息和任务原子保存，可用 options 选择本轮模型、Skill、MCP、插件、子代理及记忆/团队设置。request_id 重试不重复执行。",
+    description="project_id 可为 null，创建无项目任务；也可指定本人项目。首条消息和任务原子保存，web_search_enabled 设置任务网络搜索开关，默认开启，用户显式关闭后追问沿用。可用 options 选择本轮模型、Skill、MCP、插件、子代理及记忆/团队设置。request_id 重试不重复执行。",
 )
 async def create_task(
     body: tasks.TaskCreate,
@@ -524,8 +524,8 @@ async def task_resources(
 @task_router.patch(
     "/{task_id}",
     response_model=tasks.TaskDetail,
-    summary="修改任务标题或归档状态",
-    description="必须提供 expected_revision（list_revision）。归档保留会话，可恢复；执行中的任务须先结束或停止再归档，归档任务须恢复后才能继续发送。版本冲突返回 409。",
+    summary="修改任务标题、网络搜索或归档状态",
+    description="必须提供 expected_revision（list_revision）。web_search_enabled 随任务保存，只影响之后入队的轮次；运行和暂停中的轮次保留原设置。归档保留会话，可恢复；执行中的任务须先结束或停止再归档，归档任务须恢复后才能继续发送。版本冲突返回 409。",
 )
 async def patch_task(
     task_id: str,

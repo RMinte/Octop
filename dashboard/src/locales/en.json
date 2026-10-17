@@ -6716,6 +6716,10 @@
         "cancelled": "Cancelled",
         "expired": "Expired"
       },
+      "webSearch": {
+        "label": "Web search",
+        "scope": "Saved with this task and reused for follow-ups and retries. Changes apply from the next turn; the current turn keeps its setting."
+      },
       "approvalMode": {
         "label": "Current task approval mode",
         "ask_for_approval": "Ask for approval",

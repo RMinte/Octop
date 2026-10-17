@@ -116,6 +116,7 @@ function turn(
     artifacts: [],
     model_ref: "glm/glm",
     options: body?.options ?? {},
+    web_search_enabled: false,
     project_revision: 1,
     approval_policy_at_start: policy,
     retry_of_turn_id: null,
@@ -138,6 +139,7 @@ function task(id = "task_a", title = "第一项任务"): TaskDetail {
     status: "running",
     active_turn_id: initialTurn.turn_id,
     list_revision: 1,
+    web_search_enabled: false,
     approval_policy: policy,
     created_at: timestamp,
     updated_at: timestamp,
@@ -525,6 +527,8 @@ describe("项目任务消息队列", () => {
       reclaim: vi.fn(() => null),
       clear: vi.fn(),
       retry: vi.fn(),
+      hold: vi.fn(),
+      isHeld: vi.fn(() => false),
     };
     const page = (queue: TaskMessageQueue) => (
       <MemoryRouter initialEntries={["/box-projects/proj_a?task=task_a"]}>

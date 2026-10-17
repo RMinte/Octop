@@ -803,6 +803,23 @@
           "$ref": "#/$defs/TaskExecutionOptions",
           "description": "本轮执行选项；省略时使用当前项目及默认模型，不修改项目。"
         },
+        "web_search_enabled": {
+          "default": true,
+          "description": "任务网络搜索开关；默认开启，持久保存，追问和重试沿用任务当前值。",
+          "title": "Web Search Enabled",
+          "type": "boolean"
+        },
+        "approval_mode": {
+          "default": "ask_for_approval",
+          "description": "任务审批模式；必须在管理员允许范围内。",
+          "enum": [
+            "ask_for_approval",
+            "approve_for_me",
+            "full_access"
+          ],
+          "title": "Approval Mode",
+          "type": "string"
+        },
         "project_id": {
           "anyOf": [
             {
@@ -815,17 +832,6 @@
           "default": null,
           "description": "所属独立项目；null 创建无项目任务。",
           "title": "Project Id"
-        },
-        "approval_mode": {
-          "default": "ask_for_approval",
-          "description": "任务审批模式；必须在管理员允许范围内。",
-          "enum": [
-            "ask_for_approval",
-            "approve_for_me",
-            "full_access"
-          ],
-          "title": "Approval Mode",
-          "type": "string"
         }
       },
       "required": [
@@ -2140,6 +2146,11 @@
           "title": "Model Ref",
           "type": "string"
         },
+        "web_search_enabled": {
+          "description": "本轮入队时采用的任务网络搜索开关快照；之后修改任务不会改变此值。",
+          "title": "Web Search Enabled",
+          "type": "boolean"
+        },
         "approval_policy_at_start": {
           "$ref": "#/$defs/TaskApprovalPolicy",
           "description": "本轮入队时的任务审批模式快照；之后切换模式不会改写该快照。"
@@ -2214,6 +2225,7 @@
         "error_code",
         "activity",
         "model_ref",
+        "web_search_enabled",
         "approval_policy_at_start",
         "options",
         "cancel_requested",
@@ -2251,6 +2263,11 @@
         },
         "archived": {
           "title": "Archived",
+          "type": "boolean"
+        },
+        "web_search_enabled": {
+          "description": "任务持久保存的网络搜索开关。",
+          "title": "Web Search Enabled",
           "type": "boolean"
         },
         "status": {
@@ -2337,6 +2354,7 @@
         "project_id",
         "title",
         "archived",
+        "web_search_enabled",
         "status",
         "active_turn_id",
         "list_revision",
@@ -2372,6 +2390,11 @@
         },
         "archived": {
           "title": "Archived",
+          "type": "boolean"
+        },
+        "web_search_enabled": {
+          "description": "任务持久保存的网络搜索开关。",
+          "title": "Web Search Enabled",
           "type": "boolean"
         },
         "status": {
@@ -2425,6 +2448,7 @@
         "project_id",
         "title",
         "archived",
+        "web_search_enabled",
         "status",
         "active_turn_id",
         "list_revision",

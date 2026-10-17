@@ -156,6 +156,92 @@ async def test_standalone_tasks_and_owner_isolation(task_env):
     assert len(calls) == 1 and server.services.agent_repo.list_all() == before
 
 
+@pytest.mark.parametrize("in_project", [False, True])
+async def test_task_web_search_persists_and_each_turn_keeps_its_snapshot(task_env, in_project):
+    client, server, auth, calls = task_env
+    create_url = "/api/project-tasks"
+    if in_project:
+        project = (
+            await client.post(
+                "/api/projects",
+                headers={**auth, "Idempotency-Key": str(uuid4())},
+                json={"name": "Search project"},
+            )
+        ).json()
+        create_url = f"/api/projects/{project['project_id']}/tasks"
+    body = {"request_id": "web-search-first", "prompt": "Search"}
+    created = await client.post(create_url, headers=auth, json=body)
+    assert created.status_code == 202, created.text
+    first = await settled(client, auth, created.json()["task_id"])
+    base = f"/api/project-tasks/{first['task_id']}"
+    assert first["web_search_enabled"] is first["turns"][0]["web_search_enabled"] is True
+    assert json.loads(calls[0][0].configuration_json)["web_search_enabled"] is True
+    assert "web_search_enabled" not in first["turns"][0]["options"]
+    # Older turns lack the flag; both their public snapshot and create replay use the default.
+    with server.services.db.transaction() as conn:
+        configuration = json.loads(calls[0][0].configuration_json)
+        configuration.pop("web_search_enabled")
+        conn.execute(
+            "UPDATE project_task_turns SET configuration_json=? WHERE turn_id=?",
+            (json.dumps(configuration), first["turns"][0]["turn_id"]),
+        )
+    listing = (await client.get(create_url, headers=auth)).json()
+    assert listing["items"][0]["web_search_enabled"] is True
+    changed = await client.patch(
+        base,
+        headers=auth,
+        json={"expected_revision": first["list_revision"], "web_search_enabled": False},
+    )
+    assert changed.status_code == 200, changed.text
+    disabled = changed.json()
+    assert disabled["list_revision"] == first["list_revision"] + 1
+    assert disabled["web_search_enabled"] is False
+    assert disabled["turns"][0] == first["turns"][0]
+    assert (await client.get(base, headers=auth)).json()["web_search_enabled"] is False
+    delta = (
+        await client.get(
+            create_url + "/sync", headers=auth, params={"sync_cursor": listing["sync_cursor"]}
+        )
+    ).json()
+    assert delta["changes"][0]["data"]["web_search_enabled"] is False
+    replay = await client.post(create_url, headers=auth, json=body)
+    assert replay.status_code == 202 and replay.json()["task_id"] == first["task_id"]
+    conflict = await client.post(
+        create_url, headers=auth, json={**body, "web_search_enabled": False}
+    )
+    assert conflict.status_code == 409
+    stale = await client.patch(
+        base,
+        headers=auth,
+        json={"expected_revision": first["list_revision"], "web_search_enabled": True},
+    )
+    assert stale.status_code == 409
+    response = await client.post(
+        base + "/messages",
+        headers=auth,
+        json={"request_id": "web-search-next", "prompt": "Continue"},
+    )
+    assert response.status_code == 202, response.text
+    final = await settled(client, auth, first["task_id"])
+    assert [turn["web_search_enabled"] for turn in final["turns"]] == [True, False]
+    assert json.loads(calls[1][0].configuration_json)["web_search_enabled"] is False
+    for value in (None, 0, "false"):
+        assert (
+            await client.patch(
+                base,
+                headers=auth,
+                json={"expected_revision": final["list_revision"], "web_search_enabled": value},
+            )
+        ).status_code == 422
+        assert (
+            await client.post(
+                create_url,
+                headers=auth,
+                json={**body, "request_id": "invalid-search", "web_search_enabled": value},
+            )
+        ).status_code == 422
+
+
 async def test_busy_cancel_and_continue_preserve_history(task_env, monkeypatch):
     client, server, auth, calls = task_env
     entered = asyncio.Event()
@@ -277,8 +363,9 @@ async def test_queued_cancel_and_abandoned_worker_recovery(task_env):
     assert calls == []  # Recovery does not rerun possibly effective tools.
 
 
+@pytest.mark.parametrize("web_search_enabled", [False, True])
 async def test_real_harness_reads_project_files_and_loads_selected_skills_mcp(
-    env_with_provider, tmp_path, monkeypatch
+    env_with_provider, tmp_path, monkeypatch, web_search_enabled
 ):
     from typing import Any
 
@@ -297,10 +384,11 @@ async def test_real_harness_reads_project_files_and_loads_selected_skills_mcp(
     workspace = tmp_path / "work"
     workspace.mkdir()
     (workspace / "proof.md").write_text("project-file-proof", encoding="utf8")
-    observed = []
+    observed, tool_names = [], set()
 
     class Model(FakeMessagesListChatModel):
         def bind_tools(self, tools: Any, **kwargs: Any):
+            tool_names.update(t.name if hasattr(t, "name") else t.get("name") for t in tools)
             return self
 
         def _generate(self, messages, stop=None, run_manager=None, **kwargs):
@@ -377,7 +465,11 @@ async def test_real_harness_reads_project_files_and_loads_selected_skills_mcp(
     created = await client.post(
         f"/api/projects/{project['project_id']}/tasks",
         headers=auth,
-        json={"request_id": "actual-harness", "prompt": "Read proof.md and the note"},
+        json={
+            "request_id": "actual-harness",
+            "prompt": "Read proof.md and the note",
+            "web_search_enabled": web_search_enabled,
+        },
     )
     assert created.status_code == 202, created.text
     done = await settled(client, auth, created.json()["task_id"])
@@ -395,6 +487,9 @@ async def test_real_harness_reads_project_files_and_loads_selected_skills_mcp(
     assert done["turns"][0]["output_tokens"] == 3
     assert server.services.usage_repo.total_tokens_for_user(owner) == 8
     assert agents[0].config.workspace_dir == workspace
+    assert agents[0].config.web_search_tools is web_search_enabled
+    assert ("searchfree_search" in tool_names) is web_search_enabled
+    assert "web_fetch" in tool_names
     assert "fixture-private-secret" not in json.dumps(done)
 
 
@@ -484,6 +579,19 @@ async def test_task_status_is_in_list_and_deltas_through_follow_up(
     await check_list("queued", 1)
     claimed = services.project_task_turn_repo.claim(worker.worker_id, now_ms())
     assert claimed is not None
+    # Journal entries created before task search existed remain readable after upgrade.
+    with services.db.transaction() as conn:
+        changes = conn.execute(
+            "SELECT sequence,payload_json FROM project_sync_changes WHERE entity_id=?",
+            (task.task_id,),
+        ).fetchall()
+        for change in changes:
+            payload = json.loads(change["payload_json"])
+            payload.pop("web_search_enabled")
+            conn.execute(
+                "UPDATE project_sync_changes SET payload_json=? WHERE entity_id=? AND sequence=?",
+                (json.dumps(payload), task.task_id, change["sequence"]),
+            )
     await check_list("running", 2)
     # Text, tool progress and lease heartbeats stay out of the list change stream.
     services.project_task_turn_repo.progress(
@@ -864,6 +972,7 @@ async def test_retry_preserves_failed_text_uses_current_configuration_and_is_ide
                 "project_id": project["project_id"],
                 "request_id": "retry-original",
                 "prompt": "Original prompt",
+                "web_search_enabled": False,
             },
         )
     ).json()
@@ -883,6 +992,12 @@ async def test_retry_preserves_failed_text_uses_current_configuration_and_is_ide
 
     monkeypatch.setattr(runtime, "run_turn", succeeding)
     base = f"/api/project-tasks/{first['task_id']}"
+    changed = await client.patch(
+        base,
+        headers=auth,
+        json={"expected_revision": failed["list_revision"], "web_search_enabled": True},
+    )
+    assert changed.status_code == 200, changed.text
     url = base + f"/turns/{original['turn_id']}/retry"
     request = {
         "request_id": "retry-new-round",
@@ -905,6 +1020,8 @@ async def test_retry_preserves_failed_text_uses_current_configuration_and_is_ide
         "team_enabled": False,
     }
     assert retried["retry_of_turn_id"] == original["turn_id"]
+    assert original["web_search_enabled"] is False and retried["web_search_enabled"] is True
+    assert json.loads(observed[0][0].configuration_json)["web_search_enabled"] is True
     assert retried["prompt"] == original["prompt"] and retried["project_revision"] == 2
     assert json.loads(observed[0][0].configuration_json)["instructions"] == "Updated"
     assert observed[0][1][0] == {"role": "user", "content": "Original prompt"}
@@ -1105,6 +1222,14 @@ async def test_active_task_can_be_renamed_but_not_archived(task_env):
         )
     ).json()
     assert renamed["active_turn_id"] == task.active_turn_id and not renamed["archived"]
+    disabled = await client.patch(
+        base,
+        headers=auth,
+        json={"expected_revision": renamed["list_revision"], "web_search_enabled": False},
+    )
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["web_search_enabled"] is False
+    assert disabled.json()["turns"][0]["web_search_enabled"] is True
 
 
 async def test_project_archive_preserves_task_states_and_blocks_execution_until_restored(

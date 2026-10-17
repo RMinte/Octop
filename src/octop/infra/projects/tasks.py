@@ -175,12 +175,16 @@ class TaskPatch(ProjectModel):
     archived: StrictBool | SkipJsonSchema[None] = Field(
         default=None, description="省略保持原值；不可为 null。"
     )
+    web_search_enabled: StrictBool | SkipJsonSchema[None] = Field(
+        default=None,
+        description="任务网络搜索开关；省略保持原值，不可为 null。修改仅影响之后入队的新轮次。",
+    )
 
     @model_validator(mode="after")
     def validate_changes(self) -> Self:
         changes = self.model_dump(exclude_unset=True, exclude={"expected_revision"})
         if not changes or any(value is None for value in changes.values()):
-            raise ValueError("a non-null title or archived value is required")
+            raise ValueError("a non-null task setting is required")
         return self
 
 
@@ -222,11 +226,17 @@ class TaskCancel(ProjectModel):
     )
 
 
-class TaskCreate(TaskMessage):
-    project_id: str | None = Field(default=None, description="所属独立项目；null 创建无项目任务。")
+class ProjectTaskCreate(TaskMessage):
+    web_search_enabled: StrictBool = Field(
+        default=True, description="任务网络搜索开关；默认开启，持久保存，追问和重试沿用任务当前值。"
+    )
     approval_mode: ApprovalMode = Field(
         default="ask_for_approval", description="任务审批模式；必须在管理员允许范围内。"
     )
+
+
+class TaskCreate(ProjectTaskCreate):
+    project_id: str | None = Field(default=None, description="所属独立项目；null 创建无项目任务。")
 
 
 class TaskTurn(ProjectModel):
@@ -261,6 +271,9 @@ class TaskTurn(ProjectModel):
         description="该轮已成功发布的不可变附件；仅含元数据，内容使用鉴权 HTTP 下载。",
     )
     model_ref: str
+    web_search_enabled: bool = Field(
+        description="本轮入队时采用的任务网络搜索开关快照；之后修改任务不会改变此值。"
+    )
     approval_policy_at_start: TaskApprovalPolicy = Field(
         description="本轮入队时的任务审批模式快照；之后切换模式不会改写该快照。"
     )
@@ -281,6 +294,7 @@ class TaskSummary(ProjectModel):
     project_id: str | None
     title: str
     archived: bool
+    web_search_enabled: bool = Field(description="任务持久保存的网络搜索开关。")
     status: TurnStatus = Field(
         description="任务当前或最近一轮的执行状态；追问重新进入 queued，开始执行变为 running。列表直接返回，无需读取正文。"
     )
@@ -321,6 +335,7 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
         project_id=row.project_id,
         title=row.title,
         archived=row.archived,
+        web_search_enabled=row.web_search_enabled,
         status=cast(TurnStatus, public_status(row.status, row.wait_kind)),
         active_turn_id=row.active_turn_id,
         list_revision=row.list_revision,
@@ -360,6 +375,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         activity=t.activity,
         artifacts=attachments or [],
         model_ref=t.model_ref,
+        web_search_enabled=configuration.get("web_search_enabled", True),
         approval_policy_at_start=TaskApprovalPolicy.model_validate(
             configuration.get("approval_policy_at_start")
             or {"mode": "ask_for_approval", "revision": 1, "updated_at": _datetime(t.created_at)}
@@ -542,11 +558,15 @@ def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: s
         or json.loads(old.configuration_json).get("execution_options", {})
         != body.options.model_dump(exclude_none=True)
         or (
-            isinstance(body, TaskCreate)
-            and json.loads(old.configuration_json)
-            .get("approval_policy_at_start", {})
-            .get("mode", "ask_for_approval")
-            != body.approval_mode
+            isinstance(body, ProjectTaskCreate)
+            and (
+                json.loads(old.configuration_json)
+                .get("approval_policy_at_start", {})
+                .get("mode", "ask_for_approval")
+                != body.approval_mode
+                or json.loads(old.configuration_json).get("web_search_enabled", True)
+                != body.web_search_enabled
+            )
         )
     ):
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
@@ -634,6 +654,7 @@ def send(
                 configuration = json.dumps(
                     {
                         **json.loads(configuration),
+                        "web_search_enabled": task.web_search_enabled,
                         "approval_policy_at_start": approval_policy.view(task).model_dump(
                             mode="json"
                         ),
@@ -672,12 +693,16 @@ def send(
         else:
             configuration, model_ref = _configuration(services, owner_id, project_id, body.options)
             task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
-            mode = body.approval_mode if isinstance(body, TaskCreate) else "ask_for_approval"
+            mode = body.approval_mode if isinstance(body, ProjectTaskCreate) else "ask_for_approval"
+            web_search_enabled = (
+                body.web_search_enabled if isinstance(body, ProjectTaskCreate) else True
+            )
             approval_policy.assert_available(services, mode, model_ref)
             start_policy = TaskApprovalPolicy(mode=mode, revision=1, updated_at=_datetime(now))
             configuration = json.dumps(
                 {
                     **json.loads(configuration),
+                    "web_search_enabled": web_search_enabled,
                     "approval_policy_at_start": start_policy.model_dump(mode="json"),
                 }
             )
@@ -701,6 +726,7 @@ def send(
                     now,
                     approval_mode=mode,
                     approval_updated_at=now,
+                    web_search_enabled=web_search_enabled,
                 ),
             )
             configuration = _input_configuration(
@@ -794,12 +820,27 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
             raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
         title = body.title if body.title is not None else current.title
         archived = body.archived if body.archived is not None else current.archived
+        web_search_enabled = (
+            body.web_search_enabled
+            if body.web_search_enabled is not None
+            else current.web_search_enabled
+        )
         if archived and not current.archived and current.active_turn_id:
             raise OctopError.localized(ErrorCode.TASK_BUSY)
-        if body.title is not None or archived != current.archived:
+        if (
+            body.title is not None
+            or archived != current.archived
+            or web_search_enabled != current.web_search_enabled
+        ):
             updated = repo.update_metadata(
                 conn,
-                replace(current, title=title, archived=archived, updated_at=now_ms()),
+                replace(
+                    current,
+                    title=title,
+                    archived=archived,
+                    web_search_enabled=web_search_enabled,
+                    updated_at=now_ms(),
+                ),
                 body.expected_revision,
                 manual_title=body.title is not None,
             )

@@ -1911,7 +1911,7 @@ def _apply_sqlite_migration(db: DatabasePool, version: int, path: Path) -> None:
 def _ensure_independent_projects_schema(db: DatabasePool) -> None:
     """Apply only the independent project/task DDL, preserving historical tables.
 
-    Versions 21–27 belonged to the retired expert-bound model. Keep 28–42
+    Versions 21–27 belonged to the retired expert-bound model. Keep 28–43
     numbered as applied locally; never replay that model or lower its watermark.
     """
     tables = {
@@ -1922,7 +1922,7 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
         37: ("project_task_artifacts",),
         42: ("project_task_attachments",),
     }
-    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 42]
+    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 43]
     for version, path in versions:
         if version == 29:
             _ensure_column(db, "projects", "client_directory", "TEXT")
@@ -2009,6 +2009,13 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
                     if not stmt.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
                         conn.execute(stmt)
+        elif version == 43:
+            _ensure_column(
+                db,
+                "project_tasks",
+                "web_search_enabled",
+                "INTEGER NOT NULL DEFAULT 1 CHECK (web_search_enabled IN (0, 1))",
+            )
         elif any(not _table_exists(db, table) for table in tables[version]):
             with db.transaction() as conn:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
@@ -2026,7 +2033,7 @@ def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
     for version, path in _discover(db.dialect):
-        if 28 <= version <= 42 or version <= _current_version(db):
+        if 28 <= version <= 43 or version <= _current_version(db):
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.

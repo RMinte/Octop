@@ -53,7 +53,7 @@ async def tool_env(env_with_provider, monkeypatch):
     yield *env_with_provider, calls
 
 
-async def start_call(ws, *, request="tool-message-001"):
+async def start_call(ws, *, request="tool-message-001", web_search_enabled=True):
     await command(ws, "client.attach", "attach-client-001", client_id=CLIENT)
     created = await command(
         ws,
@@ -62,6 +62,7 @@ async def start_call(ws, *, request="tool-message-001"):
         data={
             "request_id": request,
             "prompt": "Read my note",
+            "web_search_enabled": web_search_enabled,
             "options": OPTIONS,
         },
     )

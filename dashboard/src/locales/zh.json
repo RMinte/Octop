@@ -6716,6 +6716,10 @@
         "cancelled": "已取消",
         "expired": "已过期"
       },
+      "webSearch": {
+        "label": "网络搜索",
+        "scope": "此设置随任务保存，追问和重试自动沿用；修改从下一轮开始生效，不影响正在运行的轮次。"
+      },
       "approvalMode": {
         "label": "当前任务审批模式",
         "ask_for_approval": "请求批准",

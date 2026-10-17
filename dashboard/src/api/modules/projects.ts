@@ -139,6 +139,7 @@ export interface TaskSummary {
   active_turn_id: string | null;
   list_revision: number;
   approval_policy: TaskApprovalPolicy;
+  web_search_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -239,6 +240,7 @@ export interface TaskTurn {
   artifacts: TaskArtifact[];
   model_ref: string;
   options: TaskExecutionOptions;
+  web_search_enabled: boolean;
   project_revision: number | null;
   approval_policy_at_start: TaskApprovalPolicy;
   retry_of_turn_id: string | null;
@@ -292,6 +294,13 @@ export interface TaskMessage {
 }
 export interface TaskCreate extends TaskMessage {
   approval_mode: TaskApprovalMode;
+  web_search_enabled?: boolean;
+}
+export interface TaskPatch {
+  expected_revision: number;
+  title?: string;
+  archived?: boolean;
+  web_search_enabled?: boolean;
 }
 export interface TaskApprovalUpdate {
   request_id: string;
@@ -379,10 +388,7 @@ export const projectTasksApi = {
     ),
   resources: () =>
     request<TaskResources>("/project-tasks/resources", { cache: "no-store" }),
-  update: (
-    id: string,
-    body: { expected_revision: number; title?: string; archived?: boolean },
-  ) =>
+  update: (id: string, body: TaskPatch) =>
     request<TaskDetail>(taskPath(id), {
       method: "PATCH",
       body: JSON.stringify(body),

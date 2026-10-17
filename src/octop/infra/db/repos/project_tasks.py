@@ -28,6 +28,7 @@ class ProjectTaskRow:
     approval_revision: int = 1
     approval_updated_at: int = 0
     approval_requests_json: str = "[]"
+    web_search_enabled: bool = True
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -48,6 +49,7 @@ class ProjectTaskRow:
             strict_int(row["approval_revision"]),
             strict_int(row["approval_updated_at"]),
             str(row["approval_requests_json"]),
+            bool(row["web_search_enabled"]),
         )
 
 
@@ -148,8 +150,8 @@ class ProjectTaskRepo:
         conn.execute(
             "INSERT INTO project_tasks(task_id, owner_id, project_id, title, request_id, "
             "active_turn_id, created_at, updated_at, status, title_source, "
-            "approval_mode, approval_revision, approval_updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?)",
+            "approval_mode, approval_revision, approval_updated_at, web_search_enabled) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?, ?)",
             (
                 row.task_id,
                 row.owner_id,
@@ -163,6 +165,7 @@ class ProjectTaskRepo:
                 row.approval_mode,
                 row.approval_revision,
                 row.approval_updated_at,
+                int(row.web_search_enabled),
             ),
         )
         record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
@@ -243,13 +246,15 @@ class ProjectTaskRepo:
         conn: Any, row: ProjectTaskRow, expected_revision: int, *, manual_title: bool = False
     ) -> ProjectTaskRow | None:
         result = conn.execute(
-            "UPDATE project_tasks SET title=?, archived=?, updated_at=?, list_revision=list_revision+1, "
+            "UPDATE project_tasks SET title=?, archived=?, web_search_enabled=?, updated_at=?, "
+            "list_revision=list_revision+1, "
             "title_source=CASE WHEN ?=1 THEN 'manual' ELSE title_source END, "
             "title_revision=title_revision+? "
             "WHERE task_id=? AND owner_id=? AND list_revision=? RETURNING *",
             (
                 row.title,
                 int(row.archived),
+                int(row.web_search_enabled),
                 row.updated_at,
                 int(manual_title),
                 int(manual_title),
