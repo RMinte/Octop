@@ -109,6 +109,7 @@ class ProjectTaskRepo:
     @staticmethod
     def delete(conn: Any, row: ProjectTaskRow) -> None:
         for table in (
+            "project_task_execution_receipts",
             "project_task_artifacts",
             "project_task_tool_calls",
             "project_task_contexts",

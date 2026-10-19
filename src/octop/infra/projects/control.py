@@ -11,6 +11,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.messages.tool import ToolCall
 from langchain_core.tools import StructuredTool
+from langgraph.config import get_stream_writer
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command, interrupt
 
@@ -22,6 +23,7 @@ from octop.infra.projects import approval_policy, interactions
 from octop.infra.projects.execution import TaskExecution
 from octop.infra.projects.interaction_models import ApprovalPayload, AskQuestions
 from octop.infra.projects.planning import PLANNING
+from octop.infra.projects.receipts import TaskReceipts
 
 ASK_USER = "ask_user_question"
 
@@ -46,9 +48,12 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
         turn: ProjectTaskTurnRow,
         locale: str,
         execution: TaskExecution | None = None,
+        checkpoint_sink: Callable[[], Awaitable[None]] | None = None,
     ):
         self.services, self.owner, self.turn, self.locale = services, owner, turn, locale
         self.execution = execution
+        self.checkpoint_sink = checkpoint_sink
+        self.receipts = TaskReceipts(services, owner, turn)
 
     async def _pause(self) -> None:
         current = await asyncio.to_thread(
@@ -64,6 +69,12 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
             raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
         if current.pause_requested:
             interrupt({"type": "user_pause"})
+        if (
+            self.checkpoint_sink is not None
+            and self.execution is not None
+            and self.execution.is_root()
+        ):
+            await self.checkpoint_sink()
 
     async def abefore_model(self, state: Any, runtime: Any) -> None:
         await self._pause()
@@ -89,11 +100,23 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                 return None
             items = interactions.load(current)
             approvals = [i for i in items if i.kind == "approval" and i.tool_call_id == call["id"]]
+            superseded = {
+                i.supersedes_interaction_id for i in approvals if i.supersedes_interaction_id
+            }
+            approvals = [i for i in approvals if i.interaction_id not in superseded]
             settings = approval_policy.settings(self.services)
             if not approvals:
-                return (
+                allowed = (
                     call["name"] != "execute" and call["name"] not in settings.require_human_tools
                 )
+                if (
+                    allowed
+                    and self.execution is not None
+                    and self.execution.is_root()
+                    and self.receipts.tracked(call)
+                ):
+                    self.receipts.start(conn, call)
+                return allowed
             for item in approvals:
                 payload = item.payload
                 if (
@@ -114,6 +137,12 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
             for item in approvals:
                 item.dispatch_started = True
                 item.revision += 1
+            if (
+                self.execution is not None
+                and self.execution.is_root()
+                and self.receipts.tracked(call)
+            ):
+                self.receipts.start(conn, call)
             self.services.project_task_turn_repo.save_interactions(
                 conn, current.turn_id, interactions.dump(items), int(time.time() * 1000)
             )
@@ -125,6 +154,23 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
         await self._pause()
+        tracked = (
+            self.execution is not None
+            and self.execution.is_root()
+            and self.receipts.tracked(request.tool_call)
+        )
+        if tracked:
+            previous = await asyncio.to_thread(self.receipts.replay, request.tool_call)
+            if previous is not None:
+                get_stream_writer()(
+                    {
+                        "type": "task_tool_receipt",
+                        "call_id": str(request.tool_call["id"]),
+                        "failed": previous.status == "error",
+                        "output": previous.content,
+                    }
+                )
+                return previous
         if (
             request.tool_call["name"] == PLANNING
             and self.execution is not None
@@ -163,6 +209,19 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                 tool_call_id=str(request.tool_call["id"]),
                 status="error",
             )
+        if (
+            self.execution is not None
+            and self.execution.is_root()
+            and request.tool_call["name"] != PLANNING
+        ):
+            try:
+                self.execution.binding_for_call(request.tool_call, request.tool)
+            except ValueError:
+                return ToolMessage(
+                    content=tr("projects.task_step_invalid", self.locale),
+                    tool_call_id=str(request.tool_call["id"]),
+                    status="error",
+                )
         authorized = await asyncio.to_thread(self._authorize, request.tool_call)
         if authorized is None:
             interrupt({"type": "user_pause"})
@@ -173,5 +232,11 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                 status="error",
             )
         if self.execution is not None:
-            return await self.execution.run(request, handler)
+
+            async def invoke(actual: ToolCallRequest) -> ToolMessage | Command[Any]:
+                return (
+                    await self.receipts.run(actual, handler) if tracked else await handler(actual)
+                )
+
+            return await self.execution.run(request, invoke)
         return await handler(request)

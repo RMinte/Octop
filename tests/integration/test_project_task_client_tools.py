@@ -92,7 +92,18 @@ async def result(ws, call, token, output=None, *, is_error=False):
     )
 
 
-@pytest.mark.parametrize("mode", ["success", "tool_error", "timeout"])
+async def task_with_status(client, auth, task_id, status):
+    async with asyncio.timeout(5):
+        while True:
+            response = await client.get(f"/api/project-tasks/{task_id}", headers=auth)
+            assert response.status_code == 200, response.text
+            task = response.json()
+            if task["status"] == status:
+                return task
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.parametrize("mode", ["success", "tool_error", "timeout", "pending_timeout"])
 async def test_real_harness_waits_for_client_and_receives_actual_result(
     env_with_provider, monkeypatch, mode
 ):
@@ -106,7 +117,7 @@ async def test_real_harness_waits_for_client_and_receives_actual_result(
     client, server, auth = env_with_provider
     monkeypatch.setattr(project_tasks_ws, "_UPDATE_SECONDS", 0.01)
     monkeypatch.setattr(client_tools, "_POLL_SECONDS", 0.01)
-    if mode == "timeout":
+    if mode in {"timeout", "pending_timeout"}:
         monkeypatch.setattr(client_tools, "CALL_TIMEOUT_MS", 500)
     observed, names = [], set()
 
@@ -152,17 +163,52 @@ async def test_real_harness_waits_for_client_and_receives_actual_result(
         live = (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()
         assert live["status"] in {"running", "waiting_client_tool"}
         assert len(observed) == 1  # No second model request before a tool result.
-        if mode == "timeout":
-            done = await settled(client, auth, task["task_id"])
-            assert done["status"] == "failed"
-            assert done["turns"][0]["error_code"] == "TASK_CLIENT_TOOL_TIMEOUT"
+        if mode == "pending_timeout":
+            interrupted = await task_with_status(client, auth, task["task_id"], "interrupted")
+            assert interrupted["active_turn_id"] == call["turn_id"]
+            assert not interrupted["turns"][0]["recovery"]["can_resume"]
+            state = await command(ws, "tool.get", "get-expired-call", **identity(call))
+            assert state["data"]["status"] == "expired" and not state["data"]["dispatch_allowed"]
+            assert (await claim(ws, call))["error"]["code"] == "TASK_CLIENT_TOOL_CLOSED"
+            resumed = await command(
+                ws,
+                "task.resume",
+                "resume-expired-call",
+                task_id=task["task_id"],
+                data={"turn_id": call["turn_id"], "request_id": "resume-expired-intent"},
+            )
+            assert resumed["error"]["code"] == "TASK_CONTROL_INVALID"
+            assert len(observed) == 1
             return
         receipt = await claim(ws, call)
         token = receipt["data"]["claim_token"]
+        if mode == "timeout":
+            interrupted = await task_with_status(client, auth, task["task_id"], "interrupted")
+            recovery = interrupted["turns"][0]["recovery"]
+            assert not recovery["can_resume"] and recovery["needs_reconciliation"]
+            state = await command(ws, "tool.get", "get-claimed-timeout", **identity(call))
+            assert state["data"]["status"] == "claimed" and not state["data"]["dispatch_allowed"]
+            assert state["data"]["error_code"] == "TASK_CLIENT_TOOL_TIMEOUT"
+            assert len(observed) == 1
         accepted = await result(
             ws, call, token, {"text": "client-note-proof"}, is_error=mode == "tool_error"
         )
         assert accepted["data"]["status"] == "completed"
+        if mode == "timeout":
+            reconciled = await task_with_status(client, auth, task["task_id"], "interrupted")
+            recovery = reconciled["turns"][0]["recovery"]
+            assert recovery["can_resume"] and not recovery["needs_reconciliation"]
+            assert len(observed) == 1
+            resumed = await command(
+                ws,
+                "task.resume",
+                "resume-claimed-call",
+                task_id=task["task_id"],
+                data={"turn_id": call["turn_id"], "request_id": "resume-claimed-intent"},
+            )
+            assert resumed["type"] == "result"
+            assert len(resumed["data"]["turns"]) == 1
+            assert resumed["data"]["turns"][0]["turn_id"] == call["turn_id"]
         final = await until(
             ws,
             lambda f: (
@@ -296,7 +342,7 @@ async def test_cancel_closes_call_and_rejects_late_results(tool_env, claimed):
         await session.__aexit__(None, None, None)
 
 
-async def test_timeout_is_terminal_and_does_not_replay_call(tool_env, monkeypatch):
+async def test_uncheckpointed_broker_timeout_does_not_replay_call(tool_env, monkeypatch):
     client, _, auth, outputs = tool_env
     monkeypatch.setattr(client_tools, "CALL_TIMEOUT_MS", 150)
     session, ws = await connected(client, auth)
@@ -383,13 +429,17 @@ async def test_two_connections_cannot_claim_with_different_request_ids(tool_env)
         await session.__aexit__(None, None, None)
 
 
-async def test_stale_worker_recovery_closes_durable_calls(tool_env):
+@pytest.mark.parametrize("claimed", [False, True])
+async def test_stale_worker_preserves_calls_without_replaying_until_explicit_cancel(
+    tool_env, claimed
+):
     from octop.infra.projects.tasks import now_ms
 
     client, server, auth, outputs = tool_env
     session, ws = await connected(client, auth)
     try:
         task, call = await start_call(ws)
+        token = (await claim(ws, call))["data"]["claim_token"] if claimed else None
         with server.services.db.connect() as conn:
             conn.execute(
                 "UPDATE project_task_turns SET updated_at=? WHERE turn_id=?",
@@ -398,9 +448,26 @@ async def test_stale_worker_recovery_closes_durable_calls(tool_env):
         # Simulate another worker recovering the crashed process's lease before any replay.
         runtime.ProjectTaskWorker(server.services)._recover()
         state = await command(ws, "tool.get", "get-stale-call-001", **identity(call))
-        assert state["data"]["status"] == "interrupted"
-        done = await settled(client, auth, task["task_id"])
-        assert done["turns"][0]["error_code"] == "TASK_INTERRUPTED"
+        assert state["data"]["status"] == ("claimed" if claimed else "pending")
+        assert not state["data"]["dispatch_allowed"]
+        interrupted = await task_with_status(client, auth, task["task_id"], "interrupted")
+        assert interrupted["active_turn_id"] == call["turn_id"]
+        assert outputs == []
+        await command(
+            ws,
+            "task.cancel",
+            "cancel-stale-call",
+            task_id=task["task_id"],
+            data={"turn_id": call["turn_id"]},
+        )
+        assert (await settled(client, auth, task["task_id"]))["status"] == "cancelled"
+        state = await command(ws, "tool.get", "get-cancelled-stale-call", **identity(call))
+        assert state["data"]["status"] == "cancelled" and not state["data"]["dispatch_allowed"]
+        assert (await claim(ws, call))["error"]["code"] == "TASK_CLIENT_TOOL_CLOSED"
+        if token:
+            assert (await result(ws, call, token, "late"))["error"][
+                "code"
+            ] == "TASK_CLIENT_TOOL_CLOSED"
         assert outputs == []
     finally:
         await session.__aexit__(None, None, None)

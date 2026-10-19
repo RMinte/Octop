@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from octop.infra.db.repos.project_task_reviews import TaskReviewRow
@@ -78,6 +78,7 @@ def freeze_server(
         and old.payload.action_signature == payload.action_signature
         and old.resolution is not None
         and old.resolution.outcome == "deny"
+        and not (old.resolution.source == "timeout" and item.supersedes_interaction_id)
         for old in previous
     ):
         _resolve(item, "deny", "previous_denial", now)
@@ -127,6 +128,54 @@ def freeze_server(
         )
         item.status = "reviewing"
         item.review = review_view(row)
+
+
+def rearm_expired(
+    services: SharedServices,
+    conn: Any,
+    owner: int,
+    turn: ProjectTaskTurnRow,
+    items: list[TaskInteraction],
+    wait: dict[str, Any],
+    now: int,
+) -> bool:
+    """Renew unexecuted timeout approvals only after an explicit interrupted resume."""
+    changed = interactions.expire(items)
+    by_id = {item.interaction_id: item for item in items}
+    for group in wait.get("groups", []):
+        for action in group["actions"]:
+            if action["type"] != "approval":
+                continue
+            old = by_id[action["id"]]
+            if (
+                old.status != "expired"
+                or old.dispatch_started
+                or old.resolution is None
+                or old.resolution.outcome != "deny"
+                or old.resolution.source != "timeout"
+                or not isinstance(old.payload, ApprovalPayload)
+            ):
+                continue
+            payload = old.payload.model_copy(deep=True)
+            payload.action_digest = interactions.digest(
+                {
+                    "supersedes_interaction_id": old.interaction_id,
+                    "tool_call_id": old.tool_call_id,
+                    "tool_name": payload.tool_name,
+                    "arguments": payload.arguments,
+                    "configuration": turn.configuration_json,
+                }
+            )
+            fresh = interactions.new(turn, payload, old.tool_call_id)
+            fresh.supersedes_interaction_id = old.interaction_id
+            fresh.created_at = datetime.fromtimestamp(now / 1000, UTC)
+            fresh.expires_at = fresh.created_at + timedelta(seconds=interactions.WAIT_SECONDS)
+            freeze_server(services, conn, owner, turn, fresh, items, now)
+            items.append(fresh)
+            by_id[fresh.interaction_id] = fresh
+            action["id"] = fresh.interaction_id
+            changed = True
+    return changed
 
 
 def advance(

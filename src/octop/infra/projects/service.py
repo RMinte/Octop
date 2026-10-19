@@ -41,21 +41,25 @@ def _allowed_root(services: SharedServices, owner_id: int) -> str | None:
     )
 
 
-def resources(services: SharedServices, owner_id: int) -> ProjectResources:
-    store = SkillPackageStore(
-        repo=services.skill_package_repo, root=services.paths.skill_packages_dir
-    )
-    skills = [
-        SkillOption(
-            package_id=package.id,
-            slug=str(skill["slug"]),
-            name=str(skill.get("name") or skill["slug"]),
-            description=str(skill.get("description") or ""),
+def resources(
+    services: SharedServices, owner_id: int, *, include_skills: bool = True
+) -> ProjectResources:
+    skills = []
+    if include_skills:
+        store = SkillPackageStore(
+            repo=services.skill_package_repo, root=services.paths.skill_packages_dir
         )
-        for package in store.repo.list_all()
-        for skill in store.list_skill_summaries(package.id)
-        if not skill.get("corrupt")
-    ]
+        skills = [
+            SkillOption(
+                package_id=package.id,
+                slug=str(skill["slug"]),
+                name=str(skill.get("name") or skill["slug"]),
+                description=str(skill.get("description") or ""),
+            )
+            for package in store.repo.list_all()
+            for skill in store.list_skill_summaries(package.id)
+            if not skill.get("corrupt")
+        ]
     connectors = ConnectorService(
         repo=services.connector_repo,
         secret_repo=services.secret_repo,
@@ -85,17 +89,25 @@ def resources(services: SharedServices, owner_id: int) -> ProjectResources:
     )
 
 
-def _validate(services: SharedServices, owner_id: int, fields: ProjectFields) -> str | None:
-    available = resources(services, owner_id)
+def _validate(
+    services: SharedServices, owner_id: int, fields: ProjectFields, *, cached_skills: bool = False
+) -> str | None:
+    available = (
+        resources(services, owner_id, include_skills=False)
+        if cached_skills
+        else resources(services, owner_id)
+    )
     if fields.team_enabled and not fields.subagents:
         raise OctopError.localized(ErrorCode.PROJECT_RESOURCE_INVALID, status=422)
     if not set(fields.plugins) <= {
         p.plugin_id for p in available.plugins if p.available
     } or not set(fields.subagents) <= {s.slug for s in available.subagents}:
         raise OctopError.localized(ErrorCode.PROJECT_RESOURCE_INVALID, status=422)
-    if not {(s.package_id, s.slug) for s in fields.skills if isinstance(s, SkillBinding)} <= {
-        (s.package_id, s.slug) for s in available.skills
-    } or not set(fields.mcp_servers) <= {m.server_name for m in available.mcp_servers}:
+    if (
+        not cached_skills
+        and not {(s.package_id, s.slug) for s in fields.skills if isinstance(s, SkillBinding)}
+        <= {(s.package_id, s.slug) for s in available.skills}
+    ) or not set(fields.mcp_servers) <= {m.server_name for m in available.mcp_servers}:
         raise OctopError.localized(ErrorCode.PROJECT_RESOURCE_INVALID, status=422)
     if fields.directory is None:
         return None

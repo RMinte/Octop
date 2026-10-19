@@ -208,6 +208,46 @@ def control(
             return
         if turn.status not in {"queued", "running"} or turn.cancel_requested:
             raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
+        if turn.wait_kind == "interrupted" and not paused:
+            from octop.infra.projects import approval_runtime
+
+            recovery = json.loads(turn.recovery_json)
+            if services.project_task_execution_receipt_repo.unfinished(conn, turn.turn_id):
+                raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
+            if recovery.get("mode") == "wait":
+                wait = json.loads(turn.pause_json)
+                calls = [
+                    services.project_task_tool_call_repo.get(conn, identifier)
+                    for identifier in wait["calls"]
+                ]
+                if any(row is None or row.status != "completed" for row in calls):
+                    raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
+                items = load(turn)
+                approval_runtime.rearm_expired(services, conn, owner, turn, items, wait, now)
+                kind = approval_runtime.wait_kind(items, clients=False, user_paused=False)
+                services.project_task_turn_repo.pause(
+                    conn,
+                    turn.turn_id,
+                    "",
+                    turn.checkpoint_id,
+                    encode(wait),
+                    turn.reply,
+                    turn.reasoning,
+                    turn.content_blocks_json,
+                    turn.content_revision,
+                    now,
+                    wait_kind=kind,
+                    interactions_json=dump(items),
+                )
+                services.project_task_repo.wait(conn, task_id, turn.turn_id, kind, now)
+            elif not recovery.get(
+                "can_resume"
+            ) or not services.project_task_turn_repo.resume_recovery(conn, turn.turn_id, now):
+                raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
+            services.project_task_turn_repo.save_request(
+                conn, turn.turn_id, encode(requests), False
+            )
+            return
         services.project_task_turn_repo.save_request(conn, turn.turn_id, encode(requests), paused)
         if turn.is_waiting:
             services.project_task_repo.wait(

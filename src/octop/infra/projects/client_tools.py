@@ -55,6 +55,22 @@ def _previous_denial(
     )
 
 
+def _dispatch_allowed(turn: ProjectTaskTurnRow | None, row: ProjectTaskToolCallRow) -> bool:
+    now = _now()
+    return bool(
+        turn
+        and turn.status in {"queued", "running"}
+        and turn.wait_kind != "interrupted"
+        and not turn.pause_requested
+        and not turn.cancel_requested
+        and row.status in {"pending", "claimed"}
+        and row.expires_at > now
+        and not (
+            turn.status == "running" and not turn.is_waiting and turn.updated_at < now - 90_000
+        )
+    )
+
+
 def view(row: ProjectTaskToolCallRow, services: SharedServices, conn: Any) -> ClientToolCall:
     context = json.loads(row.approval_context_json)
     if not context:
@@ -76,13 +92,7 @@ def view(row: ProjectTaskToolCallRow, services: SharedServices, conn: Any) -> Cl
         name=row.name,
         arguments=json.loads(row.arguments_json),
         approval_context=ClientApprovalContext.model_validate(context),
-        dispatch_allowed=bool(
-            turn
-            and turn.status in {"queued", "running"}
-            and not turn.pause_requested
-            and not turn.cancel_requested
-            and row.status in {"pending", "claimed"}
-        ),
+        dispatch_allowed=_dispatch_allowed(turn, row),
         manual_review_required=bool(
             context.get("requires_user")
             or row.name in settings.require_human_tools
@@ -106,12 +116,15 @@ def _normalize(
     now, status, error = _now(), "", ""
     if turn is None or turn.cancel_requested or turn.status == "cancelled":
         status = "cancelled"
-    elif turn.status not in {"running", "queued"} or (
-        turn.status == "running" and not turn.is_waiting and turn.updated_at < now - 90_000
-    ):
+    elif turn.status not in {"running", "queued"}:
         status, error = "interrupted", "TASK_INTERRUPTED"
     elif row.expires_at <= now:
-        status, error = "expired", "TASK_CLIENT_TOOL_TIMEOUT"
+        # A claimed action may already have run. Preserve its original token so
+        # the executor can reconcile the result without granting another dispatch.
+        status = "claimed" if row.status == "claimed" else "expired"
+        error = "TASK_CLIENT_TOOL_TIMEOUT"
+        if row.status == status and row.error_code == error:
+            return row
     if status:
         services.project_task_tool_call_repo.close(conn, row.call_id, status, error, now)
         return replace(row, status=status, error_code=error, updated_at=now)
@@ -177,15 +190,19 @@ def claim_call(
     with services.db.transaction() as conn:
         row = _load(services, conn, owner_id, client_id, task_id, turn_id, call_id)
         if row.status == "pending":
-            now, token = _now(), secrets.token_urlsafe(32)
-            services.project_task_tool_call_repo.claim(conn, call_id, request_id, token, now)
-            row = replace(
-                row,
-                status="claimed",
-                claim_request_id=request_id,
-                claim_token=token,
-                updated_at=now,
-            )
+            turn = services.project_task_turn_repo.get_in_transaction(conn, turn_id)
+            if not _dispatch_allowed(turn, row):
+                error = ErrorCode.TASK_CLIENT_TOOL_CLOSED
+            else:
+                now, token = _now(), secrets.token_urlsafe(32)
+                services.project_task_tool_call_repo.claim(conn, call_id, request_id, token, now)
+                row = replace(
+                    row,
+                    status="claimed",
+                    claim_request_id=request_id,
+                    claim_token=token,
+                    updated_at=now,
+                )
         elif row.status != "claimed":
             error = ErrorCode.TASK_CLIENT_TOOL_CLOSED
         elif row.claim_request_id != request_id:
@@ -196,6 +213,34 @@ def claim_call(
         call=get_call(services, owner_id, client_id, task_id, turn_id, call_id),
         claim_token=row.claim_token,
     )
+
+
+def _reconcile_completed_wait(
+    services: SharedServices, conn: Any, row: ProjectTaskToolCallRow, now: int
+) -> None:
+    turn = services.project_task_turn_repo.get_in_transaction(conn, row.turn_id)
+    if (
+        turn is None
+        or turn.status != "running"
+        or turn.wait_kind != "interrupted"
+        or turn.cancel_requested
+        or not turn.recovery_json
+    ):
+        return
+    recovery = json.loads(turn.recovery_json)
+    if recovery.get("mode") != "wait" or not recovery.get("needs_reconciliation"):
+        return
+    calls = json.loads(turn.pause_json)["calls"]
+    if row.call_id not in calls or any(
+        (pending := services.project_task_tool_call_repo.get(conn, call_id)) is None
+        or pending.status != "completed"
+        for call_id in calls
+    ):
+        return
+    if services.project_task_execution_receipt_repo.unfinished(conn, turn.turn_id):
+        return
+    recovery.update(can_resume=True, needs_reconciliation=False)
+    services.project_task_turn_repo.update_recovery(conn, turn.turn_id, json.dumps(recovery), now)
 
 
 def submit_result(
@@ -227,7 +272,10 @@ def submit_result(
         else:
             now = _now()
             services.project_task_tool_call_repo.complete(conn, call_id, encoded, now)
-            row = replace(row, status="completed", result_json=encoded, updated_at=now)
+            row = replace(
+                row, status="completed", result_json=encoded, error_code="", updated_at=now
+            )
+            _reconcile_completed_wait(services, conn, row, now)
     if error:
         raise OctopError.localized(error)
     return get_call(services, owner_id, client_id, task_id, turn_id, call_id)
@@ -359,6 +407,9 @@ class ClientToolBroker:
             row = await asyncio.to_thread(self._poll, call_id)
             if row.status == "completed":
                 return row.result_json
+            if row.status == "claimed" and row.error_code == "TASK_CLIENT_TOOL_TIMEOUT":
+                self.failure = ErrorCode.TASK_CLIENT_TOOL_TIMEOUT
+                raise OctopError.localized(self.failure)
             if row.status not in {"pending", "claimed"}:
                 self.failure = (
                     ErrorCode.TASK_CLIENT_TOOL_TIMEOUT

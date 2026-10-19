@@ -2111,6 +2111,19 @@
           "title": "Tool Call Id",
           "type": "string"
         },
+        "supersedes_interaction_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "用户明确恢复后新审批所续接的原超时交互；原记录保留。",
+          "title": "Supersedes Interaction Id"
+        },
         "dispatch_started": {
           "default": false,
           "title": "Dispatch Started",
@@ -2373,6 +2386,85 @@
       "title": "TaskPlanStep",
       "type": "object"
     },
+    "TaskRecovery": {
+      "additionalProperties": false,
+      "properties": {
+        "can_resume": {
+          "description": "服务端是否允许尝试从原轮断点继续；执行前仍校验断点和权限。",
+          "title": "Can Resume",
+          "type": "boolean"
+        },
+        "needs_reconciliation": {
+          "default": false,
+          "description": "有已派发但结果未知的操作，禁止自动重放。",
+          "title": "Needs Reconciliation",
+          "type": "boolean"
+        },
+        "phase": {
+          "description": "中断发生的具体阶段。",
+          "title": "Phase",
+          "type": "string"
+        },
+        "reason_code": {
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "cause_type": {
+          "description": "底层异常类型，不包含异常正文、请求参数或凭据。",
+          "title": "Cause Type",
+          "type": "string"
+        },
+        "diagnostic_id": {
+          "title": "Diagnostic Id",
+          "type": "string"
+        },
+        "resource_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Type"
+        },
+        "resource_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Id"
+        },
+        "status_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Code"
+        }
+      },
+      "required": [
+        "can_resume",
+        "phase",
+        "reason_code",
+        "cause_type",
+        "diagnostic_id"
+      ],
+      "title": "TaskRecovery",
+      "type": "object"
+    },
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
@@ -2448,7 +2540,7 @@
           "type": "array"
         },
         "interaction_revision": {
-          "description": "交互及暂停意图版本；独立于内容版本，单调递增。",
+          "description": "交互、暂停意图及续接能力版本；独立于内容版本，单调递增。",
           "title": "Interaction Revision",
           "type": "integer"
         },
@@ -2465,6 +2557,7 @@
             "waiting_answer",
             "waiting_client_tool",
             "paused",
+            "interrupted",
             "completed",
             "failed",
             "cancelled"
@@ -2475,6 +2568,18 @@
         "error_code": {
           "title": "Error Code",
           "type": "string"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRecovery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮中断或失败的脱敏诊断与原轮续接能力；不能据此重放结果未知的操作。"
         },
         "activity": {
           "description": "当前执行的工具名称；不包含参数、凭据或工具输出。",
@@ -2670,6 +2775,7 @@
             "waiting_answer",
             "waiting_client_tool",
             "paused",
+            "interrupted",
             "completed",
             "failed",
             "cancelled"
@@ -2797,6 +2903,7 @@
             "waiting_answer",
             "waiting_client_tool",
             "paused",
+            "interrupted",
             "completed",
             "failed",
             "cancelled"

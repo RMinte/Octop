@@ -59,6 +59,9 @@ class TaskInteraction(ProjectModel):
     turn_id: str
     kind: Literal["approval", "question"]
     tool_call_id: str
+    supersedes_interaction_id: str | None = Field(
+        default=None, description="用户明确恢复后新审批所续接的原超时交互；原记录保留。"
+    )
     dispatch_started: bool = False
     revision: int
     status: Literal["reviewing", "pending", "resolved", "cancelled", "expired"]
@@ -105,6 +108,7 @@ WAIT_STATUSES = {
     "answer": "waiting_answer",
     "client_tool": "waiting_client_tool",
     "user": "paused",
+    "interrupted": "interrupted",
 }
 
 

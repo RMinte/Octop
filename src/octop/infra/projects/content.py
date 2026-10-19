@@ -212,11 +212,12 @@ class TaskContent:
         output: Any = None,
         finished_at: datetime | str | None = None,
         duration_ms: float | None = None,
+        from_receipt: bool = False,
     ) -> None:
         block = self._tools.get(call_id)
         if block is not None:
             before = block.model_dump()
-            if failed or block.status == "streaming":
+            if from_receipt or failed or block.status == "streaming":
                 block.status = "failed" if failed else "completed"
             # A later native tool_result may follow the execution-end event; it must
             # not erase the duration or output already observed by the executor.

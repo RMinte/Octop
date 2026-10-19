@@ -113,6 +113,7 @@ export type TaskStatus =
   | "waiting_answer"
   | "waiting_client_tool"
   | "paused"
+  | "interrupted"
   | "completed"
   | "failed"
   | "cancelled";
@@ -213,6 +214,7 @@ export interface TaskInteraction {
   task_id: string;
   turn_id: string;
   tool_call_id: string;
+  supersedes_interaction_id?: string | null;
   revision: number;
   status: "pending" | "reviewing" | "resolved" | "cancelled" | "expired";
   kind: "approval" | "question";
@@ -259,6 +261,17 @@ export type InteractionResponse = {
     | { kind: "question"; action: "answer"; answer: string }
     | { kind: "question"; action: "skip" | "use_default" };
 };
+export interface TaskRecovery {
+  can_resume: boolean;
+  needs_reconciliation: boolean;
+  phase: string;
+  reason_code: string;
+  cause_type: string;
+  diagnostic_id: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  status_code: number | null;
+}
 export interface TaskTurn {
   sequence: number;
   turn_id: string;
@@ -273,6 +286,7 @@ export interface TaskTurn {
   plan_revision: number;
   status: TaskStatus;
   error_code: string;
+  recovery?: TaskRecovery | null;
   activity: string;
   artifacts: TaskArtifact[];
   model_ref: string;

@@ -98,7 +98,7 @@ class ProjectTaskToolCallRepo:
     @staticmethod
     def complete(conn: Any, call_id: str, result_json: str, now: int) -> None:
         conn.execute(
-            "UPDATE project_task_tool_calls SET status='completed',result_json=?,updated_at=? "
+            "UPDATE project_task_tool_calls SET status='completed',result_json=?,error_code='',updated_at=? "
             "WHERE call_id=? AND status='claimed'",
             (result_json, now, call_id),
         )

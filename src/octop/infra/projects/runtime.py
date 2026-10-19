@@ -14,7 +14,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import AIMessage, ToolMessage, message_to_dict, messages_from_dict
 from langchain_core.messages.tool import ToolCall
@@ -38,6 +38,7 @@ from octop.infra.projects import approval_policy, approval_runtime, input_attach
 from octop.infra.projects.approval_reviewer import TaskApprovalReviewWorker
 from octop.infra.projects.artifacts import SERVER_ARTIFACT_TOOLS, TaskArtifactPublisher
 from octop.infra.projects.capabilities import plugin_capabilities, subagent_specs
+from octop.infra.projects.checkpoint_saver import TaskCheckpointSaver, checkpoint_fence
 from octop.infra.projects.checkpoints import (
     checkpoint,
     prepare_wait,
@@ -66,6 +67,14 @@ from octop.infra.projects.progress import (
     progress_report,
     progress_tool,
 )
+from octop.infra.projects.recovery import (
+    RecoveryMode,
+    TaskInterruption,
+    TaskRecovery,
+    diagnostic,
+    transient,
+)
+from octop.infra.projects.resource_snapshot import SnapshotError, load_snapshot, save_snapshot
 from octop.infra.projects.response_text import TaskResponseText
 from octop.infra.projects.service import _validate
 from octop.infra.projects.stream import TASK_PROTOCOL
@@ -87,6 +96,18 @@ _progress_persistence: ContextVar[
 ] = ContextVar("task_progress_persistence", default=None)
 
 
+class SkillPreparationError(Exception):
+    def __init__(self, resource_id: str):
+        super().__init__("skill preparation failed")
+        self.resource_id = resource_id
+
+
+class McpToolsUnavailable(ConnectionError):
+    def __init__(self, resource_id: str):
+        super().__init__("MCP tool discovery unavailable")
+        self.resource_id = resource_id
+
+
 def _skill_files(
     services: SharedServices, fields: ProjectFields
 ) -> list[tuple[str, list[tuple[str, bytes]]]]:
@@ -99,20 +120,23 @@ def _skill_files(
         if skill.slug in seen:
             raise ValueError("duplicate runtime skill name")
         seen.add(skill.slug)
-        if isinstance(skill, SkillBinding):
-            root = store.package_skills_dir(skill.package_id) / skill.slug
-            files = [
-                (p.relative_to(root).as_posix(), p.read_bytes())
-                for p in root.rglob("*")
-                if p.is_file()
-            ]
-            if not any(name == "SKILL.md" for name, _ in files):
-                raise ValueError("skill manifest unavailable")
-        else:
-            package = prepare_skillhub_package(
-                skill.slug, download_skillhub_package_files(skill.slug), display_name=skill.name
-            )
-            files = list(package.files)
+        try:
+            if isinstance(skill, SkillBinding):
+                root = store.package_skills_dir(skill.package_id) / skill.slug
+                files = [
+                    (p.relative_to(root).as_posix(), p.read_bytes())
+                    for p in root.rglob("*")
+                    if p.is_file()
+                ]
+                if not any(name == "SKILL.md" for name, _ in files):
+                    raise ValueError("skill manifest unavailable")
+            else:
+                package = prepare_skillhub_package(
+                    skill.slug, download_skillhub_package_files(skill.slug), display_name=skill.name
+                )
+                files = list(package.files)
+        except Exception as exc:
+            raise SkillPreparationError(skill.slug) from exc
         result.append((skill.slug, files))
     return result
 
@@ -148,9 +172,30 @@ async def run_turn(
     fields = ProjectFields.model_validate(
         {key: raw[key] for key in ProjectFields.model_fields if key in raw}
     )
+    recovery = json.loads(turn.recovery_json) if turn.recovery_json else {}
+    recovery_mode = cast(
+        RecoveryMode, recovery.get("mode") or ("wait" if turn.checkpoint_id else "prepare")
+    )
+    if turn.pause_json and json.loads(turn.pause_json).get("checkpoint_id") == turn.checkpoint_id:
+        recovery_mode = "wait"
+    runtime_dir = services.paths.root / "project-tasks" / turn.task_id
+    snapshot_dir = runtime_dir / turn.turn_id / "resources"
+    resource_phase = "skill_snapshot"
     try:
-        await asyncio.to_thread(_validate, services, owner_id, fields)
-        files = await asyncio.to_thread(_skill_files, services, fields)
+        cached_files = await asyncio.to_thread(load_snapshot, snapshot_dir, turn.configuration_json)
+        if cached_files is None and recovery_mode in {"graph", "wait"}:
+            raise SnapshotError("missing recovery skill snapshot")
+        resource_phase = "resource_validation"
+        await asyncio.to_thread(
+            _validate, services, owner_id, fields, cached_skills=cached_files is not None
+        )
+        resource_phase = "skill_prepare"
+        files = (
+            cached_files
+            if cached_files is not None
+            else await asyncio.to_thread(_skill_files, services, fields)
+        )
+        resource_phase = "mcp_connect"
         connectors = ConnectorService(
             repo=services.connector_repo,
             secret_repo=services.secret_repo,
@@ -167,10 +212,28 @@ async def run_turn(
         )
         remote = {name: spec for name, spec in selected.items() if name not in gateway_names}
         tools = await aload_mcp_tools(remote) if remote else []
-        if any(not any(t.name.startswith(name + "_") for t in tools) for name in remote):
-            raise ValueError("MCP tools unavailable")
+        for name in remote:
+            if not any(t.name.startswith(name + "_") for t in tools):
+                # Harness logs and suppresses individual transport exceptions.
+                # Preserve the exact missing server; do not invent its cause.
+                raise McpToolsUnavailable(name)
     except Exception as exc:
-        raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE) from exc
+        raise TaskInterruption(
+            diagnostic(
+                resource_phase,
+                exc,
+                can_resume=transient(exc),
+                reason_code="TASK_RESOURCE_UNAVAILABLE",
+                resource_type="skill"
+                if resource_phase.startswith("skill")
+                else "mcp"
+                if resource_phase == "mcp_connect"
+                else "project",
+                resource_id=getattr(exc, "resource_id", None),
+            ),
+            recovery_mode,
+            turn.checkpoint_id,
+        ) from exc
     providers = ProviderStore(services.provider_repo)
     if not await asyncio.to_thread(providers.is_model_ref_usable, turn.model_ref):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
@@ -195,7 +258,6 @@ async def run_turn(
     ):
         raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
     configs_provider = await asyncio.to_thread(providers.build_harness_configs)
-    runtime_dir = services.paths.root / "project-tasks" / turn.task_id
     workspace = Path(fields.directory) if fields.directory else runtime_dir / "workspace"
     if fields.directory is None:
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
@@ -254,6 +316,7 @@ async def run_turn(
         plugin_tools, plugin_middleware, plugin_skills = await asyncio.to_thread(
             plugin_capabilities,
             fields,
+            include_skills=cached_files is None,
             reserved={t.name for t in [*tools, *client_tools]}
             | SERVER_ARTIFACT_TOOLS
             | {
@@ -277,8 +340,20 @@ async def run_turn(
         files.extend(plugin_skills)
         if len({slug for slug, _ in files}) != len(files):
             raise ValueError("duplicate runtime skill name")
+        if cached_files is None:
+            await asyncio.to_thread(save_snapshot, snapshot_dir, turn.configuration_json, files)
     except Exception as exc:
-        raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE) from exc
+        raise TaskInterruption(
+            diagnostic(
+                "plugin_prepare",
+                exc,
+                can_resume=transient(exc),
+                reason_code="TASK_RESOURCE_UNAVAILABLE",
+                resource_type="plugin",
+            ),
+            recovery_mode,
+            turn.checkpoint_id,
+        ) from exc
     await asyncio.to_thread(runtime_dir.mkdir, parents=True, exist_ok=True)
     restored_content = TaskContent.restore(
         turn.turn_id, json.loads(turn.content_blocks_json), turn.content_revision
@@ -318,6 +393,23 @@ async def run_turn(
         planning, locale, turn.turn_id, action_timeline_enabled=action_timeline_enabled
     )
     execution.restore(restored_content.dump())
+
+    async def save_checkpoint() -> None:
+        saver = agent.checkpointer
+        saved = (
+            await saver.aget_tuple({"configurable": {"thread_id": turn.turn_id}}) if saver else None
+        )
+        identifier = str(saved.config["configurable"].get("checkpoint_id") or "") if saved else ""
+        if identifier:
+
+            def persist() -> None:
+                with services.db.transaction() as conn:
+                    if not services.project_task_turn_repo.save_checkpoint(
+                        conn, turn.turn_id, turn.worker_id, identifier, now_ms()
+                    ):
+                        raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+
+            await asyncio.to_thread(persist)
 
     async def persist_progress(text: str, call_id: str) -> bool:
         if not execution.is_root():
@@ -371,7 +463,7 @@ async def run_turn(
         peer_invoke_mode="sync",
         middleware=[
             *plugin_middleware,
-            TaskControlMiddleware(services, owner_id, turn, locale, execution),
+            TaskControlMiddleware(services, owner_id, turn, locale, execution, save_checkpoint),
             execution,
             ReasoningRequestMiddleware(summary=raw.get("reasoning_mode") not in {None, "disabled"}),
             TaskImageMaterializeMiddleware(services, owner_id, turn.task_id),
@@ -432,6 +524,7 @@ async def run_turn(
     reply_text = turn.reply
     completed = False
     paused = False
+    graph_started = False
     events: AsyncIterator[dict[str, Any]] | None = None
 
     async def prepare(agent: HarnessAgent) -> None:
@@ -486,6 +579,12 @@ async def run_turn(
                 [*tools, *client_tools],
                 prepare,
             )
+        if agent.checkpointer:
+            saver = TaskCheckpointSaver(services, owner_id, turn, agent.checkpointer)
+            agent._checkpointer_instance = saver
+            agent._base_graph.checkpointer = saver
+            agent.graph.checkpointer = saver
+            cfg.checkpointer = saver
         request = ChatRequest(
             messages=[*history, {"role": "user", "content": user_content}],
             thread_id=turn.turn_id,
@@ -542,8 +641,10 @@ async def run_turn(
                 control_calls[call_id] = call["name"]
             return {"type": "tool_start", **detail}
 
-        if turn.checkpoint_id:
-            await checkpoint(agent, turn.turn_id, turn.checkpoint_id)
+        if turn.checkpoint_id or recovery_mode == "graph":
+            await checkpoint(
+                agent, turn.turn_id, "" if recovery_mode == "graph" else turn.checkpoint_id
+            )
             saved_messages = await agent.aget_history(turn.turn_id, limit=1_000_000)
             # Checkpoints include earlier turns as model context. Planning state
             # and replay receipts come only from this turn's durable content above;
@@ -559,9 +660,21 @@ async def run_turn(
                 execution.restore_model_calls(last_model.tool_calls)
                 for call in last_model.tool_calls:
                     intent(call)
-            decisions = await asyncio.to_thread(resume_decisions, services, owner_id, turn)
-            if decisions is None:
-                raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+            if recovery_mode == "graph":
+                state = await agent.protocol._graph.aget_state(
+                    {"configurable": {"thread_id": turn.turn_id}}
+                )
+                if not state.next or any(task.interrupts for task in state.tasks):
+                    raise TaskInterruption(
+                        diagnostic("checkpoint", RuntimeError(), can_resume=False),
+                        "graph",
+                        turn.checkpoint_id,
+                    )
+                decisions = None
+            else:
+                decisions = await asyncio.to_thread(resume_decisions, services, owner_id, turn)
+                if decisions is None:
+                    raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
             events = resume(agent, request, decisions)
         else:
             events = agent.stream(request, protocol=TASK_PROTOCOL)
@@ -575,6 +688,7 @@ async def run_turn(
             return events
 
         try:
+            graph_started = True
             async for event in events:
                 if broker.failure:
                     raise OctopError.localized(broker.failure)
@@ -632,6 +746,8 @@ async def run_turn(
                         call_details[call_id] = {**call_details.get(call_id, {}), **data}
                         if call_id not in control_calls or call_id in visible_controls:
                             yield {**data, "type": "tool_end"}
+                    elif data.get("type") == "task_tool_receipt":
+                        yield {**data, "type": "tool_receipt"}
                 elif kind == "tool_call_chunk":
                     if not delegating:
                         for output in record_reply(response_text.complete(has_tools=True)):
@@ -759,6 +875,65 @@ async def run_turn(
             if planning.phase == "blocked":
                 raise OctopError.localized(ErrorCode.TASK_PLAN_BLOCKED)
             completed = True
+    except BaseException as exc:
+        current = await asyncio.to_thread(services.project_task_turn_repo.get, turn.turn_id)
+        if (
+            isinstance(exc, asyncio.CancelledError)
+            and current is not None
+            and current.cancel_requested
+        ):
+            raise
+
+        def unfinished_receipts() -> list[Any]:
+            with services.db.connect() as conn:
+                return services.project_task_execution_receipt_repo.unfinished(conn, turn.turn_id)
+
+        unfinished = await asyncio.to_thread(unfinished_receipts)
+        if (
+            isinstance(exc, TaskInterruption)
+            or transient(exc)
+            or isinstance(exc, asyncio.CancelledError)
+            or unfinished
+        ):
+            if events is not None:
+                close = getattr(events, "aclose", None)
+                if close is not None:
+                    await close()
+            identifier = turn.checkpoint_id
+            can_resume = not unfinished
+            mode: RecoveryMode = recovery_mode
+            if graph_started:
+                mode = "graph"
+                try:
+                    identifier = await checkpoint(agent, turn.turn_id)
+                    state = await agent.protocol._graph.aget_state(
+                        {"configurable": {"thread_id": turn.turn_id}}
+                    )
+                    can_resume = can_resume and bool(state.next)
+                    if any(task.interrupts for task in state.tasks):
+                        if turn.pause_json and identifier == turn.checkpoint_id:
+                            mode = "wait"
+                        else:
+                            can_resume = False
+                except Exception:
+                    can_resume = False
+            info = (
+                exc.recovery
+                if isinstance(exc, TaskInterruption)
+                else diagnostic(
+                    "tool" if unfinished else "model" if graph_started else "runtime_prepare",
+                    exc,
+                    can_resume=can_resume,
+                    needs_reconciliation=bool(unfinished),
+                    resource_type="tool" if unfinished else "model",
+                    resource_id=unfinished[0].tool_name if unfinished else turn.model_ref,
+                )
+            )
+            info.can_resume = info.can_resume and can_resume
+            info.needs_reconciliation = info.needs_reconciliation or bool(unfinished)
+            paused = True
+            raise TaskInterruption(info, mode, identifier) from exc
+        raise
     finally:
         try:
             if events is not None:
@@ -832,15 +1007,43 @@ class ProjectTaskWorker:
         self._ready_waits(now)
         for turn in self.services.project_task_turn_repo.stale(before):
             owner = self.services.project_task_repo.runtime_owner(turn.task_id)
-            with self.services.db.transaction() as conn:
+            with checkpoint_fence(self.services, turn), self.services.db.transaction() as conn:
                 if owner is not None:
                     self.services.project_task_repo.lock_owner(conn, owner)
-                if self.services.project_task_turn_repo.interrupt(conn, turn.turn_id, before, now):
-                    interactions.close(self.services, conn, turn, now)
-                    self.services.project_task_tool_call_repo.close_turn(
-                        conn, turn.turn_id, "interrupted", "TASK_INTERRUPTED", now
+                current = self.services.project_task_turn_repo.get_in_transaction(
+                    conn, turn.turn_id
+                )
+                if (
+                    current is None
+                    or current.updated_at >= before
+                    or current.worker_id != turn.worker_id
+                ):
+                    continue
+                uncertain = bool(
+                    self.services.project_task_execution_receipt_repo.unfinished(conn, turn.turn_id)
+                )
+                interruption = TaskInterruption(
+                    diagnostic(
+                        "worker",
+                        TimeoutError(),
+                        can_resume=bool(turn.checkpoint_id) and not uncertain,
+                        needs_reconciliation=uncertain,
+                    ),
+                    "graph",
+                    turn.checkpoint_id,
+                )
+                if self.services.project_task_turn_repo.park_recovery(
+                    conn,
+                    turn.turn_id,
+                    turn.worker_id,
+                    turn.checkpoint_id,
+                    interruption.encode(),
+                    now,
+                    before=before,
+                ):
+                    self.services.project_task_repo.wait(
+                        conn, turn.task_id, turn.turn_id, "interrupted", now
                     )
-                    self.services.project_task_repo.finish(conn, turn.task_id, turn.turn_id, now)
 
     def _ready_waits(self, now: int) -> None:
         for turn in self.services.project_task_turn_repo.waiting():
@@ -848,8 +1051,28 @@ class ProjectTaskWorker:
             if owner is None:
                 continue
             error = ""
+            approval_timeout = False
             try:
-                if resume_decisions(self.services, owner, turn) is None:
+                decisions = resume_decisions(self.services, owner, turn)
+                refreshed = self.services.project_task_turn_repo.get(turn.turn_id)
+                wait = json.loads(turn.pause_json)
+                approval_ids = {
+                    action["id"]
+                    for group in wait["groups"]
+                    for action in group["actions"]
+                    if action["type"] == "approval"
+                }
+                approval_timeout = refreshed is not None and any(
+                    item.interaction_id in approval_ids
+                    and item.status == "expired"
+                    and item.resolution is not None
+                    and item.resolution.source == "timeout"
+                    and not item.dispatch_started
+                    for item in interactions.load(refreshed)
+                )
+                if approval_timeout:
+                    error = "TASK_INTERACTION_CLOSED"
+                elif decisions is None:
                     continue
             except OctopError as exc:
                 error = str(exc.code)
@@ -857,15 +1080,51 @@ class ProjectTaskWorker:
                 error = "TASK_INTERRUPTED"
             with self.services.db.transaction() as conn:
                 self.services.project_task_repo.lock_owner(conn, owner)
-                if (
-                    self.services.project_task_turn_repo.resume_wait(conn, turn.turn_id, now, error)
-                    and error
-                ):
-                    interactions.close(self.services, conn, turn, now)
-                    self.services.project_task_tool_call_repo.close_turn(
-                        conn, turn.turn_id, "interrupted", error, now
+                if error == "TASK_CLIENT_TOOL_TIMEOUT" or approval_timeout:
+                    interruption = TaskInterruption(
+                        diagnostic(
+                            "approval" if approval_timeout else "client_tool",
+                            RuntimeError(),
+                            can_resume=approval_timeout,
+                            needs_reconciliation=not approval_timeout,
+                            reason_code=error,
+                        ),
+                        "wait",
+                        turn.checkpoint_id,
                     )
-                    self.services.project_task_repo.finish(conn, turn.task_id, turn.turn_id, now)
+                    if self.services.project_task_turn_repo.interrupt_wait(
+                        conn, turn.turn_id, turn.checkpoint_id, interruption.encode(), now
+                    ):
+                        self.services.project_task_repo.wait(
+                            conn, turn.task_id, turn.turn_id, "interrupted", now
+                        )
+                else:
+                    if (
+                        self.services.project_task_turn_repo.resume_wait(
+                            conn,
+                            turn.turn_id,
+                            now,
+                            error,
+                            recovery_json=json.dumps(
+                                diagnostic(
+                                    "checkpoint",
+                                    RuntimeError(),
+                                    can_resume=False,
+                                    reason_code=error,
+                                ).model_dump()
+                            )
+                            if error
+                            else None,
+                        )
+                        and error
+                    ):
+                        interactions.close(self.services, conn, turn, now)
+                        self.services.project_task_tool_call_repo.close_turn(
+                            conn, turn.turn_id, "interrupted", error, now
+                        )
+                        self.services.project_task_repo.finish(
+                            conn, turn.task_id, turn.turn_id, now
+                        )
 
     async def _loop(self) -> None:
         while not self.closing:
@@ -873,9 +1132,10 @@ class ProjectTaskWorker:
             try:
                 await asyncio.to_thread(self._recover)
                 turn = await asyncio.to_thread(
-                    self.services.project_task_turn_repo.claim, self.worker_id, now_ms()
+                    self.services.project_task_turn_repo.claim, new_ulid(), now_ms()
                 )
                 if turn:
+                    self.worker_id = turn.worker_id
                     self._current = asyncio.create_task(self._execute(turn))
                     await self._current
                     self._current = None
@@ -893,6 +1153,7 @@ class ProjectTaskWorker:
         error: str,
         reasoning: str | None = None,
         content: TaskContent | None = None,
+        recovery_json: str | None = None,
     ) -> None:
         now = now_ms()
         owner = self.services.project_task_repo.runtime_owner(turn.task_id)
@@ -913,6 +1174,7 @@ class ProjectTaskWorker:
                 if content
                 else None,
                 content_revision=content.revision if content else None,
+                recovery_json=recovery_json,
             ):
                 final = self.services.project_task_turn_repo.get_in_transaction(conn, turn.turn_id)
                 cancelled = final is not None and final.status == "cancelled"
@@ -939,6 +1201,8 @@ class ProjectTaskWorker:
             turn.turn_id, json.loads(turn.content_blocks_json), turn.content_revision
         )
         pause: dict[str, Any] | None = None
+        interrupted: TaskInterruption | None = None
+        failure: TaskRecovery | None = None
         locale = normalize_locale(None)
         output_lock = asyncio.Lock()
 
@@ -1095,12 +1359,22 @@ class ProjectTaskWorker:
                         step_id=event.get("step_id"),
                         introduction=event.get("introduction"),
                     )
+                elif event["type"] == "tool_receipt":
+                    content.end_tool(
+                        event["call_id"],
+                        failed=event["failed"],
+                        output=event["output"],
+                        from_receipt=True,
+                    )
             if pause is None and not reply.strip():
                 raise OctopError.localized(ErrorCode.TASK_EXECUTION_FAILED)
+        except TaskInterruption as exc:
+            interrupted = exc
         except asyncio.CancelledError:
             status, error = ("failed", "TASK_INTERRUPTED") if self.closing else ("cancelled", "")
         except OctopError as exc:
             status, error = "failed", str(exc.code)
+            failure = diagnostic("runtime", exc, can_resume=False, reason_code=error)
         except Exception as exc:
             # Record exception class/status for diagnosis without logging credential-bearing payloads.
             logger.warning(
@@ -1110,6 +1384,7 @@ class ProjectTaskWorker:
                 getattr(exc, "status_code", None),
             )
             status, error = "failed", "TASK_EXECUTION_FAILED"
+            failure = diagnostic("runtime", exc, can_resume=False, reason_code=error)
         finally:
             _plan_persistence.reset(sink_token)
             _progress_persistence.reset(progress_sink_token)
@@ -1124,7 +1399,10 @@ class ProjectTaskWorker:
                 )
                 status, error = "failed", "TASK_EXECUTION_FAILED"
             parked = False
-            if pause is not None and status == "completed":
+            if interrupted is not None:
+                await save_output()
+                parked = await asyncio.to_thread(self._park_interruption, turn, interrupted)
+            if not parked and pause is not None and status == "completed":
                 try:
                     parked = await asyncio.to_thread(
                         self._pause, turn, pause, reply, reasoning, content
@@ -1139,8 +1417,42 @@ class ProjectTaskWorker:
             if not parked:
                 content.finish(completed=status == "completed")
                 await asyncio.to_thread(
-                    self._finish, turn, status, reply, error, reasoning, content
+                    self._finish,
+                    turn,
+                    status,
+                    reply,
+                    error,
+                    reasoning,
+                    content,
+                    json.dumps(failure.model_dump()) if failure else None,
                 )
+
+    def _park_interruption(self, turn: ProjectTaskTurnRow, interruption: TaskInterruption) -> bool:
+        owner = self.services.project_task_repo.runtime_owner(turn.task_id)
+        now = now_ms()
+        with checkpoint_fence(self.services, turn), self.services.db.transaction() as conn:
+            if owner is None or not self.services.project_task_repo.lock_owner(conn, owner):
+                return False
+            parked = self.services.project_task_turn_repo.park_recovery(
+                conn,
+                turn.turn_id,
+                turn.worker_id,
+                interruption.checkpoint_id,
+                interruption.encode(),
+                now,
+            )
+            if parked:
+                logger.info(
+                    "Project task interrupted: turn=%s diagnostic=%s phase=%s cause=%s",
+                    turn.turn_id,
+                    interruption.recovery.diagnostic_id,
+                    interruption.recovery.phase,
+                    interruption.recovery.cause_type,
+                )
+                self.services.project_task_repo.wait(
+                    conn, turn.task_id, turn.turn_id, "interrupted", now
+                )
+            return parked
 
     def _pause(
         self,
@@ -1153,7 +1465,7 @@ class ProjectTaskWorker:
         owner = self.services.project_task_repo.runtime_owner(turn.task_id)
         if owner is None:
             return False
-        with self.services.db.transaction() as conn:
+        with checkpoint_fence(self.services, turn), self.services.db.transaction() as conn:
             self.services.project_task_repo.lock_owner(conn, owner)
             current = self.services.project_task_turn_repo.get_in_transaction(conn, turn.turn_id)
             if (

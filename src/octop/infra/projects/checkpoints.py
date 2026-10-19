@@ -31,7 +31,7 @@ from octop.infra.projects.stream import TaskStreamProtocol
 
 
 async def resume(
-    agent: HarnessAgent, request: ChatRequest, decisions: dict[str, Any]
+    agent: HarnessAgent, request: ChatRequest, decisions: dict[str, Any] | None
 ) -> AsyncIterator[dict[str, Any]]:
     protocol = cast(TaskStreamProtocol, agent.protocol)
     with session_header_scope(request.thread_id):
@@ -242,7 +242,9 @@ def resume_decisions(
         for identifier in wait["calls"]:
             row = _load(services, conn, owner_id, client_id, turn.task_id, turn.turn_id, identifier)
             rows[identifier] = row
-            if row.status == "expired":
+            if row.status == "expired" or (
+                row.status == "claimed" and row.error_code == "TASK_CLIENT_TOOL_TIMEOUT"
+            ):
                 error = ErrorCode.TASK_CLIENT_TOOL_TIMEOUT
             elif row.status not in {"pending", "claimed", "completed"}:
                 error = ErrorCode.TASK_CLIENT_TOOL_CLOSED

@@ -160,10 +160,21 @@ def test_unrecoverable_checkpoint_records_failed_finish(turns):
     db, repo = turns
     repo.claim("worker-one", 1_000)
     pause(db, repo)
+    recovery = (
+        '{"phase":"checkpoint","can_resume":false,"reason_code":"TASK_INTERRUPTED",'
+        '"cause_type":"ValueError","diagnostic_id":"diagnostic-one"}'
+    )
     with db.transaction() as conn:
-        assert repo.resume_wait(conn, "timing-turn", 9_000, "TASK_INTERRUPTED")
+        assert repo.resume_wait(
+            conn,
+            "timing-turn",
+            9_000,
+            "TASK_INTERRUPTED",
+            recovery_json=recovery,
+        )
     row = repo.get("timing-turn")
     assert row.status == "failed" and row.started_at == 1_000 and row.finished_at == 9_000
+    assert row.recovery_json == recovery
     assert turn_view(row).processing_duration_ms == 8_000
 
 
@@ -237,7 +248,7 @@ def test_v43_migration_adds_null_timing_and_preserves_every_original_turn_column
         after = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
         assert after.pop("started_at") is None and after.pop("finished_at") is None
         assert after == before
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 45
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 46
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

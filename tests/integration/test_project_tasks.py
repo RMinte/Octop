@@ -346,16 +346,32 @@ async def test_queued_cancel_and_abandoned_worker_recovery(task_env):
         content_blocks_json=json.dumps(saved_blocks),
         content_revision=content.revision,
     )
-    worker._recover()
+    await asyncio.to_thread(worker._recover)
     done = (await client.get(f"/api/project-tasks/{task.task_id}", headers=auth)).json()
-    assert done["active_turn_id"] is None and done["turns"][0]["error_code"] == "TASK_INTERRUPTED"
-    assert done["status"] == "failed"
+    assert done["active_turn_id"] == claimed.turn_id
+    assert done["status"] == "interrupted"
+    assert done["turns"][0]["recovery"]["reason_code"] == "TASK_INTERRUPTED"
+    # This fabricated abandoned worker has no native checkpoint. Keep its
+    # output, but never manufacture a continuation from the visible text.
+    assert done["turns"][0]["recovery"]["can_resume"] is False
     assert [block["status"] for block in done["turns"][0]["content_blocks"]] == [
         "completed",
         "interrupted",
         "interrupted",
     ]
     assert done["turns"][0]["content_revision"] == content.revision
+    resume = await client.post(
+        f"/api/project-tasks/{task.task_id}/resume",
+        headers=auth,
+        json={"turn_id": claimed.turn_id, "request_id": "missing-checkpoint-resume"},
+    )
+    assert resume.status_code == 409 and calls == []
+    stopped = await client.post(
+        f"/api/project-tasks/{task.task_id}/cancel",
+        headers=auth,
+        json={"turn_id": claimed.turn_id},
+    )
+    assert stopped.json()["active_turn_id"] is None
     assert (
         json.loads(services.project_task_turn_repo.get(claimed.turn_id).content_blocks_json)
         == saved_blocks

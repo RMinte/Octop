@@ -257,7 +257,7 @@ async def test_question_defaults_timeout_and_late_reply(interaction_env, default
 
 
 @pytest.mark.parametrize("decision", ["deny", "expire"])
-async def test_denial_and_expiry_cannot_become_permission_after_policy_change(
+async def test_denial_and_expiry_require_valid_permission_after_policy_change(
     interaction_env, decision
 ):
     env = interaction_env
@@ -283,9 +283,36 @@ async def test_denial_and_expiry_cannot_become_permission_after_policy_change(
             )
     server.project_task_worker = runtime.ProjectTaskWorker(server.services)
     await server.project_task_worker.start()
+    if decision == "expire":
+        async with asyncio.timeout(5):
+            while True:
+                interrupted = (
+                    await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)
+                ).json()
+                if interrupted["status"] == "interrupted":
+                    break
+                await asyncio.sleep(0.01)
+        assert effects == [] and len(interrupted["turns"]) == 1
+        assert interrupted["turns"][0]["turn_id"] == turn["turn_id"]
+        expired = interrupted["turns"][0]["interactions"][0]
+        assert expired["status"] == "expired"
+        assert expired["resolution"] == {"outcome": "deny", "source": "timeout", "answer": None}
+        resumed = await client.post(
+            f"/api/project-tasks/{task['task_id']}/resume",
+            headers=auth,
+            json={"turn_id": turn["turn_id"], "request_id": str(uuid4())},
+        )
+        assert resumed.status_code == 200, resumed.text
+        fresh = resumed.json()["turns"][0]["interactions"][-1]
+        assert fresh["interaction_id"] != expired["interaction_id"]
+        assert fresh["supersedes_interaction_id"] == expired["interaction_id"]
+        assert fresh["tool_call_id"] == expired["tool_call_id"]
+        assert fresh["status"] == "pending" and effects == []
+        assert (await respond(env, task, expired, approval(expired))).status_code == 409
+        assert (await respond(env, task, fresh, approval(fresh))).status_code == 200
     final = await settled(client, auth, task["task_id"])
     assert final["status"] == "completed", final
-    assert effects == []
+    assert effects == (["0"] if decision == "expire" else [])
 
 
 async def test_pause_wait_answer_then_resume_exact_turn_over_ws(interaction_env):
@@ -454,7 +481,10 @@ async def test_separate_parallel_tool_interrupts_resume_by_native_identity(
             for name, value in cfg.interrupt_on.items()
             if not name.startswith("guarded_")
         }
-        cfg.middleware = [*cfg.middleware, Gate()]
+        # This is an admission gate, before the controller records dispatch.
+        # An interrupt inside a dispatched handler has an unknown outcome and
+        # must be reconciled instead of transparently replaying its code.
+        cfg.middleware = [Gate(), *cfg.middleware]
         return original(cfg, **kwargs)
 
     monkeypatch.setattr(runtime, "HarnessAgent", create)

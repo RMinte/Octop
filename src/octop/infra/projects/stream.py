@@ -14,6 +14,14 @@ TASK_PROTOCOL = "octop-project-task"
 
 
 class TaskStreamProtocol(LangGraphProtocol):
+    async def stream(
+        self, messages: list[Any], config: dict[str, Any], **kwargs: Any
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        # Each node must have a durable predecessor before work can advance.
+        kwargs["durability"] = "sync"
+        async for event in super().stream(messages, config, **kwargs):
+            yield event
+
     def _project_chunk(
         self, chunk: dict[str, Any], splitter: ThinkSplitter
     ) -> list[dict[str, Any]]:
@@ -33,14 +41,15 @@ class TaskStreamProtocol(LangGraphProtocol):
         return events
 
     async def resume(
-        self, values: dict[str, Any], config: dict[str, Any]
+        self, values: dict[str, Any] | None, config: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         splitter = ThinkSplitter()
         async for chunk in self._graph.astream(
-            Command(resume=values),
+            Command(resume=values) if values is not None else None,
             config=config,
             stream_mode=["values", "updates", "messages", "custom"],
             version="v2",
+            durability="sync",
         ):
             for event in self._project_chunk(chunk, splitter):
                 yield event

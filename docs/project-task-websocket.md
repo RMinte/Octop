@@ -2,7 +2,9 @@
 
 协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 19 日。
 
-客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。模型执行槽保持串行，主 Task 等待客户端工具时保存检查点并释放执行槽，其他排队任务可以继续；生成中的正文按约 0.5 秒的保存节奏更新。
+本次保持协议版本 3，新增轮次/摘要状态 `interrupted`、可空的 `TaskTurn.recovery` 和审批续接关联 `supersedes_interaction_id`。客户端必须识别新状态与恢复字段，不能将中断当作完成或把恢复映射成 `task.retry`；AgentComputer Swift/UI 恢复入口本次未接线。
+
+客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务由执行服务继续处理；重新连接只恢复订阅。执行服务所在电脑休眠时无法保证持续执行，本机模式在唤醒后核对断点续接；需要 Mac 合盖期间持续执行，应部署到独立常开主机。模型执行槽保持串行，主 Task 等待客户端工具时保存检查点并释放执行槽，其他排队任务可以继续；生成中的正文按约 0.5 秒的保存节奏更新。
 
 这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字、图片和通用文件输入、独立的思考内容、正式执行计划、步骤结果、工具参数与公开返回内容、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。主 Task 支持三档任务审批模式、远端独立 Reviewer、提问和手动暂停恢复；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)，输入附件见[第 15 节](#15-输入附件)。
 
@@ -132,6 +134,16 @@ data 顶层可传 `web_search_enabled:true/false`，默认 true，用户显式�
 只能重试最后一个 failed/cancelled 轮次，且任务当前没有活动轮次。成功 result.data 为 TaskDetail：保留原记录，用原 prompt 和当前配置创建新 turn_id，记录 retry_of_turn_id。它会重新执行工作，可能重复已有工具操作，不能用于自动网络重连。
 
 同一次重试的网络重发仍使用原 request_id 和 options。要再次执行另一轮重试，使用新 request_id。输入附件沿用原轮次的文件和顺序，重试请求无需上传或重复提交 attachment_ids。
+
+### 继续原轮断点 task.resume
+
+```json
+{"type":"task.resume","id":"command-resume-001","task_id":"task_example","data":{"request_id":"resume-intent-001","turn_id":"turn_interrupted"}}
+```
+
+用于解除手动暂停，或用户明确继续 `interrupted` 的原轮。成功返回当前 TaskDetail，保留原用户消息、`turn_id`、计划和步骤身份；已完成工作不重新执行。每次新的恢复意图使用新 `request_id`，丢失回执时重传原请求。自动网络重连仅恢复订阅，不自动发送此命令。
+
+中断时先读取 `turn.recovery`：`can_resume=true` 才允许尝试继续；`needs_reconciliation=true` 时先核对已派发但结果未知的操作，不重新派发。服务端仍在恢复和执行前核验断点及当前权限。原审批超时记录保持拒绝，尚未执行的超时动作只在明确恢复时新建审批；用户显式拒绝不被清除。`task.retry` 是新轮“重新执行”，只有原轮无法续接时才作为后备，并明确提示可能重复操作；原轮仍处于 `interrupted` 时先由用户明确 `task.cancel`，确认取消终态后才能重试。当前没有“重试此步”命令。
 
 ### 打开任务 task.open
 
@@ -321,7 +333,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | --- | --- | --- |
 | task_id / project_id | string / string 或 null | 任务与可选项目身份 |
 | title / archived | string / boolean | 标题与归档状态 |
-| status | string | 当前或最近一轮的 queued、running、waiting_approval、waiting_answer、waiting_client_tool、paused、completed、failed、cancelled |
+| status | string | 当前或最近一轮的 queued、running、waiting_approval、waiting_answer、waiting_client_tool、paused、interrupted、completed、failed、cancelled |
 | active_turn_id | string 或 null | 活动轮次，null 表示暂时没有活动轮次 |
 | list_revision | integer | 摘要版本，仅列表字段变化时递增 |
 | approval_policy | object | 当前账号全部任务共享的 mode、独立 revision、updated_at；按其 revision 合并 |
@@ -340,6 +352,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | content_revision | integer | 本轮内容块版本，独立于任务列表版本；客户端按此版本替换内容块 |
 | plan / plan_revision | object 或 null / integer | 本轮最新完整计划与独立版本；含稳定计划/步骤身份、结果、时间和已移除步骤；未创建时为 null 和 0 |
 | status / error_code | string | 轮次状态；错误码为空字符串时无错误 |
+| recovery | TaskRecovery 或 null | 中断/失败诊断和原轮续接能力；无诊断时 null，旧缓存可缺省 |
 | activity | string | 当前工具名称；空字符串表示无活动摘要，不含参数或工具结果 |
 | model_ref | string | 实际模型引用 |
 | options | TaskExecutionOptions | 本轮实际模型、资源与动作生成开关，继承部分已解析为实际值 |
@@ -354,10 +367,21 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 
 TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:string|null`、`event_cursor:string|null`。TaskUpdate 为 `{task:TaskSummary,turn:TaskTurn,cursor:string}`。
 
+`interrupted` 保留活动轮次并停止执行，属于可核对、可恢复的状态，不是终态。`TaskRecovery` 包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| can_resume | 是否允许尝试从原轮继续，服务端仍会重新校验恢复点和权限 |
+| needs_reconciliation | 是否存在已派发但结果未知的操作；为 true 时禁止盲目重放 |
+| phase / reason_code | 具体中断阶段及原因码 |
+| cause_type / diagnostic_id | 底层异常类型及诊断 ID，不包含异常正文或凭据 |
+| resource_type / resource_id | 可空的相关资源类型和标识 |
+| status_code | 可空的底层响应状态码 |
+
 合并规则：
 
 1. 按 task_id 找任务，摘要保留较大的 list_revision。不能用历史 turn.status 覆盖任务的当前 status。
-2. 按 turn_id 合并轮次，按 sequence 排序。终态不回退；恢复等待允许重新排队，不能用 running 永不退回 queued 的旧规则；cancel_requested=true 不被迟到的 false 清除。
+2. 按 turn_id 合并轮次，按 sequence 排序。终态不回退；暂停、中断和等待恢复允许重新排队，不能用 running 永不退回 queued 的旧规则；cancel_requested=true 不被迟到的 false 清除。恢复字段变化会进入 event_cursor 指纹，不能只依赖正文长度判断更新。
 3. 同一轮的累计 reply 和 reasoning 分别合并，不接受迟到短文本覆盖。迟到的 REST 写入回执和历史页使用相同规则。终态正文可能为空，例如排队时被取消。
 4. 计划按 `plan_revision` 独立合并，内容块按 `content_revision` 替换完整数组；先选出各自的新快照，再做终态保护并写回这些独立字段。回复、计划、思考、进展和工具活动变化不要求 list_revision 变化。
 5. 应用 turn 后保存其 cursor。已有订阅时，不用迟到写入回执的 event_cursor 跳过尚未应用的事件。
@@ -586,7 +610,7 @@ REST 首次详情默认最近 50 轮，最多 100 轮；历史页 event_cursor �
 
 此时是否已保存未知，不自动换新 request_id 重发。保留原正文、attachment_ids 及顺序、options、project_id/task_id 和 request_id；用户选择重试时，用新命令 id 重发同一消息。服务端按消息身份返回原任务或轮次，不重复排队。内容、附件、选项或重试来源变化却复用旧 request_id，会返回 TASK_REQUEST_CONFLICT。
 
-连接断开不等于服务端进程重启。执行中断可能留下 failed/TASK_INTERRUPTED；重连只恢复持久状态，不承诺恢复模型工具执行现场。用户明确选择 task.retry 才会创建新执行轮次。
+连接断开不等于服务端进程重启。执行服务中断时读取原轮 status 和 recovery：可恢复的 interrupted 由用户明确 task.resume 续接，结果未知先核对；重连仅恢复订阅，不能自动重新执行消息或工具。原轮无法续接时才由用户选择 task.retry 创建新执行轮次，并告知可能重复之前的操作。
 
 ### 心跳与超时建议
 
@@ -819,7 +843,7 @@ call_id 为服务端生成的不透明标识，客户端以它做持久化去重
 {"type":"tool.result","id":"tool-result-command-001","task_id":"task_example","turn_id":"turn_example","call_id":"call_example","data":{"claim_token":"example_claim_token_replace_with_receipt","output":{"text":"客户端笔记的实际内容"},"is_error":false}}
 ```
 
-服务端校验当前登录用户、连接绑定的 client_id、三个调用标识、claim_token、轮次状态和截止时间，持久保存结果后返回 result.data=ClientToolCall，status=completed。completed 在这里表示**调用结果已接收**；is_error=true 的结果也结束等待，模型看到错误后决定如何回复。任务仍需等待 turn.status 的终态。
+服务端校验当前登录用户、连接绑定的 client_id、三个调用标识、claim_token 及轮次状态，持久保存结果后返回 result.data=ClientToolCall，status=completed。completed 在这里表示**调用结果已接收**；is_error=true 的结果也结束等待，模型看到错误后决定如何回复。任务仍需等待 turn.status 的终态。原调用已领取后遇到可恢复中断或超时，原领取者仍可补交已执行的真实结果，不能借此启动新操作；轮次仍为 interrupted 时，补交结果也不代替用户的 task.resume。
 
 模型收到的工具返回内容为 `{"output":<实际值>,"is_error":<布尔>}`，由 harness 关联回原来的模型工具调用，继续同一轮执行。无需客户端主动发送“继续”，也不要把工具输出伪装成用户追问。
 
@@ -830,11 +854,11 @@ call_id 为服务端生成的不透明标识，客户端以它做持久化去重
 | status | 含义 | 客户端处理 |
 | --- | --- | --- |
 | pending | 等待领取 | 保存领取 request_id，领取成功并完成派发前检查后才执行 |
-| claimed | 已领取，等待结果 | 从本地记录恢复；没有执行证据时不要自动重做 |
+| claimed | 已领取，等待或核对原结果；过期时仍保留 claimed 及原令牌 | 从本地记录恢复；没有执行证据时不要自动重做；过期时 dispatch_allowed=false、error_code=TASK_CLIENT_TOOL_TIMEOUT |
 | completed | 已接收结果，包括工具错误 | 保存回执；等待任务文字和终态 |
 | cancelled | 用户已停止该轮 | 停止尚未开始的操作，对运行中的操作尽力取消 |
-| expired | 调用创建后十分钟未收到结果 | 调用失效，该轮 failed，错误 TASK_CLIENT_TOOL_TIMEOUT |
-| interrupted | 轮次或服务进程中断 | 不自动重放操作；告知用户核对已发生的副作用 |
+| expired | 尚未领取的调用创建后十分钟失效 | 禁止领取/派发；本轮进入 interrupted，不能自动创建替代调用 |
+| interrupted | 原调用已关闭，未保留可回填的有效领取 | 不自动重放；可恢复轮中已领取的调用保留 claimed，不转为此状态 |
 
 截止时间从服务端创建调用开始计算；领取、重连、心跳都不延长。主 Task 等待客户端期间该轮为 waiting_client_tool、保留活动轮次，但释放模型执行槽，其他任务可以推进。Octop 保存原生检查点和工具调用顺序，全部结果到齐后继续同一轮；不会额外创建工具调用或用户消息。一次模型响应可能提出多个工具调用，客户端必须按 call_id 分别处理，不按工具名去重。子代理和团队成员内部的客户端调用尚未接入嵌套检查点恢复，保留原有等待方式。
 
@@ -844,7 +868,7 @@ call_id 为服务端生成的不透明标识，客户端以它做持久化去重
 {"type":"tool.closed","data":{"call_id":"call_example","task_id":"task_example","turn_id":"turn_example","client_id":"mac-install-001","name":"read_note","arguments":{"path":"note.md"},"approval_context":{"mode":"ask_for_approval","revision":1,"action_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","requires_user":false},"dispatch_allowed":false,"manual_review_required":false,"review":null,"status":"cancelled","error_code":"","created_at":"2026-10-15T08:00:00Z","updated_at":"2026-10-15T08:01:00Z","expires_at":"2026-10-15T08:10:00Z"}}
 ```
 
-取消不回滚客户端已发生的副作用。已取消、超时或中断的调用拒绝迟到的首次结果，返回 TASK_CLIENT_TOOL_CLOSED，不能恢复旧轮次或影响下一轮。已经 completed 的相同结果重传仍然允许。保存成功的主 Task 等待不受 90 秒运行租约回收影响，Worker 重建后可继续等待或消费已保存结果；检查点缺失或不符时以 TASK_INTERRUPTED 结束，不重发消息。执行中异常退出的失效运行租约仍约 90 秒被恢复为中断，工具不会自动重新执行。
+取消不回滚客户端已发生的副作用。取消、失败或完成轮次拒绝未完成调用迟到的首次结果，返回 TASK_CLIENT_TOOL_CLOSED；已经 completed 的相同结果重传仍然允许。可恢复中断与超时 claimed 调用保留原 claim_token 的结果回填能力，不开放新领取身份或新派发。保存成功的主 Task 等待不受 90 秒运行租约回收影响，Worker 重建后可继续等待或消费已保存结果。检查点缺失、不符或派发结果未知时保存 recovery 诊断，不能重发消息或盲目重放工具。
 
 ### 12.5 断线与本地执行记录
 

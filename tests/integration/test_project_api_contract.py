@@ -49,6 +49,18 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
         "approval_policy_at_start",
     } <= set(turn["required"])
     assert turn["properties"]["content_blocks"]["items"]["$ref"].endswith("/TaskContentBlock")
+    assert {"type": "null"} in turn["properties"]["recovery"]["anyOf"]
+    assert {
+        "can_resume",
+        "needs_reconciliation",
+        "phase",
+        "reason_code",
+        "cause_type",
+        "diagnostic_id",
+        "resource_type",
+        "resource_id",
+        "status_code",
+    } <= set(schema["components"]["schemas"]["TaskRecovery"]["properties"])
     plan_schema = schema["components"]["schemas"]["TaskPlan"]
     assert plan_schema["properties"]["steps"]["items"]["$ref"].endswith("/TaskPlanStep")
     assert {"plan_id", "active_step_id", "retired_steps"} <= set(plan_schema["properties"])
@@ -98,6 +110,7 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
         "waiting_answer",
         "waiting_client_tool",
         "paused",
+        "interrupted",
         "completed",
         "failed",
         "cancelled",

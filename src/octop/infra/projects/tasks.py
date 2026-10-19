@@ -40,6 +40,7 @@ from octop.infra.projects.models import (
     SkillHubBinding,
 )
 from octop.infra.projects.progress import TaskPlan
+from octop.infra.projects.recovery import TaskRecovery
 from octop.infra.projects.service import _validate, get_project
 from octop.infra.projects.service import resources as project_resources
 from octop.infra.projects.settings import load_settings
@@ -57,6 +58,7 @@ TurnStatus = Literal[
     "waiting_answer",
     "waiting_client_tool",
     "paused",
+    "interrupted",
     "completed",
     "failed",
     "cancelled",
@@ -272,12 +274,18 @@ class TaskTurn(ProjectModel):
     interactions: list[TaskInteraction] = Field(
         description="本轮审批和提问完整快照，包含已处理项。"
     )
-    interaction_revision: int = Field(description="交互及暂停意图版本；独立于内容版本，单调递增。")
+    interaction_revision: int = Field(
+        description="交互、暂停意图及续接能力版本；独立于内容版本，单调递增。"
+    )
     pause_requested: bool = Field(
         description="用户暂停意图；只有 status=paused 表示已到达安全边界。"
     )
     status: TurnStatus
     error_code: str
+    recovery: TaskRecovery | None = Field(
+        default=None,
+        description="本轮中断或失败的脱敏诊断与原轮续接能力；不能据此重放结果未知的操作。",
+    )
     activity: str = Field(description="当前执行的工具名称；不包含参数、凭据或工具输出。")
     artifacts: list[TaskArtifact] = Field(
         default_factory=list,
@@ -375,7 +383,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
     configuration = json.loads(t.configuration_json)
     blocks = [TaskContentBlock.model_validate(block) for block in json.loads(t.content_blocks_json)]
     plan = next((block.plan for block in reversed(blocks) if block.type == "plan"), None)
-    if t.status not in {"queued", "running"}:
+    if t.status not in {"queued", "running"} or t.wait_kind == "interrupted":
         for block in blocks:
             if block.status == "streaming":
                 block.status = "interrupted"
@@ -397,10 +405,18 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         status=cast(
             TurnStatus,
             public_status(
-                t.status, ("user" if t.pause_requested else t.wait_kind) if t.is_waiting else ""
+                t.status,
+                ("user" if t.pause_requested and t.wait_kind != "interrupted" else t.wait_kind)
+                if t.is_waiting
+                else "",
             ),
         ),
         error_code=t.error_code,
+        recovery=TaskRecovery.model_validate(
+            {key: value for key, value in json.loads(t.recovery_json).items() if key != "mode"}
+        )
+        if t.recovery_json and (t.wait_kind == "interrupted" or t.status == "failed")
+        else None,
         activity=t.activity,
         artifacts=attachments or [],
         model_ref=t.model_ref,
