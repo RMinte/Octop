@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from datetime import datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import InjectedToolCallId, StructuredTool, ToolException
 from pydantic import Field, StrictInt, StringConstraints, ValidationError, model_validator
 
 from octop.i18n import tr
@@ -108,21 +111,43 @@ class _ProgressArgs(ProjectModel):
     text: _ProgressText
 
 
+class _NotificationArgs(_ProgressArgs):
+    call_id: Annotated[str, InjectedToolCallId]
+
+
+ProgressPersist = Callable[[str, str], Awaitable[bool]]
+
+
 def progress_prompt(locale: str) -> str:
     return tr("projects.progress_prompt", locale)
 
 
-def progress_tool(locale: str) -> StructuredTool:
-    async def notify(text: str) -> tuple[str, dict[str, str]]:
+def progress_tool(locale: str, persist: ProgressPersist | None = None) -> StructuredTool:
+    calls: dict[str, tuple[str, dict[str, Any]]] = {}
+    lock = asyncio.Lock()
+
+    async def notify(text: str, call_id: str) -> tuple[str, dict[str, Any]]:
         text = _ProgressArgs(text=text).text
-        return text, {"type": "task_progress", "text": text}
+        async with lock:
+            if call_id in calls:
+                previous = calls[call_id]
+                if previous[0] != text:
+                    raise ToolException(tr("projects.progress_call_reused", locale))
+                return deepcopy(previous)
+            artifact: dict[str, Any] = {"type": "task_progress", "text": text}
+            if persist is not None:
+                artifact["introduction"] = await persist(text, call_id)
+            result = text, artifact
+            calls[call_id] = deepcopy(result)
+            return result
 
     return StructuredTool.from_function(
         name=NOTIFY_USER,
         description=tr("projects.progress_tool_description", locale),
-        args_schema=_ProgressArgs,
+        args_schema=_NotificationArgs,
         coroutine=notify,
         response_format="content_and_artifact",
+        handle_tool_error=True,
     )
 
 
@@ -142,3 +167,12 @@ def progress_report(message: object) -> str | None:
         ).text
     except ValidationError:
         return None
+
+
+def progress_introduction(message: object) -> bool | None:
+    """Read the explicit host classification; historical absence stays unknown."""
+    if progress_report(message) is None:
+        return None
+    assert isinstance(message, ToolMessage) and isinstance(message.artifact, dict)
+    value = message.artifact.get("introduction")
+    return value if isinstance(value, bool) else None

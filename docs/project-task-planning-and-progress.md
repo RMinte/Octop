@@ -8,22 +8,22 @@ Octop 已借鉴 AgentComputer2 的结构化规划和公开进展，增加宿主�
 
 | 项目 | 分支与提交 | 用途 |
 | --- | --- | --- |
-| Octop | `feature/agentcomputer-foundation`，`490e97aa9eefa28c36cd725f2c0e3b6b02c104cf` | 本轮开发基线；下文“当前实现”包含其上的未提交改动 |
+| Octop | `feature/agentcomputer-foundation`，`04c17f55bf9067732049f4fffcc4793e533ef91f` | 当前主目录基线，保留用户已提交的审批模式改动；下文“当前实现”包含其上的未提交改动 |
 | AgentComputer2 | `codex/next-best-query-recommendations`，`da4a8afdf19d3aa654d8040629758b4b80b4d03a` | 本地运行时、持久化与原生界面参考 |
-| 实际 APP：AgentComputer | `feature/0.0.2/octp`，`41fe8e5ab9d691ed9aaf286bc2d1440a89e5b6c9` | 已有 Octop 任务连接，本轮尚未修改 Swift 或 UI |
+| 实际 APP：AgentComputer | `feature/0.0.2/octp`，`4be12673af766308c6516b69ea2c6cd0be94174d` | 已接设置、互斥展示及原组件；已记录 brief 新合同的 H/I 真实复验，本次只读核对 |
 | Octop 本地依赖 | 锁文件中的 `octop-harness 1.0.1` 及当前 `.venv` | 核对 Harness 事件与中间件能力，不直接修改已安装依赖 |
 
 首次调研日期为 2026 年 10 月 17 日，当前合同更新于 2026 年 10 月 19 日。参考实现与当前实现分节描述；本合同的测试仍需以最新交付记录确认，前一版 todo 试接的验证数字不作为本轮结果。
 
 ## 当前已落地的合同
 
-主模型对复杂请求调用 `planning create`，宿主生成 `plan_id` 和各个 `step_id`，第一步进入执行中。随后通过显式步骤身份和 `expected_revision` 更新计划、开始或选择步骤、记录完成/阻塞/跳过结果。每次有效变化保留完整计划修订，旧动作继续指向执行当时的身份。
+主模型对复杂请求调用 `planning create`，宿主生成稳定 `plan_id/step_id`、保存固定有序步骤并启动第一步。模型报告当前步骤结果后，宿主自动推进；完成或受阻后撤下工作工具，未结束的计划不能由普通终稿跳过。
 
-`message_notify_user` 发送公开开场、新发现和阻塞。工具记录保存实际参数、公开返回内容和已知的执行时间/耗时。正文、思考及进展通过明确的 `plan_id + step_id` 关联，不按步骤下标、文字相似度或“第一个执行中”推断。
+展示上，计划面板与动作链路互斥：有可见计划时只显示步骤、结果、当前短活动、已知时间/耗时和产物入口，不把完整思考、公开进展和工具列表嵌入步骤。无计划或关闭面板时，才由动作链路开关选择结构化 Process 或经典思考过程。此前“把整轮过程移进计划卡，再按步骤展开全部动作”的接入目标已撤销。
 
-实现仍复用 `content_blocks_json`：计划变化追加 `plan` 块，通知成功追加幂等 `progress` 块，工具在同一稳定块上补齐执行事实。`TaskTurn.plan` 和 `plan_revision` 从最新计划块投影，不是第二份计划存储，无需新增表或迁移。
+记录与展示分开。计划模式的 reasoning、progress 和实际工具事实仍正常保存；固定步骤身份继续用于恢复和追溯，不能为实现显示互斥删除数据。实现复用 `content_blocks_json`，计划变化追加完整快照；`TaskTurn.plan/plan_revision` 从最新计划块投影，不是第二份存储，无需新表或历史迁移。
 
-网页消费同一合同；APP 需要扩展已有 DTO、合并、缓存和展示，不能只重启服务。详见 [APP 接入指南](agentcomputer-task-planning-and-progress.md) 和 [任务实时协议](project-task-websocket.md)。
+网页与 APP 已实现展示互斥；最新 APP 已通过远端只读快照复用原版“阶段 → 动作 → 阶段结果”、工具行与命令卡，并接入显式开场和权威整轮计时。网页 Process 仍筛选并平铺进展/工具，不能把两端状态混为一谈。最新接线与验收边界见 [APP 接入指南](agentcomputer-task-planning-and-progress.md#当前-app-的具体差异)；此前“步骤内嵌过程”和“APP Process 仅线性投影”均属于旧版现状。
 
 这里仍须区分两种“项目规划”：
 
@@ -118,121 +118,229 @@ flowchart TD
 
 最初调研发现 Harness 默认的 `TodoListMiddleware` 提供 `write_todos`，但列表只有 `content` 与三态，没有稳定步骤身份、结果或时间。其完整状态通过 `state_snapshot` 到达，原任务运行时没有提取该状态。早期试接从主任务快照读取 todo，解决了“列表生成但页面看不到”的问题。
 
-这不能满足按步骤查看动作和结果：列表可改排、增删或并行，位置与文字都不能代表身份。因此当前方案已用 `TaskPlanning` 替换原生 todo，任务配置明确 `todos_enabled=False`；不保留两个活动计划来源，不双向同步，也不从旧列表猜测身份。已保存的 `source=harness_todos` 旧计划只读保留。
+这只能提供清单，不能提供正式步骤调度和稳定执行归属。列表可改排、增删或并行，位置与文字不代表身份。中间版本曾扩展为动态计划，并把执行记录嵌入步骤；本轮已撤销该展示目标及动态修改命令，改用固定步骤调度和互斥面板。当前 `TaskPlanning` 替换原生 todo，任务配置明确 `todos_enabled=False`；不保留两个活动计划来源，不双向同步，也不从旧列表猜测身份。已保存的 `source=harness_todos` 旧计划只读保留。
 
 依赖调研依据：[默认开关](/Users/fangyuan/Desktop/code/Octop/.venv/lib/python3.13/site-packages/octop_harness/config/__init__.py:611)、[原生 Todo](/Users/fangyuan/Desktop/code/Octop/.venv/lib/python3.13/site-packages/langchain/agents/middleware/todo.py:25)、[Harness 事件投影](/Users/fangyuan/Desktop/code/Octop/.venv/lib/python3.13/site-packages/octop_harness/protocols/langgraph.py:231)。这些是初始诊断依据，不是当前 Octop 新计划入口。
 
 ## Octop 正式规划规则
 
-### 由宿主管理身份和修订
+### 固定计划与宿主推进
+
+新轮次的规划工具仅有三个命令：
 
 | `planning` 命令 | 当前行为 |
 | --- | --- |
-| `create` | 用标题和非空步骤文字新建计划；宿主分配新 plan/step ID，首步开始；同轮重建也取得新 plan_id，并递增轮次计划版本 |
-| `get` | 返回当前完整计划或 null，不改变修订 |
-| `update` | 携带 expected_revision 及完整步骤列表；保留项必须显式提交 step_id；新项不带 ID，由宿主分配；省略的旧项写入 retired_steps 并记录 removed_at |
-| `start_step` | 用 expected_revision 和 step_id 开始/重新进入该步，记录已知开始时间并设为 active_step_id |
-| `select_step` | 用 expected_revision 明确选择一个 in_progress 步骤作为默认归属，或清空选择 |
-| `mark_step` | 用 expected_revision、step_id、completed/blocked/skipped 和非空 result 记录结果及结束时间；不自动启动下一项 |
+| `create` | 同轮仅能创建一次；标题非空、最多 200 字符，1～12 步，每步非空、最多 500 字符；宿主生成身份，修订为 1，启动首步 |
+| `get` | 读取已有计划，不修改修订；计划不存在时返回工具错误 |
+| `mark_step` | 必须匹配 expected_revision 和当前 step_id，报告 completed/blocked/skipped 及非空 result（最多 2000 字符），保存结束时间 |
 
-步骤状态是 `pending / in_progress / completed / blocked / skipped`，最多 100 项，文字最多 500 字符，结果最多 2000 字符。计划保存 `title`、`active_step_id`、当前 `steps` 和已移除 `retired_steps`；步骤保存宿主生成的身份及 UTC `started_at / finished_at / removed_at`。重复读取或无变化更新不增加版本。
+标题、步骤文字、数量和顺序创建后冻结。状态保持“已结束前缀、当前一个执行中或受阻步骤、待执行后缀”。完成或跳过当前步后，宿主自动启动下一步并记录时间；受阻则停止推进。普通工具的步骤元数据不能选择未来步骤。
 
-更新必须匹配当前修订，不能根据文字或下标识别旧步骤。允许显式改排、改文和并行，但只有 `active_step_id` 表示默认执行归属；标记完成不自动把下一项设为执行中。新建计划、移除步骤与切换当前步骤不能改变已保存活动的归属。
+规划必须独占模型工具批次，与工作或另一规划调用混批时整体拒绝。只有主任务维护正式计划，子代理和团队成员返回工作结果。规划工具收据将完整当前计划与已有结果交给主模型，宿主按当前状态门控；计划变化先持久化成功，再向模型返回收据，防止下一步工作先于计划落盘。
 
-规划调用必须独占模型的工具调用批次，不能和业务工作、另一规划调用混在同批并发；混批整体拒绝，防止工作尚未完成就先改步骤。正式计划只由主任务管理，子代理和团队成员不得覆盖它。规划不授予权限，原有审批、提问、暂停、客户端工具及恢复机制继续生效。
+计划执行阶段普通正文归入公开 reasoning 过程，不提前写入最终 reply；完成或受阻后进入总结阶段并撤下执行工具。尚有未结束步骤却结束主循环时，轮次保存为 `failed/TASK_PLAN_UNFINISHED`；计划受阻则为 `failed/TASK_PLAN_BLOCKED`，不把部分结果记作全部完成。模型报告的非空 result 仍须由真实结果支持，不是自动验收证明。
 
-这已经实现宿主身份、修订和步骤结果约束，但不等同于 AgentComputer2 的严格顺序调度：Octop 没有冻结整个步骤列表，没有“只准当前一项”的规则，也没有自动撤下全部工作工具进入最终总结的同款外层状态机。模型声明完成仍需真实结果支持，非空 `result` 本身不是验收证据。
+不再支持 update、start_step、select_step、清空、改排、并行步骤或同轮重建。通用读取模型保留旧记录最多 100 项的边界、retired_steps 和既有结果/身份，属于历史读取，不代表新的执行入口。旧数据不删除、不迁移，也不按位置或文字回填身份。
 
-### 动作在发生时固定步骤归属
+### 工具事实与宿主元数据
 
-主任务每次模型响应开始时确定其 `plan_id / step_id`，思考和文字保留该归属。工具默认绑定显式选中的当前步骤；模型也可通过工具 schema 中的宿主元数据 `task_step_id` 指定另一个有效执行中步骤。该元数据由宿主校验，剥离后才送入业务工具；工具本身已有同名业务参数时保留其业务语义。
-
-实际执行开始后，工具块保留其原始归属，结束、恢复或后续计划改排不会重新计算。公开进展沿用通知调用的固定归属。客户端按 `(plan_id, step_id)` 分组，不按当前下标聚合，也不把无 ID 的旧活动补绑到当前步。
-
-移除步骤保留在 `retired_steps`，因此旧动作仍能找到原步骤。重新 `create` 的新计划使用新 ID，旧计划的活动不得串到新计划；计划修订块保留历史快照。无正式计划的简单任务仍可直接工作或回答，活动保留轮次级归属。
-
-### 工具详情来自实际执行
+主模型响应开始时固定其 plan/step 上下文，实际工具开始后保留同一归属，完成和恢复时不改绑。无计划的简单任务保留轮次级关联。
 
 | 字段 | 来源与边界 |
 | --- | --- |
-| `arguments` | 实际工具参数；不混入宿主步骤元数据 |
-| `output` | 实际 `ToolMessage.content` 的 JSON 值；保留对象、数组或字符串结构 |
-| `started_at` | 服务端实际调度时记录的 UTC 时间；模型提出调用意图不算开始 |
-| `finished_at` | 服务端观察到结束的 UTC 时间 |
-| `duration_ms` | 执行器记录的非负毫秒耗时；未知时为 null |
-| `tool_label` | 服务端本地化动作名称，缺失时回退工具名 |
+| `brief` | 传输字段仍可空，历史未知不补造；动作生成开启时，适用工作工具的宿主 brief 必填、非空且最多 240 字符，描述动作与目的，不是完成证明 |
+| `arguments` | 实际业务参数，不混入宿主的 task_step_id 或 brief |
+| `output` | 实际 ToolMessage.content 的 JSON 值；保留对象、数组或字符串等结构 |
+| `started_at / finished_at` | 实际调度和服务端观察结束的 UTC 时间；未知为空 |
+| `duration_ms` | 已记录的非负工具毫秒耗时；未知为空 |
+| `tool_label` | 服务端本地化工具名称，brief 缺省时可回退到该名称 |
 
-授权前可以出现工具意图，等待审批时不能显示成已执行。中断等待不当作工具完成；恢复使用已有调用与归属，不重放已完成副作用。客户端工具未提供可核实的现场执行时间时不补造。工具异常、取消或失败保留已观察事实；计划状态不覆盖真实工具状态。
+宿主只复制并扩展发给模型的工具 schema，不修改真实业务 schema。`task_step_id` 仍为可选标注，只允许当前有效执行步。`action_timeline_enabled=true` 时，无论有无计划，适用工作工具新注入的宿主 `brief` 都进入 required：必须为字符串，去除两端空白后非空，原值不超过 240 字符。未执行调用缺失或无效时，在审批授权消费及派发前返回未执行的工具错误，供模型纠正。`planning`、`message_notify_user`、`ask_user_question` 不因缺少 brief 被拒绝，显式非法参数仍按各自校验处理。
 
-`output` 不读取私有 `artifact`、`additional_kwargs`、模型上下文或加密 reasoning。底层工具如果已经截断输出，本层只能保存实际返回的内容，无法恢复未返回部分；“真实返回内容”不等于原程序的无限制完整输出。发布附件仍以真实附件元数据与下载接口为准，不从计划结果或文本路径猜测产物。
+业务 schema 已有同名 `brief` 时，保留其原类型、required 与业务含义，不额外收紧，也不把业务值当作宿主摘要。宿主标注在实际派发前剥离，权限、审批、提问和客户端工具回执继续使用真实业务事实。每次工作调用均校验，不因 call_id 曾开始而豁免；未执行的新旧调用缺失 brief 都须由模型纠正，不能修改已批准参数来补全。已派发客户端结果仍按原 call_id 消费，原生 respond 恢复不重新调用 handler，不因补 brief 重新派发。历史 DTO 的 brief 继续允许缺失/null，已有完成记录不补写，客户端按真实标签回退。
 
-## 持久化、恢复和界面
+适用范围仍有明确差异：AgentComputer2 只对指定的 19 个自有内置工作工具收紧已有 brief；Octop 会向 MCP 等未声明同名业务字段的工作工具投影宿主元数据。这里采用本项目 240 字符合同，没有引入参考版的单行或 2048 字节规则，不能声称两边范围与校验完全相同。
 
-`content_blocks` 是完整有序快照，客户端按 `content_revision` 替换；`plan/plan_revision` 按独立计划版本合并。两者都不依赖任务列表版本或回复长度。迟到回执、历史页和终态保护不能吞掉较新的计划结果或动作事实；完成块不代表任务完成，轮次终态以 `turn.status` 为准。
+工具意图与实际执行分开，审批等待不能显示为已执行。中断等待不当作完成，恢复不重放已完成副作用。本机工具的现场时间未知时不补造。output 不读取私有 artifact、additional_kwargs 或加密 reasoning，底层已经截断的内容无法补回。产物以实际 artifacts 和下载接口为准，不从计划中的路径猜测。
 
-暂停恢复同一轮次时保留计划、步骤身份、结果和工具关联；普通追问或手动重试的新轮次从无计划开始。取消、失败、等待和进程恢复保留最后已记录的步骤，不自动完成或阻塞它们，不推造结果或时间。
+### 宿主准入错误与真实拒绝
 
-历史没有记录的字段保持 null、空结果或既有缺省值，不回填身份、时间、参数或输出。APP 的可再建缓存无法解码时沿用丢弃该本地条目并只读重取的路径，服务端任务和轮次记录保留；不能只保留 cursor 而丢掉对应正文。无需新旧协议同步或自动迁移。
+缺失/无效 brief、开场门控、混合规划批次、无效步骤关联和 question_limit 等宿主准入错误，不能伪装成用户拒绝。若错误发生在原生 HITL 检查点，服务端只使用内部 `octop_host_error` 恢复分支，核对原 call_id 和工具名，返回 `ToolMessage(status="error")` 并保留原本地化原因；内容块因此为 failed，output 是该原始错误字符串，不添加 `User rejected…` 前缀或再套旧 JSON 错误包。未派发调用不补执行时间。
 
-网页和 APP 应显示最新计划卡、当前步骤及结果，并按计划/步骤 ID 展开思考、公开进展与真实工具详情；移除步骤和旧计划仍可查看历史活动。原始块顺序保持稳定。`progress` 不进入最终答案或复制内容，不需要额外调用模型生成摘要。
+真实人工 deny 仍走原生 reject；已完成客户端调用的实际 result_json 仍按原 respond 消费，不与宿主错误混用。`octop_host_error` 不是公开 allowed_decisions、WebSocket 命令或客户端可提交的审批决定，output DTO 仍接受任意 JSON，不能因此改成仅字符串。任务 HITL 中间件按原名称替换既有槽位以保持检查点拓扑，主任务审批映射不注入子代理或 peer 的独立审批配置。
 
-实际 APP 已有远端任务网络、统一合并、缓存和会话投影，但其块类型尚不识别 plan/progress；需要按 [专项接入文档](agentcomputer-task-planning-and-progress.md) 升级。不能把远端计划直接强转原生 `AgentPlan`：后者是 UUID、最多 12 步、冻结文字和顺序推进的另一状态机。
+此修正不改写已完成 I 等历史输出；旧记录中实际保存的用户拒绝前缀或 JSON 包保持原值。本轮只读审计未发现尚未终结的旧 inline 错误项，不新增历史迁移或客户端 UI 补丁。
+
+## 全局配置与轮次快照
+
+管理员可直接在“应用设置 → 环境变量”维护以下两项，默认均为 true；本机本轮核对时两项都已配置为 true，未修改实际值。
+
+| 环境变量 | 职责 |
+| --- | --- |
+| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮公开进展及适用工作工具必填宿主 brief 的生成默认值，同时提供当前过程显示偏好 |
+| `OCTOP_TASK_STEP_PANEL_ENABLED` | 已生成计划的面板显示默认值，不控制是否规划或执行 |
+
+支持 true/false、1/0、yes/no、on/off，大小写不敏感且忽略两端空白。环境变量保存前校验这两项，非法值返回 `TASK_SETTINGS_INVALID` 且不保存本次修改。其他环境变量沿用现有规则。
+
+登录用户通过 `GET /api/project-tasks/settings` 读取 `{action_timeline_enabled, step_panel_enabled}`，均为布尔值，响应 no-store，无需管理员权限。该接口不返回任意环境变量或密钥，APP 不应读取整个环境列表。
+
+每次读取持久化 `OCTOP_HOME/env`。文件存在时，该文件对两键权威，缺键回默认 true；仅文件不存在时回退进程环境，再缺省为 true。因此保存和删除键可对后续请求热生效，多 worker 不会被另一进程残留的旧环境值覆盖，也不依赖 agent 重载或服务重启。
+
+生成优先级是 `options.action_timeline_enabled` 显式严格布尔值优先，否则采用入队时全局默认。省略或 null 继承；有效值冻结在轮次 configuration_json 顶层，turn.options 回显。原 execution_options 保留原请求用于幂等比较；同 request_id 重传复用旧轮，暂停、审批、客户端工具等待后恢复不重新读取默认，新轮才重新解析。旧轮缺字段按 true 读取，不补写历史。
+
+关闭动作生成时不注册 message_notify_user、不注入或要求宿主 brief 提示/schema，普通工具执行、实际结果和 Provider 公开思考仍保留，业务同名字段沿用原合同。开启时要求适用工作工具提供有效 brief，与是否建计划无关；计划状态不由这些文字驱动。
+
+显示设置采用当前安全接口的值，与既有轮次生成快照分开。步骤面板开关即时影响已有计划是否可见；无可见计划时，当前动作开关决定结构化 Process 或经典过程区。改变显示不会补生成公开进展，也不会删原始记录。网页与 APP 已接设置读取和恢复刷新；APP 的阶段树与原工具组件复用属于后续已完成的客户端接线，详见专项指南。
+
+## 持久化恢复与界面
+
+content_blocks 按 content_revision 替换完整数组，plan/plan_revision 独立选择最新快照，不依赖 list_revision 或回复长度。先选择内容与计划版本，再做状态保护；迟到回执和终态保护不能吞掉新的结果。完整正文和已应用 cursor 一起缓存，不能只保存游标。
+
+暂停恢复同一轮保留计划、生成策略、步骤身份、结果及工具关联；普通追问或手动重试的新轮从无计划开始。取消、失败和等待保留最后事实，不伪造完成。已保存的旧计划、退役步骤及无 ID 记录继续读取，不自动迁移或恢复旧命令。
+
+审批恢复时，规划状态和规划调用的幂等回执只从当前轮的持久化 `content_blocks` 恢复。Harness 检查点包含作为模型上下文传入的前几轮消息，不能扫描其中的 `planning` 回执来决定本轮计划，也不能跨轮比较 `revision`。规划修改在工具成功返回前已保存计划快照、调用 ID 和参数；即使检查点尚未保存工具返回，也能从本轮记录恢复同一回执。历史消息继续作为会话上下文保留。
+
+| 可见条件 | 网页和 APP 应采用的展示 |
+| --- | --- |
+| 步骤面板开启且有计划 | 唯一计划面板：步骤、结果、已知时间/耗时、当前短活动和产物入口；不嵌完整动作列表，不并列 Process |
+| 无可见计划且动作链路开启 | APP 已显示开场、阶段标题/状态、阶段内工具与可展开阶段结果，无正式计划时展示轮次级进展和工具；网页仍为线性进展/工具，默认隐藏原始思考 |
+| 无可见计划且动作链路关闭 | 经典过程区显示已保存思考/供应商摘要和工具事实；不删除旧 progress |
+
+正文与答案复制始终只取 text。面板内当前短活动来源于当前步骤已发生的最新 progress 或工具 brief/label，不是展开整条动作链。步骤耗时可以从已知起止时间求得；工具耗时使用 duration_ms，不从轮次时间估算。
+
+实际 APP 已完成阶段、阶段结果、原工具行/命令卡、运行占位互斥及整轮计时接线，记录见 [SPEC029 第 64 行起](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:64)。阶段按 `(plan_id, step_id)` 归属，开场仅认显式 introduction，未知时间不补造；保留远端字符串身份，不启动本机 PlanningFlow，也不构造执行用 AgentPlan。[后续 H/I 真实复验](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:76) 已覆盖有效 brief 的具体动作标题，以及无计划调用缺失 brief 在审批前被拒、补正后仅执行一次。G 仍保持原 null，I 的历史错误归因也不由 APP 改写。240 字符边界与提问豁免尚未新增真实模型覆盖，宿主错误分支的后续 APP 复验需另行记录；详见 [APP 接入指南](agentcomputer-task-planning-and-progress.md)。
 
 ## 实现位置与边界
 
 | 源码 | 当前职责 |
 | --- | --- |
 | [progress.py](../src/octop/infra/projects/progress.py) | 公共计划/步骤模型、旧计划读取、公开通知 |
-| [planning.py](../src/octop/infra/projects/planning.py) | 宿主分配身份、修订校验、步骤生命周期、结果与退役记录 |
-| [execution.py](../src/octop/infra/projects/execution.py) | 主任务步骤上下文、工具参数元数据、实际执行事实 |
+| [planning.py](../src/octop/infra/projects/planning.py) | 固定有序计划、修订校验、当前步骤结果与宿主推进 |
+| [execution.py](../src/octop/infra/projects/execution.py) | 主任务阶段门控、适用工作工具必填 brief、可选步骤元数据与实际执行事实 |
 | [control.py](../src/octop/infra/projects/control.py) | 批次/主任务约束、已有权限和暂停机制 |
+| [hitl.py](../src/octop/infra/projects/hitl.py) | 在原 HITL 槽位区分宿主准入错误、真实拒绝及客户端 respond，保留原调用身份与错误原因 |
 | [runtime.py](../src/octop/infra/projects/runtime.py) | 关闭 native todos、装配 planning/通知/执行记录、恢复和持久化 |
 | [content.py](../src/octop/infra/projects/content.py) | 稳定块、计划修订、公开进展与工具详情更新 |
-| [tasks.py](../src/octop/infra/projects/tasks.py) | 从持久块投影统一 TaskTurn |
-| `dashboard/src/pages/BoxProjects/` | 独立版本合并、计划/步骤聚合与动作详情 |
+| [tasks.py](../src/octop/infra/projects/tasks.py) | 入队冻结动作生成配置，从持久块投影统一 TaskTurn |
+| [settings.py](../src/octop/infra/projects/settings.py) | 读取两项全局默认值并验证布尔环境配置 |
+| `dashboard/src/pages/BoxProjects/` | 独立版本合并、互斥计划面板与 Process、当前设置刷新 |
 | [实时协议](project-task-websocket.md)及 Schema | APP/网页共享合同 |
 
 接口保持 `/api/projects`、`/api/project-tasks`；不恢复 `/api/agentcomputer/v1` 或 Bridge。项目独立于专家。客户端目录仍仅保存用户电脑绝对路径，规划不授权服务端探测、读取或上传该目录内容。
 
-项目长期规划仍属后续设计：若要跨 Task 的里程碑和依赖，应独立建模并按实际任务结果与用户决策更新。严格单步调度也属另一项执行语义选择，不能因为计划卡已经存在就声称自动实现。
+项目长期规划仍属后续设计：若要跨 Task 的里程碑和依赖，应独立建模并按实际任务结果与用户决策更新。固定步骤调度属于本轮当前实现，项目跨 Task 的路线图仍不在此合同内。
 
 ## 验证与验收目标
 
-2026 年 10 月 19 日的定向验证：后端 226 项、前端 118 项通过，Ruff、8 个相关源码文件的严格 Mypy、TypeScript 和前端构建通过。完整示例通过当前 JSON Schema、服务端模型和本文 APP 指南中的 Swift DTO 解码检查。真实 Harness 流程使用假模型，没有调用真实 LLM，也没有构建或验收 APP。
+### APP brief 实测与宿主错误归因
 
-后端验证范围与命令：
+最新客户端 [SPEC029 H/I 记录](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:76) 来自独立的两条真实模型任务。H 有两步计划，工作 brief 为“打印验收标记，核对真实命令链路”，参数只有 command；实际执行返回退出码 0、工具 12ms，原组件显示具体动作标题。I 无计划，首次缺 brief 的调用在审批前失败，没有关联审批或执行起止时间/耗时；模型改用新调用并补说明后，只有补正调用获批，实际执行一次，退出码 0、19ms。G 的旧 brief 仍为 null，未补写历史。
+
+I 同时暴露了宿主错误误归因为用户拒绝的问题：当时的 output 带原生 `User rejected the tool call…` 前缀，但该调用没有用户拒绝回执。当前服务端改用上述内部宿主错误分支，保留原工具身份、失败状态和本地化原因，不能仅在 APP 隐藏前缀，也不能用成功 respond 代替错误。已完成 I 保留原值。H/I 没有新增 240/241 字符边界、空白、业务同名字段、关闭动作或提问豁免的真实模型验收；本段不将既有定向测试数量或构建结果计作这次新跑结果。
+
+本次服务端修复先以真实 Harness 复现参数错误被添加用户拒绝前缀，修复后联合定向验证 114 项通过，覆盖原始错误内容与 error 状态、调用身份、无派发、真实用户 deny 对照、冷恢复、提问超限、审批模式、客户端结果重传、项目权限及委派隔离。原生审批槽位名称与最终工具审批配置保持，宿主内部决定的身份/内容错误及不支持的中断配置会拒绝恢复。Ruff、格式检查、4 个源码文件严格 Mypy、公开 Schema 一致性及差异检查通过。没有新增模型请求或修改 Swift/UI，未运行完整门禁，未提交或推送。
 
 ```bash
-uv run pytest \
-  tests/unit/projects/test_task_stream.py \
-  tests/unit/projects/test_progress.py \
-  tests/unit/projects/test_planning.py \
-  tests/unit/projects/test_execution.py \
-  tests/integration/test_project_task_planning.py \
-  tests/integration/test_project_task_step_interactions.py \
-  tests/integration/test_project_task_reasoning.py \
+uv run pytest tests/unit/projects/test_hitl.py \
+  tests/integration/test_project_capabilities.py \
   tests/integration/test_project_task_checkpoints.py \
   tests/integration/test_project_task_interactions.py \
+  tests/integration/test_project_task_step_interactions.py \
+  tests/integration/test_project_task_approval_modes.py \
   tests/integration/test_project_task_client_tools.py \
-  tests/integration/test_project_api_contract.py \
-  tests/unit/i18n -q
+  tests/integration/test_project_task_brief.py \
+  tests/integration/test_project_task_opening.py -q
 ```
 
-前端验证覆盖 `TaskTurnContent`、`useTaskConversation`、`TaskConversations`、`TaskConversations.queue` 和 `useTaskMessageQueue` 五个测试文件；`make build-frontend` 成功。本轮按约定没有重复完整 `make all` 门禁；本地提交沿用仓库已有提交钩子，不推送。
+修复于 16:32（Asia/Shanghai）平滑加载到本机 8088，PID 从 74751 更新为 82838。加载前等待实际任务结束，并核对全部未终结轮次不存在旧 inline 准入决定；没有引入历史迁移或修改已完成错误。重启前后 5 个项目、29 个任务、98 个轮次、25 条标题任务的全部原列摘要一致，配置及环境文件字节不变，数据库仍为 44。健康检查、首页与 API 文档通过；备份和加载信息见 `.runtime/8088/task-host-error-runtime-latest.json`，源码摘要及验证信息见 `.runtime/8088/task-host-error-runtime-verification.json`。这项错误归因修复尚未进行新的 APP 真实模型复测。
 
-本机 8088 服务已平滑重启并通过健康、首页及 API 文档检查；原环境设置保留，既有 5 个项目、20 个任务、83 个轮次和 16 条标题任务逐表摘要一致，数据库版本未改变。此检查未发送模型任务；历史无 ID 的记录仍不会补造关联。
+### 服务端 brief 必填修复
+
+2026 年 10 月 19 日客户端 G 验收反馈暴露了生成合同缺口：工作调用没有提供 brief，APP 因此正确回退“执行指令”。服务端现已在模型工具 schema 和执行前校验中同时要求适用工作工具的宿主 brief，在审批授权消费或客户端派发前拒绝缺失、空白、类型错误和超长值，供模型纠正；控制工具、关闭动作模式及同名业务字段按上文合同处理，历史记录不补造。
+
+联合定向回归 327 项通过，覆盖执行、规划、通知、正文分类、审批、提问、客户端工具、检查点和经典过程。独立复核随后发现按已开始 call_id 豁免校验可被同批重复 ID 绕过，已移除该豁免并新增两项并发回归；最终受影响的执行单元与 brief 集成整组 62 项通过。Ruff、格式检查、3 个源码文件严格 Mypy、公开 Schema 一致性和差异检查通过。新集成验证包括缺失/空白 brief 在普通工具、审批及客户端路径的零派发，纠正后仅一次执行，brief 保存且不透传业务参数，冷恢复/重复回执不重执行，关闭动作模式无需 brief。没有新增真实模型请求、修改 Swift/UI、运行完整门禁或提交代码。
+
+```bash
+uv run pytest tests/unit/projects/test_execution.py \
+  tests/integration/test_project_task_brief.py -q
+```
+
+修复已于 16:05（Asia/Shanghai）加载到本机 8088，PID 从 52549 更新为 74751。停止前和完全退出后均已备份；健康检查、首页和 API 文档通过，数据库仍为 44，无新迁移。重启前后 5 个项目、26 个任务、95 个轮次、22 条标题任务的全部原列摘要一致，配置和环境文件字节不变；当时无活动轮次或待审批原生检查点。加载证据见 `.runtime/8088/task-brief-runtime-latest.json`，源码摘要与测试证据见 `.runtime/8088/task-brief-runtime-verification.json`。该次交付时尚未进行 APP 新 brief 合同的真实模型复验；后续 H/I 记录已补在上文，G 的真实执行与冷恢复事实继续保留。
+
+### 服务端动作生成与计时修复
+
+2026 年 10 月 19 日对比后，服务端代码已补齐以下行为，APP 展示代码本轮未修改：
+
+- planning 与通知的中英文提示明确要求独占模型响应；动作生成开启时，工作与 mark_step 必须等本轮开场成功保存后的下一次模型响应。同批通知不放行业务，失败通知不放行，关闭动作生成时不要求开场。
+- 通知先持久化 progress 及显式 introduction 标记，再返回成功回执；本轮首条为 true、其余 false、历史未知 null。恢复仅认可本轮显式标记，重放调用保留原回执；旧轮通知不授权追问。
+- 普通正文在模型工具意图确定后分类，建计划前的带工具说明及纠正说明进入过程，最终无工具且非执行计划的正文才进入答案。供应商异常或用户取消前已收到的待分类正文、公开摘要保留为过程。心跳写入异常不会跳过轮次最终收尾。
+- 迁移 044 为 project_task_turns 增加 nullable started_at/finished_at；API 另返回可空 processing_duration_ms。首次实际开始到终态的墙钟跨度包含审批、暂停和恢复等待，排除首次排队；恢复不重置开始，旧记录不补造，工具耗时独立。
+
+主要验证位置：[开场与冷恢复](../tests/integration/test_project_task_opening.py)、[正文分类及流式故障](../tests/integration/test_project_task_response_classification.py)、[计时仓储与迁移](../tests/unit/db/test_project_task_turn_timing.py)、[计时 HTTP](../tests/integration/test_project_task_timing.py)、[心跳故障收尾](../tests/integration/test_project_task_output_persistence.py)。WebSocket 仍为 v3，完整 Schema 和帧示例已同步。APP 后续已接入阶段树、显式开场及整轮耗时；客户端验证独立记在 SPEC029，不以服务端测试代替。
+
+本次共覆盖 627 个不同定向用例，分批通过：联合首跑 626 项中 624 项通过、2 项失败，失败原因是旧文件/MCP 读取脚本未按新合同发送开场；该业务测试改为明确关闭动作生成，原文件/MCP 与安全断言不变，受影响的任务与开场整组 38 项复验通过，另含新增 Native HITL 拒绝用例。最终收集数为 627，未将重复运行累计。Ruff、差异与格式检查、8 个相关源码文件严格 Mypy、JSON Schema 和完整示例验证通过。模型测试使用确定性假模型，没有新增真实模型请求；按约定未重跑完整 make all。
+
+```bash
+uv run pytest tests/unit/projects tests/unit/i18n \
+  tests/unit/db/test_db_pool.py tests/unit/db/test_project_task_turn_timing.py \
+  tests/integration/test_project_task*.py \
+  tests/integration/test_project_capabilities.py \
+  tests/integration/test_project_api_contract.py -q
+uv run pytest tests/integration/test_project_tasks.py \
+  tests/integration/test_project_task_opening.py -q
+```
+
+随后同一工作区合入用户另行授权的“三种审批模式始终可选”改动，重新核对合并后的执行、规划、开场、正文分类、审批和客户端工具：最终稳定版本联合回归 272 项全部通过，16 个相关源码文件严格 Mypy 与当前模型/Schema 一致性检查通过。复验期间记录并校验了 45 个源码文件的摘要。中间一次运行载入尚未适配开场的旧客户端审批 fixture，6 项在工具派发前超时；临时库确认未创建审批或客户端调用，更新后的样例单文件 21 项通过，随后上述完整组合复跑通过，未通过放松产品门控来消除失败。
+
+服务加载与代码验证分开：加载前两次任务状态检查发现审批已恢复实际执行，保护检查退出，没有停止服务或执行生产迁移；另一次源码检查发现并行审批改动，等待合并验证后才继续。2026 年 10 月 19 日 14:45（Asia/Shanghai），真实任务执行结束后平滑重启本机 8088 服务，PID 从 22204 更新为 52549，数据库从 43 迁移至 44。健康检查、`/api/docs`、首页和新增 OpenAPI 字段均通过。重启前后 5 个项目、24 个任务、91 个轮次、20 条标题任务的原列摘要一致，历史轮次的新计时列全为空，配置与环境文件字节不变。停止前在线备份与完全退出后的最终备份均保存；当时已无待审批轮次，因此本次没有需要单独备份的活动原生检查点。备份与核对结果见 `.runtime/8088/task-action-runtime-latest.json`，源码及测试验证见 `.runtime/8088/task-action-runtime-verification.json`。本次没有新建真实模型任务，也未重跑 APP UI 验收。
+
+后续数字分别记录先前各次交付，不与本次联合验证累计或混作真实模型结果。
+
+2026 年 10 月 19 日本轮共覆盖 299 个不同的后端定向用例，分批执行：主联合回归 287 项通过；新增原生动作说明与历史恢复边界后，受影响的规划和等待交互整组 75 项通过，其中包含新增的 12 项。前端七个相关测试文件共 132 项通过。Ruff、相关 11 个源码文件的严格 Mypy、TypeScript、Prettier 和 `make build-frontend` 通过。
+
+最后受影响后端组的复验命令：
+
+```bash
+uv run pytest tests/unit/projects/test_planning.py \
+  tests/integration/test_project_task_planning.py \
+  tests/integration/test_project_task_step_interactions.py -q
+```
+
+覆盖包括 settings、planning、execution、严格 Harness 流程、审批/提问/客户端工具恢复、关闭动作生成、互斥展示、设置刷新与原版本合并。Schema 和完整帧示例通过 JSON Schema 及服务端模型检查。Harness 验证使用确定性假模型，未发起真实 LLM 请求；本轮未修改或构建 AgentComputer Swift/UI，按约定未重复完整 `make all`，未提交或推送。
+
+此前配置接线交付已平滑重启本机 8088 服务，健康检查通过；当时登录后的 `GET /api/project-tasks/settings` 返回两项 `true` 和 `Cache-Control: no-store`。重启前后 5 个项目、21 个任务、84 个轮次、17 条标题任务的逐表摘要一致，数据库版本和用户环境文件摘要不变。备份与验证信息保存在 `.runtime/8088/task-env-modes-latest.json`，当时尚未新建模型任务检验服务；后续 APP 的修改与实测见下文及专项指南。
+
+### 客户端真实测试发现的跨轮恢复缺陷
+
+上述定向测试未覆盖“完成计划后，同一任务的新轮次等待审批再恢复”。客户端后续三轮真实模型测试中，两项独立计划完成，但无计划追问审批后导入了上一轮已完成的 revision 4 计划，导致工作工具未派发，轮次仍完成；整体端到端验收未通过。复现与客户端修复情况见 [APP 交接记录](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:38)。服务端只读核对确认，失败追问与前轮 plan_id 相同，而 execute 无开始时间或耗时。
+
+服务端恢复现已移除对完整检查点历史规划回执的扫描，只使用本轮持久化规划与调用回执。新增 `test_approval_restore_does_not_import_a_previous_turn_plan` 回归先在修复前复现两项失败，修复后覆盖动作生成开/关与无计划/新计划四种组合：旧 revision 4 不覆盖新轮，跨轮相同规划调用 ID 不串用缓存，审批后工具只派发一次，重复审批后内容与执行次数不变。该验证使用确定性假模型和可计数工具后端，没有新增真实模型测试或重跑 APP。
+
+此次修复的联合定向验证为 189 项通过，包含规划、动作、公开进展、审批、提问、客户端工具、检查点和经典过程；Ruff、格式检查、差异检查及 `runtime.py` 严格 Mypy 通过。复验命令：
+
+```bash
+uv run pytest tests/unit/projects/test_planning.py \
+  tests/unit/projects/test_execution.py tests/unit/projects/test_progress.py \
+  tests/integration/test_project_task_planning.py \
+  tests/integration/test_project_task_checkpoints.py \
+  tests/integration/test_project_task_interactions.py \
+  tests/integration/test_project_task_step_interactions.py \
+  tests/integration/test_project_task_client_tools.py \
+  tests/integration/test_project_task_approval_modes.py \
+  tests/integration/test_project_task_classic_process.py -q
+```
+
+该次修复已加载到本机 8088 服务（PID 22204），健康检查与数据库检查通过。重启前后 5 个项目、23 个任务、87 个轮次、19 条标题任务的逐表摘要一致，配置和环境文件不变；备份及核对结果见 `.runtime/8088/task-plan-restore-latest.json`。原失败轮次保留原始记录，未自动清空计划、补结果或重跑工具。该次服务端交付时尚未进行 APP 真实模型复验；后续客户端交接记录第 47～50 行记录无计划追问、新计划与冷恢复通过，第 57～61 行记录关闭面板后的真实执行与恢复通过。再后续的原阶段树、工具组件、占位和计时接线已记录在第 64 行起，不再沿用当时“原 UI 尚未接通”的判断；最新边界见 [APP 接入指南](agentcomputer-task-planning-and-progress.md)。
 
 | 场景 | 应观察到的行为 |
 | --- | --- |
-| 简单问答 | 无计划可直接回答，不制造通用占位计划 |
-| 新建复杂任务计划 | planning 成功后宿主返回新 plan/step ID、首步状态与时间 |
-| 明确更新与并行 | expected_revision 校验；旧 ID 保留，新项取得新 ID；活动不随排序漂移 |
-| 步骤结束、阻塞、跳过 | 保存 result 和已知结束时间，不自动推进下一项、不把声明当验收 |
-| 移除、清空、同轮重建 | retired_steps 与旧计划活动保留；新 plan_id 不混入旧活动 |
-| 规划混批或子代理规划 | 不改变正式主计划或派发与混批竞态有关的工作 |
-| 实际工具结果 | 参数/output JSON 类型及真实时间保持，未调度不显示开始，未知不回填 |
-| 重复/迟到更新与历史页 | plan/content 版本独立不回退，稳定 ID 不产生重复记录 |
-| 暂停/审批/本机工具恢复 | 同轮计划和归属保留，不重复派发副作用 |
-| 取消/失败与普通追问 | 不伪造步骤完成；新轮计划隔离，原轮记录保留 |
-| 私有数据与底层截断 | 不公开 private artifact，不承诺恢复工具未返回的输出 |
-| APP 对接 | DTO、合并、缓存、步骤聚合全部升级；当前未修改或验收 Swift/UI |
+| 简单问答 | 不制造占位计划；可直接回答，动作生成开启时工作工具仍须先完成本轮开场 |
+| 复杂任务 | 必填标题和固定 1～12 步，宿主生成稳定身份、启动首步 |
+| 完成、跳过、受阻 | 必填真实结果；完成/跳过推进下一步，受阻停止并保留原因 |
+| 越步、混批、重建、提前终稿 | 拒绝非法工具或以明确 error_code 结束，不能派发不应发生的动作 |
+| 计划面板 | 不嵌思考/进展/工具列表，与卡外 Process 互斥，答案独立 |
+| 无可见计划 | 当前动作开关选择结构化或经典过程；原始数据不删除 |
+| 配置更新 | 安全 GET 热读两布尔值，缺键默认；旧 worker 环境不能覆盖文件 |
+| 生成快照 | 显式本轮覆盖优先；暂停和请求重传不漂移，新轮重新读取默认 |
+| 工具事实与元数据 | 参数/output/时间真实，宿主 brief/步骤元数据与同名业务字段隔离 |
+| 历史与 APP | 旧数据保留，客户端最新验证见交接记录，不以服务端定向通过代替端到端复验 |

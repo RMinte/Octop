@@ -198,6 +198,7 @@ export interface TaskContentBlock {
   tool_call_id: string | null;
   tool_name: string | null;
   tool_label?: string | null;
+  brief?: string | null;
   plan?: TaskPlan | null;
   plan_id?: string | null;
   step_id?: string | null;
@@ -302,6 +303,7 @@ export type TaskEvent =
   | { type: "snapshot"; data: TaskDetail };
 
 export interface TaskExecutionOptions {
+  action_timeline_enabled?: boolean | null;
   reasoning_mode?: "auto" | "enabled" | "disabled";
   reasoning_effort?: string;
   model_ref?: string;
@@ -371,6 +373,10 @@ const taskListPath = (projectID: string | null) =>
   projectID
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
+export interface TaskPresentationSettings {
+  action_timeline_enabled: boolean;
+  step_panel_enabled: boolean;
+}
 export const projectTasksApi = {
   approvalPolicy: () =>
     request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
@@ -382,6 +388,7 @@ export const projectTasksApi = {
       body: JSON.stringify(body),
     }),
   approvalEvents: projectTaskSocket.approvalEvents.bind(projectTaskSocket),
+  settings: () => request<TaskPresentationSettings>("/project-tasks/settings"),
   uploadAttachment: (file: File, signal?: AbortSignal) => {
     const body = new FormData();
     body.append("file", file);

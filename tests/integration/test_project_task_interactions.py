@@ -14,6 +14,7 @@ from langchain_core.tools import StructuredTool
 from octop_harness import HarnessAgent
 from octop_harness.llm.factory import ChatModelFactory
 
+from octop.i18n import tr
 from octop.infra.agents.security.policy_store import SecuritySettingsStore
 from octop.infra.projects import interactions, runtime
 from tests.integration.test_project_task_checkpoints import parked
@@ -111,7 +112,13 @@ async def interaction_env(env_with_provider, monkeypatch):
 async def start(env, prompt):
     client, server, auth, *_ = env
     response = await client.post(
-        "/api/project-tasks", headers=auth, json={"request_id": str(uuid4()), "prompt": prompt}
+        "/api/project-tasks",
+        headers=auth,
+        json={
+            "request_id": str(uuid4()),
+            "prompt": prompt,
+            "options": {"action_timeline_enabled": False},
+        },
     )
     assert response.status_code == 202, response.text
     task = response.json()
@@ -174,7 +181,8 @@ async def test_parallel_approvals_release_slot_and_survive_restart(interaction_e
     assert final["status"] == "completed", final
     assert sorted(effects) == ["0", "1"]
     assert len(final["turns"]) == 1 and final["turns"][0]["turn_id"] == turn["turn_id"]
-    assert final["turns"][0]["reply"] == "Before approval. After waiting."
+    assert final["turns"][0]["reply"] == "After waiting."
+    assert final["turns"][0]["reasoning"].count("Before approval. ") == 1
     assert all(item["dispatch_started"] for item in final["turns"][0]["interactions"])
     assert (await respond(env, task, items[0], first)).status_code == 200
     assert len(generations) == 3
@@ -512,4 +520,13 @@ async def test_question_budget_survives_multiple_native_waits(env_with_provider,
     assert len(final["turns"][0]["interactions"]) == 2
     results = [message for message in observed[-1][1] if isinstance(message, ToolMessage)]
     assert [message.tool_call_id for message in results] == ["ask-first", "ask-second"]
-    assert "三个问题" in results[-1].content or "three questions" in results[-1].content
+    assert results[-1].status == "error"
+    assert results[-1].content == tr("projects.question_limit", "zh")
+    assert "User rejected" not in results[-1].content
+    block = next(
+        block
+        for block in final["turns"][0]["content_blocks"]
+        if block["type"] == "tool" and block["tool_call_id"] == "ask-second"
+    )
+    assert block["status"] == "failed" and block["started_at"] is None
+    assert block["output"] == results[-1].content

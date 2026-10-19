@@ -40,6 +40,8 @@ class ProjectTaskTurnRow:
     pause_requested: bool = False
     wait_kind: str = ""
     requests_json: str = "[]"
+    started_at: int | None = None
+    finished_at: int | None = None
 
     @property
     def is_waiting(self) -> bool:
@@ -75,6 +77,8 @@ class ProjectTaskTurnRow:
             pause_requested=bool(r["pause_requested"]),
             wait_kind=str(r["wait_kind"]),
             requests_json=str(r["requests_json"]),
+            started_at=strict_int(r["started_at"]) if r["started_at"] is not None else None,
+            finished_at=strict_int(r["finished_at"]) if r["finished_at"] is not None else None,
         )
 
 
@@ -186,10 +190,13 @@ class ProjectTaskTurnRepo:
             ).fetchone()
             if row is None:
                 return None
+            # A checkpoint predating timing support has an unknown first start;
+            # resuming it must not invent that boundary from the current claim.
             r = conn.execute(
-                "UPDATE project_task_turns SET status='running',wait_kind='', worker_id=?, updated_at=? "
+                "UPDATE project_task_turns SET status='running',wait_kind='', worker_id=?, updated_at=?, "
+                "started_at=CASE WHEN checkpoint_id='' THEN COALESCE(started_at,?) ELSE started_at END "
                 "WHERE turn_id=? AND status='queued' RETURNING *",
-                (worker_id, now, row["turn_id"]),
+                (worker_id, now, now, row["turn_id"]),
             ).fetchone()
             if r is None:
                 return None
@@ -244,13 +251,15 @@ class ProjectTaskTurnRepo:
         return bool(
             conn.execute(
                 "UPDATE project_task_turns SET status=CASE WHEN cancel_requested=1 "
-                "THEN 'cancelled' ELSE ? END, reply=?, error_code=?, activity='', updated_at=?, reasoning=COALESCE(?,reasoning), "
+                "THEN 'cancelled' ELSE ? END, reply=?, error_code=?, activity='', updated_at=?, "
+                "finished_at=COALESCE(finished_at,?), reasoning=COALESCE(?,reasoning), "
                 "content_blocks_json=COALESCE(?,content_blocks_json), content_revision=COALESCE(?,content_revision) "
                 "WHERE turn_id=? AND worker_id=? AND status='running'",
                 (
                     status,
                     reply,
                     error_code,
+                    now,
                     now,
                     reasoning,
                     content_blocks_json,
@@ -266,9 +275,11 @@ class ProjectTaskTurnRepo:
     def cancel(conn: Any, turn_id: str, now: int) -> None:
         conn.execute(
             "UPDATE project_task_turns SET cancel_requested=1, updated_at=?, "
+            "finished_at=CASE WHEN status='queued' OR (worker_id='' AND checkpoint_id<>'') "
+            "THEN COALESCE(finished_at,?) ELSE finished_at END, "
             "status=CASE WHEN status='queued' OR (worker_id='' AND checkpoint_id<>'') "
             "THEN 'cancelled' ELSE status END WHERE turn_id=? AND status IN ('queued', 'running')",
-            (now, turn_id),
+            (now, now, turn_id),
         )
 
     @staticmethod
@@ -338,10 +349,11 @@ class ProjectTaskTurnRepo:
     def resume_wait(conn: Any, turn_id: str, now: int, error: str = "") -> bool:
         return bool(
             conn.execute(
-                "UPDATE project_task_turns SET status=?,error_code=?,updated_at=? "
+                "UPDATE project_task_turns SET status=?,error_code=?,updated_at=?, "
+                "finished_at=CASE WHEN ?<>'' THEN COALESCE(finished_at,?) ELSE finished_at END "
                 "WHERE turn_id=? AND status='running' AND worker_id='' "
                 "AND checkpoint_id<>'' AND cancel_requested=0",
-                ("failed" if error else "queued", error, now, turn_id),
+                ("failed" if error else "queued", error, now, error, now, turn_id),
             ).rowcount
             == 1
         )
@@ -360,9 +372,10 @@ class ProjectTaskTurnRepo:
         return bool(
             conn.execute(
                 "UPDATE project_task_turns SET status='failed', error_code='TASK_INTERRUPTED', "
-                "activity='', updated_at=? WHERE turn_id=? AND status='running' AND updated_at<? "
+                "activity='', updated_at=?,finished_at=COALESCE(finished_at,?) "
+                "WHERE turn_id=? AND status='running' AND updated_at<? "
                 "AND NOT (worker_id='' AND checkpoint_id<>'')",
-                (now, turn_id, before),
+                (now, now, turn_id, before),
             ).rowcount
             == 1
         )

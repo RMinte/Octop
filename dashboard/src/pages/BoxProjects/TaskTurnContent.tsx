@@ -1,4 +1,4 @@
-import { Tag, Typography } from "antd";
+import { Button, Tag, Typography } from "antd";
 import {
   Circle,
   CircleCheck,
@@ -12,10 +12,12 @@ import { useTranslation } from "react-i18next";
 import type {
   TaskContentBlock,
   TaskPlanStep,
+  TaskPresentationSettings,
   TaskTurn,
 } from "../../api/modules/projects";
 import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
+import { DEFAULT_TASK_PRESENTATION_SETTINGS } from "../../hooks/useTaskPresentationSettings";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import styles from "./index.module.less";
 
@@ -80,13 +82,11 @@ function TaskTiming({
 
 function TaskPlanStepContent({
   step,
-  blocks,
-  turn,
+  liveDetail,
   timeZone,
 }: {
   step: TaskPlanStep;
-  blocks: TaskContentBlock[];
-  turn: TaskTurn;
+  liveDetail?: string;
   timeZone: string;
 }) {
   const { t } = useTranslation();
@@ -114,11 +114,6 @@ function TaskPlanStepContent({
           </span>
           <span className={styles.taskPlanStepTitle}>{step.content}</span>
           <Tag>{t(`projects.tasks.plan.stepStatus.${step.status}`)}</Tag>
-          {!!blocks.length && (
-            <span className={styles.taskPlanRecordCount}>
-              {t("projects.tasks.plan.records", { count: blocks.length })}
-            </span>
-          )}
         </summary>
         <div className={styles.taskPlanStepBody}>
           <TaskTiming
@@ -135,10 +130,15 @@ function TaskPlanStepContent({
               <LazyMarkdown content={step.result} />
             </div>
           )}
-          {!!blocks.length && (
-            <TaskActions turn={turn} blocks={blocks} timeZone={timeZone} />
+          {liveDetail && (
+            <Typography.Paragraph
+              type="secondary"
+              className={styles.taskPlanLiveDetail}
+            >
+              {liveDetail}
+            </Typography.Paragraph>
           )}
-          {!blocks.length && !step.result && (
+          {!liveDetail && !step.result && (
             <Typography.Text type="secondary">
               {t("projects.tasks.plan.noRecords")}
             </Typography.Text>
@@ -151,90 +151,116 @@ function TaskPlanStepContent({
 
 function TaskPlanCard({
   turn,
-  actions,
   timeZone,
+  onOpenArtifacts,
 }: {
   turn: TaskTurn;
-  actions: Map<string, TaskContentBlock[]>;
   timeZone: string;
+  onOpenArtifacts?: () => void;
 }) {
   const { t } = useTranslation();
   const plan = turn.plan;
   if (!plan) return null;
   const completed = plan.steps.filter(
-    (step) => step.status === "completed",
+    (step) => step.status === "completed" || step.status === "skipped",
   ).length;
-  const current = plan.steps.filter((step) => step.status === "in_progress");
+  const current = plan.steps.find(
+    (step) =>
+      step.status === "in_progress" &&
+      (!plan.active_step_id || step.step_id === plan.active_step_id),
+  );
+  const live = [
+    "queued",
+    "running",
+    "waiting_approval",
+    "waiting_answer",
+    "waiting_client_tool",
+  ].includes(turn.status);
+  const latestActivity =
+    plan.plan_id && current?.step_id
+      ? [...turn.content_blocks]
+          .reverse()
+          .find(
+            (block) =>
+              block.plan_id === plan.plan_id &&
+              block.step_id === current.step_id &&
+              (block.type === "progress" || block.type === "tool"),
+          )
+      : undefined;
+  const activityText = live
+    ? (latestActivity?.type === "progress"
+        ? latestActivity.text
+        : latestActivity?.brief || latestActivity?.tool_label || ""
+      )
+        .replace(/\s+/g, " ")
+        .trim()
+    : "";
+  const liveDetail =
+    activityText.length > 160 ? `${activityText.slice(0, 160)}…` : activityText;
   const renderSteps = (steps: TaskPlanStep[]) => (
     <ol className={styles.taskPlanSteps}>
       {steps.map((step, index) => (
         <TaskPlanStepContent
           key={step.step_id || `historic-${index}`}
           step={step}
-          blocks={step.step_id ? actions.get(step.step_id) ?? [] : []}
-          turn={turn}
+          liveDetail={step === current && !step.removed_at ? liveDetail : ""}
           timeZone={timeZone}
         />
       ))}
     </ol>
   );
   return (
-    <details className={styles.taskPlan} open={turn.status !== "completed"}>
-      <summary>
-        <span className={styles.taskPlanHeading}>
-          <strong>{plan.title || t("projects.tasks.plan.title")}</strong>
-          <span>
-            {t("projects.tasks.plan.count", {
-              completed,
-              total: plan.steps.length,
-            })}
+    <div>
+      <details
+        className={styles.taskPlan}
+        open={completed !== plan.steps.length || !plan.steps.length}
+      >
+        <summary>
+          <span className={styles.taskPlanHeading}>
+            <strong>{plan.title || t("projects.tasks.plan.title")}</strong>
+            <span>
+              {t("projects.tasks.plan.count", {
+                completed,
+                total: plan.steps.length,
+              })}
+            </span>
+            <Tag>{t(`projects.tasks.status.${turn.status}`)}</Tag>
           </span>
-          <Tag>{t(`projects.tasks.status.${turn.status}`)}</Tag>
-        </span>
-        {current.map((step, index) => (
-          <span className={styles.taskPlanCurrent} key={step.step_id || index}>
-            {t("projects.tasks.plan.current", { content: step.content })}
-          </span>
-        ))}
-      </summary>
-      {plan.steps.length ? (
-        renderSteps(plan.steps)
-      ) : (
-        <Typography.Text type="secondary">
-          {t("projects.tasks.plan.empty")}
-        </Typography.Text>
-      )}
-      {!!plan.retired_steps?.length && (
-        <div className={styles.taskRetiredSteps}>
+          {current && (
+            <span className={styles.taskPlanCurrent}>
+              {t("projects.tasks.plan.current", { content: current.content })}
+            </span>
+          )}
+        </summary>
+        {plan.steps.length ? (
+          renderSteps(plan.steps)
+        ) : (
           <Typography.Text type="secondary">
-            {t("projects.tasks.plan.retired")}
+            {t("projects.tasks.plan.empty")}
           </Typography.Text>
-          {renderSteps(plan.retired_steps)}
-        </div>
+        )}
+        {!!plan.retired_steps?.length && (
+          <div className={styles.taskRetiredSteps}>
+            <Typography.Text type="secondary">
+              {t("projects.tasks.plan.retired")}
+            </Typography.Text>
+            {renderSteps(plan.retired_steps)}
+          </div>
+        )}
+      </details>
+      {!!turn.artifacts.length && onOpenArtifacts && (
+        <Button type="link" onClick={onOpenArtifacts}>
+          {t("projects.tasks.plan.openArtifacts", {
+            count: turn.artifacts.length,
+          })}
+        </Button>
       )}
-    </details>
+    </div>
   );
 }
 
 const processBlock = (block: TaskContentBlock) =>
   block.type !== "plan" && block.type !== "text";
-
-type ContentGroup =
-  | { type: "text"; block: TaskContentBlock }
-  | { type: "actions"; blocks: TaskContentBlock[] };
-function groupContent(blocks: TaskContentBlock[]): ContentGroup[] {
-  const groups: ContentGroup[] = [];
-  for (const block of blocks) {
-    if (block.type === "plan") continue;
-    if (block.type === "text") groups.push({ type: "text", block });
-    else {
-      const previous = groups[groups.length - 1];
-      if (previous?.type === "actions") previous.blocks.push(block);
-      else groups.push({ type: "actions", blocks: [block] });
-    }
-  }
-  return groups;
-}
 
 function toolStatus(block: TaskContentBlock, turn: TaskTurn) {
   if (block.status === "failed") return "failed";
@@ -271,37 +297,40 @@ function TaskActions({
   turn,
   blocks,
   timeZone,
+  structured,
 }: {
   turn: TaskTurn;
   blocks: TaskContentBlock[];
   timeZone: string;
+  structured: boolean;
 }) {
   const { t } = useTranslation();
-  const hasActions = blocks.some(
-    (block) => block.type === "tool" || block.type === "progress",
+  const label = t(
+    structured ? "projects.tasks.actions" : "projects.tasks.thinking",
   );
   return (
     <section
-      className={hasActions ? styles.taskActions : undefined}
-      aria-label={hasActions ? t("projects.tasks.actions") : undefined}
+      className={structured ? styles.taskActions : styles.taskThinking}
+      aria-label={label}
     >
-      {hasActions && (
-        <Typography.Text type="secondary">
-          {t("projects.tasks.actions")}
-        </Typography.Text>
-      )}
-      <ol className={styles.taskActionChain}>
+      <Typography.Text type="secondary">{label}</Typography.Text>
+      <ol
+        className={
+          structured ? styles.taskActionChain : styles.taskThinkingItems
+        }
+      >
         {blocks.map((block) => {
           const streaming =
             turn.status === "running" && block.status === "streaming";
           if (block.type === "tool")
             return (
               <li key={block.block_id} className={styles.taskAction}>
-                <Wrench size={15} aria-hidden="true" />
+                {structured && <Wrench size={15} aria-hidden="true" />}
                 <details className={styles.taskTool}>
                   <summary className={styles.taskActionHeading}>
                     <Typography.Text>
-                      {block.tool_label ||
+                      {block.brief ||
+                        block.tool_label ||
                         t("projects.tasks.tool", { name: block.tool_name })}
                     </Typography.Text>
                     <Tag>
@@ -357,7 +386,7 @@ function TaskActions({
           if (block.type === "progress")
             return (
               <li key={block.block_id} className={styles.taskAction}>
-                <MessageCircle size={15} aria-hidden="true" />
+                {structured && <MessageCircle size={15} aria-hidden="true" />}
                 <div className={styles.taskActionBody}>
                   <LazyMarkdown content={block.text} isStreaming={streaming} />
                 </div>
@@ -383,75 +412,77 @@ function TaskActions({
   );
 }
 
-export default function TaskTurnContent({ turn }: { turn: TaskTurn }) {
-  const { t } = useTranslation();
+export default function TaskTurnContent({
+  turn,
+  settings = DEFAULT_TASK_PRESENTATION_SETTINGS,
+  onOpenArtifacts,
+}: {
+  turn: TaskTurn;
+  settings?: TaskPresentationSettings;
+  onOpenArtifacts?: () => void;
+}) {
   const timeZone = useServerTimezone();
-  const plan = turn.plan;
-  const stepIDs = new Set(
-    [...(plan?.steps ?? []), ...(plan?.retired_steps ?? [])]
-      .map((step) => step.step_id)
-      .filter(Boolean),
+  const showPlan = settings.step_panel_enabled && turn.plan != null;
+  const process = turn.content_blocks.filter(
+    (block) =>
+      processBlock(block) &&
+      (!settings.action_timeline_enabled ||
+        block.type === "progress" ||
+        block.type === "tool"),
   );
-  const actions = new Map<string, TaskContentBlock[]>();
-  const unscoped = turn.content_blocks.filter((block) => {
-    if (
-      !processBlock(block) ||
-      !plan?.plan_id ||
-      block.plan_id !== plan.plan_id ||
-      !block.step_id ||
-      !stepIDs.has(block.step_id)
-    )
-      return true;
-    const existing = actions.get(block.step_id) ?? [];
-    existing.push(block);
-    actions.set(block.step_id, existing);
-    return false;
-  });
+  if (!turn.content_blocks.length) {
+    if (!settings.action_timeline_enabled && turn.reasoning) {
+      process.push({
+        block_id: "legacy-reasoning",
+        type: "reasoning",
+        text: turn.reasoning,
+        status: turn.status === "running" ? "streaming" : "completed",
+        tool_call_id: null,
+        tool_name: null,
+      });
+    }
+    if (turn.activity) {
+      process.push({
+        block_id: "legacy-activity",
+        type: "tool",
+        text: "",
+        status: turn.status === "running" ? "streaming" : "completed",
+        tool_call_id: null,
+        tool_name: turn.activity,
+      });
+    }
+  }
+  const answers = turn.content_blocks.filter((block) => block.type === "text");
   return (
     <>
-      <TaskPlanCard turn={turn} actions={actions} timeZone={timeZone} />
-      {turn.content_blocks.length ? (
-        groupContent(unscoped).map((group) =>
-          group.type === "text" ? (
-            <LazyMarkdown
-              key={group.block.block_id}
-              content={group.block.text}
-              isStreaming={
-                turn.status === "running" && group.block.status === "streaming"
-              }
-            />
-          ) : (
-            <TaskActions
-              key={group.blocks[0].block_id}
-              turn={turn}
-              blocks={group.blocks}
-              timeZone={timeZone}
-            />
-          ),
-        )
-      ) : (
-        <>
-          {turn.reasoning && (
-            <details className={styles.taskReasoning}>
-              <summary>{t("projects.tasks.reasoning")}</summary>
-              <LazyMarkdown
-                content={turn.reasoning}
-                isStreaming={turn.status === "running"}
-              />
-            </details>
-          )}
-          {turn.reply && (
-            <LazyMarkdown
-              content={turn.reply}
-              isStreaming={turn.status === "running"}
-            />
-          )}
-          {turn.activity && (
-            <Typography.Text type="secondary">
-              {t("projects.tasks.tool", { name: turn.activity })}
-            </Typography.Text>
-          )}
-        </>
+      {showPlan ? (
+        <TaskPlanCard
+          turn={turn}
+          timeZone={timeZone}
+          onOpenArtifacts={onOpenArtifacts}
+        />
+      ) : process.length > 0 ? (
+        <TaskActions
+          turn={turn}
+          blocks={process}
+          timeZone={timeZone}
+          structured={settings.action_timeline_enabled}
+        />
+      ) : null}
+      {answers.map((answer) => (
+        <LazyMarkdown
+          key={answer.block_id}
+          content={answer.text}
+          isStreaming={
+            turn.status === "running" && answer.status === "streaming"
+          }
+        />
+      ))}
+      {!answers.length && turn.reply && (
+        <LazyMarkdown
+          content={turn.reply}
+          isStreaming={turn.status === "running"}
+        />
       )}
     </>
   );

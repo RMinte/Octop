@@ -459,6 +459,8 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 
 每轮还返回 `content_blocks`（按发生顺序的摘要、思考、回答和工具活动）及 `content_revision`（内容版本）。内容块是完整快照，客户端按版本替换并保留 block_id 的展示状态；有块时不重复渲染累计 reply/reasoning。历史未记录分段时数组为空，继续展示原文。公开摘要来自模型实际返回，GLM 的 reasoning_content 保持思考类型。字段与恢复规则见 [有序内容块](project-task-websocket.md#有序内容块)。
 
+公开动作开启时，首个成功持久化通知带 `introduction=true`，工作须等待其成功回执后的下一次模型响应；同批通知不能并发放行工作，关闭动作生成时不适用。TaskTurn 的 `started_at/finished_at/processing_duration_ms` 分别为首次实际开始、终态及其墙钟毫秒跨度，包含审批/暂停等待、排除首次排队；历史或运行中的未知值为 null。带工具响应的普通正文归过程，只有确认无工具且未处于计划执行中的正文进入答案。
+
 当前实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
 
 

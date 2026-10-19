@@ -218,6 +218,9 @@
     "TASK_RETRY_UNAVAILABLE": "只能重新尝试最后一个失败或已停止的轮次，请刷新任务。",
     "TASK_ARCHIVED": "任务已归档，请恢复后继续对话。",
     "TASK_REVISION_CONFLICT": "任务已发生变化，请刷新后重新修改。",
+    "TASK_SETTINGS_INVALID": "任务过程设置 {{setting}} 必须为 true/false、1/0、yes/no 或 on/off。",
+    "TASK_PLAN_UNFINISHED": "当前计划步骤尚未记录结果，任务不能标记为完成。",
+    "TASK_PLAN_BLOCKED": "计划已受阻，请查看步骤结果并在新一轮中补充信息或重试。",
     "TASK_BUSY": "任务正在排队或执行，请等待完成或先停止任务后再操作。",
     "TASK_ARTIFACT_INVALID": "附件名称、格式或服务端工作目录路径不合法；不支持符号链接。",
     "TASK_ARTIFACT_LIMIT": "附件超过大小或本轮数量限制。",
@@ -6752,7 +6755,8 @@
           "review_unknown": "自动审查结果未确认，请人工确认；不会重复发起审查。"
         }
       },
-      "actions": "动作进展",
+      "actions": "动作链路",
+      "thinking": "思考过程",
       "plan": {
         "title": "执行计划",
         "count": "{{completed}} / {{total}} 已完成",
@@ -6767,7 +6771,8 @@
         },
         "records": "{{count}} 条记录",
         "result": "阶段结果",
-        "noRecords": "该步骤暂无动作或结果。",
+        "noRecords": "暂无步骤结果。",
+        "openArtifacts": "查看产物（{{count}}）",
         "retired": "已移除的步骤"
       },
       "actionStatus": {

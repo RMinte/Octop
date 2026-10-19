@@ -216,7 +216,11 @@ async def test_read_task_image_restores_bytes_after_image_blocks_are_compacted(
     response = await client.post(
         "/api/project-tasks",
         headers=auth,
-        json={"request_id": "compacted-image-first", "attachment_ids": [image["attachment_id"]]},
+        json={
+            "request_id": "compacted-image-first",
+            "attachment_ids": [image["attachment_id"]],
+            "options": {"action_timeline_enabled": False},
+        },
     )
     assert response.status_code == 202, response.text
     task = await settled(client, auth, response.json()["task_id"])
@@ -238,6 +242,7 @@ async def test_read_task_image_restores_bytes_after_image_blocks_are_compacted(
         headers=auth,
         json={
             "request_id": "compacted-image-second",
+            "options": {"action_timeline_enabled": False},
             "prompt": "Read the original upload again. What color is it?",
         },
     )
@@ -607,7 +612,7 @@ async def test_image_checkpoint_resumes_without_persisting_data_uri(
             data={
                 "request_id": "image-checkpoint-001",
                 "attachment_ids": [image["attachment_id"]],
-                "options": OPTIONS,
+                "options": {**OPTIONS, "action_timeline_enabled": False},
             },
         )
         assert created["type"] == "result", created

@@ -28,7 +28,7 @@ from tests.integration.test_project_tasks_ws import command, connected
 def step_harness(env_with_provider, monkeypatch):
     client, server, auth = env_with_provider
 
-    def install(kind, *, invalid=False, mixed=False, business_field=False):
+    def install(kind, *, invalid=False, mixed=False, business_field=False, invalid_brief=None):
         observed, effects, arguments = [], [], []
 
         async def guarded(value: str) -> str:
@@ -51,11 +51,31 @@ def step_harness(env_with_provider, monkeypatch):
                         {
                             "id": "create-plan",
                             "name": "planning",
-                            "args": {"command": "create", "steps": ["Inspect the requested note"]},
+                            "args": {
+                                "command": "create",
+                                "title": "Inspect the requested note",
+                                "steps": ["Inspect the requested note"],
+                            },
                         }
                     ]
                 elif isinstance(last, ToolMessage) and last.tool_call_id == "create-plan":
-                    plan = json.loads(last.content)
+                    calls = [
+                        {
+                            "id": "opening-notice",
+                            "name": "message_notify_user",
+                            "args": {
+                                "text": "I will inspect the note and verify its actual result."
+                            },
+                        }
+                    ]
+                elif isinstance(last, ToolMessage) and last.tool_call_id == "opening-notice":
+                    plan = next(
+                        json.loads(message.content)
+                        for message in reversed(messages)
+                        if isinstance(message, ToolMessage)
+                        and message.name == "planning"
+                        and message.status != "error"
+                    )
                     step = "missing-step" if invalid else plan["steps"][0]["step_id"]
                     if kind == "client":
                         name, args = "client__read_note", {"path": "note.md"}
@@ -67,12 +87,50 @@ def step_harness(env_with_provider, monkeypatch):
                     else:
                         name, args = "guarded_action", {"value": "proof"}
                     args["task_step_id"] = 42 if business_field else step
+                    if kind != "question":
+                        args["brief"] = "Read the note" if kind == "client" else "Record the fact"
+                    if invalid_brief is not None:
+                        args["brief"] = invalid_brief
                     arguments.append(deepcopy(args))
                     calls = [{"id": "step-action", "name": name, "args": args}]
                     if mixed:
                         calls.insert(
                             0, {"id": "mixed-plan", "name": "planning", "args": {"command": "get"}}
                         )
+                elif isinstance(last, ToolMessage) and last.tool_call_id != "complete-step":
+                    plan = next(
+                        json.loads(message.content)
+                        for message in reversed(messages)
+                        if isinstance(message, ToolMessage)
+                        and message.name == "planning"
+                        and message.status != "error"
+                    )
+                    action = next(
+                        message
+                        for message in reversed(messages)
+                        if isinstance(message, ToolMessage)
+                        and message.tool_call_id == "step-action"
+                    )
+                    calls = [
+                        {
+                            "id": "complete-step",
+                            "name": "planning",
+                            "args": {
+                                "command": "mark_step",
+                                "expected_revision": plan["revision"],
+                                "step_id": plan["active_step_id"],
+                                "status": "skipped"
+                                if invalid or mixed or invalid_brief is not None
+                                else "completed",
+                                "result": (
+                                    "Action was not executed: "
+                                    if invalid or mixed or invalid_brief is not None
+                                    else "Action returned: "
+                                )
+                                + str(action.content),
+                            },
+                        }
+                    ]
                 else:
                     return ChatResult(
                         generations=[ChatGeneration(message=AIMessage(content="Finished."))]
@@ -238,12 +296,9 @@ async def test_invalid_ownership_and_mixed_planning_never_dispatch_native_wait_a
         m for m in observed[-1] if isinstance(m, ToolMessage) and m.tool_call_id == "step-action"
     )
     expected = tr("projects.planning_mixed_batch" if mixed else "projects.task_step_invalid", "zh")
-    assert expected in message.content
-    if kind in {"client", "question"}:
-        value = json.loads(message.content)
-        assert value == {"is_error": True, "output": expected}
-    else:
-        assert message.status == "error"
+    assert message.content == expected
+    assert message.status == "error"
+    assert "User rejected" not in message.content
     block = next(
         block
         for block in turn["content_blocks"]
@@ -251,4 +306,39 @@ async def test_invalid_ownership_and_mixed_planning_never_dispatch_native_wait_a
     )
     assert block["status"] == "failed"
     assert block["started_at"] is None
-    assert turn["plan"]["revision"] == 1
+    assert block["output"] == expected
+    assert turn["plan"]["revision"] == 2
+    assert turn["plan"]["steps"][0]["status"] == "skipped"
+    assert "Action was not executed:" in turn["plan"]["steps"][0]["result"]
+
+
+@pytest.mark.parametrize("kind", ["client", "question", "server"])
+@pytest.mark.parametrize("brief", [42, "   ", "x" * 241])
+async def test_invalid_brief_never_dispatches_native_wait_actions(step_harness, kind, brief):
+    client, server, auth, install = step_harness
+    _, effects, _, options = install(kind, invalid_brief=brief)
+    response = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={
+            "request_id": str(uuid4()),
+            "prompt": "Reject an invalid action brief",
+            "options": options,
+        },
+    )
+    assert response.status_code == 202
+    task = await settled(client, auth, response.json()["task_id"])
+    assert task["status"] == "completed", task
+    turn = task["turns"][0]
+    assert not turn["interactions"] and effects == []
+    with server.services.db.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM project_task_tool_calls WHERE turn_id=?", (turn["turn_id"],)
+            ).fetchone()[0]
+            == 0
+        )
+    block = next(b for b in turn["content_blocks"] if b["tool_call_id"] == "step-action")
+    assert block["status"] == "failed" and block["started_at"] is None
+    assert block["arguments"] is not None and "brief" not in block["arguments"]
+    assert turn["plan"]["steps"][0]["status"] == "skipped"

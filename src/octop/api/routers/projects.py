@@ -36,6 +36,7 @@ from octop.infra.projects.models import (
     ProjectView,
 )
 from octop.infra.projects.runtime import ProjectTaskWorker
+from octop.infra.projects.settings import TaskSettings, load_settings
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
 from octop.infra.utils.locale import resolve_request_locale
@@ -325,6 +326,21 @@ def _task_worker(server: OctopServer) -> ProjectTaskWorker:
 
 
 task_router = APIRouter(prefix="/project-tasks")
+
+
+@task_router.get(
+    "/settings",
+    response_model=TaskSettings,
+    summary="读取任务过程显示与生成默认值",
+    description="登录用户可读取两个全局布尔默认值，不返回环境变量内容或密钥。动作链路默认值在新轮次入队时固定；步骤面板只影响客户端显示。每次读取持久化配置，不使用缓存。",
+)
+async def task_settings(
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> TaskSettings:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(load_settings, _services(server))
 
 
 @task_router.post(

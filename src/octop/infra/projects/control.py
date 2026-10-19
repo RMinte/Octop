@@ -151,6 +151,18 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                 tool_call_id=str(request.tool_call["id"]),
                 status="error",
             )
+        rejected = (
+            self.execution.rejection(request.tool_call, request.tool)
+            if self.execution is not None and self.execution.is_root()
+            else None
+        )
+        if rejected is not None:
+            return ToolMessage(
+                content=rejected,
+                name=request.tool_call["name"],
+                tool_call_id=str(request.tool_call["id"]),
+                status="error",
+            )
         authorized = await asyncio.to_thread(self._authorize, request.tool_call)
         if authorized is None:
             interrupt({"type": "user_pause"})

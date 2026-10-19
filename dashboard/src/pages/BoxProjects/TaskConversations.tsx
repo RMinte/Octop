@@ -39,6 +39,7 @@ import {
   type TaskSummary,
 } from "../../api/modules/projects";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
+import { useTaskPresentationSettings } from "../../hooks/useTaskPresentationSettings";
 import { apiErrorMessage } from "../../utils/apiError";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import styles from "./index.module.less";
@@ -70,6 +71,7 @@ export default function TaskConversations({
   const queue = sharedQueue ?? localQueue;
   const clearQueue = queue.clear;
   const timeZone = useServerTimezone();
+  const presentationSettings = useTaskPresentationSettings();
   const [params, setParams] = useSearchParams();
   const taskID = params.get("task");
   const queued = taskID ? queue.queues[taskID] : undefined;
@@ -799,7 +801,15 @@ export default function TaskConversations({
                     <Typography.Paragraph type="secondary">
                       {t("projects.tasks.modelUsed", { model: turn.model_ref })}
                     </Typography.Paragraph>
-                    <TaskTurnContent turn={turn} />
+                    <TaskTurnContent
+                      turn={turn}
+                      settings={presentationSettings}
+                      onOpenArtifacts={() =>
+                        document
+                          .getElementById(`task-artifacts-${turn.turn_id}`)
+                          ?.scrollIntoView({ block: "nearest" })
+                      }
+                    />
                     {!!turn.interactions?.length && (
                       <TaskInteractions
                         taskID={detail.task_id}
@@ -824,6 +834,7 @@ export default function TaskConversations({
                       )}
                     {turn.artifacts?.length > 0 && (
                       <Space
+                        id={`task-artifacts-${turn.turn_id}`}
                         direction="vertical"
                         aria-label={t("projects.tasks.artifacts")}
                       >

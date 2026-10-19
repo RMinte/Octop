@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from octop.infra.projects.models import ProjectModel
 from octop.infra.projects.progress import TaskPlan
@@ -24,6 +24,13 @@ class TaskContentBlock(ProjectModel):
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_label: str | None = Field(default=None, description="服务端本地化的工具动作名称。")
+    brief: str | None = Field(
+        default=None, max_length=240, description="本次工具动作及目的的简短公开说明。"
+    )
+    introduction: StrictBool | None = Field(
+        default=None,
+        description="宿主标记的本轮首条已保存公开进展；后续进展为 false，旧记录未知为空。",
+    )
     plan: TaskPlan | None = Field(
         default=None, description="该次计划更新的完整快照，仅 plan 块提供。"
     )
@@ -131,13 +138,24 @@ class TaskContent:
         self.revision += 1
 
     def report_progress(
-        self, call_id: str, text: str, *, plan_id: str | None = None, step_id: str | None = None
+        self,
+        call_id: str,
+        text: str,
+        *,
+        plan_id: str | None = None,
+        step_id: str | None = None,
+        introduction: bool | None = None,
     ) -> None:
         if any(block.type == "progress" and block.tool_call_id == call_id for block in self.blocks):
             return
         self.end_text()
         block = self._new(
-            "progress", text=text, tool_call_id=call_id, plan_id=plan_id, step_id=step_id
+            "progress",
+            text=text,
+            tool_call_id=call_id,
+            plan_id=plan_id,
+            step_id=step_id,
+            introduction=introduction,
         )
         block.status = "completed"
         self.revision += 1
@@ -152,6 +170,7 @@ class TaskContent:
         step_id: str | None = None,
         arguments: dict[str, Any] | None = None,
         started_at: datetime | str | None = None,
+        brief: str | None = None,
     ) -> None:
         existing = self._tools.get(call_id)
         if existing is not None:
@@ -166,6 +185,8 @@ class TaskContent:
                 existing.plan_id, existing.step_id = plan_id, step_id
             if arguments is not None:
                 existing.arguments = arguments
+            if brief is not None:
+                existing.brief = brief
             if existing.model_dump() != before:
                 self.revision += 1
             return
@@ -179,6 +200,7 @@ class TaskContent:
             step_id=step_id,
             arguments=arguments,
             started_at=started_at,
+            brief=brief,
         )
         self.revision += 1
 

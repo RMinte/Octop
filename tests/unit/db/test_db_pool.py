@@ -1140,6 +1140,8 @@ def test_task_list_sync_upgrade_preserves_existing_conversations(
             assert after_turn.pop("pause_requested") == 0
             assert after_turn.pop("wait_kind") == ""
             assert after_turn.pop("requests_json") == "[]"
+            assert after_turn.pop("started_at") is None
+            assert after_turn.pop("finished_at") is None
             assert after_turn == before_turn
             assert conn.execute("SELECT COUNT(*) FROM project_sync_changes").fetchone()[0] == 0
             assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 45

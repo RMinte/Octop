@@ -844,6 +844,19 @@
     "TaskExecutionOptions": {
       "additionalProperties": false,
       "properties": {
+        "action_timeline_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮结构化动作链路开关；省略或 null 使用当前全局默认值，入队后固定，不修改计划执行或步骤面板显示。",
+          "title": "Action Timeline Enabled"
+        },
         "reasoning_mode": {
           "anyOf": [
             {
@@ -1871,6 +1884,33 @@
           "description": "服务端本地化的工具动作名称。",
           "title": "Tool Label"
         },
+        "brief": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本次工具动作及目的的简短公开说明。",
+          "title": "Brief"
+        },
+        "introduction": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "宿主标记的本轮首条已保存公开进展；后续进展为 false，旧记录未知为空。",
+          "title": "Introduction"
+        },
         "plan": {
           "anyOf": [
             {
@@ -2514,6 +2554,48 @@
           "format": "date-time",
           "title": "Updated At",
           "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮首次实际开始执行的服务端时间；首次排队不计入，历史未知时为 null。",
+          "title": "Started At"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮到达完成、失败或取消终态的服务端时间；尚未终止或历史未知时为 null。",
+          "title": "Finished At"
+        },
+        "processing_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "首次实际开始到终态的墙钟毫秒数，包含审批、暂停及恢复等待；任一边界未知时为 null。",
+          "title": "Processing Duration Ms"
         }
       },
       "required": [

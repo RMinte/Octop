@@ -206,7 +206,9 @@ async def test_plugin_results_survive_new_harness_and_project_directory_change(
             json={"name": "Context", "directory": str(first_dir), "plugins": ["project-proof"]},
         )
     ).json()
-    task = await create_task(client, auth, project_id=project["project_id"])
+    task = await create_task(
+        client, auth, project_id=project["project_id"], options={"action_timeline_enabled": False}
+    )
     assert task["status"] == "completed", task
     assert project_plugin == ["called"]
     await client.patch(
@@ -214,7 +216,9 @@ async def test_plugin_results_survive_new_harness_and_project_directory_change(
         headers=auth,
         json={"expected_revision": 1, "directory": str(second_dir), "plugins": []},
     )
-    task = await follow_up(client, auth, task["task_id"])
+    task = await follow_up(
+        client, auth, task["task_id"], options={"action_timeline_enabled": False}
+    )
     assert task["status"] == "completed", task
     assert len(agents) == 2 and agents[1].config.workspace_dir == second_dir
     messages = observed[-1][1]
@@ -272,13 +276,23 @@ async def test_task_long_term_memory_reopens_and_is_isolated(env_with_provider, 
             AIMessage(content="Separate task"),
         ],
     )
-    task = await create_task(client, auth, "Remember ultramarine zebra")
+    task = await create_task(
+        client, auth, "Remember ultramarine zebra", options={"action_timeline_enabled": False}
+    )
     assert task["status"] == "completed", task
-    task = await follow_up(client, auth, task["task_id"], "Recall my preference")
+    task = await follow_up(
+        client,
+        auth,
+        task["task_id"],
+        "Recall my preference",
+        options={"action_timeline_enabled": False},
+    )
     assert task["status"] == "completed", task
     recall = [str(m.content) for m in observed[-1][1] if isinstance(m, ToolMessage)]
     assert any("ultramarine" in text for text in recall), recall
-    other = await create_task(client, auth, "Recall previous preferences")
+    other = await create_task(
+        client, auth, "Recall previous preferences", options={"action_timeline_enabled": False}
+    )
     assert other["status"] == "completed", other
     results = [str(m.content) for m in observed[-1][1] if isinstance(m, ToolMessage)]
     assert not any("ultramarine zebra" in text for text in results), results
@@ -311,7 +325,13 @@ async def test_task_can_delegate_to_selected_subagent(env_with_provider, monkeyp
         ],
     )
     task = await create_task(
-        client, auth, options={"subagents": ["engineering-code-reviewer"], "memory_enabled": False}
+        client,
+        auth,
+        options={
+            "subagents": ["engineering-code-reviewer"],
+            "memory_enabled": False,
+            "action_timeline_enabled": False,
+        },
     )
     assert task["status"] == "completed", task
     assert task["turns"][0]["reply"] == "Delegation complete"
@@ -356,7 +376,13 @@ async def test_task_team_calls_only_task_members(env_with_provider, monkeypatch)
         ],
     )
     task = await create_task(
-        client, auth, options={"subagents": ["engineering-code-reviewer"], "team_enabled": True}
+        client,
+        auth,
+        options={
+            "subagents": ["engineering-code-reviewer"],
+            "team_enabled": True,
+            "action_timeline_enabled": False,
+        },
     )
     assert task["status"] == "completed", task
     assert task["turns"][0]["reply"] == "Team complete"
@@ -406,7 +432,7 @@ async def test_cancelled_tool_context_is_closed_and_not_replayed(
         json={
             "request_id": str(uuid4()),
             "prompt": "Begin",
-            "options": {"plugins": ["project-proof"]},
+            "options": {"plugins": ["project-proof"], "action_timeline_enabled": False},
         },
     )
     assert response.status_code == 202
@@ -419,7 +445,9 @@ async def test_cancelled_tool_context_is_closed_and_not_replayed(
     )
     done = await settled(client, auth, task["task_id"])
     assert done["status"] == "cancelled", done
-    done = await follow_up(client, auth, task["task_id"])
+    done = await follow_up(
+        client, auth, task["task_id"], options={"action_timeline_enabled": False}
+    )
     assert done["status"] == "completed", done
     result = next(
         m

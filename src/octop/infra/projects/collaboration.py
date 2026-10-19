@@ -23,6 +23,7 @@ from octop_harness.registry import AgentEntry, AgentRegistry
 from octop_harness.teams.team_manager import TeamManager
 
 from octop.i18n import tr
+from octop.infra.projects.hitl import TaskHumanInTheLoopMiddleware
 
 
 class SubagentCommandGate(AgentMiddleware[Any, Any]):
@@ -118,7 +119,14 @@ class TaskTeam:
                     "db_path": str(runtime_dir / "team" / slug / "memory.sqlite")
                 },
                 team_enabled=False,
-                middleware=[SubagentCommandGate(cfg.language), *(cfg.middleware or [])],
+                middleware=[
+                    SubagentCommandGate(cfg.language),
+                    *(
+                        item
+                        for item in cfg.middleware or []
+                        if not isinstance(item, TaskHumanInTheLoopMiddleware)
+                    ),
+                ],
                 # Root task checkpoints own the durable client handoff. Peer
                 # streams retain the existing broker until nested resume is wired.
                 interrupt_on={

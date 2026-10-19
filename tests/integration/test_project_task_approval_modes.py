@@ -158,6 +158,7 @@ async def create(env, mode="approve_for_me", prompt="command"):
             "request_id": str(uuid4()),
             "prompt": prompt,
             "approval_mode": mode,
+            "options": {"action_timeline_enabled": False},
         },
     )
     assert result.status_code == 202, result.text
@@ -198,7 +199,8 @@ async def test_auto_allow_resumes_original_turn_once_and_bills_separately(modes_
     assert final["status"] == "completed", final
     turn = final["turns"][0]
     assert len(final["turns"]) == 1 and turn["turn_id"] == created["active_turn_id"]
-    assert turn["reply"] == "Before command. After command."
+    assert turn["reply"] == "After command."
+    assert turn["reasoning"].count("Before command. ") == 1
     assert effects == ["echo approval-check"] and len(reviews) == 1 and len(generations) == 2
     item = turn["interactions"][0]
     assert item["resolution"]["outcome"] == "allow_once"

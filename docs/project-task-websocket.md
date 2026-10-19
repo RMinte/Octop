@@ -235,7 +235,7 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "activity":"",
       "artifacts":[],
       "model_ref":"provider/model",
-      "options":{"model_ref":"provider/model","reasoning_mode":null,"reasoning_effort":null,"skills":[],"mcp_servers":[]},
+      "options":{"action_timeline_enabled":true,"model_ref":"provider/model","reasoning_mode":null,"reasoning_effort":null,"skills":[],"mcp_servers":[]},
       "interactions": [],
       "interaction_revision": 0,
       "pause_requested": false,
@@ -284,7 +284,7 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "activity":"",
       "artifacts":[],
       "model_ref":"provider/model",
-      "options":{"model_ref":"provider/model","reasoning_mode":"enabled","reasoning_effort":null,"skills":[],"mcp_servers":[]},
+      "options":{"action_timeline_enabled":true,"model_ref":"provider/model","reasoning_mode":"enabled","reasoning_effort":null,"skills":[],"mcp_servers":[]},
       "interactions": [],
       "interaction_revision": 0,
       "pause_requested": false,
@@ -342,7 +342,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | status / error_code | string | 轮次状态；错误码为空字符串时无错误 |
 | activity | string | 当前工具名称；空字符串表示无活动摘要，不含参数或工具结果 |
 | model_ref | string | 实际模型引用 |
-| options | TaskExecutionOptions | 本轮实际模型与资源，继承部分已解析为实际选择 |
+| options | TaskExecutionOptions | 本轮实际模型、资源与动作生成开关，继承部分已解析为实际值 |
 | approval_policy_at_start | object | 本轮开始时的模式；动作采用各自创建时的冻结版本 |
 | interactions / interaction_revision | array / int | 完整交互列表与独立版本，见交互协议 |
 | pause_requested | boolean | 已请求暂停，status=paused 才表示已生效 |
@@ -374,6 +374,7 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 
 | options 字段 | 省略或 null | 显式值 |
 | --- | --- | --- |
+| action_timeline_enabled | 使用入队时全局默认值，生效值随轮次冻结 | 严格布尔值；控制本轮公开进展及适用工作工具必填宿主 brief，不改变计划调度或步骤面板显示 |
 | model_ref | 使用发送时的默认可用模型 | 1–512 字符；不可用报错，不静默换模型 |
 | reasoning_mode | 使用所选模型的默认模式 | auto / enabled / disabled；不支持的模式返回 422 TASK_REASONING_INVALID |
 | reasoning_effort | 使用所选模型的默认强度 | 必须来自该模型 reasoning_config.efforts；不支持的值或关闭思考时指定强度返回 422 TASK_REASONING_INVALID |
@@ -390,6 +391,41 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 
 options 只影响本轮，不写回项目。相同 request_id 的网络重发保持原 options，不在重连时重新计算继承结果。
 
+### 任务过程配置
+
+“应用设置 → 环境变量”提供两个全局默认值，缺省均为 true；本机本轮核对两项均已设为 true，实际值未改动。
+
+| 环境变量 | 生效范围 |
+| --- | --- |
+| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮公开进展及适用工作工具必填宿主 brief 的生成默认值，同时提供当前过程显示偏好 |
+| `OCTOP_TASK_STEP_PANEL_ENABLED` | 已有计划的步骤面板显示默认值，不控制计划是否创建或执行 |
+
+接受 true/false、1/0、yes/no、on/off，忽略大小写和两端空白。环境保存先校验这两键，非法值返回 `400 TASK_SETTINGS_INVALID`，不保存本次环境修改，错误只含设置名。
+
+已登录客户端读取 `GET /api/project-tasks/settings`，使用现有 Bearer 凭据，无需管理员权限：
+
+```json
+{"action_timeline_enabled":true,"step_panel_enabled":true}
+```
+
+响应 `Cache-Control: no-store`，只包含两个布尔值，不返回环境变量全集、路径或密钥。它是 HTTP 设置接口，没有新增 WebSocket 命令。APP 不读取 `/api/envs`。
+
+服务端每次读取持久化的 `OCTOP_HOME/env`。文件存在时以文件为两键权威，缺键回默认 true，避免另一个 worker 的旧进程环境覆盖删除结果；仅整个文件不存在时才回退进程环境，再缺省 true。保存/删键对之后的请求热生效，不依赖跨进程环境广播、agent 重载或服务重启。
+
+本轮生成配置优先级：显式 `options.action_timeline_enabled` 优先，否则取入队时全局默认。创建、追问和手动重试均支持；options 不接受 step_panel_enabled。生效值写入轮次配置并在 `turn.options.action_timeline_enabled` 回显。暂停/审批/客户端工具等待后恢复使用同一快照；相同 request_id 重传返回原轮，不重新取默认。保留原始请求 options，不把响应中解析的默认值填回待重传消息。新轮重新解析，旧轮缺字段按 true 读取且不补写历史。
+
+```json
+{"type":"task.message","id":"command-classic-001","task_id":"task_example","data":{"request_id":"message-classic-001","prompt":"继续处理","options":{"action_timeline_enabled":false}}}
+```
+
+关闭本轮动作生成时，不注册 message_notify_user、不注入宿主 brief 提示和 schema 字段；普通工具执行、输出、时间和 Provider 公开思考继续记录。业务工具自己定义的同名字段不受该开关影响。
+
+开启时，无论有无计划，适用工作工具的模型侧宿主 brief 均为必填、非空字符串，最多 240 字符。缺失或无效调用在审批授权消费和实际派发前被拒绝，模型可根据工具错误纠正。控制工具豁免、同名业务字段及旧恢复边界见下文“执行计划和动作链路”。这不把历史内容块的可空 brief 改为传输必填。
+
+当前显示设置与冻结的生成策略分开。`step_panel_enabled && turn.plan != null` 时仅显示计划面板：步骤结果、当前一条短活动、已知时间/耗时和产物入口，不在步骤内铺开思考/进展/工具列表，也不并列 Process。无可见计划时，action_timeline_enabled=true 显示结构化 Process 的公开进展与工具，默认隐藏原始思考；false 显示经典思考与工具事实。切换不删记录，不补生已关闭轮次的进展，答案始终独立。
+
+客户端在进入和恢复前台及配置保存后刷新安全设置。网页与 APP 已接安全设置和互斥展示；最新 AgentComputer `4be12673` 已复用原阶段、结果、工具行和命令卡，并接入显式开场与整轮计时。客户端 H/I 真实复验已覆盖有效 brief 的具体标题，以及无计划调用缺失 brief 在审批前被拒、补正后仅执行一次；240 字符边界、提问豁免及后续宿主错误归因修正未由这次实测覆盖，详见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)。
+
 ### APP 思考内容接入
 
 #### 有序内容块
@@ -403,7 +439,9 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 | text | 本块累计文字，客户端替换，不重复追加 |
 | status | `streaming` 仍在生成/执行；`completed` 此块结束；`failed` 工具返回错误；`interrupted` 未完成即停止或中断 |
 | tool_call_id / tool_name | 工具调用身份和名称；progress 使用通知的 tool_call_id，其他非工具块通常为 null |
-| tool_label | 服务端本地化动作名称；空缺时回退 tool_name |
+| tool_label | 服务端本地化动作名称；brief 缺省时可回退到它或 tool_name |
+| brief | 传输字段可缺失/null，历史未知不补造；新动作模式下适用工作工具的生成约束为非空且最多 240 字符；不是业务参数或成功证明 |
+| introduction | progress 的宿主开场标记：本轮第一条成功保存的公开进展为 true，后续进展为 false；历史未知为 null，不能按文字猜测 |
 | plan | plan 块携带该修订完整计划；其他类型为 null |
 | plan_id / step_id | 生成/执行当时固定的计划和步骤关联；未知或旧数据为 null |
 | arguments | 工具实际参数对象；不混入宿主步骤元数据；未知为 null |
@@ -413,7 +451,11 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 
 例如同一轮可以依次收到“摘要① → 工具 A → 摘要② → 回答① → 回答②”。模型响应、供应商摘要项、思考/正文切换和工具调用是分段边界，网络 token 批次与 Markdown 换行不是分段依据。并行工具各有独立标识，完成顺序不改变其原始位置。`completed` 只表示当前内容块结束，不表示任务完成，也不代表回答内容已经通过验证。
 
-有内容块时按数组顺序渲染，思考/摘要可折叠，工具显示名称及状态；不要再同时渲染累计 `reply`、`reasoning` 或当前 `activity`，否则会重复。这些累计字段继续保存。历史没有记录分段的轮次返回 `content_blocks: []`、`content_revision: 0`，直接展示原有累计文本，不推测旧工具顺序、不改写历史数据。
+普通正文先等待本次模型响应的工具意图确认：带工具调用的正文和计划执行中的正文作为 reasoning 过程保存；确认无工具且不在执行计划时，才发布 text/reply。因此首次建计划或工具纠正说明不会混入答案；公开摘要仍按原类型保存。异常或取消前已收到但尚未分类的正文只保留为过程，不冒充最终答案。
+
+TaskTurn 另提供可空的 started_at、finished_at、processing_duration_ms：首次实际领取执行时记录 started_at，审批/暂停/恢复不重置，完成/失败/取消时记录 finished_at。时长为两者间墙钟毫秒数，包含审批、暂停与恢复等待，排除首次排队；运行中及任一边界未知时为 null。它与单个工具的 duration_ms 分开。旧记录不从 updated_at 或接收时间回填，也不以各工具耗时之和推算。
+
+有内容块时保留数组顺序，并按上节互斥规则投影为计划面板或 Process；经典模式中的思考/摘要可折叠，工具显示名称及真实状态。不要同时渲染累计 `reply`、`reasoning` 或当前 `activity`，否则会重复。这些累计字段继续保存。历史没有记录分段的轮次返回 `content_blocks: []`、`content_revision: 0`，直接展示原有累计文本，不推测旧工具顺序、不改写历史数据。
 
 #### 执行计划和动作链路
 
@@ -426,7 +468,7 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
   "source": "octop_planning",
   "plan_id": "plan_example",
   "title": "生成并验证报告",
-  "revision": 3,
+  "revision": 2,
   "active_step_id": "step_verify",
   "steps": [
     {
@@ -452,38 +494,43 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 }
 ```
 
-`plan_id` 和 `step_id` 由宿主生成，均为字符串。`steps` 最多 100 项，`content` 非空且最多 500 字符，`result` 最多 2000 字符。状态为 `pending / in_progress / completed / blocked / skipped`。时间由宿主以 UTC 记录；APP 按服务端配置时区显示，未知时不以接收时间回填。
+`plan_id` 和 `step_id` 由宿主生成，均为字符串。新轮次标题必须非空、最多 200 字符，固定 1～12 步；每步 content 非空且最多 500 字符，result 最多 2000 字符。状态为 pending / in_progress / completed / blocked / skipped。时间由宿主以 UTC 记录，客户端按服务端配置时区展示；未知时间不以接收时间回填。
 
-`planning` 是模型工具，不是 WebSocket 命令。它支持：
+`planning` 是模型工具，不是 WebSocket 命令，仅支持：
 
 | command | 语义 |
 | --- | --- |
-| create | 创建全新计划和步骤身份；首步进入 in_progress 并记录 started_at；同轮重建计划仍增加修订，但取得新 plan_id |
-| get | 读取当前完整计划，不修改版本 |
-| update | 提交 expected_revision 和完整步骤列表；保留项必须明确 step_id，新项省略 ID，由宿主分配；删除项进入 retired_steps 并记录 removed_at |
-| start_step | 用 expected_revision、step_id 开始该步，并设为默认当前项 |
-| select_step | 用 expected_revision 明确选择一个执行中步骤为 active_step_id，或清空选择 |
-| mark_step | 用 expected_revision、step_id、completed/blocked/skipped 和非空 result 记录结果与 finished_at，不自动启动下一项 |
+| create | 同轮仅创建一次固定计划，必填 title 与 steps；生成 plan/step ID，revision=1，启动首步并记录 started_at |
+| get | 读取已有完整计划，不修改修订；不存在计划时返回工具错误 |
+| mark_step | 必须匹配 expected_revision、当前 step_id；提交 completed/blocked/skipped 及非空 result，记录 finished_at |
 
-除 create/get 外的修改必须匹配当前修订。更新和改排按显式 ID 完成，不按文字或下标识别旧步骤。允许多个独立步骤并行，但 `active_step_id` 只选择一个默认归属，不能由客户端猜“第一个 in_progress”。清空计划以 `steps=[]` 表达，原项保留在 `retired_steps`，对象和新修订仍存在。
+创建后标题、步骤文字、数量和顺序冻结。完成或跳过后宿主启动下一步并记录时间；受阻停止推进。只有当前步骤可工作，不能选择未来步。计划执行阶段普通正文归入公开 reasoning 过程，不提前写入 text/reply；计划完成或受阻后撤下执行工具，只生成总结。主循环提前结束但步骤尚未结束时，轮次为 `failed/TASK_PLAN_UNFINISHED`；受阻则为 `failed/TASK_PLAN_BLOCKED`，已记录的部分结果继续保留，不能显示为整轮成功。
 
-规划工具必须独占一次调用批次；与工作工具或其他规划调用混批时整体拒绝，避免并发改变执行归属。子代理/团队成员不改变正式主计划。计划与结果不授予权限，现有审批、提问和暂停机制继续生效；当前实现也不承诺 AgentComputer2 式的严格逐步自动调度。
+当前不提供 update、start_step、select_step、清空、改排、并行步骤或同轮重建。公共读取模型保留旧计划最多 100 步、retired_steps 等历史字段，不迁移或删掉此前记录；历史形状可读不代表新运行支持这些旧命令。
 
-每次有效计划变化追加一个 `type:"plan"` 块，`plan` 为该修订完整快照。该块同时保留规划调用的 `tool_call_id`、`tool_name:"planning"` 和 `arguments`，供恢复时重建调用幂等缓存；重播已保存的 create 不重新分配身份。`TaskTurn.plan` 从最后一个计划块投影，不是第二份存储。计划块 `status:"completed"` 只表示快照已记录，不表示计划全部完成。普通界面显示最新计划，历史修订用于恢复和查看旧计划。
+规划调用必须独占模型工具批次，和工作或另一规划调用混批时整体拒绝。子代理/团队成员不能改变正式主计划。规划不授予执行权限，原审批、提问、手动暂停、客户端工具领取和回执机制不变。非空 result 是模型的结果说明，不等于自动验证成功。
 
-主模型通过 `message_notify_user(text)` 发送公开进展。成功后产生 `progress` 块，含非空且最多 2000 字符的 `text`、稳定 `tool_call_id` 和已知的步骤关联；相同调用不重复追加。进展不进入 `reply`，不修改步骤状态。成功 planning 和通知不重复显示为普通动作；失败时保留失败工具块，无成功进展。
+每次有效计划变化先保存完整 `type:"plan"` 块，再向模型返回成功收据并推进。该块保留 tool_call_id、tool_name:"planning" 和 arguments，供恢复时重建调用幂等缓存；已保存 create 重播不重新分配身份。TaskTurn.plan 从最后一个计划块投影，不是第二份存储。计划块 status:"completed" 只表示该快照已记录。
 
-思考/正文以模型响应开始时的步骤上下文关联；工具和通知以执行时确定的 `plan_id + step_id` 固定归属。宿主可接收工具参数中的 `task_step_id` 元数据来指定一个有效执行中步骤，校验并剥离该元数据后才调用业务工具；工具本身有同名业务参数时不改其语义。这不是 APP 额外发送的字段。
+动作生成启用时，主模型须先单独调用 message_notify_user(text)，确认成功后再于下一次模型响应执行工作或 mark_step。通知会先保存 progress 块及 introduction 标记，再返回成功回执；同一响应中的工作不能借通知并发完成而被放行。planning create/get 和提问可在开场前调用。无效或保存失败的通知不放行工作；关闭动作生成时不要求通知。text 非空且最多 2000 字符，带稳定调用身份和已知步骤关联，相同调用重放不重复追加或重新分类。
 
-客户端按 **`(plan_id, step_id)`** 聚合动作、进展及思考，组内保留块顺序。改排、改文、切换当前步骤不重绑历史活动；移除步骤从 `retired_steps` 恢复关联；同轮新建的计划不得吞入旧 plan_id 的活动。无绑定记录留在轮次级或未关联组，不补到当前步骤。
+审批/暂停恢复只读取本轮已保存且 introduction=true 的 completed progress；历史缺标记不猜测为已接受开场，需要模型发送新的有效通知。旧轮的进展不会授权新轮。进展不进入 reply、不修改步骤状态。成功规划和通知不重复显示为普通工具；失败保留失败工具块，没有成功进展。计划面板和 Process 的展示互斥，不会停止这些执行记录的保存。
 
-工具块展示意图和实际执行事实。`arguments` 是实际参数；`output` 仅保存实际 `ToolMessage.content` 的 JSON 结构，不公开 private artifact、additional_kwargs 或加密推理。底层工具自行截断的内容无法从这里恢复，不能声称输出一定是原程序的完整无限制输出。参数和返回内容可能包含任务实际业务数据，客户端按已鉴权任务详情展示，不将工具块作为本机执行请求。
+思考/正文在模型响应开始时固定步骤上下文；工具、通知在执行时固定 plan_id + step_id。模型侧可选 task_step_id 只允许当前有效执行步。动作生成开启时，有计划和无计划的适用工作调用都必须提供宿主 brief：字符串去除两端空白后非空，原值最多 240 字符，注入的模型 schema 将其列为 required。planning、message_notify_user 和 ask_user_question 缺失 brief 豁免，显式非法参数仍按适用规则校验。关闭动作生成时不注入、不要求宿主 brief。
 
-`started_at` 只在实际调度后填入，审批等待或仅生成调用意图不等于执行。`finished_at` 是服务端观察结束的时间，`duration_ms` 是执行器记录；未观察到或旧数据为 null，不从轮次时间推算。真实本机执行仍通过第 12 节的独立 tool.call 协议。
+宿主只扩展发给模型的 schema；业务工具原定义已有同名 brief 时，保留其原类型、required 和业务意义，不额外收紧，也不把业务值当作宿主摘要。无同名业务字段的 MCP 等工作工具同样适用宿主元数据合同。每次工作调用均校验，不因 call_id 曾开始而豁免；未执行的新旧调用缺失/无效 brief 时，在审批授权消费和实际派发前返回工具错误，供模型纠正，不能修改已批准参数来补全。已派发客户端结果仍按原 call_id 消费，原生 respond 恢复不重新调用 handler，不因补 brief 重新派发。通过校验与现有审批后，仅剥离宿主元数据再派发。APP 不额外把这两项加到业务工具定义或本机派发参数，也不为历史可空字段补造摘要或改写已有完成记录。
 
-计划、结果和执行事实随原有完整 turn 快照保存和续接。客户端独立按 `plan_revision`、`content_revision` 合并，不依赖 `list_revision` 或回复增长。暂停恢复同轮保留计划和固定关联；普通追问和手动重试创建新轮，不继承旧完成状态。取消、失败或等待保留真实记录，不自动勾选、阻塞或编造结果。
+客户端保留 `(plan_id, step_id)` 和原始块顺序用于恢复与追溯，不从文字或下标补绑无 ID 记录。已有历史计划、退役步骤、旧计划活动和未关联记录正常保存；它们无需作为新计划面板里的完整动作列表展示，面板关闭后仍可通过过程区查看。
 
-历史没有计划时保持 `null/0`。已保存的 `source:"harness_todos"` 旧计划可读取，但不转为新的 planning，不回填 plan/step ID、结果、时间或动作归属，不恢复原生 todos 或建立双向同步。APP 必须升级 DTO、合并、缓存及按 ID 聚合，具体位置见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)。
+工具 arguments 是实际业务参数，output 只保存实际 ToolMessage.content 的 JSON 值，不公开 private artifact、additional_kwargs 或加密推理。底层已经截断的内容无法恢复。参数/输出属于已鉴权任务的展示数据，不是本机执行指令。started_at 仅在实际调度后填入，审批等待不是执行；finished_at 是服务端观察到结束的时间，duration_ms 是已记录的执行耗时，未知为空，不从轮次时间推算。
+
+宿主准入失败与真实用户拒绝分开：brief、开场、步骤/批次校验及 question_limit 等错误若经 HITL 恢复，使用服务端内部 `octop_host_error` 决定，固定匹配原 call_id 与工具名，生成 `ToolMessage(status="error")` 和原本地化原因。内容块 status 为 failed，output 保存原始错误字符串，不拼接 `User rejected…` 或另套旧 JSON 错误包；未执行调用没有开始/结束时间与耗时。真正的用户 deny 继续走原生 reject，已派发客户端的实际 result_json 继续走原 respond，不能将这些语义互换。
+
+该分支不是公开 WebSocket 命令或 allowed_decisions 的新值，客户端不提交它，也不把 output 类型收窄为字符串。任务 HITL 适配保留原中间件名称和槽位，保持检查点拓扑，主任务审批映射不泄漏到子代理/peer。已完成历史保留真实原值，包括 I 当时误带拒绝前缀的输出；本轮审计没有待恢复的旧 inline 项，不做历史重写或新增迁移。
+
+计划、结果和执行事实随完整 turn 保存和续接。plan_revision 与 content_revision 独立合并，不依赖 list_revision 或回复增长。暂停恢复同轮保留身份、关联和生成快照；普通追问与手动重试创建新轮，从无计划开始。取消、失败和等待保留事实，不伪造完成或时间。
+
+历史未记录计划时保持 null/0，source:"harness_todos" 旧计划只读保留，不回填身份或恢复原生 todos。实际 APP 已接六类块、设置、brief、互斥投影、原计划面板和阶段式 Process，显式开场与权威整轮耗时也已贯通 DTO、缓存、合并及原组件。未知字段仍可空；具体客户端记录与剩余验收边界见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)，本次文档更新不修改 Swift/UI。
 
 OpenAI 官方端点或已使用 Responses 的模型，在启用思考且声明相应能力时请求 `reasoning.summary: auto`，保存其公开摘要；加密推理内容只用于模型上下文续接，不发给客户端。GLM 等 Chat Completions 接口继续读取 `reasoning_content`，保存为 `reasoning` 块，不冒充供应商摘要，不额外调用模型改写。两种来源均支持工具前后的独立分段。
 
@@ -491,7 +538,7 @@ OpenAI 官方端点或已使用 Responses 的模型，在启用思考且声明�
 
 #### 累计思考文本
 
-APP 在轮次数据模型中增加 `reasoning: string`，按 task_id/turn_id 保存并与 reply 分开渲染；非空时显示可折叠的“思考过程”，为空时隐藏。不要以 reply 非空或 list_revision 增长作为处理 turn 的条件，思考可能先于正式回复出现。
+APP 按 task_id/turn_id 保存 `reasoning: string`，与 reply 分开。无可见计划且采用经典过程样式时，非空内容作为可折叠思考显示；结构化动作样式默认隐藏原始思考，计划面板不嵌入思考列表。不要以 reply 非空或 list_revision 增长作为处理 turn 的条件，思考可能先于正式回复出现。
 
 | 数据来源 | 思考字段路径 |
 | --- | --- |
@@ -514,7 +561,7 @@ APP 从 `GET /api/project-tasks/resources` 的选中模型读取该能力，只�
 
 这两个选项同样用于 task.create 和 task.retry 的 data.options。收到 TASK_REASONING_INVALID 时刷新候选能力，让用户调整本轮设置后用新的 request_id 发送。
 
-主任务只展示自己的思考内容，团队成员和子代理的思考不会混入；长期记忆仍只捕获用户消息和正式回复。接入前需确保服务端已部署并重启到包含 reasoning 字段的版本；本指南中的 Swift 示例不代表 AgentComputer APP 已完成展示接入。
+主任务只展示自己的思考内容，团队成员和子代理的思考不会混入；长期记忆仍只捕获用户消息和正式回复。接入前需确保服务端已部署并重启到包含 reasoning 字段的版本；实际 AgentComputer 的旧合同接线不代表已完成本轮配置与互斥展示适配。
 
 任务跨轮恢复模型所需工具上下文；本合同保存的工具 arguments 和公开 ToolMessage.content 会随任务详情、历史分页和订阅返回，私有 artifact、additional_kwargs、记忆及其他内部模型上下文不对外展开。停止后追问会看到工具中断结果，不自动重跑工具。所选插件提供工具、中间件及技能；子代理通过 task 委派，团队成员使用同一组选定角色，独立于专家。长期记忆按任务隔离，可跨执行环境重建和服务重启检索。团队成员文本由主任务汇总，成员和子代理模型用量计入本轮；目前仅支持同步团队调用。
 
@@ -590,7 +637,7 @@ REST 首次详情默认最近 50 轮，最多 100 轮；历史页 event_cursor �
 | 422 / PROJECT_RESOURCE_INVALID | 所选 Skill/MCP 无效或无权使用，刷新候选 |
 | 500 / INTERNAL_ERROR | 服务端异常，保留发送身份并按错误范围处理 |
 
-status 是 JSON 业务字段，不是连接建立后的 HTTP 状态。按 code 分支，用本地化 message 展示。执行中的 TASK_RESOURCE_UNAVAILABLE、TASK_EXECUTION_FAILED、TASK_INTERRUPTED 通常通过 `turn.status=failed` 和 turn.error_code 表达；刚收到成功 result 也可能在后续执行失败。
+status 是 JSON 业务字段，不是连接建立后的 HTTP 状态。按 code 分支，用本地化 message 展示。执行中的 TASK_RESOURCE_UNAVAILABLE、TASK_EXECUTION_FAILED、TASK_INTERRUPTED、TASK_PLAN_UNFINISHED、TASK_PLAN_BLOCKED 通常通过 `turn.status=failed` 和 turn.error_code 表达；刚收到成功 result 也可能在后续执行失败。
 
 | 关闭代码 | 含义 | 处理 |
 | --- | --- | --- |

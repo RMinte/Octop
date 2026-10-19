@@ -127,6 +127,7 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
                     "request_id": "artifact-message-001",
                     "prompt": "请交付报告和演示",
                     "project_id": project["project_id"],
+                    "options": {"action_timeline_enabled": False},
                 },
             )
         )["data"]
@@ -212,7 +213,11 @@ async def test_no_project_text_attachment_and_tool_failure_do_not_fake_delivery(
     response = await client.post(
         "/api/project-tasks",
         headers=auth,
-        json={"request_id": "standalone-artifact", "prompt": "Create attachments"},
+        json={
+            "request_id": "standalone-artifact",
+            "prompt": "Create attachments",
+            "options": {"action_timeline_enabled": False},
+        },
     )
     done = await settled(client, auth, response.json()["task_id"])
     assert done["status"] == "completed"

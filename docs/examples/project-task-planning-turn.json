@@ -16,7 +16,7 @@
         "updated_at": "2026-10-17T04:00:00Z"
       },
       "created_at": "2026-10-19T04:00:00Z",
-      "updated_at": "2026-10-19T04:00:04Z"
+      "updated_at": "2026-10-19T04:00:03Z"
     },
     "turn": {
       "sequence": 1,
@@ -35,6 +35,7 @@
           "tool_call_id": "planning_example_1",
           "tool_name": "planning",
           "tool_label": null,
+          "brief": null,
           "plan": {
             "source": "octop_planning",
             "plan_id": "plan_example",
@@ -86,6 +87,7 @@
           "tool_call_id": "notice_example",
           "tool_name": null,
           "tool_label": null,
+          "brief": null,
           "plan": null,
           "plan_id": "plan_example",
           "step_id": "step_research",
@@ -93,7 +95,8 @@
           "output": null,
           "started_at": null,
           "finished_at": null,
-          "duration_ms": null
+          "duration_ms": null,
+          "introduction": true
         },
         {
           "block_id": "turn_example:3",
@@ -103,6 +106,7 @@
           "tool_call_id": null,
           "tool_name": null,
           "tool_label": null,
+          "brief": null,
           "plan": null,
           "plan_id": "plan_example",
           "step_id": "step_research",
@@ -120,6 +124,7 @@
           "tool_call_id": "read_example",
           "tool_name": "read_file",
           "tool_label": "读取文件",
+          "brief": "读取调研资料，核对报告中的事实。",
           "plan": null,
           "plan_id": "plan_example",
           "step_id": "step_research",
@@ -139,12 +144,13 @@
           "tool_call_id": "planning_example_2",
           "tool_name": "planning",
           "tool_label": null,
+          "brief": null,
           "plan": {
             "source": "octop_planning",
             "plan_id": "plan_example",
             "title": "资料报告",
             "revision": 2,
-            "active_step_id": null,
+            "active_step_id": "step_report",
             "steps": [
               {
                 "step_id": "step_research",
@@ -158,9 +164,9 @@
               {
                 "step_id": "step_report",
                 "content": "整理报告",
-                "status": "pending",
+                "status": "in_progress",
                 "result": "",
-                "started_at": null,
+                "started_at": "2026-10-19T04:00:03Z",
                 "finished_at": null,
                 "removed_at": null
               }
@@ -183,60 +189,13 @@
         },
         {
           "block_id": "turn_example:6",
-          "type": "plan",
-          "text": "",
-          "status": "completed",
-          "tool_call_id": "planning_example_3",
-          "tool_name": "planning",
-          "tool_label": null,
-          "plan": {
-            "source": "octop_planning",
-            "plan_id": "plan_example",
-            "title": "资料报告",
-            "revision": 3,
-            "active_step_id": "step_report",
-            "steps": [
-              {
-                "step_id": "step_research",
-                "content": "核对资料",
-                "status": "completed",
-                "result": "已核对 research.md 的两项事实，可以用于报告。",
-                "started_at": "2026-10-19T04:00:00Z",
-                "finished_at": "2026-10-19T04:00:03Z",
-                "removed_at": null
-              },
-              {
-                "step_id": "step_report",
-                "content": "整理报告",
-                "status": "in_progress",
-                "result": "",
-                "started_at": "2026-10-19T04:00:04Z",
-                "finished_at": null,
-                "removed_at": null
-              }
-            ],
-            "retired_steps": []
-          },
-          "plan_id": "plan_example",
-          "step_id": null,
-          "arguments": {
-            "command": "start_step",
-            "expected_revision": 2,
-            "step_id": "step_report"
-          },
-          "output": null,
-          "started_at": null,
-          "finished_at": null,
-          "duration_ms": null
-        },
-        {
-          "block_id": "turn_example:7",
           "type": "progress",
           "text": "资料已核对，正在整理报告。",
           "status": "completed",
           "tool_call_id": "report_notice",
           "tool_name": null,
           "tool_label": null,
+          "brief": null,
           "plan": null,
           "plan_id": "plan_example",
           "step_id": "step_report",
@@ -244,15 +203,16 @@
           "output": null,
           "started_at": null,
           "finished_at": null,
-          "duration_ms": null
+          "duration_ms": null,
+          "introduction": false
         }
       ],
-      "content_revision": 9,
+      "content_revision": 8,
       "plan": {
         "source": "octop_planning",
         "plan_id": "plan_example",
         "title": "资料报告",
-        "revision": 3,
+        "revision": 2,
         "active_step_id": "step_report",
         "steps": [
           {
@@ -269,14 +229,14 @@
             "content": "整理报告",
             "status": "in_progress",
             "result": "",
-            "started_at": "2026-10-19T04:00:04Z",
+            "started_at": "2026-10-19T04:00:03Z",
             "finished_at": null,
             "removed_at": null
           }
         ],
         "retired_steps": []
       },
-      "plan_revision": 3,
+      "plan_revision": 2,
       "interactions": [],
       "interaction_revision": 0,
       "pause_requested": false,
@@ -302,7 +262,8 @@
         "memory_enabled": true,
         "team_enabled": false,
         "client_id": null,
-        "client_tools": null
+        "client_tools": null,
+        "action_timeline_enabled": true
       },
       "cancel_requested": false,
       "retry_of_turn_id": null,
@@ -310,7 +271,10 @@
       "output_tokens": 0,
       "project_revision": null,
       "created_at": "2026-10-19T04:00:00Z",
-      "updated_at": "2026-10-19T04:00:04Z"
+      "updated_at": "2026-10-19T04:00:03Z",
+      "started_at": "2026-10-19T04:00:00Z",
+      "finished_at": null,
+      "processing_duration_ms": null
     },
     "cursor": "opaque_example_cursor"
   }

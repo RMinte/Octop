@@ -2017,6 +2017,10 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
                 "web_search_enabled",
                 "INTEGER NOT NULL DEFAULT 1 CHECK (web_search_enabled IN (0, 1))",
             )
+        elif version == 44:
+            timestamp_type = "BIGINT" if db.dialect == "postgresql" else "INTEGER"
+            _ensure_column(db, "project_task_turns", "started_at", timestamp_type)
+            _ensure_column(db, "project_task_turns", "finished_at", timestamp_type)
         elif any(not _table_exists(db, table) for table in tables[version]):
             with db.transaction() as conn:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):

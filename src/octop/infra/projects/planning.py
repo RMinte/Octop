@@ -1,9 +1,10 @@
-"""Host-owned plan identities, revision checks, and explicit step lifecycle tools."""
+"""Host-owned ordered plans, durable step transitions, and replayable tool receipts."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
@@ -16,7 +17,6 @@ from octop.i18n import tr
 from octop.infra.projects.models import ProjectModel
 from octop.infra.projects.progress import (
     PLAN_CONTENT_LIMIT,
-    PLAN_STEP_LIMIT,
     PROGRESS_TEXT_LIMIT,
     PlanIdentity,
     TaskPlan,
@@ -25,6 +25,10 @@ from octop.infra.projects.progress import (
 from octop.infra.utils.ulid import new_ulid
 
 PLANNING = "planning"
+ORDERED_PLAN_STEP_LIMIT = 12
+PLAN_TITLE_LIMIT = 200
+PlanningPhase = Literal["unplanned", "executing", "blocked", "completed"]
+PlanPersist = Callable[[TaskPlan, str, dict[str, Any]], Awaitable[None]]
 _Content = Annotated[
     str,
     StringConstraints(
@@ -37,14 +41,9 @@ _Result = Annotated[
         strict=True, strip_whitespace=True, min_length=1, max_length=PROGRESS_TEXT_LIMIT
     ),
 ]
-_Command = Literal["create", "get", "update", "start_step", "mark_step", "select_step"]
+_Command = Literal["create", "get", "mark_step"]
 _EndStatus = Literal["completed", "blocked", "skipped"]
 _ToolResult = tuple[str, dict[str, Any]]
-
-
-class _StepUpdate(ProjectModel):
-    step_id: PlanIdentity | None = None
-    content: _Content
 
 
 class _PlanningArgs(ProjectModel):
@@ -54,22 +53,39 @@ class _PlanningArgs(ProjectModel):
     title: (
         Annotated[
             str,
-            StringConstraints(strict=True, strip_whitespace=True, max_length=PLAN_CONTENT_LIMIT),
+            StringConstraints(
+                strict=True, strip_whitespace=True, min_length=1, max_length=PLAN_TITLE_LIMIT
+            ),
         ]
         | None
     ) = None
-    steps: list[_Content | _StepUpdate] | None = Field(default=None, max_length=PLAN_STEP_LIMIT)
+    steps: list[_Content] | None = Field(
+        default=None, min_length=1, max_length=ORDERED_PLAN_STEP_LIMIT
+    )
     step_id: PlanIdentity | None = None
     status: _EndStatus | None = None
     result: _Result | None = None
 
 
 class TaskPlanning:
-    def __init__(self, restored: TaskPlan | None, locale: str):
+    def __init__(self, restored: TaskPlan | None, locale: str, persist: PlanPersist | None = None):
         self._plan = restored.model_copy(deep=True) if restored is not None else None
         self.locale = locale
         self._lock = asyncio.Lock()
         self._calls: dict[str, tuple[str, _ToolResult]] = {}
+        self._persist = persist
+
+    @property
+    def phase(self) -> PlanningPhase:
+        if self._plan is None:
+            return "unplanned"
+        if any(step.status == "blocked" for step in self._plan.steps):
+            return "blocked"
+        if self._plan.steps and all(
+            step.status in {"completed", "skipped"} for step in self._plan.steps
+        ):
+            return "completed"
+        return "executing"
 
     @property
     def plan(self) -> TaskPlan | None:
@@ -95,6 +111,8 @@ class TaskPlanning:
         plan = self._plan
         selected = step_id if step_id is not None else plan.active_step_id if plan else None
         if selected is None:
+            if plan is not None and self.phase == "executing":
+                raise ValueError(tr("projects.planning_step_not_current", self.locale))
             return None, None
         if plan is None or plan.source != "octop_planning" or plan.plan_id is None:
             raise ValueError(tr("projects.planning_step_unavailable", self.locale))
@@ -103,13 +121,28 @@ class TaskPlanning:
             raise ValueError(tr("projects.planning_step_unavailable", self.locale))
         if step.status != "in_progress":
             raise ValueError(tr("projects.planning_step_not_running", self.locale))
+        if selected != plan.active_step_id or not self._is_ordered(plan):
+            raise ValueError(tr("projects.planning_step_not_current", self.locale))
         return plan.plan_id, selected
+
+    @staticmethod
+    def _is_ordered(plan: TaskPlan) -> bool:
+        reached_unfinished = False
+        for step in plan.steps:
+            if reached_unfinished and step.status != "pending":
+                return False
+            if step.status not in {"completed", "skipped"}:
+                reached_unfinished = True
+        current = next((step for step in plan.steps if step.status == "in_progress"), None)
+        return plan.active_step_id == (current.step_id if current else None)
 
     def _managed(self, expected_revision: int | None) -> TaskPlan:
         if self._plan is None:
             raise self._error("missing")
         if self._plan.source != "octop_planning":
             raise self._error("legacy")
+        if not self._is_ordered(self._plan):
+            raise self._error("step_not_current")
         if expected_revision != self._plan.revision:
             raise self._error("conflict")
         return self._plan.model_copy(deep=True)
@@ -120,78 +153,70 @@ class TaskPlanning:
             raise self._error("step_unavailable")
         return step
 
-    def _apply(self, args: _PlanningArgs) -> None:
+    def _candidate(self, args: _PlanningArgs) -> TaskPlan:
         if args.command == "get":
-            return
+            if any(
+                value is not None
+                for value in (
+                    args.expected_revision,
+                    args.title,
+                    args.steps,
+                    args.step_id,
+                    args.status,
+                    args.result,
+                )
+            ):
+                raise self._error("invalid_arguments")
+            if self._plan is None:
+                raise self._error("missing")
+            return self._plan.model_copy(deep=True)
         now = datetime.now(UTC)
         if args.command == "create":
-            if not args.steps or any(not isinstance(step, str) for step in args.steps):
+            if self._plan is not None:
+                raise self._error("already_created")
+            if (
+                args.title is None
+                or not args.steps
+                or any(
+                    value is not None
+                    for value in (args.expected_revision, args.step_id, args.status, args.result)
+                )
+            ):
                 raise self._error("invalid_arguments")
             steps = [
                 TaskPlanStep(step_id=new_ulid(), content=step, status="pending")
                 for step in args.steps
-                if isinstance(step, str)
             ]
             steps[0].status = "in_progress"
             steps[0].started_at = now
-            self._plan = TaskPlan(
+            return TaskPlan(
                 source="octop_planning",
                 plan_id=new_ulid(),
-                title=args.title or "",
-                revision=self._plan.revision + 1 if self._plan else 1,
+                title=args.title,
+                revision=1,
                 active_step_id=steps[0].step_id,
                 steps=steps,
             )
-            return
+        if args.title is not None or args.steps is not None:
+            raise self._error("invalid_arguments")
+        if args.step_id is None or args.status is None or args.result is None:
+            raise self._error("invalid_arguments")
         plan = self._managed(args.expected_revision)
-        if args.command == "update":
-            if args.steps is None or any(not isinstance(step, _StepUpdate) for step in args.steps):
-                raise self._error("invalid_arguments")
-            steps = []
-            retained: set[str] = set()
-            for update in args.steps:
-                assert isinstance(update, _StepUpdate)
-                if update.step_id is None:
-                    step = TaskPlanStep(
-                        step_id=new_ulid(), content=update.content, status="pending"
-                    )
-                else:
-                    if update.step_id in retained:
-                        raise self._error("step_unavailable")
-                    step = self._step(plan, update.step_id).model_copy(deep=True)
-                    step.content = update.content
-                    retained.add(update.step_id)
-                steps.append(step)
-            for step in plan.steps:
-                if step.step_id not in retained:
-                    step.removed_at = now
-                    plan.retired_steps.append(step)
-            plan.steps = steps
-            if plan.active_step_id not in retained:
-                plan.active_step_id = None
-        elif args.command == "select_step":
-            if args.step_id is not None and self._step(plan, args.step_id).status != "in_progress":
-                raise self._error("step_not_running")
-            plan.active_step_id = args.step_id
-        else:
-            step = self._step(plan, args.step_id)
-            if args.command == "start_step":
-                step.status = "in_progress"
-                step.started_at = step.started_at or now
-                step.finished_at = None
-                plan.active_step_id = step.step_id
-            elif args.command == "mark_step":
-                if args.status is None or args.result is None:
-                    raise self._error("invalid_arguments")
-                step.status = args.status
-                step.result = args.result
-                step.finished_at = now
-                if plan.active_step_id == step.step_id:
-                    plan.active_step_id = None
-        assert self._plan is not None
-        if plan.model_dump(exclude={"revision"}) != self._plan.model_dump(exclude={"revision"}):
-            plan.revision += 1
-            self._plan = plan
+        step = self._step(plan, args.step_id)
+        if plan.active_step_id != args.step_id or step.status != "in_progress":
+            raise self._error("step_not_current")
+        step.status = args.status
+        step.result = args.result
+        step.finished_at = now
+        plan.active_step_id = None
+        if args.status != "blocked":
+            following = next((step for step in plan.steps if step.status == "pending"), None)
+            if following is not None:
+                following.status = "in_progress"
+                following.started_at = now
+                plan.active_step_id = following.step_id
+        plan.revision += 1
+        return plan
 
     @staticmethod
     def _snapshot_result(plan: TaskPlan | None) -> _ToolResult:
@@ -204,7 +229,7 @@ class TaskPlanning:
             call_id: str,
             expected_revision: int | None = None,
             title: str | None = None,
-            steps: list[str | _StepUpdate] | None = None,
+            steps: list[str] | None = None,
             step_id: str | None = None,
             status: _EndStatus | None = None,
             result: str | None = None,
@@ -226,8 +251,16 @@ class TaskPlanning:
                     if cached[0] != signature:
                         raise self._error("call_reused")
                     return deepcopy(cached[1])
-                self._apply(args)
-                response = self._snapshot_result(self._plan)
+                candidate = self._candidate(args)
+                if args.command != "get":
+                    if self._persist is not None:
+                        await self._persist(
+                            candidate.model_copy(deep=True),
+                            call_id,
+                            args.model_dump(exclude={"call_id"}, exclude_none=True),
+                        )
+                    self._plan = candidate
+                response = self._snapshot_result(candidate)
                 self._calls[call_id] = signature, deepcopy(response)
                 return response
 

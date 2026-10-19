@@ -19,6 +19,7 @@ import TaskConversations from "./TaskConversations";
 
 vi.mock("../../api/modules/projects", () => ({
   projectTasksApi: {
+    settings: vi.fn(),
     list: vi.fn(),
     sync: vi.fn(),
     get: vi.fn(),
@@ -125,6 +126,10 @@ beforeEach(() => {
     return new Promise<void>((resolve) =>
       signal.addEventListener("abort", () => resolve(), { once: true }),
     );
+  });
+  api.settings.mockResolvedValue({
+    action_timeline_enabled: true,
+    step_panel_enabled: true,
   });
   api.list.mockResolvedValue({
     items: [fixture],
@@ -1329,6 +1334,10 @@ it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目
 });
 
 it("独立展示思考内容并合并实时更新，迟到内容不截断已收到的思考", async () => {
+  api.settings.mockResolvedValue({
+    action_timeline_enabled: false,
+    step_panel_enabled: true,
+  });
   const running: TaskDetail = {
     ...fixture,
     active_turn_id: "turn_a",
@@ -1345,9 +1354,11 @@ it("独立展示思考内容并合并实时更新，迟到内容不截断已收�
   const user = userEvent.setup();
   mount("?task=task_a");
   await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
-  const fold = screen.getByText("思考过程").closest("details")!;
+  const fold = screen
+    .getByText("思考过程", { selector: "summary" })
+    .closest("details")!;
   expect(fold).not.toHaveAttribute("open");
-  await user.click(screen.getByText("思考过程"));
+  await user.click(screen.getByText("思考过程", { selector: "summary" }));
   expect(screen.getByText("先分析问题。")).toBeVisible();
   const receive = api.events.mock.calls[0][2];
   const reasoning = "先分析问题。再检查证据。";
@@ -1378,6 +1389,10 @@ it("独立展示思考内容并合并实时更新，迟到内容不截断已收�
 });
 
 it("摘要与工具按顺序展示，稳定标识保留展开状态，迟到快照不会覆盖新内容块", async () => {
+  api.settings.mockResolvedValue({
+    action_timeline_enabled: false,
+    step_panel_enabled: true,
+  });
   const running: TaskDetail = {
     ...fixture,
     active_turn_id: "turn_a",
@@ -1456,7 +1471,9 @@ it("摘要与工具按顺序展示，稳定标识保留展开状态，迟到快�
   expect(fold).toHaveAttribute("open");
   expect(screen.getByText("准备检查。先核对目录。")).toBeVisible();
   expect(screen.getAllByText("思考摘要")).toHaveLength(2);
-  expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("思考过程", { selector: "summary" }),
+  ).not.toBeInTheDocument();
   const tool = screen.getByText(zh.projects.tasks.tool);
   expect(
     fold.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -2305,6 +2322,63 @@ it("Reviewer 转人工时在原卡显示稳定原因并保留人工决定入口"
   expect(
     screen.getByRole("button", { name: /^\u62d2\s*\u7edd$/ }),
   ).toBeEnabled();
+});
+
+it("多个历史回合共用一次设置读取，恢复焦点后同时更新展示", async () => {
+  const history: TaskDetail = {
+    ...fixture,
+    turns: [1, 2].map((sequence) => ({
+      ...fixture.turns[0],
+      turn_id: `turn_${sequence}`,
+      sequence,
+      reply: `第 ${sequence} 轮答复`,
+      plan: {
+        source: "octop_planning" as const,
+        plan_id: `plan_${sequence}`,
+        title: `第 ${sequence} 轮计划`,
+        revision: 1,
+        steps: [
+          {
+            step_id: `step_${sequence}`,
+            content: "检查",
+            status: "completed" as const,
+            result: "检查完成",
+          },
+        ],
+      },
+      content_blocks: [
+        {
+          block_id: `progress_${sequence}`,
+          type: "progress" as const,
+          text: `第 ${sequence} 轮公开进展`,
+          status: "completed" as const,
+          tool_call_id: null,
+          tool_name: null,
+        },
+      ],
+    })),
+  };
+  api.open.mockResolvedValue(history);
+  api.get.mockResolvedValue(history);
+  mount("?task=task_a");
+  await screen.findByText("第 1 轮计划");
+  expect(screen.getByText("第 2 轮计划")).toBeVisible();
+  expect(api.settings).toHaveBeenCalledOnce();
+  expect(
+    screen.queryByRole("region", { name: "动作链路" }),
+  ).not.toBeInTheDocument();
+  api.settings.mockResolvedValue({
+    action_timeline_enabled: false,
+    step_panel_enabled: false,
+  });
+  act(() => window.dispatchEvent(new Event("focus")));
+  await waitFor(() =>
+    expect(screen.getAllByRole("region", { name: "思考过程" })).toHaveLength(2),
+  );
+  expect(screen.queryByText("第 1 轮计划")).not.toBeInTheDocument();
+  expect(screen.getByText("第 1 轮公开进展")).toBeVisible();
+  expect(screen.getByText("第 2 轮公开进展")).toBeVisible();
+  expect(api.settings).toHaveBeenCalledTimes(2);
 });
 
 it("账号审批在任务之间共享，迟到任务摘要和低版本推送不覆盖已确认模式", async () => {

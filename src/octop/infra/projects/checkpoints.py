@@ -10,6 +10,7 @@ from contextlib import aclosing
 from typing import Any, cast
 
 from langchain_core.messages import AIMessage
+from langchain_core.messages.tool import ToolCall
 from langchain_core.tools import BaseTool
 from octop_harness import HarnessAgent
 from octop_harness.llm.session_header import session_header_scope
@@ -23,6 +24,7 @@ from octop.infra.projects import approval_runtime, interactions
 from octop.infra.projects.client_tools import ClientToolBroker, _load
 from octop.infra.projects.control import ASK_USER, question_tool
 from octop.infra.projects.execution import TaskExecution, strip_step_metadata
+from octop.infra.projects.hitl import HOST_ERROR
 from octop.infra.projects.interaction_models import ApprovalPayload, AskQuestions
 from octop.infra.projects.planning import PLANNING
 from octop.infra.projects.stream import TaskStreamProtocol
@@ -131,13 +133,15 @@ async def prepare_wait(
                 )
                 error = tr("projects.planning_mixed_batch", locale) if mixed_planning else None
                 tool = registered.get(action["name"])
+                if error is None and execution is not None:
+                    error = execution.rejection(match, tool)
                 if error is None and execution is not None and action["name"] != PLANNING:
                     try:
                         execution.binding_for_call(match, tool)
                     except ValueError:
                         error = tr("projects.task_step_invalid", locale)
                 if error is not None:
-                    entries.append(_inline_error(error, allowed))
+                    entries.append(_inline_error(error, allowed, match))
                     continue
                 # Keep matching and server approval facts intact; only runtime
                 # inputs sent to clients/questions lose host-owned metadata.
@@ -153,13 +157,7 @@ async def prepare_wait(
                     questions = AskQuestions.model_validate(arguments).questions
                     if sum(i.kind == "question" for i in items) + len(questions) > 3:
                         entries.append(
-                            {
-                                "type": "inline",
-                                "decision": {
-                                    "type": "respond",
-                                    "message": tr("projects.question_limit", locale),
-                                },
-                            }
+                            _inline_error(tr("projects.question_limit", locale), allowed, match)
                         )
                         continue
                     created = [
@@ -199,21 +197,19 @@ async def prepare_wait(
     }
 
 
-def _inline_error(message: str, allowed: list[str]) -> dict[str, Any]:
-    if "reject" in allowed:
-        decision = {"type": "reject", "message": message}
-    elif "respond" in allowed:
-        # Native HITL respond always constructs a success-status ToolMessage.
-        # Retain an explicit error result so models and projections cannot read
-        # a failed admission as a successful client action or answered question.
-        decision = {
-            "type": "respond",
-            "message": interactions.encode({"is_error": True, "output": message}),
-        }
-    else:
+def _inline_error(message: str, allowed: list[str], call: ToolCall) -> dict[str, Any]:
+    if not {"reject", "respond"}.intersection(allowed):
         # Never approve an action just to escape an incompatible interrupt.
         raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
-    return {"type": "inline", "decision": decision}
+    return {
+        "type": "inline",
+        "decision": {
+            "type": HOST_ERROR,
+            "message": message,
+            "tool_call_id": call["id"],
+            "tool_name": call["name"],
+        },
+    }
 
 
 def resume_decisions(

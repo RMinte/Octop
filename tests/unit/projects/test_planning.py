@@ -1,4 +1,4 @@
-"""Official task plans keep stable identities and host-owned lifecycle evidence."""
+"""Ordered planning advances only through durable, host-owned step transitions."""
 
 import asyncio
 import json
@@ -8,10 +8,15 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from octop.i18n import tr
-from octop.infra.projects.planning import PLANNING, TaskPlanning, plan_report
+from octop.infra.projects.planning import (
+    ORDERED_PLAN_STEP_LIMIT,
+    PLAN_TITLE_LIMIT,
+    PLANNING,
+    TaskPlanning,
+    plan_report,
+)
 from octop.infra.projects.progress import (
     PLAN_CONTENT_LIMIT,
-    PLAN_STEP_LIMIT,
     PROGRESS_TEXT_LIMIT,
     TaskPlan,
     TaskPlanStep,
@@ -30,16 +35,30 @@ async def invoke(manager, command, *, call_id=None, **arguments):
     )
 
 
-async def created():
-    manager = TaskPlanning(None, "en")
+async def created(persist=None):
+    manager = TaskPlanning(None, "en", persist)
     result = await invoke(manager, "create", title="  Ship progress  ", steps=["Inspect", "Verify"])
     assert result.status == "success"
     return manager
 
 
+async def mark(manager, index=0, status="completed", **arguments):
+    plan = manager.plan
+    return await invoke(
+        manager,
+        "mark_step",
+        expected_revision=plan.revision,
+        step_id=plan.steps[index].step_id,
+        status=status,
+        result="Verified result or recovery needed.",
+        **arguments,
+    )
+
+
 @pytest.mark.parametrize("locale", ["zh", "en"])
 async def test_create_allocates_stable_ids_and_starts_first_step(locale):
     manager = TaskPlanning(None, locale)
+    assert manager.phase == "unplanned" and manager.binding() == (None, None)
     response = await invoke(manager, "create", title="  Task plan  ", steps=[" Inspect ", "Verify"])
     plan = plan_report(response)
     assert plan is not None and plan == manager.plan
@@ -52,157 +71,120 @@ async def test_create_allocates_stable_ids_and_starts_first_step(locale):
     assert plan.steps[0].started_at.tzinfo is not None
     assert plan.steps[1].status == "pending" and plan.steps[1].started_at is None
     assert plan.steps[0].result == "" and plan.steps[0].finished_at is None
+    assert manager.phase == "executing"
     assert manager.binding() == (plan.plan_id, plan.steps[0].step_id)
     assert json.loads(response.content) == response.artifact["plan"]
     assert manager.tools()[0].description == tr("projects.planning_tool_description", locale)
 
 
-async def test_reorder_and_edit_use_explicit_ids_and_never_match_text():
+@pytest.mark.parametrize("status", ["completed", "skipped"])
+async def test_host_starts_next_step_after_explicit_outcome(status):
     manager = await created()
     original = manager.plan
-    first, second = original.steps
-    response = await invoke(
-        manager,
-        "update",
-        expected_revision=original.revision,
-        steps=[
-            {"step_id": second.step_id, "content": "Inspect"},
-            {"step_id": first.step_id, "content": "Renamed"},
-            {"content": "Inspect"},
-        ],
-    )
-    updated = plan_report(response)
-    assert updated.revision == 2 and updated.plan_id == original.plan_id
-    assert [step.step_id for step in updated.steps[:2]] == [second.step_id, first.step_id]
-    assert updated.steps[2].step_id not in {first.step_id, second.step_id}
-    assert updated.steps[1].started_at == first.started_at
-    assert updated.steps[1].status == "in_progress"
-    assert updated.active_step_id == first.step_id
-    assert not updated.retired_steps
+    result = plan_report(await mark(manager, status=status))
+    assert result.revision == 2 and result.plan_id == original.plan_id
+    assert [step.step_id for step in result.steps] == [step.step_id for step in original.steps]
+    first, second = result.steps
+    assert first.status == status and first.result == "Verified result or recovery needed."
+    assert first.started_at == original.steps[0].started_at
+    assert first.finished_at >= first.started_at
+    assert second.status == "in_progress" and second.started_at == first.finished_at
+    assert second.finished_at is None and second.result == ""
+    assert result.active_step_id == second.step_id
+    assert manager.binding() == (result.plan_id, second.step_id)
+    assert manager.phase == "executing"
+    finished = plan_report(await mark(manager, index=1))
+    assert finished.revision == 3 and finished.active_step_id is None
+    assert manager.phase == "completed" and manager.binding() == (None, None)
 
 
-async def test_removed_steps_remain_in_history_and_cannot_be_reused():
+async def test_blocked_step_stops_without_starting_next_step():
     manager = await created()
     original = manager.plan
-    first, second = original.steps
-    response = await invoke(
-        manager,
-        "update",
-        expected_revision=original.revision,
-        steps=[{"step_id": second.step_id, "content": second.content}],
-    )
-    updated = plan_report(response)
-    assert updated.active_step_id is None and manager.binding() == (None, None)
-    assert updated.retired_steps[0].step_id == first.step_id
-    assert updated.retired_steps[0].removed_at is not None
-    assert updated.retired_steps[0].started_at == first.started_at
-    failed = await invoke(
-        manager,
-        "update",
-        expected_revision=updated.revision,
-        steps=[{"step_id": first.step_id, "content": first.content}],
-    )
-    assert failed.status == "error" and manager.plan == updated
-    with pytest.raises(ValueError, match=tr("projects.planning_step_unavailable", "en")):
-        manager.binding(first.step_id)
+    blocked = plan_report(await mark(manager, status="blocked"))
+    assert blocked.steps[0].status == "blocked" and blocked.steps[0].finished_at is not None
+    assert blocked.steps[1] == original.steps[1]
+    assert blocked.active_step_id is None
+    assert manager.phase == "blocked" and manager.binding() == (None, None)
+    for index in (0, 1):
+        rejected = await mark(manager, index=index)
+        assert rejected.status == "error" and manager.plan == blocked
 
 
-async def test_step_results_and_times_follow_explicit_transitions():
+async def test_only_current_step_can_be_marked_or_receive_action_binding():
     manager = await created()
-    first, second = manager.plan.steps
-    started = first.started_at
-    second_result = await invoke(manager, "start_step", expected_revision=1, step_id=second.step_id)
-    running = plan_report(second_result)
-    assert running.active_step_id == second.step_id
-    assert all(step.status == "in_progress" for step in running.steps)
-    done = await invoke(
-        manager,
-        "mark_step",
-        expected_revision=2,
-        step_id=second.step_id,
-        status="completed",
-        result="  Relevant checks passed.  ",
-    )
-    completed = plan_report(done)
-    assert completed.active_step_id is None
-    assert completed.steps[0].status == "in_progress" and completed.steps[0].started_at == started
-    assert completed.steps[1].result == "Relevant checks passed."
-    assert completed.steps[1].finished_at >= completed.steps[1].started_at
-    restarted = await invoke(manager, "start_step", expected_revision=3, step_id=second.step_id)
-    resumed = plan_report(restarted)
-    assert resumed.steps[1].started_at == completed.steps[1].started_at
-    assert resumed.steps[1].finished_at is None
-    assert resumed.steps[1].status == "in_progress"
-
-
-@pytest.mark.parametrize("status", ["completed", "blocked", "skipped"])
-async def test_terminal_step_requires_result_and_does_not_finish_another_step(status):
-    manager = await created()
-    first, second = manager.plan.steps
-    response = await invoke(
-        manager,
-        "mark_step",
-        expected_revision=1,
-        step_id=first.step_id,
-        status=status,
-        result="Evidence or reason.",
-    )
-    plan = plan_report(response)
-    assert plan.steps[0].status == status and plan.steps[0].finished_at is not None
-    assert plan.steps[1] == second and plan.active_step_id is None
-
-
-async def test_selection_controls_binding_without_changing_other_steps():
-    manager = await created()
-    first, second = manager.plan.steps
+    original = manager.plan
     with pytest.raises(ValueError, match=tr("projects.planning_step_not_running", "en")):
-        manager.binding(second.step_id)
-    invalid = await invoke(manager, "select_step", expected_revision=1, step_id=second.step_id)
-    assert invalid.status == "error" and manager.plan.revision == 1
-    cleared = await invoke(manager, "select_step", expected_revision=1, step_id=None)
-    assert plan_report(cleared).active_step_id is None
-    assert manager.binding() == (None, None)
-    assert manager.binding(first.step_id) == (manager.plan.plan_id, first.step_id)
-    chosen = await invoke(manager, "select_step", expected_revision=2, step_id=first.step_id)
-    assert plan_report(chosen).active_step_id == first.step_id
+        manager.binding(original.steps[1].step_id)
+    assert (await mark(manager, index=1)).status == "error" and manager.plan == original
+    completed_first = plan_report(await mark(manager))
+    assert (await mark(manager)).status == "error" and manager.plan == completed_first
+    with pytest.raises(ValueError, match=tr("projects.planning_step_not_running", "en")):
+        manager.binding(original.steps[0].step_id)
+    unknown = await invoke(
+        manager,
+        "mark_step",
+        expected_revision=manager.plan.revision,
+        step_id="unknown",
+        status="completed",
+        result="Cannot skip to an unknown step.",
+    )
+    assert unknown.status == "error" and manager.plan == completed_first
 
 
-async def test_empty_update_retires_all_steps_without_selecting_another():
+@pytest.mark.parametrize("command", ["update", "start_step", "select_step"])
+async def test_dynamic_commands_are_not_advertised_or_executable(command):
     manager = await created()
-    response = await invoke(manager, "update", expected_revision=1, steps=[])
-    plan = plan_report(response)
-    assert plan.steps == [] and len(plan.retired_steps) == 2
-    assert all(step.removed_at is not None for step in plan.retired_steps)
-    assert manager.binding() == (None, None)
+    schema = manager.tool().tool_call_schema.model_json_schema()
+    assert schema["properties"]["command"]["enum"] == ["create", "get", "mark_step"]
+    original = manager.plan
+    rejected = await invoke(manager, command, expected_revision=1)
+    assert rejected.status == "error" and manager.plan == original
 
 
-async def test_historical_plan_is_not_migrated_without_explicit_create():
+async def test_plan_creation_is_once_per_turn_even_after_completion():
+    manager = await created()
+    for after_completion in (False, True):
+        if after_completion:
+            await mark(manager)
+            await mark(manager, index=1)
+        original = manager.plan
+        rejected = await invoke(manager, "create", title="Replacement", steps=["New step"])
+        assert rejected.status == "error"
+        assert rejected.content == tr("projects.planning_already_created", "en")
+        assert manager.plan == original
+
+
+async def test_historical_plan_remains_read_only_without_migration_or_replacement():
     historical = TaskPlan(
-        revision=7,
-        steps=[TaskPlanStep(content="Legacy step", status="in_progress")],
+        revision=7, steps=[TaskPlanStep(content="Legacy step", status="in_progress")]
     )
     manager = TaskPlanning(historical, "en")
-    assert manager.binding() == (None, None)
+    with pytest.raises(ValueError, match=tr("projects.planning_step_not_current", "en")):
+        manager.binding()
     assert plan_report(await invoke(manager, "get")) == historical
-    rejected = await invoke(manager, "update", expected_revision=7, steps=[])
-    assert rejected.status == "error"
-    assert rejected.content == tr("projects.planning_legacy", "en")
+    rejected = await invoke(
+        manager,
+        "mark_step",
+        expected_revision=7,
+        step_id="legacy",
+        status="completed",
+        result="Do not invent missing identities.",
+    )
+    assert rejected.status == "error" and rejected.content == tr("projects.planning_legacy", "en")
+    replacement = await invoke(manager, "create", title="New plan", steps=["New step"])
+    assert replacement.status == "error"
     assert manager.plan == historical and manager.plan.steps[0].step_id is None
-    replacement = plan_report(await invoke(manager, "create", steps=["New explicit plan"]))
-    assert replacement.revision == 8 and replacement.plan_id is not None
-    assert replacement.steps[0].step_id is not None
-    assert historical.steps[0].step_id is None
 
 
-async def test_restore_and_read_are_isolated_snapshots():
+async def test_restore_and_get_return_isolated_snapshots():
     manager = await created()
     restored = manager.plan
     resumed = TaskPlanning(restored, "en")
     restored.steps[0].content = "External mutation"
     snapshot = resumed.get()
     snapshot.steps[0].content = "Another external mutation"
-    response = await invoke(resumed, "get")
-    assert plan_report(response) == manager.plan
+    assert plan_report(await invoke(resumed, "get")) == manager.plan
     assert resumed.binding() == manager.binding()
 
 
@@ -210,9 +192,7 @@ async def test_checkpoint_restore_only_accepts_newer_revision():
     manager = await created()
     initial = manager.plan
     resumed = TaskPlanning(initial, "en")
-    latest = plan_report(
-        await invoke(manager, "start_step", expected_revision=1, step_id=initial.steps[1].step_id)
-    )
+    latest = plan_report(await mark(manager))
     resumed.restore(latest)
     resumed.restore(initial)
     assert resumed.plan == latest and resumed.binding() == manager.binding()
@@ -220,17 +200,12 @@ async def test_checkpoint_restore_only_accepts_newer_revision():
     assert resumed.plan == manager.plan
 
 
-async def test_restore_call_replays_original_create_without_changing_newer_plan():
+async def test_restore_call_replays_create_without_rolling_back_newer_step():
     manager = TaskPlanning(None, "en")
     arguments = {"title": "  Original plan  ", "steps": [" Inspect ", "Verify"]}
-    created_result = await invoke(manager, "create", call_id="create-once", **arguments)
-    created_plan = plan_report(created_result)
-    await invoke(
-        manager,
-        "start_step",
-        expected_revision=1,
-        step_id=created_plan.steps[1].step_id,
-    )
+    response = await invoke(manager, "create", call_id="create-once", **arguments)
+    created_plan = plan_report(response)
+    await mark(manager)
     latest = manager.plan
     resumed = TaskPlanning(latest, "en")
     resumed.restore_call("create-once", {"command": "create", **arguments}, created_plan)
@@ -242,83 +217,189 @@ async def test_restore_call_replays_original_create_without_changing_newer_plan(
         title="Original plan",
         steps=["Inspect", "Verify"],
     )
-    assert replayed.status == "success" and replayed.artifact == created_result.artifact
-    assert resumed.plan == latest and resumed.plan.revision == 2
-    assert resumed.binding() == manager.binding()
-    replayed.artifact["plan"]["steps"][0]["content"] = "Mutation in a returned artifact"
-    again = await invoke(resumed, "create", call_id="create-once", **arguments)
-    assert again.artifact == created_result.artifact
+    assert replayed.status == "success" and replayed.artifact == response.artifact
+    assert resumed.plan == latest and resumed.binding() == manager.binding()
+    replayed.artifact["plan"]["steps"][0]["content"] = "Mutation in returned artifact"
+    assert (
+        await invoke(resumed, "create", call_id="create-once", **arguments)
+    ).artifact == response.artifact
 
 
-async def test_repeated_call_is_idempotent_and_different_payload_cannot_reuse_id():
+async def test_repeated_call_is_idempotent_and_changed_payload_cannot_reuse_id():
     manager = TaskPlanning(None, "en")
     first, duplicate = await asyncio.gather(
-        invoke(manager, "create", call_id="same-call", steps=["Inspect", "Verify"]),
-        invoke(manager, "create", call_id="same-call", steps=["Inspect", "Verify"]),
+        invoke(manager, "create", call_id="same-call", title="Plan", steps=["Inspect", "Verify"]),
+        invoke(manager, "create", call_id="same-call", title="Plan", steps=["Inspect", "Verify"]),
     )
-    assert first.artifact == duplicate.artifact
-    assert manager.plan.revision == 1
-    reused = await invoke(manager, "create", call_id="same-call", steps=["Different"])
+    assert first.artifact == duplicate.artifact and manager.plan.revision == 1
+    reused = await invoke(manager, "create", call_id="same-call", title="Plan", steps=["Different"])
     assert reused.status == "error" and manager.plan.revision == 1
     assert reused.content == tr("projects.planning_call_reused", "en")
 
 
-async def test_parallel_mutations_cannot_overwrite_a_newer_revision():
+async def test_parallel_step_reports_cannot_overwrite_newer_revision():
     manager = await created()
-    first, second = manager.plan.steps
+    first = manager.plan.steps[0]
     responses = await asyncio.gather(
-        invoke(
-            manager,
-            "mark_step",
-            expected_revision=1,
-            step_id=first.step_id,
-            status="completed",
-            result="Checks passed.",
-        ),
-        invoke(manager, "start_step", expected_revision=1, step_id=second.step_id),
+        *(
+            invoke(
+                manager,
+                "mark_step",
+                expected_revision=1,
+                step_id=first.step_id,
+                status="completed",
+                result="Checks passed.",
+            )
+            for _ in range(2)
+        )
     )
     assert sorted(response.status for response in responses) == ["error", "success"]
     assert manager.plan.revision == 2
-    rejected = next(response for response in responses if response.status == "error")
-    assert rejected.content == tr("projects.planning_conflict", "en")
+    assert next(response for response in responses if response.status == "error").content == tr(
+        "projects.planning_conflict", "en"
+    )
 
 
 @pytest.mark.parametrize(
-    "command,arguments",
+    "arguments",
     [
-        ("create", {"steps": []}),
-        ("create", {"steps": [" "]}),
-        ("create", {"steps": ["x" * (PLAN_CONTENT_LIMIT + 1)]}),
-        ("create", {"steps": ["Step"] * (PLAN_STEP_LIMIT + 1)}),
-        ("create", {"steps": [{"content": "An update is not a create"}]}),
-        ("update", {"steps": ["A create is not an update"]}),
-        ("mark_step", {"status": "completed"}),
-        ("mark_step", {"status": "completed", "result": " "}),
-        ("mark_step", {"status": "completed", "result": "x" * (PROGRESS_TEXT_LIMIT + 1)}),
+        {"steps": ["Inspect"]},
+        {"title": " ", "steps": ["Inspect"]},
+        {"title": "x" * (PLAN_TITLE_LIMIT + 1), "steps": ["Inspect"]},
+        {"title": "Plan", "steps": []},
+        {"title": "Plan", "steps": [" "]},
+        {"title": "Plan", "steps": ["x" * (PLAN_CONTENT_LIMIT + 1)]},
+        {"title": "Plan", "steps": ["Step"] * (ORDERED_PLAN_STEP_LIMIT + 1)},
+        {"title": "Plan", "steps": [{"content": "Unknown shape"}]},
+        {"title": "Plan", "steps": ["Inspect"], "step_id": "future"},
+        {"title": "Plan", "steps": ["Inspect"], "expected_revision": 1},
+        {"title": "Plan", "steps": ["Inspect"], "status": "completed"},
+        {"title": "Plan", "steps": ["Inspect"], "result": "Premature"},
     ],
 )
-async def test_invalid_commands_do_not_mutate_plan(command, arguments):
+async def test_invalid_create_does_not_publish_a_plan(arguments):
+    manager = TaskPlanning(None, "en")
+    rejected = await invoke(manager, "create", **arguments)
+    assert rejected.status == "error" and manager.plan is None and manager.phase == "unplanned"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"result": " "},
+        {"result": "x" * (PROGRESS_TEXT_LIMIT + 1)},
+        {"expected_revision": None},
+        {"expected_revision": True},
+        {"step_id": None},
+        {"status": None},
+        {"status": "in_progress"},
+        {"title": "Cannot rename"},
+        {"steps": ["Cannot replan"]},
+    ],
+)
+async def test_invalid_step_reports_are_atomic(arguments):
     manager = await created()
     original = manager.plan
-    arguments = {"expected_revision": 1, "step_id": original.steps[0].step_id, **arguments}
-    result = await invoke(manager, command, **arguments)
-    assert result.status == "error"
+    rejected = await invoke(
+        manager,
+        "mark_step",
+        **{
+            "expected_revision": 1,
+            "step_id": original.active_step_id,
+            "status": "completed",
+            "result": "Verified.",
+            **arguments,
+        },
+    )
+    assert rejected.status == "error" and manager.plan == original
+
+
+async def test_get_requires_existing_plan_and_no_mutation_arguments():
+    assert (await invoke(TaskPlanning(None, "en"), "get")).status == "error"
+    manager = await created()
+    original = manager.plan
+    for arguments in ({"title": "New"}, {"expected_revision": 1}, {"status": "completed"}):
+        assert (await invoke(manager, "get", **arguments)).status == "error"
+        assert manager.plan == original
+
+
+async def test_persistence_is_awaited_before_plan_or_next_step_is_published():
+    entered, release = asyncio.Event(), asyncio.Event()
+    records = []
+
+    async def persist(plan, call_id, arguments):
+        records.append((plan, call_id, arguments))
+        entered.set()
+        await release.wait()
+
+    manager = TaskPlanning(None, "en", persist)
+    creation = asyncio.create_task(
+        invoke(
+            manager, "create", call_id="durable-create", title="Plan", steps=["Inspect", "Verify"]
+        )
+    )
+    await entered.wait()
+    assert manager.plan is None and not creation.done()
+    assert records[0][1:] == (
+        "durable-create",
+        {"command": "create", "title": "Plan", "steps": ["Inspect", "Verify"]},
+    )
+    release.set()
+    await creation
+    original = manager.plan
+    entered.clear()
+    release.clear()
+    transition = asyncio.create_task(mark(manager, call_id="durable-mark"))
+    await entered.wait()
+    assert manager.plan == original and not transition.done()
+    assert records[-1][0].steps[1].status == "in_progress"
+    release.set()
+    await transition
+    records[-1][0].steps[1].content = "Mutation in persistence adapter"
+    assert manager.plan.steps[1].content == "Verify"
+    await invoke(manager, "get")
+    assert len(records) == 2
+
+
+@pytest.mark.parametrize("command", ["create", "mark_step"])
+async def test_uncertain_persistence_failure_escapes_without_advancing_memory(command):
+    async def fail(plan, call_id, arguments):
+        raise RuntimeError("Plan write did not confirm success")
+
+    if command == "create":
+        manager = TaskPlanning(None, "en", fail)
+        original = None
+        operation = invoke(manager, "create", title="Plan", steps=["Inspect", "Verify"])
+    else:
+        baseline = await created()
+        manager = TaskPlanning(baseline.plan, "en", fail)
+        original = manager.plan
+        operation = mark(manager)
+    with pytest.raises(RuntimeError, match="did not confirm success"):
+        await operation
     assert manager.plan == original
 
 
-async def test_unknown_and_duplicate_ids_are_atomic_errors():
-    manager = await created()
-    first = manager.plan.steps[0]
+async def test_persisted_call_replay_does_not_write_again_or_advance_again():
+    records = []
+
+    async def persist(plan, call_id, arguments):
+        records.append((plan, call_id, arguments))
+
+    manager = await created(persist)
     original = manager.plan
-    for updates in (
-        [{"content": "New"}, {"step_id": "unknown", "content": "Invalid"}],
-        [
-            {"step_id": first.step_id, "content": first.content},
-            {"step_id": first.step_id, "content": "Duplicate"},
-        ],
-    ):
-        response = await invoke(manager, "update", expected_revision=1, steps=updates)
-        assert response.status == "error" and manager.plan == original
+    first = await mark(manager, call_id="mark-once")
+    replay = await invoke(
+        manager,
+        "mark_step",
+        call_id="mark-once",
+        expected_revision=original.revision,
+        step_id=original.active_step_id,
+        status="completed",
+        result="Verified result or recovery needed.",
+    )
+    assert first.artifact == replay.artifact and manager.plan.revision == 2
+    assert len(records) == 2
 
 
 async def test_plan_report_requires_successful_planning_artifact():
@@ -328,9 +409,9 @@ async def test_plan_report_requires_successful_planning_artifact():
     invalid_artifact = deepcopy(response.artifact)
     invalid_artifact["plan"]["active_step_id"] = "missing"
     for message in (
-        ToolMessage(content="raw plan text", tool_call_id="raw", name=PLANNING),
+        ToolMessage(content="Raw plan text", tool_call_id="raw", name=PLANNING),
         ToolMessage(
-            content="Other tool", tool_call_id="other", name="execute", artifact=response.artifact
+            content="Other", tool_call_id="other", name="execute", artifact=response.artifact
         ),
         ToolMessage(
             content="Failed",
@@ -344,3 +425,34 @@ async def test_plan_report_requires_successful_planning_artifact():
         ),
     ):
         assert plan_report(message) is None
+
+
+@pytest.mark.parametrize("source", ["harness_todos", "octop_planning"])
+async def test_restored_unfinished_plan_without_current_step_cannot_dispatch(source):
+    plan = TaskPlan.model_validate(
+        {
+            "source": source,
+            "plan_id": "historical-plan" if source == "octop_planning" else None,
+            "revision": 1,
+            "steps": [
+                {
+                    "step_id": "historical-step" if source == "octop_planning" else None,
+                    "content": "An unfinished historical step",
+                    "status": "pending",
+                }
+            ],
+        }
+    )
+    manager = TaskPlanning(plan, "en")
+    with pytest.raises(ValueError, match=tr("projects.planning_step_not_current", "en")):
+        manager.binding()
+    assert manager.plan == plan
+
+
+def test_restored_completed_plan_without_current_step_stays_readable():
+    plan = TaskPlan.model_validate(
+        {"revision": 1, "steps": [{"content": "Done", "status": "completed"}]}
+    )
+    manager = TaskPlanning(plan, "en")
+    assert manager.binding() == (None, None)
+    assert manager.phase == "completed" and manager.plan == plan

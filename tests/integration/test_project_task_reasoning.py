@@ -221,14 +221,14 @@ async def test_summary_and_tool_rounds_survive_persistence_and_reopen(
             message("报告已生成。", "请查看附件。"),
         ],
     )
-    task = await create_task(client, auth)
+    task = await create_task(client, auth, options={"action_timeline_enabled": False})
     assert task["status"] == "completed", task
     turn = task["turns"][0]
     blocks = turn["content_blocks"]
     reasoning_kind = "reasoning_summary" if source == "responses" else "reasoning"
     assert [block["type"] for block in blocks] == [
         reasoning_kind,
-        "text",
+        "reasoning",
         "tool",
         reasoning_kind,
         "text",
@@ -243,7 +243,8 @@ async def test_summary_and_tool_rounds_survive_persistence_and_reopen(
     assert blocks[2]["tool_call_id"] == "report" and blocks[2]["tool_name"] == "create_artifact"
     assert all(block["status"] == "completed" for block in blocks)
     assert "must-not-be-public" not in json.dumps(task)
-    assert turn["reasoning"] == "先准备报告。报告已生成。"
+    assert turn["reasoning"] == "先准备报告。正在整理。报告已生成。"
+    assert turn["reply"] == "请查看附件。"
     saved = server.services.project_task_turn_repo.get(turn["turn_id"])
     assert json.loads(saved.content_blocks_json) == blocks
     reopened = (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()

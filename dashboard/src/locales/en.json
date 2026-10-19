@@ -218,6 +218,9 @@
     "TASK_RETRY_UNAVAILABLE": "Only the latest failed or stopped turn can be retried. Refresh the task.",
     "TASK_ARCHIVED": "This task is archived. Restore it to continue.",
     "TASK_REVISION_CONFLICT": "The task has changed. Refresh before editing again.",
+    "TASK_SETTINGS_INVALID": "Task process setting {{setting}} must be true/false, 1/0, yes/no, or on/off.",
+    "TASK_PLAN_UNFINISHED": "The current plan step has no recorded result. The task cannot complete.",
+    "TASK_PLAN_BLOCKED": "The plan is blocked. Review its result and provide information or retry in a new turn.",
     "TASK_BUSY": "The task is queued or running. Wait for it to finish or stop it before continuing.",
     "TASK_ARTIFACT_INVALID": "Invalid attachment name, format or server workspace path. Symbolic links are not supported.",
     "TASK_ARTIFACT_LIMIT": "The attachment exceeds the size or per-turn quota.",
@@ -6752,7 +6755,8 @@
           "review_unknown": "The automatic review result is unconfirmed. Human approval is required; review will not be repeated."
         }
       },
-      "actions": "Actions and progress",
+      "actions": "Action timeline",
+      "thinking": "Thinking",
       "plan": {
         "title": "Execution plan",
         "count": "{{completed}} / {{total}} completed",
@@ -6767,7 +6771,8 @@
         },
         "records": "{{count}} records",
         "result": "Step result",
-        "noRecords": "No actions or result recorded for this step yet.",
+        "noRecords": "No step result recorded yet.",
+        "openArtifacts": "View artifacts ({{count}})",
         "retired": "Removed steps"
       },
       "actionStatus": {

@@ -1,5 +1,6 @@
 """Plans and public updates accept explicit, valid runtime data only."""
 
+import asyncio
 from copy import deepcopy
 
 import pytest
@@ -14,6 +15,7 @@ from octop.infra.projects.progress import (
     PROGRESS_TEXT_LIMIT,
     TaskPlan,
     normalize_todos,
+    progress_introduction,
     progress_prompt,
     progress_report,
     progress_tool,
@@ -95,7 +97,9 @@ async def test_notification_exposes_explicit_public_text_in_artifact(locale):
 @pytest.mark.parametrize("text", [" ", "x" * (PROGRESS_TEXT_LIMIT + 1), 123, None])
 async def test_notification_rejects_invalid_public_text(text):
     with pytest.raises(ValidationError):
-        await progress_tool("en").ainvoke({"text": text})
+        await progress_tool("en").ainvoke(
+            {"type": "tool_call", "id": "invalid", "name": NOTIFY_USER, "args": {"text": text}}
+        )
 
 
 @pytest.mark.parametrize(
@@ -138,3 +142,67 @@ async def test_notification_rejects_invalid_public_text(text):
 )
 def test_progress_report_ignores_untrusted_or_failed_messages(message):
     assert progress_report(message) is None
+
+
+async def test_notification_waits_for_persistence_and_replays_one_receipt():
+    entered, release = asyncio.Event(), asyncio.Event()
+    saved = []
+
+    async def persist(text, call_id):
+        saved.append((text, call_id))
+        entered.set()
+        await release.wait()
+        return True
+
+    tool = progress_tool("en", persist)
+    call = {
+        "type": "tool_call",
+        "id": "opening",
+        "name": NOTIFY_USER,
+        "args": {"text": "  I will inspect the note.  "},
+    }
+    first = asyncio.create_task(tool.ainvoke(call))
+    await entered.wait()
+    assert not first.done()
+    duplicate = asyncio.create_task(tool.ainvoke(call))
+    release.set()
+    result, replay = await asyncio.gather(first, duplicate)
+    assert saved == [("I will inspect the note.", "opening")]
+    assert result.artifact == replay.artifact
+    assert progress_introduction(result) is True
+    replay.artifact["text"] = "External mutation"
+    assert (await tool.ainvoke(call)).artifact == result.artifact
+    changed = {**call, "args": {"text": "Different notice"}}
+    assert (await tool.ainvoke(changed)).status == "error"
+    assert "call_id" not in tool.tool_call_schema.model_json_schema()["properties"]
+
+
+async def test_notification_persistence_failure_never_returns_success():
+    async def persist(text, call_id):
+        raise RuntimeError("Progress persistence did not confirm success")
+
+    tool = progress_tool("en", persist)
+    with pytest.raises(RuntimeError, match="did not confirm success"):
+        await tool.ainvoke(
+            {
+                "type": "tool_call",
+                "id": "opening",
+                "name": NOTIFY_USER,
+                "args": {"text": "I will inspect the note."},
+            }
+        )
+
+
+@pytest.mark.parametrize("value", [True, False, None, "true", 1])
+def test_introduction_requires_an_explicit_host_boolean(value):
+    message = ToolMessage(
+        content="Progress",
+        name=NOTIFY_USER,
+        tool_call_id="notice",
+        artifact={"type": "task_progress", "text": "Progress", "introduction": value},
+    )
+    expected = value if isinstance(value, bool) else None
+    assert progress_introduction(message) is expected
+    assert progress_report(message) == "Progress"
+    message.status = "error"
+    assert progress_introduction(message) is None

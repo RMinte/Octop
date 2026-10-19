@@ -24,6 +24,7 @@ import type { TaskMessageQueue } from "./useTaskMessageQueue";
 
 vi.mock("../../api/modules/projects", () => ({
   projectTasksApi: {
+    settings: vi.fn(),
     list: vi.fn(),
     sync: vi.fn(),
     get: vi.fn(),
@@ -174,6 +175,10 @@ beforeEach(() => {
     return new Promise<void>((resolve) =>
       signal.addEventListener("abort", () => resolve(), { once: true }),
     );
+  });
+  api.settings.mockResolvedValue({
+    action_timeline_enabled: true,
+    step_panel_enabled: true,
   });
   sessionStorage.clear();
   snapshots = new Map([

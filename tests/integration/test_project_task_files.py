@@ -122,7 +122,7 @@ async def test_file_only_task_reaches_real_tools_without_vision_model(
         "request_id": "only-file-001",
         "prompt": "",
         "attachment_ids": [attachment["attachment_id"]],
-        "options": {"model_ref": "text-only/plain-chat"},
+        "options": {"model_ref": "text-only/plain-chat", "action_timeline_enabled": False},
     }
     experts = server.services.agent_repo.list_all()
     session = None
@@ -189,6 +189,7 @@ async def test_file_followups_preserve_edits_and_restore_after_project_directory
         headers=auth,
         json={
             "request_id": "file-project-first",
+            "options": {"action_timeline_enabled": False},
             "project_id": project["project_id"],
             "attachment_ids": [attachment["attachment_id"]],
         },
@@ -202,7 +203,11 @@ async def test_file_followups_preserve_edits_and_restore_after_project_directory
     response = await client.post(
         followup,
         headers=auth,
-        json={"request_id": "file-project-edited", "prompt": "Read it again"},
+        json={
+            "request_id": "file-project-edited",
+            "prompt": "Read it again",
+            "options": {"action_timeline_enabled": False},
+        },
     )
     assert response.status_code == 202, response.text
     done = await settled(client, auth, done["task_id"])
@@ -223,7 +228,11 @@ async def test_file_followups_preserve_edits_and_restore_after_project_directory
     response = await client.post(
         followup,
         headers=auth,
-        json={"request_id": "file-project-restored", "prompt": "Read the original file"},
+        json={
+            "request_id": "file-project-restored",
+            "prompt": "Read the original file",
+            "options": {"action_timeline_enabled": False},
+        },
     )
     assert response.status_code == 202, response.text
     done = await settled(client, auth, done["task_id"])

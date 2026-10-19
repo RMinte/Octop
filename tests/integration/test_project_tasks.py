@@ -469,6 +469,7 @@ async def test_real_harness_reads_project_files_and_loads_selected_skills_mcp(
             "request_id": "actual-harness",
             "prompt": "Read proof.md and the note",
             "web_search_enabled": web_search_enabled,
+            "options": {"action_timeline_enabled": False},
         },
     )
     assert created.status_code == 202, created.text
@@ -1010,6 +1011,7 @@ async def test_retry_preserves_failed_text_uses_current_configuration_and_is_ide
     retried = done["turns"][1]
     assert retried["options"] == {
         **request["options"],
+        "action_timeline_enabled": True,
         "reasoning_mode": None,
         "reasoning_effort": None,
         "client_id": None,
@@ -1394,6 +1396,7 @@ async def test_turn_execution_options_override_without_mutating_project_and_bind
         task["turns"][0]["options"]
         == {
             **choice,
+            "action_timeline_enabled": True,
             "reasoning_mode": None,
             "reasoning_effort": None,
             "client_id": None,

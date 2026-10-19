@@ -63,7 +63,7 @@ async def start_call(ws, *, request="tool-message-001", web_search_enabled=True)
             "request_id": request,
             "prompt": "Read my note",
             "web_search_enabled": web_search_enabled,
-            "options": OPTIONS,
+            "options": {**OPTIONS, "action_timeline_enabled": False},
         },
     )
     assert created["type"] == "result", created

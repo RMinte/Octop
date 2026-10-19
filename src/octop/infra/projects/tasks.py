@@ -42,6 +42,7 @@ from octop.infra.projects.models import (
 from octop.infra.projects.progress import TaskPlan
 from octop.infra.projects.service import _validate, get_project
 from octop.infra.projects.service import resources as project_resources
+from octop.infra.projects.settings import load_settings
 from octop.infra.projects.title_policy import provisional_title
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.locale import normalize_locale
@@ -63,6 +64,10 @@ TurnStatus = Literal[
 
 
 class TaskExecutionOptions(ProjectModel):
+    action_timeline_enabled: StrictBool | None = Field(
+        default=None,
+        description="本轮结构化动作链路开关；省略或 null 使用当前全局默认值，入队后固定，不修改计划执行或步骤面板显示。",
+    )
     reasoning_mode: Literal["auto", "enabled", "disabled"] | None = Field(
         default=None,
         description="本轮思考模式；省略或 null 使用所选模型默认值。不支持的设置返回 422。",
@@ -122,6 +127,7 @@ class TaskExecutionOptions(ProjectModel):
                         "client_tools",
                         "reasoning_mode",
                         "reasoning_effort",
+                        "action_timeline_enabled",
                     },
                 ),
             }
@@ -294,6 +300,19 @@ class TaskTurn(ProjectModel):
     project_revision: int | None = Field(description="本轮开始时采用的项目配置版本。")
     created_at: datetime
     updated_at: datetime
+    started_at: datetime | None = Field(
+        default=None,
+        description="本轮首次实际开始执行的服务端时间；首次排队不计入，历史未知时为 null。",
+    )
+    finished_at: datetime | None = Field(
+        default=None,
+        description="本轮到达完成、失败或取消终态的服务端时间；尚未终止或历史未知时为 null。",
+    )
+    processing_duration_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description="首次实际开始到终态的墙钟毫秒数，包含审批、暂停及恢复等待；任一边界未知时为 null。",
+    )
 
 
 class TaskSummary(ProjectModel):
@@ -391,6 +410,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
             or {"mode": "ask_for_approval", "revision": 1, "updated_at": _datetime(t.created_at)}
         ),
         options=TaskExecutionOptions(
+            action_timeline_enabled=configuration.get("action_timeline_enabled", True),
             model_ref=t.model_ref,
             reasoning_mode=configuration.get("reasoning_mode"),
             reasoning_effort=configuration.get("reasoning_effort"),
@@ -410,6 +430,11 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         project_revision=configuration.get("revision"),
         created_at=_datetime(t.created_at),
         updated_at=_datetime(t.updated_at),
+        started_at=_datetime(t.started_at) if t.started_at is not None else None,
+        finished_at=_datetime(t.finished_at) if t.finished_at is not None else None,
+        processing_duration_ms=t.finished_at - t.started_at
+        if t.started_at is not None and t.finished_at is not None and t.finished_at >= t.started_at
+        else None,
     )
 
 
@@ -526,7 +551,14 @@ def _configuration(
     snapshot = fields.model_dump(mode="json")
     overrides = options.model_dump(
         exclude_none=True,
-        exclude={"model_ref", "client_id", "client_tools", "reasoning_mode", "reasoning_effort"},
+        exclude={
+            "model_ref",
+            "client_id",
+            "client_tools",
+            "reasoning_mode",
+            "reasoning_effort",
+            "action_timeline_enabled",
+        },
     )
     fields = ProjectFields.model_validate(
         {**fields.model_dump(include=set(ProjectFields.model_fields)), **overrides}
@@ -542,6 +574,11 @@ def _configuration(
             **snapshot,
             **fields.model_dump(),
             **_reasoning_configuration(providers, ref, options),
+            "action_timeline_enabled": (
+                options.action_timeline_enabled
+                if options.action_timeline_enabled is not None
+                else load_settings(services).action_timeline_enabled
+            ),
             "execution_options": options.model_dump(exclude_none=True),
         }
     ), ref

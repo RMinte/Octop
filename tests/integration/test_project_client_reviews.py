@@ -132,6 +132,7 @@ async def start_exec(env, *, mode="approve_for_me"):
             "prompt": "Check the local workspace",
             "approval_mode": mode,
             "options": {
+                "action_timeline_enabled": False,
                 "client_id": CLIENT,
                 "client_tools": [
                     {

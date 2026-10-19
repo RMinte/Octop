@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../../../api";
 import { useIsMobile } from "../../../hooks/useIsMobile";
+import { invalidateTaskPresentationSettings } from "../../../hooks/useTaskPresentationSettings";
 import { useEnvVars } from "./useEnvVars";
 import {
   PageHeader,
@@ -210,6 +211,7 @@ function EnvironmentsPage() {
     setSaving(true);
     try {
       await api.batchSaveEnvs(dict);
+      invalidateTaskPresentationSettings();
       message.success(t("environments.saveSuccess"));
       setRows(null);
       setKeyErrors({});
