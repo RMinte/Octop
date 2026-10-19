@@ -2168,16 +2168,14 @@ it.each([
   {
     allowed_modes: ["ask_for_approval"] as const,
     reviewer_ready: true,
-    reason: zh.projects.tasks.approvalMode.adminDisabled,
   },
   {
     allowed_modes: ["ask_for_approval", "approve_for_me"] as const,
     reviewer_ready: false,
-    reason: zh.projects.tasks.approvalMode.reviewerUnavailable,
   },
 ])(
-  "未开放或未就绪的自动模式不能选择，显示原因 $reason",
-  async ({ allowed_modes, reviewer_ready, reason }) => {
+  "三种审批模式始终可选，审查就绪状态为 $reviewer_ready",
+  async ({ allowed_modes, reviewer_ready }) => {
     api.resources.mockResolvedValue({
       skills: [],
       mcp_servers: [],
@@ -2199,16 +2197,26 @@ it.each([
     });
     await waitFor(() => expect(selector).toBeEnabled());
     await user.click(selector);
-    const option = await screen.findByText(
-      `${zh.projects.tasks.approvalMode.approve_for_me} · ${reason}`,
-    );
-    expect(option.closest(".ant-select-item-option")).toHaveClass(
-      "ant-select-item-option-disabled",
+    for (const mode of [
+      "ask_for_approval",
+      "approve_for_me",
+      "full_access",
+    ] as const) {
+      const option = screen
+        .getAllByText(zh.projects.tasks.approvalMode[mode])
+        .find((element) => element.closest(".ant-select-item-option"));
+      expect(option).toBeDefined();
+      expect(option?.closest(".ant-select-item-option")).not.toHaveClass(
+        "ant-select-item-option-disabled",
+      );
+    }
+    const option = screen.getByText(
+      zh.projects.tasks.approvalMode.approve_for_me,
     );
     await user.click(option);
     expect(api.setApproval).not.toHaveBeenCalled();
     expect(selector.closest(".ant-select")).toHaveTextContent(
-      zh.projects.tasks.approvalMode.ask_for_approval,
+      zh.projects.tasks.approvalMode.approve_for_me,
     );
   },
 );

@@ -31,10 +31,6 @@ async def review_env(env_with_provider, monkeypatch):
 
     client, server, auth = env_with_provider
     monkeypatch.setattr(project_tasks_ws, "_UPDATE_SECONDS", 0.01)
-    approval_policy.save_settings(
-        server.services,
-        TaskApprovalSettings(allowed_modes=["ask_for_approval", "approve_for_me", "full_access"]),
-    )
     state = SimpleNamespace(
         generations=[],
         reviews=[],
@@ -339,7 +335,6 @@ async def test_administrator_required_human_approval_blocks_auto_review_even_aft
 ):
     _client, server, _auth, state = review_env
     settings = TaskApprovalSettings(
-        allowed_modes=["ask_for_approval", "approve_for_me", "full_access"],
         require_human_tools=["client__exec_command"],
     )
     if before:

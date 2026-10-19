@@ -22,54 +22,43 @@ const api = vi.mocked(securityApi, true);
 beforeEach(() => {
   vi.clearAllMocks();
   api.getTaskApprovals.mockResolvedValue({
-    allowed_modes: ["ask_for_approval"],
     require_human_tools: ["publish", "custom__charge"],
   });
   api.saveTaskApprovals.mockImplementation(async (body) => body);
 });
 
-it("管理员开放自动审批时保留强制人工工具，请求批准始终可用", async () => {
+it("管理员仅管理强制人工工具列表，保存时去重并去除空行", async () => {
   const user = userEvent.setup();
   render(<TaskApprovalsPanel />);
-  const ask = await screen.findByRole("checkbox", {
-    name: zh.projects.tasks.approvalMode.ask_for_approval,
+  const tools = await screen.findByRole("textbox", {
+    name: zh.security.taskApprovals.requireHuman,
   });
-  expect(ask).toBeChecked();
-  expect(ask).toBeDisabled();
-  await user.click(
-    screen.getByRole("checkbox", {
-      name: zh.projects.tasks.approvalMode.approve_for_me,
-    }),
-  );
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  await user.clear(tools);
+  await user.type(tools, " publish \n\ncustom__charge\npublish\n");
   await user.click(
     screen.getByRole("button", { name: zh.security.taskApprovals.save }),
   );
   await waitFor(() =>
     expect(api.saveTaskApprovals).toHaveBeenCalledWith({
-      allowed_modes: ["ask_for_approval", "approve_for_me"],
       require_human_tools: ["publish", "custom__charge"],
     }),
   );
   await screen.findByText(zh.security.saved);
 });
 
-it("保存失败保留用户选择与原列表，不显示成功", async () => {
+it("保存失败保留用户编辑的列表，不显示成功", async () => {
   api.saveTaskApprovals.mockRejectedValueOnce(new Error("Settings offline"));
   const user = userEvent.setup();
   render(<TaskApprovalsPanel />);
-  const full = await screen.findByRole("checkbox", {
-    name: zh.projects.tasks.approvalMode.full_access,
+  const tools = await screen.findByRole("textbox", {
+    name: zh.security.taskApprovals.requireHuman,
   });
-  await user.click(full);
+  await user.type(tools, "\nexecute");
   await user.click(
     screen.getByRole("button", { name: zh.security.taskApprovals.save }),
   );
   await screen.findByText("Settings offline");
-  expect(full).toBeChecked();
-  expect(
-    screen.getByRole("textbox", {
-      name: zh.security.taskApprovals.requireHuman,
-    }),
-  ).toHaveValue("publish\ncustom__charge");
+  expect(tools).toHaveValue("publish\ncustom__charge\nexecute");
   expect(screen.queryByText(zh.security.saved)).not.toBeInTheDocument();
 });

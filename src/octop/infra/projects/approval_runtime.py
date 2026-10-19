@@ -85,7 +85,6 @@ def freeze_server(
     if (
         payload.tool_name not in MODE_TOOLS
         or payload.tool_name in settings.require_human_tools
-        or policy.mode not in settings.allowed_modes
         or "allow_once" not in payload.allowed_decisions
     ):
         return
@@ -154,10 +153,7 @@ def advance(
             continue
         payload = item.payload
         assert isinstance(payload, ApprovalPayload)
-        allowed = (
-            payload.approval_mode in settings.allowed_modes
-            and payload.tool_name not in settings.require_human_tools
-        )
+        allowed = payload.tool_name not in settings.require_human_tools
         if row.action_digest != payload.action_digest:
             item.status = "pending"
             item.revision += 1

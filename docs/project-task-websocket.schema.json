@@ -811,7 +811,7 @@
         },
         "approval_mode": {
           "default": "ask_for_approval",
-          "description": "任务审批模式；必须在管理员允许范围内。",
+          "description": "任务审批模式；三种模式始终可选，默认请求批准。",
           "enum": [
             "ask_for_approval",
             "approve_for_me",

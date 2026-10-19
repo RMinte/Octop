@@ -915,11 +915,11 @@ Authorization: Bearer <access token>
 
 结果为最新 TaskDetail。expected_revision 来自 approval_policy.revision；成功写入增加此版本和列表版本。同一 request_id 重传完整原载荷，异体返回 TASK_REQUEST_CONFLICT；新请求版本冲突返回 TASK_APPROVAL_POLICY_CONFLICT。切换不改变已有人工卡及已有调用的冻结模式。REST 等价入口为 PUT /api/project-tasks/{task_id}/approval-policy。
 
-资源接口增加 approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}。默认仅开放人工档，管理员通过 GET/PUT /api/admin/security/task-approvals 保存 allowed_modes 和 require_human_tools。网页完全访问确认说明服务端主机进程权限；本机权限须另行授予。实际范围与边界见[审批模式文档](project-task-approval-modes.md)。
+资源接口增加 approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}，allowed_modes 固定返回 ask_for_approval、approve_for_me 和 full_access，三种模式始终可选。reviewer_ready 仅供状态展示，未就绪不限制选择帮我审批；实际审查不可用时转人工。管理员通过 GET/PUT /api/admin/security/task-approvals 仅保存 require_human_tools，无需配置可用模式。网页完全访问确认说明服务端主机进程权限；本机权限须另行授予。实际范围与边界见[审批模式文档](project-task-approval-modes.md)。
 
 ### 14.2 客户端远端审查 tool.review
 
-已领取的 exec_command 在冻结模式为 approve_for_me 时可以请求审查。原 command 参数须为非空字符串数组；请求不接受新的工具参数。目录与授权摘要仅作审查文本，Octop 不读取客户端路径。
+已领取的 exec_command 在冻结模式为 approve_for_me 时可以请求审查；原调用冻结模式不符时返回 TASK_APPROVAL_MODE_UNAVAILABLE。原 command 参数须为非空字符串数组；请求不接受新的工具参数。目录与授权摘要仅作审查文本，Octop 不读取客户端路径。
 
 ```json
 {"type":"tool.review","id":"review-command-001","task_id":"task_example","turn_id":"turn_example","call_id":"call_example","data":{"request_id":"review-request-001","claim_token":"example_claim_token_replace_with_receipt","action_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","context":{"working_directory":"/Users/example/project","workspace_authorization_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","command_authorization_id":"local-grant-001","execution_profile":"workspace_write","context_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}

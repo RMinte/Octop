@@ -77,9 +77,9 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 ### 任务审批模式与远端 Reviewer
 
-TaskSummary/TaskDetail 返回 `approval_policy={mode,revision,updated_at}`，轮次返回 `approval_policy_at_start`。创建任务可用顶层 `approval_mode` 选择 `ask_for_approval`、`approve_for_me`、`full_access`；默认人工审批。已建任务用 `PUT /api/project-tasks/{task_id}/approval-policy` 提交 `{request_id,expected_revision,mode}`，或等价 `task.approval.set`。版本取审批模式的独立 revision；网络重试复用原请求。新请求版本冲突返回 `TASK_APPROVAL_POLICY_CONFLICT`，模式未开放或 Reviewer 不可用返回 `TASK_APPROVAL_MODE_UNAVAILABLE`。切换不放行已有人工卡。
+TaskSummary/TaskDetail 返回 `approval_policy={mode,revision,updated_at}`，轮次返回 `approval_policy_at_start`。创建任务可用顶层 `approval_mode` 选择 `ask_for_approval`、`approve_for_me`、`full_access`；三种模式始终可选，默认人工审批。已建任务用 `PUT /api/project-tasks/{task_id}/approval-policy` 提交 `{request_id,expected_revision,mode}`，或等价 `task.approval.set`。版本取审批模式的独立 revision；网络重试复用原请求。新请求版本冲突返回 `TASK_APPROVAL_POLICY_CONFLICT`。切换不放行已有人工卡。
 
-`GET /api/project-tasks/resources` 增加 `approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}`。管理员通过 `GET/PUT /api/admin/security/task-approvals` 保存 `{allowed_modes,require_human_tools}`，默认只开放人工审批，人工档始终保留。网页在选择完全访问前说明服务端命令使用 Octop 主机进程权限；本机权限仍由执行电脑授予。
+`GET /api/project-tasks/resources` 增加 `approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}`，`allowed_modes` 固定返回三种模式。`reviewer_ready` 仅供状态展示，不限制选择帮我审批；执行时 Reviewer 不可用则转人工。管理员通过 `GET/PUT /api/admin/security/task-approvals` 仅保存 `{require_human_tools}`，无需配置可用模式。网页在选择完全访问前说明服务端命令使用 Octop 主机进程权限；本机权限仍由执行电脑授予。
 
 首版三档模式覆盖服务端 `execute` 与客户端 `exec_command`；其他需审批的工具保持人工，强制人工列表始终生效。自动审批使用 Octop 上独立且无工具的 Reviewer，沿用该轮已保存模型，只接收固定动作和本轮目标。45 秒超时、格式非法、不可用或配额不足均转人工。审查不占主任务执行槽，用量独立保存并计入用户累计配额。重启后不重复请求状态不明的已派发审查；取消后迟到结果只登记用量。
 

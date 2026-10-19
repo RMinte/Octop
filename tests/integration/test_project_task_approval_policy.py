@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from octop.infra.projects import approval_policy, runtime
-from octop.infra.projects.approval_models import TaskApprovalSettings
+from octop.infra.projects.approval_models import APPROVAL_MODES, TaskApprovalSettings
 from tests.integration.test_project_tasks import settled
 from tests.integration.test_project_tasks_ws import command, connected
 from tests.support.auth import create_user
@@ -28,55 +28,85 @@ async def policy_env(env_with_provider, monkeypatch):
     return client, server, auth, calls
 
 
-def test_approval_settings_always_keep_human_mode():
-    assert TaskApprovalSettings().allowed_modes == ["ask_for_approval"]
-    for modes in ([], ["full_access"], ["ask_for_approval", "ask_for_approval"]):
-        with pytest.raises(ValidationError):
-            TaskApprovalSettings(allowed_modes=modes)
+def test_approval_settings_only_configure_mandatory_human_tools():
+    assert TaskApprovalSettings().model_dump() == {"require_human_tools": []}
+    with pytest.raises(ValidationError):
+        TaskApprovalSettings.model_validate({"allowed_modes": ["ask_for_approval"]})
+    with pytest.raises(ValidationError):
+        TaskApprovalSettings(require_human_tools=["execute", "execute"])
 
 
-async def test_modes_require_admin_enablement_and_report_reviewer_readiness(policy_env):
+@pytest.mark.parametrize("mode", APPROVAL_MODES)
+async def test_all_modes_are_available_without_configuration(policy_env, mode):
     client, server, auth, _ = policy_env
     resource = (await client.get("/api/project-tasks/resources", headers=auth)).json()
     assert resource["approval"] == {
-        "allowed_modes": ["ask_for_approval"],
+        "allowed_modes": list(APPROVAL_MODES),
         "reviewer_ready": True,
         "execution_profile": "host_process",
     }
     response = await client.post(
         "/api/project-tasks",
         headers=auth,
-        json={"request_id": "unavailable-mode", "prompt": "First", "approval_mode": "full_access"},
-    )
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "TASK_APPROVAL_MODE_UNAVAILABLE"
-    assert (await client.get("/api/project-tasks", headers=auth)).json()["items"] == []
-    approval_policy.save_settings(
-        server.services,
-        TaskApprovalSettings(allowed_modes=["ask_for_approval", "approve_for_me", "full_access"]),
-    )
-    response = await client.post(
-        "/api/project-tasks",
-        headers=auth,
         json={
             "request_id": "auto-review-mode",
             "prompt": "First",
-            "approval_mode": "approve_for_me",
+            "approval_mode": mode,
         },
     )
     assert response.status_code == 202, response.text
     data = response.json()
-    assert data["approval_policy"]["mode"] == "approve_for_me"
+    assert data["approval_policy"]["mode"] == mode
     assert data["turns"][0]["approval_policy_at_start"] == data["approval_policy"]
     assert not approval_policy.capabilities(server.services, "missing/model").reviewer_ready
 
 
+async def test_saved_mode_limits_are_ignored_while_human_tools_are_preserved(policy_env):
+    client, server, auth, _ = policy_env
+    stored = json.dumps({"allowed_modes": ["ask_for_approval"], "require_human_tools": ["execute"]})
+    server.services.settings_repo.set(approval_policy.SETTINGS_KEY, stored)
+    resource = (await client.get("/api/project-tasks/resources", headers=auth)).json()
+    assert resource["approval"]["allowed_modes"] == list(APPROVAL_MODES)
+    settings = await client.get("/api/admin/security/task-approvals", headers=auth)
+    assert settings.json() == {"require_human_tools": ["execute"]}
+    assert server.services.settings_repo.get(approval_policy.SETTINGS_KEY) == stored
+    response = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={"request_id": "saved-mode-limits", "prompt": "First", "approval_mode": "full_access"},
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["approval_policy"]["mode"] == "full_access"
+
+
+async def test_reviewer_readiness_does_not_block_mode_selection(policy_env, monkeypatch):
+    from octop.infra.projects import tasks
+
+    client, _, auth, _ = policy_env
+    response = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={"request_id": "before-reviewer-unavailable", "prompt": "First"},
+    )
+    task = await settled(client, auth, response.json()["task_id"])
+    monkeypatch.setattr(tasks, "resolve_model_ref", lambda services: "missing/model")
+    resource = (await client.get("/api/project-tasks/resources", headers=auth)).json()
+    assert resource["approval"]["reviewer_ready"] is False
+    changed = await client.put(
+        f"/api/project-tasks/{task['task_id']}/approval-policy",
+        headers=auth,
+        json={
+            "request_id": "choose-unready-reviewer",
+            "expected_revision": 1,
+            "mode": "approve_for_me",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["approval_policy"]["mode"] == "approve_for_me"
+
+
 async def test_policy_cas_retries_turn_snapshot_and_owner_isolation(policy_env):
     client, server, auth, calls = policy_env
-    approval_policy.save_settings(
-        server.services,
-        TaskApprovalSettings(allowed_modes=["ask_for_approval", "approve_for_me", "full_access"]),
-    )
     first = {"request_id": "create-policy-task", "prompt": "First"}
     response = await client.post("/api/project-tasks", headers=auth, json=first)
     assert response.status_code == 202
@@ -126,10 +156,7 @@ async def test_policy_cas_retries_turn_snapshot_and_owner_isolation(policy_env):
 
 
 async def test_ws_policy_setting_uses_same_durable_contract(policy_env):
-    client, server, auth, _ = policy_env
-    approval_policy.save_settings(
-        server.services, TaskApprovalSettings(allowed_modes=["ask_for_approval", "full_access"])
-    )
+    client, _, auth, _ = policy_env
     session, ws = await connected(client, auth)
     try:
         created = await command(
@@ -156,11 +183,7 @@ async def test_ws_policy_setting_uses_same_durable_contract(policy_env):
 
 
 async def test_competing_policy_writes_and_late_retry_never_restore_old_mode(policy_env):
-    client, server, auth, _ = policy_env
-    approval_policy.save_settings(
-        server.services,
-        TaskApprovalSettings(allowed_modes=["ask_for_approval", "approve_for_me", "full_access"]),
-    )
+    client, _, auth, _ = policy_env
     created = (
         await client.post(
             "/api/project-tasks",

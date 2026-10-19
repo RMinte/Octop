@@ -106,9 +106,9 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                     or item.resolution.outcome != "allow_once"
                 ):
                     return False
-                if item.resolution.source in {"auto_reviewer", "full_access_mode"} and (
-                    payload.approval_mode not in settings.allowed_modes
-                    or payload.tool_name in settings.require_human_tools
+                if (
+                    item.resolution.source in {"auto_reviewer", "full_access_mode"}
+                    and payload.tool_name in settings.require_human_tools
                 ):
                     return False
             for item in approvals:

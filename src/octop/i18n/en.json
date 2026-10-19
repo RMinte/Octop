@@ -537,7 +537,7 @@
     "TASK_INTERACTION_CLOSED": "This interaction is already closed. Refresh the task.",
     "TASK_INTERACTION_CONFLICT": "This interaction has changed. Refresh before responding.",
     "TASK_CONTROL_INVALID": "This turn can no longer be paused or resumed.",
-    "TASK_APPROVAL_MODE_UNAVAILABLE": "This approval mode is not allowed. Refresh the task settings.",
+    "TASK_APPROVAL_MODE_UNAVAILABLE": "This operation is not supported in the current task approval mode.",
     "TASK_APPROVAL_POLICY_CONFLICT": "The task approval mode has changed. Refresh before updating.",
     "TASK_APPROVAL_REVIEW_INVALID": "This call or execution context is not eligible for automatic review.",
     "TASK_APPROVAL_REVIEW_CONFLICT": "This call is already bound to a different review context."

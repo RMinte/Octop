@@ -50,7 +50,7 @@ Octop `/api/project-tasks/ws` 发送 `ready.protocol_version=3`。旧客户端�
 
 `expected_revision` 是独立的 `approval_policy.revision`。成功 result.data 为当前 TaskDetail；失败、超时或丢回执不能乐观显示已切换。显式重试使用原 request_id 和完整载荷，或先读取当前任务。跨设备冲突刷新权威模式，同一个旧请求重发不能再次覆盖用户后来的选择。
 
-任务资源 `approval` 返回 `allowed_modes`、`reviewer_ready`、`execution_profile:"host_process"`。管理员默认只开放请求批准；未开放的选项显示原因，Reviewer 未就绪时不能选择帮我审批。管理员在 `/api/admin/security/task-approvals` 设置的强制人工工具优先，普通用户选择模式不能改变该设置。
+任务资源 `approval` 返回 `allowed_modes`、`reviewer_ready`、`execution_profile:"host_process"`。`allowed_modes` 固定包含请求批准、帮我审批和完全访问，三种模式始终可选，无需管理员开放。`reviewer_ready` 仅供状态展示，未就绪不限制选择帮我审批；实际审查不可用时转人工。管理员在 `/api/admin/security/task-approvals` 仅设置强制人工工具，该设置仍优先，普通用户选择模式不能改变它。
 
 模式只影响后续尚未固定的动作；原人工卡、正在审查和已经创建但未领取的本机调用仍保持原快照。网页已提供服务端完全访问范围确认：命令在 Octop 宿主进程执行，工作目录不是系统沙盒。AgentComputer 需分别说明服务端范围与电脑范围，不能把一次服务端确认当作本机同意，也不能仅显示“两端都已生效”。
 

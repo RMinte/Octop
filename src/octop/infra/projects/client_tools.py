@@ -112,10 +112,6 @@ def _normalize(
         status, error = "interrupted", "TASK_INTERRUPTED"
     elif row.expires_at <= now:
         status, error = "expired", "TASK_CLIENT_TOOL_TIMEOUT"
-    context = json.loads(row.approval_context_json)
-    settings = approval_policy.settings(services)
-    if not status and context.get("mode", "ask_for_approval") not in settings.allowed_modes:
-        status, error = "interrupted", "TASK_APPROVAL_MODE_UNAVAILABLE"
     if status:
         services.project_task_tool_call_repo.close(conn, row.call_id, status, error, now)
         return replace(row, status=status, error_code=error, updated_at=now)

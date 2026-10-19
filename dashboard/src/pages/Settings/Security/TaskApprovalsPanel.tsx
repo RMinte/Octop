@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Checkbox, Input, Space, Spin, Typography } from "antd";
+import { Alert, Button, Input, Space, Spin, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import {
   securityApi,
   type TaskApprovalSettings,
 } from "../../../api/modules/security";
-import type { TaskApprovalMode } from "../../../api/modules/projects";
 import { apiErrorMessage } from "../../../utils/apiError";
 import styles from "./index.module.less";
 
@@ -43,7 +42,6 @@ export default function TaskApprovalsPanel() {
     setError("");
     try {
       const result = await securityApi.saveTaskApprovals({
-        allowed_modes: settings.allowed_modes,
         require_human_tools: [
           ...new Set(
             tools
@@ -78,34 +76,6 @@ export default function TaskApprovalsPanel() {
       {!settings && !error && <Spin />}
       {settings && (
         <Space direction="vertical" style={{ width: "100%" }}>
-          <Checkbox.Group
-            aria-label={t("security.taskApprovals.allowedModes")}
-            value={settings.allowed_modes}
-            disabled={saving}
-            options={(
-              [
-                "ask_for_approval",
-                "approve_for_me",
-                "full_access",
-              ] as TaskApprovalMode[]
-            ).map((mode) => ({
-              value: mode,
-              label: t(`projects.tasks.approvalMode.${mode}`),
-              disabled: mode === "ask_for_approval",
-            }))}
-            onChange={(values) => {
-              setSettings({
-                ...settings,
-                allowed_modes: [
-                  "ask_for_approval",
-                  ...(values.filter(
-                    (value) => value !== "ask_for_approval",
-                  ) as TaskApprovalMode[]),
-                ],
-              });
-              setSaved(false);
-            }}
-          />
           <Typography.Text>
             {t("security.taskApprovals.requireHuman")}
           </Typography.Text>

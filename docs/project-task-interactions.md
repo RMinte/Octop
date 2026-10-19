@@ -44,9 +44,9 @@
 
 ## Task 审批模式
 
-TaskSummary / TaskDetail 的 `approval_policy` 为 `{mode, revision, updated_at}`。新建任务顶层 `approval_mode` 默认 `ask_for_approval`，不放入本轮 `options`。可选值为 `ask_for_approval`、`approve_for_me`、`full_access`。管理员默认只开放第一档，通过 `/api/admin/security/task-approvals` 设置 `allowed_modes` 和 `require_human_tools`。任务资源 `approval` 返回 `allowed_modes`、`reviewer_ready` 和 `execution_profile:"host_process"`；服务端目录不是系统沙盒。
+TaskSummary / TaskDetail 的 `approval_policy` 为 `{mode, revision, updated_at}`。新建任务顶层 `approval_mode` 默认 `ask_for_approval`，不放入本轮 `options`。`ask_for_approval`、`approve_for_me`、`full_access` 三种模式始终可选，无需管理员开放。管理员通过 `/api/admin/security/task-approvals` 仅设置 `require_human_tools`。任务资源 `approval` 返回固定包含三种模式的 `allowed_modes`、`reviewer_ready` 和 `execution_profile:"host_process"`；Reviewer 未就绪不限制选择，执行审查不可用时转人工；服务端目录不是系统沙盒。
 
-当前任务切换使用 `task.approval.set`，data 为 `{request_id,expected_revision,mode}`，或 `PUT /api/project-tasks/{task_id}/approval-policy`。`expected_revision` 对应独立模式版本，成功返回当前 TaskDetail。该幂等键保存在任务级别；相同原请求重试只返回当前状态，同键异体返回 `TASK_REQUEST_CONFLICT`，版本竞争为 `TASK_APPROVAL_POLICY_CONFLICT`，模式不在管理员允许范围或审查模型未就绪为 `TASK_APPROVAL_MODE_UNAVAILABLE`。
+当前任务切换使用 `task.approval.set`，data 为 `{request_id,expected_revision,mode}`，或 `PUT /api/project-tasks/{task_id}/approval-policy`。`expected_revision` 对应独立模式版本，成功返回当前 TaskDetail。该幂等键保存在任务级别；相同原请求重试只返回当前状态，同键异体返回 `TASK_REQUEST_CONFLICT`，版本竞争为 `TASK_APPROVAL_POLICY_CONFLICT`。
 
 切换只影响尚未固定的后续动作，不能自动处理已出现的人工审批。首版模式治理服务端 `execute` 和待客户端接入的本机 `exec_command`，不扩大 MCP、发送、发布等其他工具的既有授权。禁止规则和强制人工工具优先于三档模式；问题答案仍独立于授权。
 

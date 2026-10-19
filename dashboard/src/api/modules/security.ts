@@ -1,8 +1,6 @@
 import { request } from "../request";
-import type { TaskApprovalMode } from "./projects";
 
 export interface TaskApprovalSettings {
-  allowed_modes: TaskApprovalMode[];
   require_human_tools: string[];
 }
 

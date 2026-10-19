@@ -232,7 +232,7 @@ class ProjectTaskCreate(TaskMessage):
         default=True, description="任务网络搜索开关；默认开启，持久保存，追问和重试沿用任务当前值。"
     )
     approval_mode: ApprovalMode = Field(
-        default="ask_for_approval", description="任务审批模式；必须在管理员允许范围内。"
+        default="ask_for_approval", description="任务审批模式；三种模式始终可选，默认请求批准。"
     )
 
 
@@ -705,7 +705,6 @@ def send(
             web_search_enabled = (
                 body.web_search_enabled if isinstance(body, ProjectTaskCreate) else True
             )
-            approval_policy.assert_available(services, mode, model_ref)
             start_policy = TaskApprovalPolicy(mode=mode, revision=1, updated_at=_datetime(now))
             configuration = json.dumps(
                 {

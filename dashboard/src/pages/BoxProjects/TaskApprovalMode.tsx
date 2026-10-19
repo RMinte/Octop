@@ -141,25 +141,10 @@ export default function TaskApprovalModePicker({
           loading={loading || saving}
           disabled={disabled || loading || saving || !!retry || !capabilities}
           style={{ minWidth: 160 }}
-          options={modes.map((value) => {
-            const allowed =
-              capabilities?.allowed_modes.includes(value) ?? false;
-            const reviewerUnavailable =
-              value === "approve_for_me" && !capabilities?.reviewer_ready;
-            const reason = !allowed
-              ? t("projects.tasks.approvalMode.adminDisabled")
-              : reviewerUnavailable
-              ? t("projects.tasks.approvalMode.reviewerUnavailable")
-              : "";
-            return {
-              value,
-              disabled: !allowed || reviewerUnavailable,
-              label: `${t(`projects.tasks.approvalMode.${value}`)}${
-                reason ? ` · ${reason}` : ""
-              }`,
-              title: reason,
-            };
-          })}
+          options={modes.map((value) => ({
+            value,
+            label: t(`projects.tasks.approvalMode.${value}`),
+          }))}
           onChange={choose}
         />
       </Space>

@@ -1,6 +1,6 @@
 # Task 审批模式与远端独立 Reviewer
 
-更新日期：2026 年 10 月 16 日。Octop 服务端和现有网页已实现下述 **v3** 契约。一个 Task 共用三档审批模式，由 Octop 保存；独立 Reviewer 在 Octop 远端运行，执行权限留在各执行端。AgentComputer 仅作只读参考，其本机模式同意、远端 Reviewer 适配和派发检查仍需客户端接线，尚未完成真机端到端验证。
+更新日期：2026 年 10 月 19 日。Octop 服务端和现有网页已实现下述 **v3** 契约。一个 Task 共用三档审批模式，由 Octop 保存；三种模式始终可选，无需管理员开放。独立 Reviewer 在 Octop 远端运行，执行权限留在各执行端。AgentComputer 仅作只读参考，其本机模式同意、远端 Reviewer 适配和派发检查仍需客户端接线，尚未完成真机端到端验证。
 
 暂停、提问和人工回应的完整手册见[交互协议](project-task-interactions.md)，客户端操作字段和接线顺序见[AgentComputer 交接说明](agentcomputer-task-interactions.md)。
 
@@ -20,7 +20,7 @@
 
 | 层级 | 保存的事实 | 不能替代的权限 |
 | --- | --- | --- |
-| Octop 管理员设置 | 可用模式、强制人工工具和既有安全限制。 | 用户模式不能覆盖管理员限制。 |
+| Octop 管理员设置 | 强制人工工具和既有安全限制。 | 用户模式不能覆盖管理员限制。 |
 | Octop Task | `approval_policy:{mode,revision,updated_at}`。 | 不代表执行电脑已同意采用增强模式。 |
 | 单个动作 | 原参数、执行端、模式版本、动作摘要和决定来源。 | 之后切模式不能改写该动作或替代另一次批准。 |
 | 执行电脑 | 目录 bookmark、目录/命令授权身份、本机模式同意及执行 journal。 | 远端 mode、Reviewer 允许或领取成功都不授予本机权限。 |
@@ -29,18 +29,17 @@
 
 网页输入框只有一个“当前任务审批模式”选择器。它显示远端已确认状态，模式请求未确认前保留原值；丢回执后显式重试原请求，或读取当前模式。首次选择服务端完全访问会说明真实范围：`execution_profile=host_process`，命令在 Octop 宿主进程内，以其操作系统身份和实际权限执行，工作目录不是 OS 沙盒。该确认不授权任何电脑。
 
-管理员在现有安全设置的 Task 审批区域配置：
+管理员在现有安全设置的 Task 审批区域配置强制人工工具：
 
 ```json
 {
-  "allowed_modes": ["ask_for_approval", "approve_for_me", "full_access"],
   "require_human_tools": ["custom_sensitive_tool", "client__exec_command"]
 }
 ```
 
-读取和保存分别为 `GET` / `PUT /api/admin/security/task-approvals`，需要 `security` 权限。默认仅开放 `ask_for_approval`，且该模式必须始终保留；`require_human_tools` 默认空，最多 256 个不重复的准确工具名。客户端命令可按原名 `exec_command` 或模型侧名 `client__exec_command` 指定。保存替换该设置，不修改专家的全局策略。
+读取和保存分别为 `GET` / `PUT /api/admin/security/task-approvals`，需要 `security` 权限，仅管理 `require_human_tools`。该列表默认空，最多 256 个不重复的准确工具名。客户端命令可按原名 `exec_command` 或模型侧名 `client__exec_command` 指定。保存替换该设置，不修改专家的全局策略。
 
-`GET /api/project-tasks/resources` 的 `approval` 为 `{allowed_modes,reviewer_ready,execution_profile:"host_process"}`。该资源接口的 `reviewer_ready` 检查当前默认模型是否可用；实际审查仍使用原轮次模型，并在审查前复验。不就绪不能选择帮我审批。模式被管理员撤销后，尚未派发的旧自动授权不再可用；客户端调用读取时会关闭为不可执行状态，强制人工变化通过 `manual_review_required` 重新报告。
+`GET /api/project-tasks/resources` 的 `approval` 为 `{allowed_modes,reviewer_ready,execution_profile:"host_process"}`，其中 `allowed_modes` 固定为 `["ask_for_approval","approve_for_me","full_access"]`。`reviewer_ready` 检查当前默认模型是否可用，仅供状态展示，不限制选择帮我审批；实际审查仍使用原轮次模型，并在审查前复验，不可用时转人工。强制人工变化通过客户端调用的 `manual_review_required` 重新报告。
 
 ## 切换任务模式
 
@@ -59,7 +58,7 @@
 
 REST 等价入口为 `PUT /api/project-tasks/{task_id}/approval-policy`，body 同 data，成功返回当前 `TaskDetail`。`expected_revision` 校验 `approval_policy.revision`，与正文、标题和运行状态的版本分开。模式写入、任务级幂等记录及列表增量在同一 owner 事务锁中保存。空闲或轮次结束后也可以切模式。
 
-同一原请求重发只返回当前状态，不重复应用旧意图；同键异体为 `TASK_REQUEST_CONFLICT`，版本竞争为 `TASK_APPROVAL_POLICY_CONFLICT`，管理员未开放或 Reviewer 未就绪为 `TASK_APPROVAL_MODE_UNAVAILABLE`。跨用户隐藏目标。客户端收到成功回执或更新快照后才更新实际模式，按模式独立版本避免旧正文覆盖新设置。
+同一原请求重发只返回当前状态，不重复应用旧意图；同键异体为 `TASK_REQUEST_CONFLICT`，版本竞争为 `TASK_APPROVAL_POLICY_CONFLICT`。跨用户隐藏目标。客户端收到成功回执或更新快照后才更新实际模式，按模式独立版本避免旧正文覆盖新设置。
 
 切换只影响尚未固定的后续动作和未来轮次。已存在的人工卡、正在审查的动作和已创建但尚未领取的客户端调用保持原快照。切换不是撤销已经形成的单次批准；要立即阻止新派发应暂停、停止或撤销资源权限。已启动的操作不回滚、不自动重跑。
 
@@ -68,7 +67,7 @@ REST 等价入口为 `PUT /api/project-tasks/{task_id}/approval-policy`，body �
 普通 `execute` 及已有安全规则产生审批后，Octop 固定原调用与动作模式，在原生检查点落盘后释放主任务执行槽。顺序为：
 
 1. 同一轮相同服务端参数与配置已被拒绝时，直接保存 `previous_denial`，不重新发起 Reviewer。
-2. 强制人工工具、模式已被管理员撤销、原安全策略不允许批准，以及非命令适配范围的审批保持人工。
+2. 强制人工工具、原安全策略不允许批准，以及非命令适配范围的审批保持人工。
 3. 请求批准保持 `pending`；帮我审批进入 `reviewing`；完全访问保存单次 `full_access_mode` 允许。
 4. Reviewer 明确允许或拒绝后保存 `auto_reviewer`；需要用户或异常时，同一个 interaction 转为 `pending`，不另建卡片。
 5. 恢复原断点后，派发前复验原调用、参数、Worker 租约、暂停/取消、当前安全限制与派发标记；每个批准只能用于原动作一次。
@@ -98,7 +97,7 @@ Reviewer 使用本轮已选模型，以独立请求处理固定提案，不带�
 
 ## 执行电脑接入
 
-Octop 已提供 `tool.review`，结果是审查建议，不是本机执行授权。客户端先完成 `client.attach` 和原调用 `tool.claim`，保留 claim_token，再使用原 call 的 `approval_context.action_digest` 与固定的本机执行上下文请求审查。接口只支持可自动审查的 `exec_command`，不能审查任意服务端目标或覆盖强制人工工具。
+Octop 已提供 `tool.review`，结果是审查建议，不是本机执行授权。客户端先完成 `client.attach` 和原调用 `tool.claim`，保留 claim_token，再使用原 call 的 `approval_context.action_digest` 与固定的本机执行上下文请求审查。接口只支持可自动审查的 `exec_command`，原调用冻结模式不是 `approve_for_me` 时返回 `TASK_APPROVAL_MODE_UNAVAILABLE`；不能审查任意服务端目标或覆盖强制人工工具。
 
 本机上下文包含真实 `working_directory`、`workspace_authorization_digest`、`command_authorization_id`、`execution_profile` 和完整 `context_digest`。模式、参数和服务端动作摘要从服务端原调用取值；请求不能替换原参数。首个提案在原 call 上持久固定，后续相同提案返回相同 review，不重复花费模型用量；更换上下文或摘要返回冲突，不能靠新 request_id 重审。
 

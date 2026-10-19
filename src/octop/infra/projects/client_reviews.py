@@ -66,10 +66,7 @@ def request_review(
             or "client__" + row.name in settings.require_human_tools
         ):
             error = ErrorCode.TASK_APPROVAL_REVIEW_INVALID
-        elif (
-            context.get("mode") != "approve_for_me"
-            or "approve_for_me" not in settings.allowed_modes
-        ):
+        elif context.get("mode") != "approve_for_me":
             error = ErrorCode.TASK_APPROVAL_MODE_UNAVAILABLE
         else:
             now = int(time.time() * 1000)

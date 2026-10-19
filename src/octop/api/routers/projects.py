@@ -459,7 +459,7 @@ async def create_task(
     "/{task_id}/approval-policy",
     response_model=tasks.TaskDetail,
     summary="切换任务审批模式",
-    description="只修改本人任务后续动作的审批模式，不放行已存在的审批。expected_revision 校验审批模式版本；request_id 保证重试幂等，重复标识的内容不同返回 409。模式必须在管理员允许范围内。",
+    description="三种模式均可直接选择，只修改本人任务后续动作的审批模式，不放行已存在的审批。expected_revision 校验审批模式版本；request_id 保证重试幂等，重复标识的内容不同返回 409。强制人工工具和执行端资源授权仍生效。",
 )
 async def update_task_approval_policy(
     task_id: str,

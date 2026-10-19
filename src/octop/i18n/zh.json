@@ -537,7 +537,7 @@
     "TASK_INTERACTION_CLOSED": "此交互已关闭，请刷新任务。",
     "TASK_INTERACTION_CONFLICT": "交互内容或版本已变化，请刷新后再操作。",
     "TASK_CONTROL_INVALID": "此轮已不能暂停或恢复。",
-    "TASK_APPROVAL_MODE_UNAVAILABLE": "管理员未开放此审批模式，请刷新设置。",
+    "TASK_APPROVAL_MODE_UNAVAILABLE": "当前任务审批模式不支持此操作。",
     "TASK_APPROVAL_POLICY_CONFLICT": "任务审批模式已被修改，请刷新后再操作。",
     "TASK_APPROVAL_REVIEW_INVALID": "此调用或执行上下文不能用于自动审查。",
     "TASK_APPROVAL_REVIEW_CONFLICT": "此调用已有不同的审查上下文，不能复用原审查。"

@@ -24,7 +24,6 @@ from tests.integration.test_project_tasks import settled
 from tests.support.auth import create_user
 
 SETTINGS_URL = "/api/admin/security/task-approvals"
-ALL_MODES = ["ask_for_approval", "approve_for_me", "full_access"]
 
 
 @pytest.fixture
@@ -134,8 +133,6 @@ async def modes_env(env_with_provider, monkeypatch):
         return HarnessAgent(cfg, model_factory=Factory(cfg.providers), **kwargs)
 
     monkeypatch.setattr(runtime, "HarnessAgent", create)
-    enabled = await client.put(SETTINGS_URL, headers=auth, json={"allowed_modes": ALL_MODES})
-    assert enabled.status_code == 200, enabled.text
     yield client, server, auth, effects, generations, reviews, scenario, entered, released
     released.set()
 
@@ -283,16 +280,16 @@ async def test_switching_mode_does_not_approve_existing_human_card(modes_env):
     assert effects == ["echo approval-check"] and reviews == []
 
 
-async def test_revoking_auto_mode_while_reviewing_requires_human(modes_env):
+async def test_requiring_human_while_reviewing_prevents_automatic_dispatch(modes_env):
     env = modes_env
     client, _, auth, effects, _, _, scenario, entered, released = env
     scenario["block"] = True
     created = await create(env)
     await asyncio.wait_for(entered.wait(), 5)
-    revoked = await client.put(
-        SETTINGS_URL, headers=auth, json={"allowed_modes": ["ask_for_approval"]}
+    changed = await client.put(
+        SETTINGS_URL, headers=auth, json={"require_human_tools": ["execute"]}
     )
-    assert revoked.status_code == 200
+    assert changed.status_code == 200, changed.text
     released.set()
     detail, item = await interaction(env, created["task_id"], "pending")
     assert detail["status"] == "waiting_approval" and effects == []
@@ -342,20 +339,25 @@ async def test_approval_settings_are_admin_only_and_reject_unsafe_shape(env_with
             method,
             SETTINGS_URL,
             headers=user,
-            json={"allowed_modes": ALL_MODES} if method == "PUT" else None,
+            json={"require_human_tools": ["execute"]} if method == "PUT" else None,
         )
         assert response.status_code == 403
-    invalid = await client.put(SETTINGS_URL, headers=auth, json={"allowed_modes": ["full_access"]})
-    assert invalid.status_code == 422
+    initial = await client.get(SETTINGS_URL, headers=auth)
+    assert initial.status_code == 200 and initial.json() == {"require_human_tools": []}
+    for body in (
+        {"allowed_modes": ["ask_for_approval"]},
+        {"require_human_tools": ["execute", "execute"]},
+    ):
+        invalid = await client.put(SETTINGS_URL, headers=auth, json=body)
+        assert invalid.status_code == 422, invalid.text
     valid = await client.put(
         SETTINGS_URL,
         headers=auth,
         json={
-            "allowed_modes": ALL_MODES,
             "require_human_tools": ["execute"],
         },
     )
-    assert valid.status_code == 200
+    assert valid.status_code == 200 and valid.json() == {"require_human_tools": ["execute"]}
     read = await client.get(SETTINGS_URL, headers=auth)
     assert read.json() == valid.json()
 
@@ -368,7 +370,6 @@ async def test_required_human_tool_cannot_be_bypassed_by_task_mode(modes_env, mo
         SETTINGS_URL,
         headers=auth,
         json={
-            "allowed_modes": ALL_MODES,
             "require_human_tools": ["execute"],
         },
     )

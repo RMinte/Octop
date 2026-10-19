@@ -207,7 +207,7 @@ async def get_security_defaults(
     )
 
 
-@router.get("/task-approvals", summary="读取任务审批模式设置")
+@router.get("/task-approvals", summary="读取任务强制人工审批设置")
 async def get_task_approval_settings(
     _: Any = Depends(require_permission("security")),
     server: Any = Depends(get_server),
@@ -219,8 +219,8 @@ async def get_task_approval_settings(
 
 @router.put(
     "/task-approvals",
-    summary="设置任务可用审批模式",
-    description="仅管理员可修改。任务模式不能覆盖强制人工工具或执行端资源授权；默认仅开放请求批准。",
+    summary="设置任务强制人工审批工具",
+    description="仅管理员可修改强制人工工具。三种任务审批模式始终可用，模式选择不能覆盖强制人工工具或执行端资源授权。",
 )
 async def put_task_approval_settings(
     body: TaskApprovalSettings,
