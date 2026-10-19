@@ -165,13 +165,47 @@ export interface TaskInputAttachment {
   workspace_path?: string | null;
   created_at: string;
 }
+export interface TaskPlanStep {
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "blocked" | "skipped";
+  // Historic records may omit these fields; new responses use explicit nulls.
+  step_id?: string | null;
+  result?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  removed_at?: string | null;
+}
+export interface TaskPlan {
+  source: "octop_planning" | "harness_todos";
+  revision: number;
+  plan_id?: string | null;
+  title?: string;
+  active_step_id?: string | null;
+  steps: TaskPlanStep[];
+  retired_steps?: TaskPlanStep[];
+}
 export interface TaskContentBlock {
   block_id: string;
-  type: "text" | "reasoning" | "reasoning_summary" | "tool";
+  type:
+    | "text"
+    | "reasoning"
+    | "reasoning_summary"
+    | "tool"
+    | "plan"
+    | "progress";
   text: string;
   status: "streaming" | "completed" | "failed" | "interrupted";
   tool_call_id: string | null;
   tool_name: string | null;
+  tool_label?: string | null;
+  plan?: TaskPlan | null;
+  plan_id?: string | null;
+  step_id?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  arguments?: Record<string, unknown> | null;
+  output?: unknown | null;
 }
 export interface TaskInteraction {
   interaction_id: string;
@@ -234,6 +268,8 @@ export interface TaskTurn {
   reasoning: string;
   content_blocks: TaskContentBlock[];
   content_revision: number;
+  plan: TaskPlan | null;
+  plan_revision: number;
   status: TaskStatus;
   error_code: string;
   activity: string;

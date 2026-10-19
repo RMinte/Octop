@@ -16,12 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage, message_to_dict, messages_from_dict
+from langchain_core.messages.tool import ToolCall
 from octop_harness import HarnessAgent, HarnessAgentConfig
 from octop_harness.mcp import aload_mcp_tools
 from octop_harness.messages import extract_call_response
 from octop_harness.request import ChatRequest
 
-from octop.i18n import tr
+from octop.i18n import tool_display_name, tr
 from octop.infra.agents.middleware.reasoning import CONFIG_KEY, ReasoningRequestMiddleware
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.agents.security.policy_store import SecuritySettingsStore
@@ -47,11 +48,19 @@ from octop.infra.projects.collaboration import TaskTeam, guard_subagents
 from octop.infra.projects.content import TaskContent
 from octop.infra.projects.context import capture_memory, close_pending_tools
 from octop.infra.projects.control import ASK_USER, TaskControlMiddleware, question_tool
+from octop.infra.projects.execution import TaskExecution, strip_step_metadata
 from octop.infra.projects.image_middleware import TaskImageMaterializeMiddleware
 from octop.infra.projects.image_tools import READ_TASK_IMAGE, read_image_tool
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction
 from octop.infra.projects.models import ProjectFields, SkillBinding
+from octop.infra.projects.planning import PLANNING, TaskPlanning, plan_report
+from octop.infra.projects.progress import (
+    NOTIFY_USER,
+    progress_prompt,
+    progress_report,
+    progress_tool,
+)
 from octop.infra.projects.service import _validate
 from octop.infra.projects.stream import TASK_PROTOCOL
 from octop.infra.projects.tasks import now_ms
@@ -172,9 +181,11 @@ async def run_turn(
     ]
     broker = ClientToolBroker(services, owner_id, turn, options.get("client_id") or "", definitions)
     client_tools = broker.tools()
-    if ({tool.name for tool in client_tools} | SERVER_ARTIFACT_TOOLS | {READ_TASK_IMAGE}) & {
-        tool.name for tool in tools
-    }:
+    if (
+        {tool.name for tool in client_tools}
+        | SERVER_ARTIFACT_TOOLS
+        | {READ_TASK_IMAGE, NOTIFY_USER, PLANNING}
+    ) & {tool.name for tool in tools}:
         raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE)
     active_mcp = [*fields.mcp_servers, *(["client"] if definitions else [])]
     if definitions:
@@ -182,6 +193,7 @@ async def run_turn(
     publisher = TaskArtifactPublisher(services, owner_id, turn, workspace, locale)
     prompt += "\n\n" + tr("projects.artifacts_prompt", locale)
     prompt += "\n\n" + tr("projects.task_images_prompt", locale)
+    prompt += "\n\n" + progress_prompt(locale)
     task_files = [
         item
         for item in await asyncio.to_thread(
@@ -220,6 +232,8 @@ async def run_turn(
                 "glob",
                 "grep",
                 READ_TASK_IMAGE,
+                NOTIFY_USER,
+                PLANNING,
             },
         )
         roles = await asyncio.to_thread(subagent_specs, fields, locale)
@@ -229,6 +243,20 @@ async def run_turn(
     except Exception as exc:
         raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE) from exc
     await asyncio.to_thread(runtime_dir.mkdir, parents=True, exist_ok=True)
+    restored_content = TaskContent.restore(
+        turn.turn_id, json.loads(turn.content_blocks_json), turn.content_revision
+    )
+    planning = TaskPlanning(restored_content.plan, locale)
+    for block in restored_content.blocks:
+        if (
+            block.type == "plan"
+            and block.plan is not None
+            and block.tool_call_id
+            and block.arguments is not None
+        ):
+            planning.restore_call(block.tool_call_id, block.arguments, block.plan)
+    execution = TaskExecution(planning, locale, turn.turn_id)
+    execution.restore(restored_content.dump())
     cfg = HarnessAgentConfig(
         name="project-task",
         language=locale,
@@ -251,11 +279,13 @@ async def run_turn(
         bootstrap_enabled=False,
         subagents=roles,
         subagents_auto_load=False,
+        todos_enabled=False,
         team_enabled=fields.team_enabled,
         peer_invoke_mode="sync",
         middleware=[
             *plugin_middleware,
-            TaskControlMiddleware(services, owner_id, turn, locale),
+            TaskControlMiddleware(services, owner_id, turn, locale, execution),
+            execution,
             ReasoningRequestMiddleware(summary=raw.get("reasoning_mode") not in {None, "disabled"}),
             TaskImageMaterializeMiddleware(services, owner_id, turn.task_id),
         ],
@@ -276,6 +306,8 @@ async def run_turn(
             *publisher.tools(),
             *plugin_tools,
             question_tool(locale),
+            planning.tool(),
+            progress_tool(locale),
             read_image_tool(services, owner_id, turn.task_id, locale),
         ],
     )
@@ -373,8 +405,78 @@ async def run_turn(
             mcp_servers=active_mcp,
             configurable={CONFIG_KEY: raw.get("reasoning_overrides", {})},
         )
+        control_calls: dict[str, str] = {}
+        visible_controls: set[str] = set()
+        registered = {tool.name: tool for tool in [*tools, *client_tools, *(cfg.tools or [])]}
+        call_bindings = {
+            block.tool_call_id: (block.plan_id, block.step_id)
+            for block in restored_content.blocks
+            if block.tool_call_id
+        }
+        restored_call_ids = set(call_bindings)
+        call_details: dict[str, dict[str, Any]] = {}
+        response_binding = planning.binding()
+
+        def intent(call: ToolCall) -> dict[str, Any]:
+            call_id = call["id"] or ""
+            if call_id not in restored_call_ids and not call_details.get(call_id, {}).get(
+                "started_at"
+            ):
+                try:
+                    actual = strip_step_metadata(call, registered.get(call["name"]))
+                    call_bindings[call_id] = (
+                        execution.binding_for_call(call, registered.get(call["name"]))
+                        if actual["args"] != call["args"]
+                        else response_binding
+                    )
+                except ValueError:
+                    # Invalid metadata is rejected before dispatch, never guessed.
+                    call_bindings[call_id] = (None, None)
+            call_bindings.setdefault(call_id, (None, None))
+            plan_id, step_id = call_bindings[call_id]
+            detail = {
+                "call_id": call_id,
+                "name": call["name"],
+                "label": tr("projects.progress_action", locale)
+                if call["name"] == NOTIFY_USER
+                else tool_display_name(call["name"], locale),
+                "plan_id": plan_id,
+                "step_id": step_id,
+                "arguments": strip_step_metadata(call, registered.get(call["name"]))["args"],
+            }
+            call_details[call_id] = {**call_details.get(call_id, {}), **detail}
+            if call["name"] in {NOTIFY_USER, PLANNING}:
+                control_calls[call_id] = call["name"]
+            return {"type": "tool_start", **detail}
+
         if turn.checkpoint_id:
             await checkpoint(agent, turn.turn_id, turn.checkpoint_id)
+            saved_messages = await agent.aget_history(turn.turn_id, limit=1_000_000)
+            saved_calls = {
+                call["id"]: call
+                for message in saved_messages
+                if isinstance(message, AIMessage)
+                for call in message.tool_calls
+            }
+            for message in saved_messages:
+                saved_plan = plan_report(message)
+                if saved_plan is not None:
+                    assert isinstance(message, ToolMessage)
+                    saved_call = saved_calls.get(message.tool_call_id)
+                    if saved_call is not None:
+                        planning.restore_call(message.tool_call_id, saved_call["args"], saved_plan)
+                    else:
+                        planning.restore(saved_plan)
+            if planning.plan is not None:
+                yield {"type": "plan", "plan": planning.plan}
+            response_binding = planning.binding()
+            last_model = next(
+                (message for message in reversed(saved_messages) if isinstance(message, AIMessage)),
+                None,
+            )
+            if last_model is not None:
+                for call in last_model.tool_calls:
+                    intent(call)
             decisions = await asyncio.to_thread(resume_decisions, services, owner_id, turn)
             if decisions is None:
                 raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
@@ -395,6 +497,8 @@ async def run_turn(
                         "type": "token",
                         "content": content,
                         "block_key": event.get("block_key", ""),
+                        "plan_id": response_binding[0],
+                        "step_id": response_binding[1],
                     }
             elif kind in {"reasoning", "reasoning_summary"}:
                 if not delegating:
@@ -402,38 +506,120 @@ async def run_turn(
                         "type": kind,
                         "content": str(event.get("content") or ""),
                         "block_key": event.get("block_key", ""),
+                        "plan_id": response_binding[0],
+                        "step_id": response_binding[1],
                     }
             elif kind == "message_end":
                 if not delegating:
                     yield event
+            elif kind == "custom":
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    continue
+                if data.get("type") == "task_step_context":
+                    response_binding = data.get("plan_id"), data.get("step_id")
+                elif data.get("type") == "task_tool_start":
+                    call_id = data["call_id"]
+                    call_bindings[call_id] = data.get("plan_id"), data.get("step_id")
+                    call_details[call_id] = {**call_details.get(call_id, {}), **data}
+                    if data["name"] in {NOTIFY_USER, PLANNING}:
+                        control_calls[call_id] = data["name"]
+                    if data["name"] not in {NOTIFY_USER, PLANNING}:
+                        yield {
+                            **data,
+                            "type": "tool_start",
+                            "label": tool_display_name(data["name"], locale),
+                        }
+                elif data.get("type") == "task_tool_end":
+                    call_id = data["call_id"]
+                    call_details[call_id] = {**call_details.get(call_id, {}), **data}
+                    if call_id not in control_calls or call_id in visible_controls:
+                        yield {**data, "type": "tool_end"}
             elif kind == "tool_call_chunk" and event.get("name") and event.get("id"):
+                call_bindings.setdefault(str(event["id"]), response_binding)
+                if event["name"] in {NOTIFY_USER, PLANNING}:
+                    control_calls[str(event["id"])] = str(event["name"])
+                    continue
                 if event["name"] in {"task", "ask_agent"}:
                     delegating = True
                 yield {
                     "type": "tool_start",
                     "name": str(event["name"]),
                     "call_id": str(event.get("id") or ""),
+                    "label": tool_display_name(str(event["name"]), locale),
+                    "plan_id": response_binding[0],
+                    "step_id": response_binding[1],
                 }
             elif kind == "tool_result":
                 delegating = False
                 for message in event.get("messages", []):
                     if isinstance(message, ToolMessage):
+                        plan = plan_report(message)
+                        if plan is not None:
+                            yield {
+                                "type": "plan",
+                                "plan": plan,
+                                "call_id": message.tool_call_id,
+                                "arguments": call_details.get(message.tool_call_id, {}).get(
+                                    "arguments"
+                                ),
+                            }
+                            continue
+                        report = progress_report(message)
+                        if report is not None:
+                            yield {
+                                "type": "progress",
+                                "call_id": message.tool_call_id,
+                                "content": report,
+                                "plan_id": call_bindings.get(message.tool_call_id, (None, None))[0],
+                                "step_id": call_bindings.get(message.tool_call_id, (None, None))[1],
+                            }
+                            continue
+                        control_name = control_calls.get(message.tool_call_id)
+                        if message.name in {NOTIFY_USER, PLANNING}:
+                            control_name = message.name
+                        failed = message.status == "error"
+                        result_name = message.name or call_details.get(
+                            message.tool_call_id, {}
+                        ).get("name", "")
+                        if (
+                            result_name.startswith("client__") or result_name == ASK_USER
+                        ) and isinstance(message.content, str):
+                            with contextlib.suppress(ValueError, TypeError):
+                                result = json.loads(message.content)
+                                failed = failed or (
+                                    isinstance(result, dict) and result.get("is_error") is True
+                                )
+                        if control_name:
+                            if not failed:
+                                continue
+                            visible_controls.add(message.tool_call_id)
+                            yield {
+                                **call_details.get(message.tool_call_id, {}),
+                                "type": "tool_start",
+                                "name": control_name,
+                                "call_id": message.tool_call_id,
+                                "label": tr("projects.progress_action", locale)
+                                if control_name == NOTIFY_USER
+                                else tool_display_name(control_name, locale),
+                            }
                         yield {
+                            **call_details.get(message.tool_call_id, {}),
                             "type": "tool_end",
                             "call_id": message.tool_call_id,
-                            "failed": message.status == "error",
+                            "failed": failed,
+                            "output": message.content,
                         }
             elif kind == "state_update":
                 for message in (event.get("data") or {}).get("messages", []):
                     if isinstance(message, AIMessage):
                         for call in message.tool_calls:
+                            detail = intent(call)
+                            if call["name"] in {NOTIFY_USER, PLANNING}:
+                                continue
                             if call["name"] in {"task", "ask_agent"}:
                                 delegating = True
-                            yield {
-                                "type": "tool_start",
-                                "name": call["name"],
-                                "call_id": call["id"],
-                            }
+                            yield detail
             elif kind == "usage":
                 usage[str(event.get("call_id") or "model")] = dict(event.get("usage") or {})
             elif kind == "hitl_required" and event.get("interrupt_id"):
@@ -442,7 +628,7 @@ async def run_turn(
             raise OctopError.localized(broker.failure)
         if pending:
             # Drain before reading the durable interrupt checkpoint.
-            wait = await prepare_wait(agent, broker, list(pending.values()), locale)
+            wait = await prepare_wait(agent, broker, list(pending.values()), locale, execution)
             paused = True
             yield {"type": "pause", **wait}
         else:
@@ -697,17 +883,43 @@ class ProjectTaskWorker:
             async for event in run_turn(self.services, task, turn, history):
                 if event["type"] == "token":
                     reply += event["content"]
-                    content.append("text", event["content"], event.get("block_key", ""))
+                    content.append(
+                        "text",
+                        event["content"],
+                        event.get("block_key", ""),
+                        plan_id=event.get("plan_id"),
+                        step_id=event.get("step_id"),
+                    )
                 elif event["type"] in {"reasoning", "reasoning_summary"}:
                     reasoning += event["content"]
-                    content.append(event["type"], event["content"], event.get("block_key", ""))
+                    content.append(
+                        event["type"],
+                        event["content"],
+                        event.get("block_key", ""),
+                        plan_id=event.get("plan_id"),
+                        step_id=event.get("step_id"),
+                    )
                 elif event["type"] == "message_end":
                     content.end_text()
                 elif event["type"] == "tool_start":
                     activity = event["name"]
-                    content.start_tool(event["call_id"], activity)
+                    content.start_tool(
+                        event["call_id"],
+                        activity,
+                        event.get("label"),
+                        plan_id=event.get("plan_id"),
+                        step_id=event.get("step_id"),
+                        arguments=event.get("arguments"),
+                        started_at=event.get("started_at"),
+                    )
                 elif event["type"] == "tool_end":
-                    content.end_tool(event["call_id"], failed=event["failed"])
+                    content.end_tool(
+                        event["call_id"],
+                        failed=event["failed"],
+                        output=event.get("output"),
+                        finished_at=event.get("finished_at"),
+                        duration_ms=event.get("duration_ms"),
+                    )
                     activity = ""
                 elif event["type"] == "activity":
                     activity = event["name"]
@@ -717,6 +929,19 @@ class ProjectTaskWorker:
                         content.end_tool("")
                 elif event["type"] == "pause":
                     pause = event
+                elif event["type"] == "plan":
+                    content.update_plan(
+                        event["plan"],
+                        call_id=event.get("call_id"),
+                        arguments=event.get("arguments"),
+                    )
+                elif event["type"] == "progress":
+                    content.report_progress(
+                        event["call_id"],
+                        event["content"],
+                        plan_id=event.get("plan_id"),
+                        step_id=event.get("step_id"),
+                    )
             if pause is None and not reply.strip():
                 raise OctopError.localized(ErrorCode.TASK_EXECUTION_FAILED)
         except asyncio.CancelledError:

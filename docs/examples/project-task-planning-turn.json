@@ -1,0 +1,317 @@
+{
+  "type": "turn",
+  "data": {
+    "task": {
+      "task_id": "task_example",
+      "project_id": null,
+      "title": "资料报告",
+      "archived": false,
+      "web_search_enabled": true,
+      "status": "running",
+      "active_turn_id": "turn_example",
+      "list_revision": 2,
+      "approval_policy": {
+        "mode": "ask_for_approval",
+        "revision": 1,
+        "updated_at": "2026-10-17T04:00:00Z"
+      },
+      "created_at": "2026-10-19T04:00:00Z",
+      "updated_at": "2026-10-19T04:00:04Z"
+    },
+    "turn": {
+      "sequence": 1,
+      "turn_id": "turn_example",
+      "request_id": "message_example_001",
+      "prompt": "核对资料并整理报告",
+      "attachments": [],
+      "reply": "",
+      "reasoning": "先读取已有资料，核对报告需要的事实。",
+      "content_blocks": [
+        {
+          "block_id": "turn_example:1",
+          "type": "plan",
+          "text": "",
+          "status": "completed",
+          "tool_call_id": "planning_example_1",
+          "tool_name": "planning",
+          "tool_label": null,
+          "plan": {
+            "source": "octop_planning",
+            "plan_id": "plan_example",
+            "title": "资料报告",
+            "revision": 1,
+            "active_step_id": "step_research",
+            "steps": [
+              {
+                "step_id": "step_research",
+                "content": "核对资料",
+                "status": "in_progress",
+                "result": "",
+                "started_at": "2026-10-19T04:00:00Z",
+                "finished_at": null,
+                "removed_at": null
+              },
+              {
+                "step_id": "step_report",
+                "content": "整理报告",
+                "status": "pending",
+                "result": "",
+                "started_at": null,
+                "finished_at": null,
+                "removed_at": null
+              }
+            ],
+            "retired_steps": []
+          },
+          "plan_id": "plan_example",
+          "step_id": null,
+          "arguments": {
+            "command": "create",
+            "title": "资料报告",
+            "steps": [
+              "核对资料",
+              "整理报告"
+            ]
+          },
+          "output": null,
+          "started_at": null,
+          "finished_at": null,
+          "duration_ms": null
+        },
+        {
+          "block_id": "turn_example:2",
+          "type": "progress",
+          "text": "我会先核对资料，再整理报告。",
+          "status": "completed",
+          "tool_call_id": "notice_example",
+          "tool_name": null,
+          "tool_label": null,
+          "plan": null,
+          "plan_id": "plan_example",
+          "step_id": "step_research",
+          "arguments": null,
+          "output": null,
+          "started_at": null,
+          "finished_at": null,
+          "duration_ms": null
+        },
+        {
+          "block_id": "turn_example:3",
+          "type": "reasoning_summary",
+          "text": "先读取已有资料，核对报告需要的事实。",
+          "status": "completed",
+          "tool_call_id": null,
+          "tool_name": null,
+          "tool_label": null,
+          "plan": null,
+          "plan_id": "plan_example",
+          "step_id": "step_research",
+          "arguments": null,
+          "output": null,
+          "started_at": null,
+          "finished_at": null,
+          "duration_ms": null
+        },
+        {
+          "block_id": "turn_example:4",
+          "type": "tool",
+          "text": "",
+          "status": "completed",
+          "tool_call_id": "read_example",
+          "tool_name": "read_file",
+          "tool_label": "读取文件",
+          "plan": null,
+          "plan_id": "plan_example",
+          "step_id": "step_research",
+          "arguments": {
+            "file_path": "research.md"
+          },
+          "output": "1: 调研资料已核实。\n2: 报告需要说明两项结论。",
+          "started_at": "2026-10-19T04:00:01Z",
+          "finished_at": "2026-10-19T04:00:03Z",
+          "duration_ms": 2000.0
+        },
+        {
+          "block_id": "turn_example:5",
+          "type": "plan",
+          "text": "",
+          "status": "completed",
+          "tool_call_id": "planning_example_2",
+          "tool_name": "planning",
+          "tool_label": null,
+          "plan": {
+            "source": "octop_planning",
+            "plan_id": "plan_example",
+            "title": "资料报告",
+            "revision": 2,
+            "active_step_id": null,
+            "steps": [
+              {
+                "step_id": "step_research",
+                "content": "核对资料",
+                "status": "completed",
+                "result": "已核对 research.md 的两项事实，可以用于报告。",
+                "started_at": "2026-10-19T04:00:00Z",
+                "finished_at": "2026-10-19T04:00:03Z",
+                "removed_at": null
+              },
+              {
+                "step_id": "step_report",
+                "content": "整理报告",
+                "status": "pending",
+                "result": "",
+                "started_at": null,
+                "finished_at": null,
+                "removed_at": null
+              }
+            ],
+            "retired_steps": []
+          },
+          "plan_id": "plan_example",
+          "step_id": null,
+          "arguments": {
+            "command": "mark_step",
+            "expected_revision": 1,
+            "step_id": "step_research",
+            "status": "completed",
+            "result": "已核对 research.md 的两项事实，可以用于报告。"
+          },
+          "output": null,
+          "started_at": null,
+          "finished_at": null,
+          "duration_ms": null
+        },
+        {
+          "block_id": "turn_example:6",
+          "type": "plan",
+          "text": "",
+          "status": "completed",
+          "tool_call_id": "planning_example_3",
+          "tool_name": "planning",
+          "tool_label": null,
+          "plan": {
+            "source": "octop_planning",
+            "plan_id": "plan_example",
+            "title": "资料报告",
+            "revision": 3,
+            "active_step_id": "step_report",
+            "steps": [
+              {
+                "step_id": "step_research",
+                "content": "核对资料",
+                "status": "completed",
+                "result": "已核对 research.md 的两项事实，可以用于报告。",
+                "started_at": "2026-10-19T04:00:00Z",
+                "finished_at": "2026-10-19T04:00:03Z",
+                "removed_at": null
+              },
+              {
+                "step_id": "step_report",
+                "content": "整理报告",
+                "status": "in_progress",
+                "result": "",
+                "started_at": "2026-10-19T04:00:04Z",
+                "finished_at": null,
+                "removed_at": null
+              }
+            ],
+            "retired_steps": []
+          },
+          "plan_id": "plan_example",
+          "step_id": null,
+          "arguments": {
+            "command": "start_step",
+            "expected_revision": 2,
+            "step_id": "step_report"
+          },
+          "output": null,
+          "started_at": null,
+          "finished_at": null,
+          "duration_ms": null
+        },
+        {
+          "block_id": "turn_example:7",
+          "type": "progress",
+          "text": "资料已核对，正在整理报告。",
+          "status": "completed",
+          "tool_call_id": "report_notice",
+          "tool_name": null,
+          "tool_label": null,
+          "plan": null,
+          "plan_id": "plan_example",
+          "step_id": "step_report",
+          "arguments": null,
+          "output": null,
+          "started_at": null,
+          "finished_at": null,
+          "duration_ms": null
+        }
+      ],
+      "content_revision": 9,
+      "plan": {
+        "source": "octop_planning",
+        "plan_id": "plan_example",
+        "title": "资料报告",
+        "revision": 3,
+        "active_step_id": "step_report",
+        "steps": [
+          {
+            "step_id": "step_research",
+            "content": "核对资料",
+            "status": "completed",
+            "result": "已核对 research.md 的两项事实，可以用于报告。",
+            "started_at": "2026-10-19T04:00:00Z",
+            "finished_at": "2026-10-19T04:00:03Z",
+            "removed_at": null
+          },
+          {
+            "step_id": "step_report",
+            "content": "整理报告",
+            "status": "in_progress",
+            "result": "",
+            "started_at": "2026-10-19T04:00:04Z",
+            "finished_at": null,
+            "removed_at": null
+          }
+        ],
+        "retired_steps": []
+      },
+      "plan_revision": 3,
+      "interactions": [],
+      "interaction_revision": 0,
+      "pause_requested": false,
+      "status": "running",
+      "error_code": "",
+      "activity": "",
+      "artifacts": [],
+      "model_ref": "provider/model",
+      "web_search_enabled": true,
+      "approval_policy_at_start": {
+        "mode": "ask_for_approval",
+        "revision": 1,
+        "updated_at": "2026-10-17T04:00:00Z"
+      },
+      "options": {
+        "reasoning_mode": null,
+        "reasoning_effort": null,
+        "model_ref": "provider/model",
+        "skills": [],
+        "mcp_servers": [],
+        "plugins": [],
+        "subagents": [],
+        "memory_enabled": true,
+        "team_enabled": false,
+        "client_id": null,
+        "client_tools": null
+      },
+      "cancel_requested": false,
+      "retry_of_turn_id": null,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "project_revision": null,
+      "created_at": "2026-10-19T04:00:00Z",
+      "updated_at": "2026-10-19T04:00:04Z"
+    },
+    "cursor": "opaque_example_cursor"
+  }
+}

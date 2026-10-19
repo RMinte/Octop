@@ -84,6 +84,8 @@ const fixture: TaskDetail = {
       reasoning: "",
       content_blocks: [],
       content_revision: 0,
+      plan: null,
+      plan_revision: 0,
       status: "completed",
       error_code: "",
       activity: "",

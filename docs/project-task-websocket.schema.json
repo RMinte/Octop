@@ -1804,12 +1804,14 @@
           "type": "string"
         },
         "type": {
-          "description": "回答文字、可展示思考、供应商思考摘要或工具活动。",
+          "description": "回答文字、可展示思考、供应商摘要、工具活动、计划或公开进展。",
           "enum": [
             "text",
             "reasoning",
             "reasoning_summary",
-            "tool"
+            "tool",
+            "plan",
+            "progress"
           ],
           "title": "Type",
           "type": "string"
@@ -1854,6 +1856,124 @@
           ],
           "default": null,
           "title": "Tool Name"
+        },
+        "tool_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "服务端本地化的工具动作名称。",
+          "title": "Tool Label"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "该次计划更新的完整快照，仅 plan 块提供。"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "执行时明确关联的计划；历史未关联记录为空。",
+          "title": "Plan Id"
+        },
+        "step_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "执行时固定的步骤标识，不随步骤排序或当前步骤变化。",
+          "title": "Step Id"
+        },
+        "arguments": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "工具的实际参数，不含宿主步骤元数据。",
+          "title": "Arguments"
+        },
+        "output": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "工具返回的公开 content，保留其原始 JSON 结构。",
+          "title": "Output"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "服务端实际开始执行工具的 UTC 时间；未知为空。",
+          "title": "Started At"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "服务端观察到工具执行结束的 UTC 时间；未知为空。",
+          "title": "Finished At"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "实际工具执行耗时，单位毫秒；未知为空。",
+          "title": "Duration Ms"
         }
       },
       "required": [
@@ -2042,6 +2162,176 @@
       "title": "TaskInteraction",
       "type": "object"
     },
+    "TaskPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "default": "harness_todos",
+          "enum": [
+            "harness_todos",
+            "octop_planning"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "宿主生成的稳定计划标识；旧计划未记录时为空。",
+          "title": "Plan Id"
+        },
+        "title": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Title",
+          "type": "string"
+        },
+        "revision": {
+          "description": "轮次内单调递增的计划版本。",
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "active_step_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "宿主明确选中的执行中步骤；为空时默认动作归属整轮。",
+          "title": "Active Step Id"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/TaskPlanStep"
+          },
+          "maxItems": 100,
+          "title": "Steps",
+          "type": "array"
+        },
+        "retired_steps": {
+          "description": "从本计划移除的步骤，保留原身份、阶段结果和时间。",
+          "items": {
+            "$ref": "#/$defs/TaskPlanStep"
+          },
+          "title": "Retired Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "steps"
+      ],
+      "title": "TaskPlan",
+      "type": "object"
+    },
+    "TaskPlanStep": {
+      "additionalProperties": false,
+      "properties": {
+        "step_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "宿主生成的稳定步骤标识；旧计划未记录时为空，不按文字或顺序补造。",
+          "title": "Step Id"
+        },
+        "content": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed",
+            "blocked",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "result": {
+          "default": "",
+          "description": "模型显式报告的阶段结果或受阻原因；不代表工具自动验证成功。",
+          "maxLength": 2000,
+          "title": "Result",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "宿主首次启动步骤的 UTC 时间。",
+          "title": "Started At"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "宿主结束步骤的 UTC 时间；重新启动后清空。",
+          "title": "Finished At"
+        },
+        "removed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "步骤从当前计划移入历史的 UTC 时间。",
+          "title": "Removed At"
+        }
+      },
+      "required": [
+        "content",
+        "status"
+      ],
+      "title": "TaskPlanStep",
+      "type": "object"
+    },
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
@@ -2090,6 +2380,22 @@
         "content_revision": {
           "description": "本轮内容块版本；只有内容块或块状态变化才递增。",
           "title": "Content Revision",
+          "type": "integer"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskPlan"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "本轮最新的执行计划；未创建时为 null，独立于项目长期目标。"
+        },
+        "plan_revision": {
+          "description": "本轮计划版本；未创建时为零，只在计划条目变化时递增。",
+          "title": "Plan Revision",
           "type": "integer"
         },
         "interactions": {
@@ -2218,6 +2524,8 @@
         "reasoning",
         "content_blocks",
         "content_revision",
+        "plan",
+        "plan_revision",
         "interactions",
         "interaction_revision",
         "pause_requested",

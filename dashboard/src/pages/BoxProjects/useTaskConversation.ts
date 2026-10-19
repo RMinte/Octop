@@ -35,6 +35,8 @@ function mergeTurns(current: TaskTurn[], incoming: TaskTurn[]): TaskTurn[] {
       old && (old.interaction_revision ?? 0) > (turn.interaction_revision ?? 0)
         ? old
         : turn;
+    const plan =
+      old && (old.plan_revision ?? 0) > (turn.plan_revision ?? 0) ? old : turn;
     rows.set(turn.turn_id, {
       ...base,
       interactions: interaction.interactions,
@@ -54,10 +56,32 @@ function mergeTurns(current: TaskTurn[], incoming: TaskTurn[]): TaskTurn[] {
         old?.content_revision ?? 0,
         turn.content_revision,
       ),
+      plan: plan.plan ?? null,
+      plan_revision: Math.max(old?.plan_revision ?? 0, turn.plan_revision ?? 0),
       cancel_requested: old?.cancel_requested || turn.cancel_requested,
     });
   }
   return [...rows.values()].sort((a, b) => a.sequence - b.sequence);
+}
+
+function mergeSnapshot(
+  old: TaskDetail | null,
+  incoming: TaskDetail,
+): TaskDetail {
+  if (!old || old.task_id !== incoming.task_id) return incoming;
+  const base = old.list_revision > incoming.list_revision ? old : incoming;
+  const incomingIDs = new Set(incoming.turns.map((turn) => turn.turn_id));
+  return {
+    ...base,
+    approval_policy: approvalPolicy(old, incoming),
+    // Fresh snapshots replace the loaded range; revisions still protect each turn.
+    turns: mergeTurns(
+      base === old
+        ? old.turns
+        : old.turns.filter((turn) => incomingIDs.has(turn.turn_id)),
+      incoming.turns,
+    ),
+  };
 }
 
 export function useTaskConversation(
@@ -156,14 +180,7 @@ export function useTaskConversation(
           // A reset replaces the loaded range rather than keeping an unknown gap.
           historyRequest.current = null;
           setLoadingHistory(false);
-          setDetail((old) =>
-            old?.task_id === snapshot.task_id &&
-            old.list_revision > snapshot.list_revision
-              ? old
-              : old?.task_id === snapshot.task_id
-              ? { ...snapshot, approval_policy: approvalPolicy(old, snapshot) }
-              : snapshot,
-          );
+          setDetail((old) => mergeSnapshot(old, snapshot));
           cursor = snapshot.event_cursor;
           setLoading(false);
           setError("");
@@ -175,17 +192,7 @@ export function useTaskConversation(
           (event) => {
             if (disposed || controller?.signal.aborted) return;
             if (event.type === "snapshot") {
-              setDetail((old) =>
-                old?.task_id === event.data.task_id &&
-                old.list_revision > event.data.list_revision
-                  ? old
-                  : old?.task_id === event.data.task_id
-                  ? {
-                      ...event.data,
-                      approval_policy: approvalPolicy(old, event.data),
-                    }
-                  : event.data,
-              );
+              setDetail((old) => mergeSnapshot(old, event.data));
               cursor = event.data.event_cursor;
             } else {
               const { task, turn } = event.data;

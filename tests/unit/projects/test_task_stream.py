@@ -6,6 +6,7 @@ from octop_harness.protocols import resolve_protocol
 from openai.types.responses import ResponseReasoningSummaryTextDeltaEvent
 
 from octop.infra.projects.content import TaskContent
+from octop.infra.projects.progress import TaskPlan
 from octop.infra.projects.stream import TASK_PROTOCOL
 
 
@@ -136,3 +137,110 @@ def test_parallel_tools_and_partial_output_have_honest_terminal_states():
         "failed",
         "interrupted",
     ]
+
+
+def test_plan_snapshots_are_immutable_and_resume_does_not_duplicate_progress():
+    output = TaskContent("turn")
+    plan = TaskPlan.model_validate(
+        {
+            "source": "octop_planning",
+            "plan_id": "p1",
+            "revision": 1,
+            "active_step_id": "s1",
+            "steps": [{"step_id": "s1", "content": "核对结果", "status": "in_progress"}],
+        }
+    )
+    output.update_plan(plan)
+    output.report_progress("notice", "接下来核对实际结果。", plan_id="p1", step_id="s1")
+    output.start_tool("check", "read_file", "读取文件", plan_id="p1", step_id="s1")
+    saved = output.dump()
+    restored = TaskContent.restore("turn", saved, output.revision)
+    restored.update_plan(plan)
+    restored.report_progress("notice", "接下来核对实际结果。")
+    assert restored.dump() == saved
+
+    # Public snapshots are independent copies and a replay cannot regress them.
+    plan.steps[0].status = "completed"
+    plan.steps[0].result = "实际文件符合要求。"
+    plan.active_step_id = None
+    plan.revision = 2
+    restored.update_plan(plan)
+    assert restored.plan is not None and restored.plan.revision == 2
+    assert saved[0]["plan"]["steps"][0]["status"] == "in_progress"
+    restored.end_tool("check", failed=True)
+    restored.finish(completed=False)
+    assert restored.blocks[2].status == "failed"
+    assert [b.type for b in restored.blocks] == ["plan", "progress", "tool", "plan"]
+
+    plan.steps = []
+    plan.revision = 3
+    restored.update_plan(plan)
+    assert restored.plan is not None and restored.plan.steps == []
+    assert restored.plan.revision == 3
+
+
+def test_actual_dispatch_adds_details_and_late_completion_keeps_original_binding():
+    output = TaskContent("turn")
+    output.start_tool("a", "read_file", plan_id="plan", step_id="first")
+    assert output.blocks[0].started_at is None
+    output.start_tool(
+        "a",
+        "read_file",
+        plan_id="plan",
+        step_id="first",
+        arguments={"path": "report.md"},
+        started_at="2026-10-19T01:00:00Z",
+    )
+    output.append("reasoning", "另一条模型调用", plan_id="plan", step_id="second")
+    output.start_tool(
+        "a", "read_file", plan_id="plan", step_id="second", started_at="2026-10-19T01:00:01Z"
+    )
+    output.end_tool(
+        "a",
+        output=[{"type": "text", "text": "完整报告"}],
+        finished_at="2026-10-19T01:00:02Z",
+        duration_ms=2000,
+    )
+    output.end_tool("a")
+    block = TaskContent.restore("turn", output.dump(), output.revision).blocks[0]
+    assert (block.plan_id, block.step_id) == ("plan", "first")
+    assert block.arguments == {"path": "report.md"}
+    assert block.output == [{"type": "text", "text": "完整报告"}]
+    assert block.duration_ms == 2000 and block.finished_at > block.started_at
+    assert block.status == "completed"
+
+
+def test_text_ownership_does_not_merge_and_historical_tools_get_no_invented_details():
+    output = TaskContent("turn")
+    output.append("reasoning", "甲", "model", plan_id="p", step_id="a")
+    output.append("reasoning", "乙", "model", plan_id="p", step_id="b")
+    assert [b.step_id for b in output.blocks] == ["a", "b"]
+    old = TaskContent.restore(
+        "old",
+        [
+            {
+                "block_id": "old:1",
+                "type": "tool",
+                "text": "",
+                "status": "completed",
+                "tool_call_id": "old-call",
+                "tool_name": "ls",
+            }
+        ],
+        1,
+    )
+    block = old.blocks[0]
+    assert block.step_id is None and block.plan_id is None
+    assert block.arguments is None and block.output is None
+    assert block.started_at is None and block.finished_at is None and block.duration_ms is None
+
+
+def test_native_failure_corrects_earlier_execution_end_without_erasing_details():
+    output = TaskContent("turn")
+    output.start_tool("call", "tool", arguments={"a": 1}, started_at="2026-10-19T01:00:00Z")
+    output.end_tool("call", finished_at="2026-10-19T01:00:01Z", duration_ms=1000)
+    output.end_tool("call", failed=True, output="工具报告失败")
+    output.end_tool("call", failed=False)
+    block = output.blocks[0]
+    assert block.status == "failed" and block.output == "工具报告失败"
+    assert block.duration_ms == 1000 and block.finished_at is not None

@@ -41,12 +41,32 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
     assert {
         "content_blocks",
         "content_revision",
+        "plan",
+        "plan_revision",
         "interactions",
         "interaction_revision",
         "pause_requested",
         "approval_policy_at_start",
     } <= set(turn["required"])
     assert turn["properties"]["content_blocks"]["items"]["$ref"].endswith("/TaskContentBlock")
+    plan_schema = schema["components"]["schemas"]["TaskPlan"]
+    assert plan_schema["properties"]["steps"]["items"]["$ref"].endswith("/TaskPlanStep")
+    assert {"plan_id", "active_step_id", "retired_steps"} <= set(plan_schema["properties"])
+    assert {"step_id", "result", "started_at", "finished_at", "removed_at"} <= set(
+        schema["components"]["schemas"]["TaskPlanStep"]["properties"]
+    )
+    assert {
+        "plan_id",
+        "step_id",
+        "arguments",
+        "output",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+    } <= set(schema["components"]["schemas"]["TaskContentBlock"]["properties"])
+    assert {"plan", "progress"} <= set(
+        schema["components"]["schemas"]["TaskContentBlock"]["properties"]["type"]["enum"]
+    )
     assert turn["properties"]["attachments"]["items"]["$ref"].endswith("/TaskInputAttachment")
     message = schema["components"]["schemas"]["TaskMessage"]
     assert message["properties"]["attachment_ids"]["maxItems"] == 9

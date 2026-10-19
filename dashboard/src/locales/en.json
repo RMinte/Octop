@@ -6754,6 +6754,47 @@
           "review_expired": "Automatic review expired. The original action will not be automatically allowed.",
           "review_unknown": "The automatic review result is unconfirmed. Human approval is required; review will not be repeated."
         }
+      },
+      "actions": "Actions and progress",
+      "plan": {
+        "title": "Execution plan",
+        "count": "{{completed}} / {{total}} completed",
+        "current": "Current: {{content}}",
+        "empty": "The current plan has been cleared.",
+        "stepStatus": {
+          "pending": "Pending",
+          "in_progress": "In progress",
+          "completed": "Completed",
+          "blocked": "Blocked",
+          "skipped": "Skipped"
+        },
+        "records": "{{count}} records",
+        "result": "Step result",
+        "noRecords": "No actions or result recorded for this step yet.",
+        "retired": "Removed steps"
+      },
+      "actionStatus": {
+        "queued": "Queued",
+        "running": "Running",
+        "completed": "Completed",
+        "failed": "Failed",
+        "cancelled": "Stopped",
+        "waiting_approval": "Awaiting approval",
+        "waiting_answer": "Awaiting answer",
+        "waiting_client_tool": "Awaiting client execution",
+        "paused": "Paused",
+        "unconfirmed": "Execution unconfirmed"
+      },
+      "actionDetails": {
+        "started": "Started",
+        "finished": "Finished",
+        "removed": "Removed",
+        "duration": "Duration",
+        "milliseconds": "{{value}} ms",
+        "arguments": "Arguments",
+        "output": "Output",
+        "noArguments": "No arguments recorded.",
+        "noOutput": "No output recorded yet."
       }
     },
     "configuration": "Project settings",

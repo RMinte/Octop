@@ -223,7 +223,17 @@ async def test_plugin_results_survive_new_harness_and_project_directory_change(
     )
     assert "project_proof" not in observed[-1][2]
     assert project_plugin == ["called"]
-    assert "private-plugin-result" not in json.dumps(task)
+    tool_block = next(
+        block
+        for block in task["turns"][0]["content_blocks"]
+        if block["tool_call_id"] == "plugin-first"
+    )
+    assert tool_block["output"] == "private-plugin-result"
+    assert all(
+        "private-plugin-result" not in turn[field]
+        for turn in task["turns"]
+        for field in ("reply", "reasoning")
+    )
     assert PluginRegistry().get("project-proof").diagnostics == [
         "middleware-proof",
         "middleware-proof",

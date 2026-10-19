@@ -63,6 +63,8 @@ function detail(
         reasoning: "",
         content_blocks: [],
         content_revision: 0,
+        plan: null,
+        plan_revision: 0,
         status,
         error_code: "",
         activity: "",

@@ -39,6 +39,7 @@ from octop.infra.projects.models import (
     SkillBinding,
     SkillHubBinding,
 )
+from octop.infra.projects.progress import TaskPlan
 from octop.infra.projects.service import _validate, get_project
 from octop.infra.projects.service import resources as project_resources
 from octop.infra.projects.title_policy import provisional_title
@@ -256,6 +257,10 @@ class TaskTurn(ProjectModel):
         description="按发生顺序排列的完整内容块快照；历史未记录分段时为空，不推测原始顺序。"
     )
     content_revision: int = Field(description="本轮内容块版本；只有内容块或块状态变化才递增。")
+    plan: TaskPlan | None = Field(
+        description="本轮最新的执行计划；未创建时为 null，独立于项目长期目标。"
+    )
+    plan_revision: int = Field(description="本轮计划版本；未创建时为零，只在计划条目变化时递增。")
     interactions: list[TaskInteraction] = Field(
         description="本轮审批和提问完整快照，包含已处理项。"
     )
@@ -348,6 +353,7 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
 def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = None) -> TaskTurn:
     configuration = json.loads(t.configuration_json)
     blocks = [TaskContentBlock.model_validate(block) for block in json.loads(t.content_blocks_json)]
+    plan = next((block.plan for block in reversed(blocks) if block.type == "plan"), None)
     if t.status not in {"queued", "running"}:
         for block in blocks:
             if block.status == "streaming":
@@ -362,6 +368,8 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         reasoning=t.reasoning,
         content_blocks=blocks,
         content_revision=t.content_revision,
+        plan=plan,
+        plan_revision=plan.revision if plan else 0,
         interactions=interactions.load(t),
         interaction_revision=t.interaction_revision,
         pause_requested=t.pause_requested,

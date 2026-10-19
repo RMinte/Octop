@@ -2,6 +2,8 @@
 
 交付日期：2026 年 10 月 16 日。**本次只修改 Octop，AgentComputer 仓库没有改动。** 参考的是 `/Users/fangyuan/Desktop/code/AgentComputer/`，不是 AgentComputer2。服务端契约与现有网页实现已就绪，本文用于客户端后续接线。
 
+2026 年 10 月 17 日新增的计划、公开进展和动作链路，按[APP 专项接入指南](agentcomputer-task-planning-and-progress.md)升级 DTO、合并、缓存和界面；这部分同样尚未修改 APP。
+
 任务协议现为 **v3**，已提供 Task 三档模式、Octop 远端独立 Reviewer 和客户端命令审查接口。模式范围及实现规则见[审批模式与 Reviewer](project-task-approval-modes.md)。AgentComputer 的本机增强模式同意、Reviewer 适配与派发门禁仍需按本文接线，尚未完成真机端到端验证。
 
 ## 必须一起升级的部分

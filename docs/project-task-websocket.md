@@ -1,16 +1,17 @@
 # 任务 WebSocket 客户端接入指南
 
-协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 17 日。
+协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 19 日。
 
 客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务继续执行；重新连接只恢复订阅。模型执行槽保持串行，主 Task 等待客户端工具时保存检查点并释放执行槽，其他排队任务可以继续；生成中的正文按约 0.5 秒的保存节奏更新。
 
-这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字、图片和通用文件输入、独立的思考内容、工具活动摘要、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。主 Task 支持三档任务审批模式、远端独立 Reviewer、提问和手动暂停恢复；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)，输入附件见[第 15 节](#15-输入附件)。
+这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字、图片和通用文件输入、独立的思考内容、正式执行计划、步骤结果、工具参数与公开返回内容、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。主 Task 支持三档任务审批模式、远端独立 Reviewer、提问和手动暂停恢复；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)，输入附件见[第 15 节](#15-输入附件)。
 
 - [JSON Schema](project-task-websocket.schema.json)：请求按实际 Pydantic 模型导出；服务端数据模型与 REST 共用定义。
 - [API 参考](api.md)：项目配置、任务列表、历史分页、改名与归档。
 - [列表增量同步](project-task-incremental-sync.md)：侧栏任务状态同步。
 - [审批、提问及暂停恢复](project-task-interactions.md)：v3 已实现契约及语义。
 - [AgentComputer 交接文档](agentcomputer-task-interactions.md)：客户端接线说明，本次未修改客户端。
+- [APP 任务计划与动作链路接入指南](agentcomputer-task-planning-and-progress.md)：新块解码、Swift DTO、状态合并、缓存及原生界面接线位置。
 - 网页参考实现：[连接管理](../dashboard/src/api/modules/projectTaskSocket.ts)、[命令封装](../dashboard/src/api/modules/projects.ts)、[状态合并和恢复](../dashboard/src/pages/BoxProjects/useTaskConversation.ts)。
 
 目录：[最短流程](#1-最短接入流程) · [连接与鉴权](#2-连接与鉴权) · [标识约定](#3-标识与公共约定) · [客户端命令](#4-客户端命令) · [服务端事件](#5-服务端事件与完整示例) · [数据合并](#6-数据模型与状态合并) · [本轮设置](#7-本轮模型与资源) · [APP 思考接入](#app-思考内容接入) · [断线恢复](#8-断线恢复与多任务复用) · [错误与关闭](#9-错误与关闭) · [Swift 示例](#10-原生客户端最小连接示例) · [联调检查](#11-客户端联调检查) · [客户端工具](#12-客户端工具完整接入协议)。
@@ -227,6 +228,8 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "reasoning":"",
       "content_blocks":[],
       "content_revision":0,
+      "plan":null,
+      "plan_revision":0,
       "status":"queued",
       "error_code":"",
       "activity":"",
@@ -274,6 +277,8 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "reasoning":"先确认项目目标，再整理下一步。",
       "content_blocks":[{"block_id":"turn_example:1","type":"reasoning","text":"先确认项目目标，再整理下一步。","status":"streaming","tool_call_id":null,"tool_name":null}],
       "content_revision":1,
+      "plan":null,
+      "plan_revision":0,
       "status":"running",
       "error_code":"",
       "activity":"",
@@ -300,7 +305,7 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
 
 reply 和 reasoning 各自是累计全文。例如 reasoning 第一次为“先确认项目目标”，第二次为“先确认项目目标，再整理下一步。”。客户端分别替换累计文本，或确认前缀一致后仅追加新增部分，不能直接拼接两次累计文本。
 
-新轮次还提供 `content_blocks` 和 `content_revision`，用于按发生顺序展示摘要、思考、工具活动与回答。它们随同一条 turn 完整状态发送，不是增量事件。展示规则见下文“有序内容块”。
+新轮次还提供 `content_blocks` 和 `content_revision`，用于保存有序的计划、进展、思考、工具活动与回答，并以明确的计划/步骤 ID 关联执行记录。它们随同一条 turn 完整状态发送，不是增量事件。展示规则见下文“有序内容块”。
 
 snapshot.data 与创建回执的 result.data 使用相同 TaskDetail 结构，没有 data.task 包装。识别任务分别用 `snapshot.data.task_id` 和 `turn.data.task.task_id`。
 
@@ -333,6 +338,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | reasoning | string | 模型实际返回的可展示思考文本，与 reply 分开保存；无内容时为空字符串 |
 | content_blocks | TaskContentBlock[] | 按首次发生顺序排列的完整内容块快照；历史未记录时为空 |
 | content_revision | integer | 本轮内容块版本，独立于任务列表版本；客户端按此版本替换内容块 |
+| plan / plan_revision | object 或 null / integer | 本轮最新完整计划与独立版本；含稳定计划/步骤身份、结果、时间和已移除步骤；未创建时为 null 和 0 |
 | status / error_code | string | 轮次状态；错误码为空字符串时无错误 |
 | activity | string | 当前工具名称；空字符串表示无活动摘要，不含参数或工具结果 |
 | model_ref | string | 实际模型引用 |
@@ -353,7 +359,7 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 1. 按 task_id 找任务，摘要保留较大的 list_revision。不能用历史 turn.status 覆盖任务的当前 status。
 2. 按 turn_id 合并轮次，按 sequence 排序。终态不回退；恢复等待允许重新排队，不能用 running 永不退回 queued 的旧规则；cancel_requested=true 不被迟到的 false 清除。
 3. 同一轮的累计 reply 和 reasoning 分别合并，不接受迟到短文本覆盖。迟到的 REST 写入回执和历史页使用相同规则。终态正文可能为空，例如排队时被取消。
-4. 回复、思考和工具活动变化不递增 list_revision；同一个摘要版本下仍要应用新 turn。
+4. 计划按 `plan_revision` 独立合并，内容块按 `content_revision` 替换完整数组；先选出各自的新快照，再做终态保护并写回这些独立字段。回复、计划、思考、进展和工具活动变化不要求 list_revision 变化。
 5. 应用 turn 后保存其 cursor。已有订阅时，不用迟到写入回执的 event_cursor 跳过尚未应用的事件。
 
 重建 snapshot 基线时替换原加载范围，防止在未知历史缺口两侧直接拼接。需要更早正文时再按分页接口读取。
@@ -393,14 +399,91 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 | 字段 | 含义 |
 | --- | --- |
 | block_id | 本轮内稳定的标识；追加文字、结束或刷新后保持一致 |
-| type | `text` 回答文字；`reasoning` 可展示思考；`reasoning_summary` 供应商返回的思考摘要；`tool` 工具活动 |
+| type | `text` 回答文字；`reasoning` 可展示思考；`reasoning_summary` 供应商返回的思考摘要；`tool` 工具活动；`plan` 计划更新；`progress` 公开进展 |
 | text | 本块累计文字，客户端替换，不重复追加 |
 | status | `streaming` 仍在生成/执行；`completed` 此块结束；`failed` 工具返回错误；`interrupted` 未完成即停止或中断 |
-| tool_call_id / tool_name | 工具调用标识和名称；非工具块为 null。不包含工具参数、输出或凭据 |
+| tool_call_id / tool_name | 工具调用身份和名称；progress 使用通知的 tool_call_id，其他非工具块通常为 null |
+| tool_label | 服务端本地化动作名称；空缺时回退 tool_name |
+| plan | plan 块携带该修订完整计划；其他类型为 null |
+| plan_id / step_id | 生成/执行当时固定的计划和步骤关联；未知或旧数据为 null |
+| arguments | 工具实际参数对象；不混入宿主步骤元数据；未知为 null |
+| output | 实际 ToolMessage.content 的 JSON 值，保留结构；未返回或未知为 null |
+| started_at / finished_at | 服务端实际开始调度和观察结束的 UTC datetime；未知为 null |
+| duration_ms | 执行器记录的非负毫秒耗时；未知为 null |
 
 例如同一轮可以依次收到“摘要① → 工具 A → 摘要② → 回答① → 回答②”。模型响应、供应商摘要项、思考/正文切换和工具调用是分段边界，网络 token 批次与 Markdown 换行不是分段依据。并行工具各有独立标识，完成顺序不改变其原始位置。`completed` 只表示当前内容块结束，不表示任务完成，也不代表回答内容已经通过验证。
 
 有内容块时按数组顺序渲染，思考/摘要可折叠，工具显示名称及状态；不要再同时渲染累计 `reply`、`reasoning` 或当前 `activity`，否则会重复。这些累计字段继续保存。历史没有记录分段的轮次返回 `content_blocks: []`、`content_revision: 0`，直接展示原有累计文本，不推测旧工具顺序、不改写历史数据。
+
+#### 执行计划和动作链路
+
+新主任务使用 `planning`，运行时关闭原生 `write_todos`。APP 不调用这两个工具，只消费正常 `result/snapshot/turn` 中的结果；没有新增顶层事件或规划订阅入口。主模型对复杂请求新建计划，简单问答可不建计划。
+
+`TaskTurn.plan` 未创建时为 `null`，`plan_revision` 为 `0`；创建后 `plan.revision == plan_revision`。当前计划形状如下，ID 是示例占位值：
+
+```json
+{
+  "source": "octop_planning",
+  "plan_id": "plan_example",
+  "title": "生成并验证报告",
+  "revision": 3,
+  "active_step_id": "step_verify",
+  "steps": [
+    {
+      "step_id": "step_create",
+      "content": "生成报告",
+      "status": "completed",
+      "result": "报告附件已实际保存。",
+      "started_at": "2026-10-19T02:00:00Z",
+      "finished_at": "2026-10-19T02:01:00Z",
+      "removed_at": null
+    },
+    {
+      "step_id": "step_verify",
+      "content": "验证交付结果",
+      "status": "in_progress",
+      "result": "",
+      "started_at": "2026-10-19T02:01:01Z",
+      "finished_at": null,
+      "removed_at": null
+    }
+  ],
+  "retired_steps": []
+}
+```
+
+`plan_id` 和 `step_id` 由宿主生成，均为字符串。`steps` 最多 100 项，`content` 非空且最多 500 字符，`result` 最多 2000 字符。状态为 `pending / in_progress / completed / blocked / skipped`。时间由宿主以 UTC 记录；APP 按服务端配置时区显示，未知时不以接收时间回填。
+
+`planning` 是模型工具，不是 WebSocket 命令。它支持：
+
+| command | 语义 |
+| --- | --- |
+| create | 创建全新计划和步骤身份；首步进入 in_progress 并记录 started_at；同轮重建计划仍增加修订，但取得新 plan_id |
+| get | 读取当前完整计划，不修改版本 |
+| update | 提交 expected_revision 和完整步骤列表；保留项必须明确 step_id，新项省略 ID，由宿主分配；删除项进入 retired_steps 并记录 removed_at |
+| start_step | 用 expected_revision、step_id 开始该步，并设为默认当前项 |
+| select_step | 用 expected_revision 明确选择一个执行中步骤为 active_step_id，或清空选择 |
+| mark_step | 用 expected_revision、step_id、completed/blocked/skipped 和非空 result 记录结果与 finished_at，不自动启动下一项 |
+
+除 create/get 外的修改必须匹配当前修订。更新和改排按显式 ID 完成，不按文字或下标识别旧步骤。允许多个独立步骤并行，但 `active_step_id` 只选择一个默认归属，不能由客户端猜“第一个 in_progress”。清空计划以 `steps=[]` 表达，原项保留在 `retired_steps`，对象和新修订仍存在。
+
+规划工具必须独占一次调用批次；与工作工具或其他规划调用混批时整体拒绝，避免并发改变执行归属。子代理/团队成员不改变正式主计划。计划与结果不授予权限，现有审批、提问和暂停机制继续生效；当前实现也不承诺 AgentComputer2 式的严格逐步自动调度。
+
+每次有效计划变化追加一个 `type:"plan"` 块，`plan` 为该修订完整快照。该块同时保留规划调用的 `tool_call_id`、`tool_name:"planning"` 和 `arguments`，供恢复时重建调用幂等缓存；重播已保存的 create 不重新分配身份。`TaskTurn.plan` 从最后一个计划块投影，不是第二份存储。计划块 `status:"completed"` 只表示快照已记录，不表示计划全部完成。普通界面显示最新计划，历史修订用于恢复和查看旧计划。
+
+主模型通过 `message_notify_user(text)` 发送公开进展。成功后产生 `progress` 块，含非空且最多 2000 字符的 `text`、稳定 `tool_call_id` 和已知的步骤关联；相同调用不重复追加。进展不进入 `reply`，不修改步骤状态。成功 planning 和通知不重复显示为普通动作；失败时保留失败工具块，无成功进展。
+
+思考/正文以模型响应开始时的步骤上下文关联；工具和通知以执行时确定的 `plan_id + step_id` 固定归属。宿主可接收工具参数中的 `task_step_id` 元数据来指定一个有效执行中步骤，校验并剥离该元数据后才调用业务工具；工具本身有同名业务参数时不改其语义。这不是 APP 额外发送的字段。
+
+客户端按 **`(plan_id, step_id)`** 聚合动作、进展及思考，组内保留块顺序。改排、改文、切换当前步骤不重绑历史活动；移除步骤从 `retired_steps` 恢复关联；同轮新建的计划不得吞入旧 plan_id 的活动。无绑定记录留在轮次级或未关联组，不补到当前步骤。
+
+工具块展示意图和实际执行事实。`arguments` 是实际参数；`output` 仅保存实际 `ToolMessage.content` 的 JSON 结构，不公开 private artifact、additional_kwargs 或加密推理。底层工具自行截断的内容无法从这里恢复，不能声称输出一定是原程序的完整无限制输出。参数和返回内容可能包含任务实际业务数据，客户端按已鉴权任务详情展示，不将工具块作为本机执行请求。
+
+`started_at` 只在实际调度后填入，审批等待或仅生成调用意图不等于执行。`finished_at` 是服务端观察结束的时间，`duration_ms` 是执行器记录；未观察到或旧数据为 null，不从轮次时间推算。真实本机执行仍通过第 12 节的独立 tool.call 协议。
+
+计划、结果和执行事实随原有完整 turn 快照保存和续接。客户端独立按 `plan_revision`、`content_revision` 合并，不依赖 `list_revision` 或回复增长。暂停恢复同轮保留计划和固定关联；普通追问和手动重试创建新轮，不继承旧完成状态。取消、失败或等待保留真实记录，不自动勾选、阻塞或编造结果。
+
+历史没有计划时保持 `null/0`。已保存的 `source:"harness_todos"` 旧计划可读取，但不转为新的 planning，不回填 plan/step ID、结果、时间或动作归属，不恢复原生 todos 或建立双向同步。APP 必须升级 DTO、合并、缓存及按 ID 聚合，具体位置见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)。
 
 OpenAI 官方端点或已使用 Responses 的模型，在启用思考且声明相应能力时请求 `reasoning.summary: auto`，保存其公开摘要；加密推理内容只用于模型上下文续接，不发给客户端。GLM 等 Chat Completions 接口继续读取 `reasoning_content`，保存为 `reasoning` 块，不冒充供应商摘要，不额外调用模型改写。两种来源均支持工具前后的独立分段。
 
@@ -433,7 +516,7 @@ APP 从 `GET /api/project-tasks/resources` 的选中模型读取该能力，只�
 
 主任务只展示自己的思考内容，团队成员和子代理的思考不会混入；长期记忆仍只捕获用户消息和正式回复。接入前需确保服务端已部署并重启到包含 reasoning 字段的版本；本指南中的 Swift 示例不代表 AgentComputer APP 已完成展示接入。
 
-任务跨轮恢复完整工具上下文；内部工具参数、结果及记忆不通过 task.open、历史分页或订阅发送给客户端。停止后追问会看到工具中断结果，不自动重跑工具。所选插件提供工具、中间件及技能；子代理通过 task 委派，团队成员使用同一组选定角色，独立于专家。长期记忆按任务隔离，可跨执行环境重建和服务重启检索。团队成员文本由主任务汇总，成员和子代理模型用量计入本轮；目前仅支持同步团队调用。
+任务跨轮恢复模型所需工具上下文；本合同保存的工具 arguments 和公开 ToolMessage.content 会随任务详情、历史分页和订阅返回，私有 artifact、additional_kwargs、记忆及其他内部模型上下文不对外展开。停止后追问会看到工具中断结果，不自动重跑工具。所选插件提供工具、中间件及技能；子代理通过 task 委派，团队成员使用同一组选定角色，独立于专家。长期记忆按任务隔离，可跨执行环境重建和服务重启检索。团队成员文本由主任务汇总，成员和子代理模型用量计入本轮；目前仅支持同步团队调用。
 
 ## 8 断线恢复与多任务复用
 

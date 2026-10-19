@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.messages.tool import ToolCall
 from langchain_core.tools import StructuredTool
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -19,7 +19,9 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import approval_policy, interactions
+from octop.infra.projects.execution import TaskExecution
 from octop.infra.projects.interaction_models import ApprovalPayload, AskQuestions
+from octop.infra.projects.planning import PLANNING
 
 ASK_USER = "ask_user_question"
 
@@ -37,8 +39,16 @@ def question_tool(locale: str) -> StructuredTool:
 
 
 class TaskControlMiddleware(AgentMiddleware[Any, Any]):
-    def __init__(self, services: SharedServices, owner: int, turn: ProjectTaskTurnRow, locale: str):
+    def __init__(
+        self,
+        services: SharedServices,
+        owner: int,
+        turn: ProjectTaskTurnRow,
+        locale: str,
+        execution: TaskExecution | None = None,
+    ):
         self.services, self.owner, self.turn, self.locale = services, owner, turn, locale
+        self.execution = execution
 
     async def _pause(self) -> None:
         current = await asyncio.to_thread(
@@ -115,6 +125,32 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
         await self._pause()
+        if (
+            request.tool_call["name"] == PLANNING
+            and self.execution is not None
+            and not self.execution.is_root()
+        ):
+            return ToolMessage(
+                content=tr("projects.planning_root_only", self.locale),
+                name=PLANNING,
+                tool_call_id=str(request.tool_call["id"]),
+                status="error",
+            )
+        messages = request.state.get("messages", []) if isinstance(request.state, dict) else []
+        latest = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+        if (
+            latest is not None
+            and len(latest.tool_calls) > 1
+            and any(call["name"] == PLANNING for call in latest.tool_calls)
+        ):
+            # ToolNode executes batches concurrently. Reject the whole batch before
+            # any plan mutation or business action can race with a change of step.
+            return ToolMessage(
+                content=tr("projects.planning_mixed_batch", self.locale),
+                name=request.tool_call["name"],
+                tool_call_id=str(request.tool_call["id"]),
+                status="error",
+            )
         authorized = await asyncio.to_thread(self._authorize, request.tool_call)
         if authorized is None:
             interrupt({"type": "user_pause"})
@@ -124,4 +160,6 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                 tool_call_id=str(request.tool_call["id"]),
                 status="error",
             )
+        if self.execution is not None:
+            return await self.execution.run(request, handler)
         return await handler(request)

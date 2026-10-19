@@ -10,6 +10,7 @@ from contextlib import aclosing
 from typing import Any, cast
 
 from langchain_core.messages import AIMessage
+from langchain_core.tools import BaseTool
 from octop_harness import HarnessAgent
 from octop_harness.llm.session_header import session_header_scope
 from octop_harness.request import ChatRequest
@@ -20,8 +21,10 @@ from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import approval_runtime, interactions
 from octop.infra.projects.client_tools import ClientToolBroker, _load
-from octop.infra.projects.control import ASK_USER
+from octop.infra.projects.control import ASK_USER, question_tool
+from octop.infra.projects.execution import TaskExecution, strip_step_metadata
 from octop.infra.projects.interaction_models import ApprovalPayload, AskQuestions
+from octop.infra.projects.planning import PLANNING
 from octop.infra.projects.stream import TaskStreamProtocol
 
 
@@ -45,7 +48,11 @@ async def checkpoint(agent: HarnessAgent, turn_id: str, expected: str = "") -> s
 
 
 async def prepare_wait(
-    agent: HarnessAgent, broker: ClientToolBroker, pending: list[dict[str, Any]], locale: str
+    agent: HarnessAgent,
+    broker: ClientToolBroker,
+    pending: list[dict[str, Any]],
+    locale: str,
+    execution: TaskExecution | None = None,
 ) -> dict[str, Any]:
     identifier = await checkpoint(agent, broker.turn.turn_id)
     state = await agent.protocol._graph.aget_state(
@@ -54,6 +61,7 @@ async def prepare_wait(
     messages = await agent.aget_history(broker.turn.turn_id, limit=1_000_000)
     last = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
     calls = list(last.tool_calls) if last else []
+    mixed_planning = len(calls) > 1 and any(call["name"] == PLANNING for call in calls)
     # ToolNode fan-out retains each call's original index even when tool names
     # and arguments are identical. Global after_model interrupts use list order.
     interrupted_calls = {
@@ -67,6 +75,16 @@ async def prepare_wait(
         for entry in task.interrupts
     }
     definitions = {"client__" + d.name: d for d in broker.definitions}
+    registered = {
+        tool.name: tool
+        for tool in [
+            *broker.tools(),
+            question_tool(locale),
+            *(agent.config.tools or []),
+            *getattr(agent, "_mcp_tools", []),
+        ]
+        if isinstance(tool, BaseTool)
+    }
     current = await asyncio.to_thread(
         broker.services.project_task_turn_repo.get, broker.turn.turn_id
     )
@@ -108,15 +126,31 @@ async def prepare_wait(
                     raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
                 calls.remove(match)
                 call_id = match["id"] or ""
+                allowed = configs.get(action["name"], {}).get(
+                    "allowed_decisions", ["approve", "reject"]
+                )
+                error = tr("projects.planning_mixed_batch", locale) if mixed_planning else None
+                tool = registered.get(action["name"])
+                if error is None and execution is not None and action["name"] != PLANNING:
+                    try:
+                        execution.binding_for_call(match, tool)
+                    except ValueError:
+                        error = tr("projects.task_step_invalid", locale)
+                if error is not None:
+                    entries.append(_inline_error(error, allowed))
+                    continue
+                # Keep matching and server approval facts intact; only runtime
+                # inputs sent to clients/questions lose host-owned metadata.
+                arguments = strip_step_metadata(match, tool)["args"]
                 if action["name"] in definitions:
                     client_call = await asyncio.to_thread(
-                        broker._create, definitions[action["name"]], action["args"], call_id
+                        broker._create, definitions[action["name"]], arguments, call_id
                     )
                     call_ids.append(client_call)
                     entries.append({"type": "client", "call_id": client_call})
                     kinds.add("client_tool")
                 elif action["name"] == ASK_USER:
-                    questions = AskQuestions.model_validate(action["args"]).questions
+                    questions = AskQuestions.model_validate(arguments).questions
                     if sum(i.kind == "question" for i in items) + len(questions) > 3:
                         entries.append(
                             {
@@ -135,9 +169,6 @@ async def prepare_wait(
                     entries.append({"type": "question", "ids": [i.interaction_id for i in created]})
                     kinds.add("answer")
                 else:
-                    allowed = configs.get(action["name"], {}).get(
-                        "allowed_decisions", ["approve", "reject"]
-                    )
                     payload = ApprovalPayload(
                         tool_name=action["name"],
                         arguments=action["args"],
@@ -166,6 +197,23 @@ async def prepare_wait(
         "wait_kind": kind,
         "interactions_json": interactions.dump(items) if len(items) != old_count else None,
     }
+
+
+def _inline_error(message: str, allowed: list[str]) -> dict[str, Any]:
+    if "reject" in allowed:
+        decision = {"type": "reject", "message": message}
+    elif "respond" in allowed:
+        # Native HITL respond always constructs a success-status ToolMessage.
+        # Retain an explicit error result so models and projections cannot read
+        # a failed admission as a successful client action or answered question.
+        decision = {
+            "type": "respond",
+            "message": interactions.encode({"is_error": True, "output": message}),
+        }
+    else:
+        # Never approve an action just to escape an incompatible interrupt.
+        raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+    return {"type": "inline", "decision": decision}
 
 
 def resume_decisions(
