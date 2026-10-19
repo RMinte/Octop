@@ -171,27 +171,14 @@ class ProjectTaskRepo:
         record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
 
     @staticmethod
-    def update_approval(
-        conn: Any,
-        row: ProjectTaskRow,
-        mode: str,
-        requests_json: str,
-        now: int,
-    ) -> ProjectTaskRow | None:
-        result = conn.execute(
-            "UPDATE project_tasks SET approval_mode=?,approval_revision=approval_revision+1,"
-            "approval_updated_at=?,approval_requests_json=?,updated_at=?,"
-            "list_revision=list_revision+1 "
-            "WHERE task_id=? AND owner_id=? AND approval_revision=? RETURNING *",
-            (mode, now, requests_json, now, row.task_id, row.owner_id, row.approval_revision),
-        ).fetchone()
-        if result is None:
-            return None
-        updated = ProjectTaskRow.from_row(result)
-        record_change(
-            conn, updated.owner_id, task_scope(updated.project_id), updated.task_id, updated
-        )
-        return updated
+    def approval_changed(conn: Any, owner_id: int) -> None:
+        rows = conn.execute(
+            "UPDATE project_tasks SET list_revision=list_revision+1 WHERE owner_id=? RETURNING *",
+            (owner_id,),
+        ).fetchall()
+        for result in rows:
+            row = ProjectTaskRow.from_row(result)
+            record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
 
     @staticmethod
     def activate(conn: Any, task_id: str, turn_id: str, now: int) -> bool:

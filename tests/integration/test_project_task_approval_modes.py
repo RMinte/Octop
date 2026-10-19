@@ -139,6 +139,18 @@ async def modes_env(env_with_provider, monkeypatch):
 
 async def create(env, mode="approve_for_me", prompt="command"):
     client, _, auth, *_ = env
+    current = (await client.get("/api/project-tasks/approval-policy", headers=auth)).json()
+    if current["mode"] != mode:
+        changed = await client.put(
+            "/api/project-tasks/approval-policy",
+            headers=auth,
+            json={
+                "request_id": "test-global-mode-" + str(current["revision"]),
+                "expected_revision": current["revision"],
+                "mode": mode,
+            },
+        )
+        assert changed.status_code == 200, changed.text
     result = await client.post(
         "/api/project-tasks",
         headers=auth,
@@ -265,7 +277,9 @@ async def test_switching_mode_does_not_approve_existing_human_card(modes_env):
         headers=auth,
         json={
             "request_id": str(uuid4()),
-            "expected_revision": 1,
+            "expected_revision": (
+                await client.get("/api/project-tasks/approval-policy", headers=auth)
+            ).json()["revision"],
             "mode": "full_access",
         },
     )
@@ -428,7 +442,9 @@ async def test_denied_action_cannot_be_retried_under_full_access(modes_env, monk
             headers=auth,
             json={
                 "request_id": str(uuid4()),
-                "expected_revision": 1,
+                "expected_revision": (
+                    await client.get("/api/project-tasks/approval-policy", headers=auth)
+                ).json()["revision"],
                 "mode": "full_access",
             },
         )
@@ -461,3 +477,32 @@ async def test_full_access_preserves_admin_reject_only_decisions(modes_env):
     assert (await respond(env, detail, item, approval(item, "deny"))).status_code == 200
     assert (await settled(client, auth, created["task_id"]))["status"] == "completed"
     assert reviews == [] and effects == []
+
+
+async def test_global_switch_applies_to_next_action_of_running_task_without_releasing_old_card(
+    modes_env,
+):
+    client, _, auth, effects, _, reviews, scenario, *_ = modes_env
+    scenario["repeat"] = True
+    created = await create(modes_env, mode="ask_for_approval")
+    detail, original = await interaction(modes_env, created["task_id"], "pending")
+    changed = await client.put(
+        "/api/project-tasks/approval-policy",
+        headers=auth,
+        json={"request_id": "switch-running-global", "expected_revision": 1, "mode": "full_access"},
+    )
+    assert changed.status_code == 200, changed.text
+    waiting = (await client.get(f"/api/project-tasks/{created['task_id']}", headers=auth)).json()
+    assert waiting["status"] == "waiting_approval" and effects == []
+    assert waiting["turns"][0]["interactions"][0] == original
+    accepted = await respond(modes_env, detail, original, approval(original))
+    assert accepted.status_code == 200, accepted.text
+    final = await settled(client, auth, created["task_id"])
+    first, second = final["turns"][0]["interactions"]
+    assert first["payload"]["approval_mode"] == "ask_for_approval"
+    assert first["resolution"]["source"] == "user"
+    assert second["payload"]["approval_mode"] == "full_access"
+    assert second["payload"]["approval_revision"] == changed.json()["revision"]
+    assert second["resolution"]["source"] == "full_access_mode"
+    assert final["turns"][0]["approval_policy_at_start"]["mode"] == "ask_for_approval"
+    assert effects == ["echo approval-check", "echo approval-check"] and reviews == []

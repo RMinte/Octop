@@ -60,6 +60,7 @@ def export_schema() -> dict[str, Any]:
             },
         },
     )
+    event("ApprovalPolicyEvent", "approval.policy", {"data": ref("TaskApprovalPolicy")})
     event("SnapshotEvent", "snapshot", {"data": ref("TaskDetail")})
     event("TurnEvent", "turn", {"data": ref("TaskUpdate")})
     event("ToolCallEvent", "tool.call", {"data": ref("ClientToolCall")})

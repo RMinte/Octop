@@ -16,7 +16,7 @@ RequestID = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{8,128}$")]
 
 class TaskApprovalPolicy(ProjectModel):
     mode: ApprovalMode
-    revision: int = Field(ge=1, description="任务审批模式版本；切换模式时递增。")
+    revision: int = Field(ge=1, description="当前账号全部任务共用的审批模式版本；切换时递增。")
     updated_at: datetime
 
 

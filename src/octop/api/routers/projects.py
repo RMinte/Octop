@@ -24,7 +24,7 @@ from octop.infra.projects import (
     sync,
     tasks,
 )
-from octop.infra.projects.approval_models import ApprovalPolicyUpdate
+from octop.infra.projects.approval_models import ApprovalPolicyUpdate, TaskApprovalPolicy
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import InteractionResponse, TaskControl
 from octop.infra.projects.models import (
@@ -455,11 +455,44 @@ async def create_task(
     return result
 
 
+@task_router.get(
+    "/approval-policy",
+    response_model=TaskApprovalPolicy,
+    summary="读取账号全局任务审批模式",
+    description="本人所有项目、已有及新任务共用同一个审批模式与独立版本。没有任务时也可读取。",
+)
+async def get_global_task_approval_policy(
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> TaskApprovalPolicy:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(approval_policy.current, _services(server), user.id)
+
+
+@task_router.put(
+    "/approval-policy",
+    response_model=TaskApprovalPolicy,
+    summary="切换账号全局任务审批模式",
+    description="原子更新本人全部任务及未来新任务的后续动作模式。expected_revision 检查全局版本，request_id 全账号幂等；不改变已固定的动作、人工卡、强制人工规则或执行电脑授权。",
+)
+async def update_global_task_approval_policy(
+    body: ApprovalPolicyUpdate,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> TaskApprovalPolicy:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        approval_policy.set_global_policy, _services(server), user.id, body
+    )
+
+
 @task_router.put(
     "/{task_id}/approval-policy",
     response_model=tasks.TaskDetail,
-    summary="切换任务审批模式",
-    description="三种模式均可直接选择，只修改本人任务后续动作的审批模式，不放行已存在的审批。expected_revision 校验审批模式版本；request_id 保证重试幂等，重复标识的内容不同返回 409。强制人工工具和执行端资源授权仍生效。",
+    summary="从任务切换账号全局审批模式",
+    description="验证任务归属后，原子切换当前账号所有任务及未来任务后续动作的审批模式，不放行已存在的审批。expected_revision 校验审批模式版本；request_id 保证重试幂等，重复标识的内容不同返回 409。强制人工工具和执行端资源授权仍生效。",
 )
 async def update_task_approval_policy(
     task_id: str,

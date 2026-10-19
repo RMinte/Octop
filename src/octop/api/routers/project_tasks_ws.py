@@ -207,6 +207,7 @@ async def task_websocket(websocket: WebSocket) -> None:
 
     async def push_updates() -> None:
         checked = time.monotonic()
+        delivered_policy = None
         try:
             while True:
                 await asyncio.sleep(_UPDATE_SECONDS)
@@ -215,6 +216,12 @@ async def task_websocket(websocket: WebSocket) -> None:
                         await authenticate()
                         await websocket.send_json({"type": "heartbeat"})
                         checked = time.monotonic()
+                    policy = await asyncio.to_thread(approval_policy.current, services, user.id)
+                    if policy != delivered_policy:
+                        await websocket.send_json(
+                            {"type": "approval.policy", "data": policy.model_dump(mode="json")}
+                        )
+                        delivered_policy = policy
                     for task_id, cursor in list(subscriptions.items()):
                         try:
                             updates = await asyncio.to_thread(

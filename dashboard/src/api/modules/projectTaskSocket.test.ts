@@ -72,6 +72,57 @@ afterEach(() => {
 });
 
 describe("shared task WebSocket", () => {
+  it("keeps account approval pushes alive without a selected task", async () => {
+    const connection = new ProjectTaskSocket();
+    const controller = new AbortController();
+    const receive = vi.fn(),
+      opened = vi.fn();
+    const events = connection.approvalEvents(
+      receive,
+      controller.signal,
+      opened,
+    );
+    const ws = await ready();
+    expect(opened).toHaveBeenCalledTimes(1);
+    const policy = {
+      mode: "approve_for_me",
+      revision: 4,
+      updated_at: "2026-10-19T00:00:00Z",
+    };
+    ws.receive({ type: "approval.policy", data: policy });
+    expect(receive).toHaveBeenCalledExactlyOnceWith(policy);
+    expect(ws.sent.some((frame) => frame.type === "task.subscribe")).toBe(
+      false,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(ws.readyState).toBe(1);
+    controller.abort();
+    await events;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ws.readyState).toBe(3);
+  });
+
+  it("rejects malformed account policies instead of publishing an actionable mode", async () => {
+    const connection = new ProjectTaskSocket();
+    const controller = new AbortController();
+    const receive = vi.fn();
+    const events = connection.approvalEvents(receive, controller.signal);
+    const rejected = expect(events).rejects.toThrow();
+    const ws = await ready();
+    ws.receive({
+      type: "approval.policy",
+      data: {
+        mode: "full_access",
+        revision: 0,
+        updated_at: "2026-10-19T00:00:00Z",
+      },
+    });
+    await rejected;
+    expect(receive).not.toHaveBeenCalled();
+    expect(ws.readyState).toBe(3);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
   it("authenticates without a URL token and routes Chinese text to separate tasks", async () => {
     const connection = new ProjectTaskSocket();
     const a = new AbortController(),

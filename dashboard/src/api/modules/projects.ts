@@ -329,7 +329,6 @@ export interface TaskMessage {
   options?: TaskExecutionOptions;
 }
 export interface TaskCreate extends TaskMessage {
-  approval_mode: TaskApprovalMode;
   web_search_enabled?: boolean;
 }
 export interface TaskPatch {
@@ -373,6 +372,16 @@ const taskListPath = (projectID: string | null) =>
     ? `/projects/${encodeURIComponent(projectID)}/tasks`
     : "/project-tasks";
 export const projectTasksApi = {
+  approvalPolicy: () =>
+    request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
+      cache: "no-store",
+    }),
+  updateApprovalPolicy: (body: TaskApprovalUpdate) =>
+    request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  approvalEvents: projectTaskSocket.approvalEvents.bind(projectTaskSocket),
   uploadAttachment: (file: File, signal?: AbortSignal) => {
     const body = new FormData();
     body.append("file", file);

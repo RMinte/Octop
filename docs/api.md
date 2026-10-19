@@ -77,7 +77,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 ### 任务审批模式与远端 Reviewer
 
-TaskSummary/TaskDetail 返回 `approval_policy={mode,revision,updated_at}`，轮次返回 `approval_policy_at_start`。创建任务可用顶层 `approval_mode` 选择 `ask_for_approval`、`approve_for_me`、`full_access`；三种模式始终可选，默认人工审批。已建任务用 `PUT /api/project-tasks/{task_id}/approval-policy` 提交 `{request_id,expected_revision,mode}`，或等价 `task.approval.set`。版本取审批模式的独立 revision；网络重试复用原请求。新请求版本冲突返回 `TASK_APPROVAL_POLICY_CONFLICT`。切换不放行已有人工卡。
+TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy={mode,revision,updated_at}`，轮次保留 `approval_policy_at_start`。`GET /api/project-tasks/approval-policy` 读取、`PUT /api/project-tasks/approval-policy` 提交 `{request_id,expected_revision,mode}` 并返回策略对象，无任务时也可用。原 `PUT /api/project-tasks/{task_id}/approval-policy` 和 `task.approval.set` 验证任务归属后也修改全局模式，返回 TaskDetail。全部项目、已有/运行/新任务统一生效，三种模式始终可选，新账号默认询问。创建顶层旧 `approval_mode` 已忽略，不可覆盖或重置全局。版本和幂等键为账号范围；网络重试复用原请求。新请求版本冲突返回 `TASK_APPROVAL_POLICY_CONFLICT`。切换不放行已有人工卡，不改动作/轮次旧快照、强制人工规则或本机资源授权。WebSocket 独立推送 `approval.policy` 事件，首次轮询及全局变化发送，不要求 task.subscribe。
 
 `GET /api/project-tasks/resources` 增加 `approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}`，`allowed_modes` 固定返回三种模式。`reviewer_ready` 仅供状态展示，不限制选择帮我审批；执行时 Reviewer 不可用则转人工。管理员通过 `GET/PUT /api/admin/security/task-approvals` 仅保存 `{require_human_tools}`，无需配置可用模式。网页在选择完全访问前说明服务端命令使用 Octop 主机进程权限；本机权限仍由执行电脑授予。
 
@@ -198,7 +198,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-创建无项目任务时，仍使用上述入口，把 `project_id` 传 null 或省略。也可使用 `POST /api/projects/{project_id}/tasks`，此时不再重复传 `project_id`，仍可设置 `web_search_enabled`、`approval_mode` 和 `options`。
+创建无项目任务时，仍使用上述入口，把 `project_id` 传 null 或省略。也可使用 `POST /api/projects/{project_id}/tasks`，此时不再重复传 `project_id`，仍可设置 `web_search_enabled` 和 `options`；审批模式读取账号全局设置。
 
 这两个创建入口都返回 HTTP 202 和 `TaskDetail`，表示任务及首轮已保存并排队，不表示模型已执行完成。执行不要求预先创建专家或单独创建会话。
 
@@ -211,7 +211,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-消息支持文字、图片和通用文件，可混合发送：`prompt` 去首尾空白后最多 32768 字符；文字为空时必须提供 attachment_ids。`request_id` 为 8–128 位字母、数字、短横线或下划线。附件先通过独立上传接口取得 ID，图片和其他文件合计每轮最多九个。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；创建任务可在顶层设置 approval_mode 和 web_search_enabled。未覆盖的资源继承发送时的项目配置。
+消息支持文字、图片和通用文件，可混合发送：`prompt` 去首尾空白后最多 32768 字符；文字为空时必须提供 attachment_ids。`request_id` 为 8–128 位字母、数字、短横线或下划线。附件先通过独立上传接口取得 ID，图片和其他文件合计每轮最多九个。当前请求接受 options 中的本轮模型及 Skill/MCP 选择；创建任务可在顶层设置 web_search_enabled；旧 approval_mode 已忽略，继承账号全局模式。未覆盖的资源继承发送时的项目配置。
 
 通过 `GET /api/project-tasks/task_example` 读取 `TaskDetail`，默认最近 50 轮。`limit` 为 1–100；使用 `next_page_cursor` 作为下一次的 `page_cursor` 读取更早轮次，每页内部按创建顺序正序排列。首屏与实时基线来自同一数据库快照，历史页的 `event_cursor=null`，不能用历史页推进实时位置。以下是单轮已完成时的示意，创建响应的轮次通常处于 queued：
 

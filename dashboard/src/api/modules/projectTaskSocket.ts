@@ -1,7 +1,7 @@
 import i18n from "../../i18n";
 import { getWsUrl } from "../config";
 import { getAuthToken, isSessionOnlyAuth, setAuthToken } from "../request";
-import type { TaskEvent } from "./projects";
+import type { TaskApprovalPolicy, TaskEvent } from "./projects";
 
 type Pending = {
   resolve: (data: unknown) => void;
@@ -10,6 +10,10 @@ type Pending = {
 };
 type Listener = {
   receive: (event: TaskEvent) => void;
+  reject: (error: Error) => void;
+};
+type ApprovalListener = {
+  receive: (policy: TaskApprovalPolicy) => void;
   reject: (error: Error) => void;
 };
 type Frame = {
@@ -31,6 +35,7 @@ export class ProjectTaskSocket {
   private token = "";
   private pending = new Map<string, Pending>();
   private listeners = new Map<string, Set<Listener>>();
+  private approvalListeners = new Set<ApprovalListener>();
   private rejectReady: ((error: Error) => void) | null = null;
   private idle: ReturnType<typeof setTimeout> | undefined;
   private watchdog: ReturnType<typeof setTimeout> | undefined;
@@ -50,16 +55,25 @@ export class ProjectTaskSocket {
     this.pending.clear();
     const listeners = [...this.listeners.values()];
     this.listeners.clear();
+    const approvalListeners = [...this.approvalListeners];
+    this.approvalListeners.clear();
+    for (const reader of approvalListeners) reader.reject(error);
     for (const readers of listeners)
       for (const reader of readers) reader.reject(error);
     socket.close();
   }
 
   private release() {
-    if (this.pending.size || this.listeners.size) return;
+    if (this.pending.size || this.listeners.size || this.approvalListeners.size)
+      return;
     clearTimeout(this.idle);
     this.idle = setTimeout(() => {
-      if (this.socket && !this.pending.size && !this.listeners.size)
+      if (
+        this.socket &&
+        !this.pending.size &&
+        !this.listeners.size &&
+        !this.approvalListeners.size
+      )
         this.fail(disconnected(), this.socket);
     }, 1000);
   }
@@ -148,6 +162,21 @@ export class ProjectTaskSocket {
             for (const reader of readers ?? []) reader.reject(error);
             this.release();
           } else this.fail(error, socket);
+        } else if (frame.type === "approval.policy") {
+          const policy = frame.data as TaskApprovalPolicy;
+          if (
+            !policy ||
+            !["ask_for_approval", "approve_for_me", "full_access"].includes(
+              policy.mode,
+            ) ||
+            !Number.isInteger(policy.revision) ||
+            policy.revision < 1 ||
+            typeof policy.updated_at !== "string"
+          ) {
+            this.fail(disconnected(), socket);
+            return;
+          }
+          for (const reader of this.approvalListeners) reader.receive(policy);
         } else if (frame.type === "turn" || frame.type === "snapshot") {
           const update = frame as TaskEvent;
           const taskID =
@@ -186,6 +215,39 @@ export class ProjectTaskSocket {
       } catch {
         this.fail(disconnected(), socket);
       }
+    });
+  }
+
+  async approvalEvents(
+    receive: (policy: TaskApprovalPolicy) => void,
+    signal: AbortSignal,
+    onOpen?: () => void,
+  ): Promise<void> {
+    if (signal.aborted) return;
+    await this.connect();
+    if (signal.aborted) {
+      this.release();
+      return;
+    }
+    return new Promise<void>((resolve, reject) => {
+      let finished = false;
+      const finish = (error?: Error) => {
+        if (finished) return;
+        finished = true;
+        signal.removeEventListener("abort", abort);
+        this.approvalListeners.delete(listener);
+        this.release();
+        if (error) reject(error);
+        else resolve();
+      };
+      const abort = () => finish();
+      const listener: ApprovalListener = {
+        receive,
+        reject: (error) => finish(error),
+      };
+      this.approvalListeners.add(listener);
+      signal.addEventListener("abort", abort, { once: true });
+      onOpen?.();
     });
   }
 

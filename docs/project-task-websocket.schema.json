@@ -811,7 +811,8 @@
         },
         "approval_mode": {
           "default": "ask_for_approval",
-          "description": "任务审批模式；三种模式始终可选，默认请求批准。",
+          "deprecated": true,
+          "description": "旧客户端输入字段，已忽略；新任务继承当前账号全局审批模式。",
           "enum": [
             "ask_for_approval",
             "approve_for_me",
@@ -1707,7 +1708,7 @@
           "type": "string"
         },
         "revision": {
-          "description": "任务审批模式版本；切换模式时递增。",
+          "description": "当前账号全部任务共用的审批模式版本；切换时递增。",
           "minimum": 1,
           "title": "Revision",
           "type": "integer"
@@ -3073,6 +3074,23 @@
       ],
       "additionalProperties": true
     },
+    "ApprovalPolicyEvent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "approval.policy"
+        },
+        "data": {
+          "$ref": "#/$defs/TaskApprovalPolicy"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "additionalProperties": true
+    },
     "SnapshotEvent": {
       "type": "object",
       "properties": {
@@ -3224,6 +3242,9 @@
         },
         {
           "$ref": "#/$defs/ResultEvent"
+        },
+        {
+          "$ref": "#/$defs/ApprovalPolicyEvent"
         },
         {
           "$ref": "#/$defs/SnapshotEvent"

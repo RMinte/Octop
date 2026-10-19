@@ -33,7 +33,6 @@ import {
   projectTasksApi,
   type TaskMessage,
   type TaskCreate,
-  type TaskApprovalMode,
   type TaskExecutionOptions,
   type TaskArtifact,
   type Project,
@@ -114,8 +113,6 @@ export default function TaskConversations({
   const images = useTaskImages(`${projectID ?? ""}:${taskID ?? "new"}`);
   const imageInput = useRef<HTMLInputElement>(null);
   const [options, setOptions] = useState<TaskExecutionOptions>({});
-  const [approvalMode, setApprovalMode] =
-    useState<TaskApprovalMode>("ask_for_approval");
   const [approvalSaving, setApprovalSaving] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const webSearchSaving = !!taskID && queue.isHeld(taskID);
@@ -217,8 +214,6 @@ export default function TaskConversations({
     setError("");
     setDraft("");
     setOptions({});
-    setApprovalMode("ask_for_approval");
-    setApprovalSaving(false);
     setWebSearchEnabled(true);
     pending.current = null;
     retryRequest.current = null;
@@ -326,9 +321,8 @@ export default function TaskConversations({
       JSON.stringify(pending.current.body.options ?? {}) !==
         JSON.stringify(options) ||
       (!taskID &&
-        ((pending.current.body as TaskCreate).approval_mode !== approvalMode ||
-          (pending.current.body as TaskCreate).web_search_enabled !==
-            webSearchEnabled))
+        (pending.current.body as TaskCreate).web_search_enabled !==
+          webSearchEnabled)
     ) {
       pending.current = {
         target,
@@ -338,7 +332,6 @@ export default function TaskConversations({
           ...(attachmentIDs.length ? { attachment_ids: attachmentIDs } : {}),
           ...(!taskID
             ? {
-                approval_mode: approvalMode,
                 web_search_enabled: webSearchEnabled,
               }
             : {}),
@@ -899,20 +892,8 @@ export default function TaskConversations({
           }}
         >
           <TaskApprovalModePicker
-            key={`${projectID ?? ""}:${taskID ?? "new"}`}
-            task={detail}
-            draft={approvalMode}
-            onDraftChange={setApprovalMode}
-            onChange={applyWrite}
             onBusyChange={setApprovalSaving}
-            disabled={
-              sending ||
-              webSearchSaving ||
-              reconnecting ||
-              !!detail?.archived ||
-              projectArchived ||
-              !!(taskID && !detail)
-            }
+            disabled={sending || webSearchSaving}
           />
           <TaskWebSearch
             key={`web-search:${projectID ?? ""}:${taskID ?? "new"}`}

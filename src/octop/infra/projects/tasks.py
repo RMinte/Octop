@@ -232,7 +232,9 @@ class ProjectTaskCreate(TaskMessage):
         default=True, description="任务网络搜索开关；默认开启，持久保存，追问和重试沿用任务当前值。"
     )
     approval_mode: ApprovalMode = Field(
-        default="ask_for_approval", description="任务审批模式；三种模式始终可选，默认请求批准。"
+        default="ask_for_approval",
+        description="旧客户端输入字段，已忽略；新任务继承当前账号全局审批模式。",
+        deprecated=True,
     )
 
 
@@ -334,7 +336,7 @@ def _datetime(value: int) -> datetime:
     return datetime.fromtimestamp(value / 1000, UTC)
 
 
-def summary(row: ProjectTaskRow) -> TaskSummary:
+def summary(row: ProjectTaskRow, policy: TaskApprovalPolicy) -> TaskSummary:
     return TaskSummary(
         task_id=row.task_id,
         project_id=row.project_id,
@@ -344,7 +346,7 @@ def summary(row: ProjectTaskRow) -> TaskSummary:
         status=cast(TurnStatus, public_status(row.status, row.wait_kind)),
         active_turn_id=row.active_turn_id,
         list_revision=row.list_revision,
-        approval_policy=approval_policy.view(row),
+        approval_policy=policy,
         created_at=_datetime(row.created_at),
         updated_at=_datetime(row.updated_at),
     )
@@ -433,6 +435,7 @@ def detail(
         row = services.project_task_repo.get_in_transaction(conn, task_id, owner_id)
         if row is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        policy = approval_policy.in_transaction(conn, services, owner_id)
         turns = services.project_task_turn_repo.page(conn, task_id, limit + 1, before)
         attachments = artifacts.for_turns(services, conn, task_id, [turn.turn_id for turn in turns])
     more = len(turns) > limit
@@ -440,7 +443,7 @@ def detail(
     views = [turn_view(t, attachments.get(t.turn_id)) for t in turns]
     stream = cursor_codec(services, owner_id, f"conversation:{task_id}:events")
     return TaskDetail(
-        **summary(row).model_dump(),
+        **summary(row, policy).model_dump(),
         turns=views,
         next_page_cursor=(codec.encode("conversation", position=turns[0].pk) if more else None),
         event_cursor=(
@@ -464,6 +467,7 @@ def updates(
         task = services.project_task_repo.get_in_transaction(conn, task_id, owner_id)
         if task is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        policy = approval_policy.in_transaction(conn, services, owner_id)
         rows = services.project_task_turn_repo.since(conn, task_id, cursor.position, 50)
         attachments = artifacts.for_turns(services, conn, task_id, [turn.turn_id for turn in rows])
     if cursor.position and (not rows or rows[0].pk != cursor.position):
@@ -476,7 +480,7 @@ def updates(
             continue
         result.append(
             TaskUpdate(
-                task=summary(task),
+                task=summary(task, policy),
                 turn=view,
                 cursor=codec.encode("conversation", position=row.pk, after=fingerprint),
             )
@@ -567,14 +571,8 @@ def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: s
         != body.options.model_dump(exclude_none=True)
         or (
             isinstance(body, ProjectTaskCreate)
-            and (
-                json.loads(old.configuration_json)
-                .get("approval_policy_at_start", {})
-                .get("mode", "ask_for_approval")
-                != body.approval_mode
-                or json.loads(old.configuration_json).get("web_search_enabled", True)
-                != body.web_search_enabled
-            )
+            and json.loads(old.configuration_json).get("web_search_enabled", True)
+            != body.web_search_enabled
         )
     ):
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
@@ -663,9 +661,9 @@ def send(
                     {
                         **json.loads(configuration),
                         "web_search_enabled": task.web_search_enabled,
-                        "approval_policy_at_start": approval_policy.view(task).model_dump(
-                            mode="json"
-                        ),
+                        "approval_policy_at_start": approval_policy.in_transaction(
+                            conn, services, owner_id
+                        ).model_dump(mode="json"),
                     }
                 )
                 if retry_of_turn_id is not None:
@@ -701,11 +699,10 @@ def send(
         else:
             configuration, model_ref = _configuration(services, owner_id, project_id, body.options)
             task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
-            mode = body.approval_mode if isinstance(body, ProjectTaskCreate) else "ask_for_approval"
             web_search_enabled = (
                 body.web_search_enabled if isinstance(body, ProjectTaskCreate) else True
             )
-            start_policy = TaskApprovalPolicy(mode=mode, revision=1, updated_at=_datetime(now))
+            start_policy = approval_policy.in_transaction(conn, services, owner_id)
             configuration = json.dumps(
                 {
                     **json.loads(configuration),
@@ -731,8 +728,9 @@ def send(
                     turn_id,
                     now,
                     now,
-                    approval_mode=mode,
-                    approval_updated_at=now,
+                    approval_mode=start_policy.mode,
+                    approval_revision=start_policy.revision,
+                    approval_updated_at=int(start_policy.updated_at.timestamp() * 1000),
                     web_search_enabled=web_search_enabled,
                 ),
             )

@@ -109,6 +109,18 @@ async def review_env(env_with_provider, monkeypatch):
 
 async def start_exec(env, *, mode="approve_for_me"):
     client, server, auth, state = env
+    current = (await client.get("/api/project-tasks/approval-policy", headers=auth)).json()
+    if current["mode"] != mode:
+        changed = await client.put(
+            "/api/project-tasks/approval-policy",
+            headers=auth,
+            json={
+                "request_id": "test-global-mode-" + str(current["revision"]),
+                "expected_revision": current["revision"],
+                "mode": mode,
+            },
+        )
+        assert changed.status_code == 200, changed.text
     session, ws = await connected(client, auth)
     await command(ws, "client.attach", "attach-review-client", client_id=CLIENT)
     created = await command(
@@ -194,7 +206,7 @@ async def test_review_is_advice_and_only_the_actual_client_result_resumes_native
     session, ws, task, call = await start_exec(review_env)
     try:
         frozen = call["approval_context"]
-        assert frozen["mode"] == "approve_for_me" and frozen["revision"] == 1
+        assert frozen["mode"] == "approve_for_me" and frozen["revision"] == 2
         assert not frozen["requires_user"] and call["dispatch_allowed"]
         token = (await claim(ws, call))["data"]["claim_token"]
         body = review_body(call, token)
@@ -380,7 +392,9 @@ async def test_completed_review_survives_worker_restart_and_keeps_frozen_mode(re
             headers=auth,
             json={
                 "request_id": "switch-future-calls",
-                "expected_revision": 1,
+                "expected_revision": (
+                    await client.get("/api/project-tasks/approval-policy", headers=auth)
+                ).json()["revision"],
                 "mode": "ask_for_approval",
             },
         )
@@ -475,7 +489,9 @@ async def test_denied_command_cannot_be_reproposed_with_new_call_id_or_full_acce
                 headers=auth,
                 json={
                     "request_id": "full-after-review-deny",
-                    "expected_revision": 1,
+                    "expected_revision": (
+                        await client.get("/api/project-tasks/approval-policy", headers=auth)
+                    ).json()["revision"],
                     "mode": "full_access",
                 },
             )

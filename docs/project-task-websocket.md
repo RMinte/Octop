@@ -324,7 +324,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | status | string | 当前或最近一轮的 queued、running、waiting_approval、waiting_answer、waiting_client_tool、paused、completed、failed、cancelled |
 | active_turn_id | string 或 null | 活动轮次，null 表示暂时没有活动轮次 |
 | list_revision | integer | 摘要版本，仅列表字段变化时递增 |
-| approval_policy | object | 任务共享的 mode、独立 revision、updated_at；按其 revision 合并 |
+| approval_policy | object | 当前账号全部任务共享的 mode、独立 revision、updated_at；按其 revision 合并 |
 | created_at / updated_at | datetime string | 任务创建与最近摘要更新时间 |
 
 ### TaskTurn
@@ -907,13 +907,15 @@ Authorization: Bearer <access token>
 
 ### 14.1 任务模式
 
-创建时可在 data 顶层设置 approval_mode，默认 ask_for_approval；options 内没有该字段。已建任务切换使用：
+新账号默认 ask_for_approval。创建读取当前账号全局模式；旧 data 顶层 approval_mode 已忽略，不覆盖/重置全局，也不参与创建幂等比较。任一已建任务入口切换账号所有项目与任务的全局策略：
 
 ```json
 {"type":"task.approval.set","id":"mode-command-001","task_id":"task_example","data":{"request_id":"mode-request-001","expected_revision":1,"mode":"approve_for_me"}}
 ```
 
-结果为最新 TaskDetail。expected_revision 来自 approval_policy.revision；成功写入增加此版本和列表版本。同一 request_id 重传完整原载荷，异体返回 TASK_REQUEST_CONFLICT；新请求版本冲突返回 TASK_APPROVAL_POLICY_CONFLICT。切换不改变已有人工卡及已有调用的冻结模式。REST 等价入口为 PUT /api/project-tasks/{task_id}/approval-policy。
+结果为最新 TaskDetail。expected_revision 来自账号全局 approval_policy.revision；成功写入增加全局版本及本人全部任务的列表版本。同一 request_id 全账号幂等，重传完整原载荷，异体返回 TASK_REQUEST_CONFLICT；新请求版本冲突返回 TASK_APPROVAL_POLICY_CONFLICT。切换影响全部已有/运行/未来任务的后续动作，不改变已有人工卡、调用或轮次的冻结模式。REST 等价入口为 PUT /api/project-tasks/{task_id}/approval-policy；无任务时用 GET/PUT /api/project-tasks/approval-policy，PUT 返回策略对象。
+
+服务器另发送独立全局事件 `{"type":"approval.policy","data":{"mode":"ask_for_approval","revision":1,"updated_at":"2026-10-19T00:00:00Z"}}`。连接首次轮询及策略变化时推送，不需要 task.subscribe，New Task 页也可实时观察；ready 保持原样。所有 TaskSummary/Detail 读取相同账号权威；旧 Task 列不再决定模式。045 迁移将账号初值设为询问，revision 高于其全部旧 Task 版本；动作与轮次快照保留。
 
 资源接口增加 approval={allowed_modes,reviewer_ready,execution_profile:"host_process"}，allowed_modes 固定返回 ask_for_approval、approve_for_me 和 full_access，三种模式始终可选。reviewer_ready 仅供状态展示，未就绪不限制选择帮我审批；实际审查不可用时转人工。管理员通过 GET/PUT /api/admin/security/task-approvals 仅保存 require_human_tools，无需配置可用模式。网页完全访问确认说明服务端主机进程权限；本机权限须另行授予。实际范围与边界见[审批模式文档](project-task-approval-modes.md)。
 

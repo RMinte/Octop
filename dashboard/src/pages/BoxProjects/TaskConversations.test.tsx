@@ -29,6 +29,9 @@ vi.mock("../../api/modules/projects", () => ({
     control: vi.fn(),
     respond: vi.fn(),
     setApproval: vi.fn(),
+    approvalPolicy: vi.fn(),
+    updateApprovalPolicy: vi.fn(),
+    approvalEvents: vi.fn(),
     events: vi.fn(),
     retry: vi.fn(),
     resources: vi.fn(),
@@ -111,6 +114,18 @@ const fixture: TaskDetail = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  api.approvalPolicy.mockResolvedValue(fixture.approval_policy);
+  api.updateApprovalPolicy.mockImplementation(async (body) => ({
+    ...fixture.approval_policy,
+    mode: body.mode,
+    revision: body.expected_revision + 1,
+  }));
+  api.approvalEvents.mockImplementation((_receive, signal, onOpen) => {
+    onOpen?.();
+    return new Promise<void>((resolve) =>
+      signal.addEventListener("abort", () => resolve(), { once: true }),
+    );
+  });
   api.list.mockResolvedValue({
     items: [fixture],
     next_page_cursor: null,
@@ -588,7 +603,6 @@ describe("项目任务对话", () => {
         "proj_a",
         expect.objectContaining({
           prompt: "记住蓝鸟",
-          approval_mode: "ask_for_approval",
           web_search_enabled: true,
           request_id: expect.any(String),
         }),
@@ -2005,8 +2019,10 @@ it("任务模式切换丢回执后显式重试原请求，确认前保留远端�
       revision: 2,
     },
   };
-  api.setApproval.mockRejectedValueOnce(new Error("Lost mode receipt"));
-  api.setApproval.mockResolvedValueOnce(approved);
+  api.updateApprovalPolicy.mockRejectedValueOnce(
+    new Error("Lost mode receipt"),
+  );
+  api.updateApprovalPolicy.mockResolvedValueOnce(approved.approval_policy);
   const user = userEvent.setup();
   mount("?task=task_a");
   const selector = await screen.findByRole("combobox", {
@@ -2025,9 +2041,13 @@ it("任务模式切换丢回执后显式重试原请求，确认前保留远端�
   await user.click(
     screen.getByRole("button", { name: zh.projects.tasks.approvalMode.retry }),
   );
-  await waitFor(() => expect(api.setApproval).toHaveBeenCalledTimes(2));
-  expect(api.setApproval.mock.calls[0]).toEqual(api.setApproval.mock.calls[1]);
-  expect(api.setApproval.mock.calls[0][1]).toMatchObject({
+  await waitFor(() =>
+    expect(api.updateApprovalPolicy).toHaveBeenCalledTimes(2),
+  );
+  expect(api.updateApprovalPolicy.mock.calls[0]).toEqual(
+    api.updateApprovalPolicy.mock.calls[1],
+  );
+  expect(api.updateApprovalPolicy.mock.calls[0][0]).toMatchObject({
     expected_revision: 1,
     mode: "approve_for_me",
     request_id: expect.any(String),
@@ -2052,7 +2072,7 @@ it("任务模式切换丢回执后显式重试原请求，确认前保留远端�
   );
 });
 
-it("新任务完全访问先确认服务端真实范围，模式通过创建顶层字段发送", async () => {
+it("新任务完全访问先确认真实范围，全局保存后创建继承而不发送任务模式", async () => {
   const user = userEvent.setup();
   mount();
   const selector = await screen.findByRole("combobox", {
@@ -2082,10 +2102,14 @@ it("新任务完全访问先确认服务端真实范围，模式通过创建顶�
   await waitFor(() =>
     expect(api.create).toHaveBeenCalledWith(
       "proj_a",
-      expect.objectContaining({ approval_mode: "full_access" }),
+      expect.objectContaining({ prompt: "检查服务端项目" }),
     ),
   );
+  expect(api.create.mock.calls[0][1]).not.toHaveProperty("approval_mode");
   expect(api.create.mock.calls[0][1].options).toBeUndefined();
+  expect(api.updateApprovalPolicy).toHaveBeenCalledWith(
+    expect.objectContaining({ mode: "full_access", expected_revision: 1 }),
+  );
 });
 
 it("自动审查中没有人工批准按钮，自动结果仅留折叠记录", async () => {
@@ -2215,8 +2239,13 @@ it.each([
     );
     await user.click(option);
     expect(api.setApproval).not.toHaveBeenCalled();
-    expect(selector.closest(".ant-select")).toHaveTextContent(
-      zh.projects.tasks.approvalMode.approve_for_me,
+    await waitFor(() =>
+      expect(selector.closest(".ant-select")).toHaveTextContent(
+        zh.projects.tasks.approvalMode.approve_for_me,
+      ),
+    );
+    expect(api.updateApprovalPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "approve_for_me" }),
     );
   },
 );
@@ -2276,4 +2305,113 @@ it("Reviewer 转人工时在原卡显示稳定原因并保留人工决定入口"
   expect(
     screen.getByRole("button", { name: /^\u62d2\s*\u7edd$/ }),
   ).toBeEnabled();
+});
+
+it("账号审批在任务之间共享，迟到任务摘要和低版本推送不覆盖已确认模式", async () => {
+  const other = { ...fixture, task_id: "task_b", title: "另一任务" };
+  api.list.mockResolvedValue({
+    items: [fixture, other],
+    next_page_cursor: null,
+    sync_cursor: "sync_first",
+  });
+  api.open.mockImplementation(async (id) =>
+    id === "task_b" ? other : fixture,
+  );
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const selector = await screen.findByRole("combobox", {
+    name: zh.projects.tasks.approvalMode.label,
+  });
+  await waitFor(() => expect(selector).toBeEnabled());
+  await user.click(selector);
+  await user.click(
+    await screen.findByText(zh.projects.tasks.approvalMode.approve_for_me),
+  );
+  await waitFor(() =>
+    expect(selector.closest(".ant-select")).toHaveTextContent(
+      zh.projects.tasks.approvalMode.approve_for_me,
+    ),
+  );
+  await user.click(screen.getByRole("button", { name: /另一任务/ }));
+  await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_b"));
+  expect(
+    screen
+      .getByRole("combobox", { name: zh.projects.tasks.approvalMode.label })
+      .closest(".ant-select"),
+  ).toHaveTextContent(zh.projects.tasks.approvalMode.approve_for_me);
+  const push = api.approvalEvents.mock.calls[0][0];
+  await act(async () =>
+    push({ ...fixture.approval_policy, mode: "full_access", revision: 3 }),
+  );
+  await act(async () => push(fixture.approval_policy));
+  expect(selector.closest(".ant-select")).toHaveTextContent(
+    zh.projects.tasks.approvalMode.full_access,
+  );
+  expect(api.updateApprovalPolicy).toHaveBeenCalledTimes(1);
+  expect(api.respond).not.toHaveBeenCalled();
+  expect(fixture.turns[0].approval_policy_at_start.mode).toBe(
+    "ask_for_approval",
+  );
+});
+
+it("审批未知回执在只读刷新后仍保留可见重试，确认较新全局版本后不重发旧意图", async () => {
+  api.updateApprovalPolicy.mockRejectedValueOnce(
+    new Error("Unknown global receipt"),
+  );
+  const user = userEvent.setup();
+  mount();
+  const selector = await screen.findByRole("combobox", {
+    name: zh.projects.tasks.approvalMode.label,
+  });
+  await waitFor(() => expect(selector).toBeEnabled());
+  await user.click(selector);
+  await user.click(
+    await screen.findByText(zh.projects.tasks.approvalMode.approve_for_me),
+  );
+  await screen.findByText("Unknown global receipt");
+  await user.click(
+    screen.getByRole("button", {
+      name: zh.projects.tasks.approvalMode.refresh,
+    }),
+  );
+  expect(
+    await screen.findByRole("button", {
+      name: zh.projects.tasks.approvalMode.retry,
+    }),
+  ).toBeEnabled();
+  expect(selector).toBeDisabled();
+  api.approvalPolicy.mockResolvedValue({
+    ...fixture.approval_policy,
+    mode: "approve_for_me",
+    revision: 2,
+  });
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.approvalMode.retry }),
+  );
+  await waitFor(() => expect(selector).toBeEnabled());
+  expect(selector.closest(".ant-select")).toHaveTextContent(
+    zh.projects.tasks.approvalMode.approve_for_me,
+  );
+  expect(api.updateApprovalPolicy).toHaveBeenCalledTimes(1);
+});
+
+it("新任务接收独立账号推送，无任务正文和旧资源门禁也能同步审批模式", async () => {
+  api.resources.mockRejectedValue(new Error("Legacy resources unavailable"));
+  mount();
+  const selector = await screen.findByRole("combobox", {
+    name: zh.projects.tasks.approvalMode.label,
+  });
+  await waitFor(() => expect(selector).toBeEnabled());
+  await act(async () =>
+    api.approvalEvents.mock.calls[0][0]({
+      ...fixture.approval_policy,
+      mode: "approve_for_me",
+      revision: 5,
+    }),
+  );
+  expect(selector.closest(".ant-select")).toHaveTextContent(
+    zh.projects.tasks.approvalMode.approve_for_me,
+  );
+  expect(api.updateApprovalPolicy).not.toHaveBeenCalled();
+  expect(api.get).not.toHaveBeenCalled();
 });

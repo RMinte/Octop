@@ -4,7 +4,7 @@
 
 2026 年 10 月 17 日新增的计划、公开进展和动作链路，按[APP 专项接入指南](agentcomputer-task-planning-and-progress.md)升级 DTO、合并、缓存和界面；这部分同样尚未修改 APP。
 
-任务协议现为 **v3**，已提供 Task 三档模式、Octop 远端独立 Reviewer 和客户端命令审查接口。模式范围及实现规则见[审批模式与 Reviewer](project-task-approval-modes.md)。AgentComputer 的本机增强模式同意、Reviewer 适配与派发门禁仍需按本文接线，尚未完成真机端到端验证。
+任务协议现为 **v3**，已提供账号全局三档模式、Octop 远端独立 Reviewer 和客户端命令审查接口。模式范围、当前运行证据与验收边界见[审批模式与 Reviewer](project-task-approval-modes.md)。AgentComputer 已接入账号全局模式同步；本机增强模式同意、Reviewer 适配与派发门禁继续遵守本文的独立授权边界。
 
 ## 必须一起升级的部分
 
@@ -33,11 +33,11 @@ Octop `/api/project-tasks/ws` 发送 `ready.protocol_version=3`。旧客户端�
 
 `interaction_id` 是不透明字符串，不能强行转为 UUID。UI 需要 UUID 时建立稳定映射，键至少包含账号、实例、task、turn、来源和服务端请求身份。
 
-## 当前 Task 的三档模式
+## 当前账号全局的三档模式
 
-`approval_policy` 为 `{mode,revision,updated_at}`，模式值沿用 `ask_for_approval`、`approve_for_me`、`full_access`。Octop 是远端 Task 的模式权威；保留本地 Runtime 的 `AgentPermissionModeStore` 原设备级语义，不用它直接修改所有远端任务。
+`approval_policy` 为 `{mode,revision,updated_at}`，模式值沿用 `ask_for_approval`、`approve_for_me`、`full_access`。Octop 账号策略是全部项目及已有、运行和未来 Task 的唯一权威；所有入口共享已确认状态。保留本地 Runtime 的 `AgentPermissionModeStore` 原设备级语义，不把设备偏好或本机同意当成远端账号策略。
 
-新建请求顶层 `approval_mode` 默认请求批准，不能放入 options。当前任务切换示例：
+新账号默认请求批准；新 Task 继承账号当前策略，创建请求不再携带 `approval_mode`，旧字段由服务端忽略。无任务时用 `GET/PUT /api/project-tasks/approval-policy`；PUT 接受 `{request_id,expected_revision,mode}` 并返回策略对象。共享 Socket 独立观察 `approval.policy`，首次轮询和全局变化均推送，不依赖任务订阅。任一已有 Task 入口也可切换相同账号全局模式：
 
 ```json
 {
@@ -48,7 +48,7 @@ Octop `/api/project-tasks/ws` 发送 `ready.protocol_version=3`。旧客户端�
 }
 ```
 
-`expected_revision` 是独立的 `approval_policy.revision`。成功 result.data 为当前 TaskDetail；失败、超时或丢回执不能乐观显示已切换。显式重试使用原 request_id 和完整载荷，或先读取当前任务。跨设备冲突刷新权威模式，同一个旧请求重发不能再次覆盖用户后来的选择。
+`expected_revision` 是账号全局独立的 `approval_policy.revision`。成功 result.data 为当前 TaskDetail；失败、超时或丢回执不能乐观显示已切换。显式重试使用原 request_id 和完整载荷，或先读取当前任务。跨设备冲突刷新权威模式，同一个旧请求重发不能再次覆盖用户后来的选择。
 
 任务资源 `approval` 返回 `allowed_modes`、`reviewer_ready`、`execution_profile:"host_process"`。`allowed_modes` 固定包含请求批准、帮我审批和完全访问，三种模式始终可选，无需管理员开放。`reviewer_ready` 仅供状态展示，未就绪不限制选择帮我审批；实际审查不可用时转人工。管理员在 `/api/admin/security/task-approvals` 仅设置强制人工工具，该设置仍优先，普通用户选择模式不能改变它。
 
@@ -176,14 +176,14 @@ REST 可用于相同操作，均 Bearer 鉴权并返回 TaskDetail：
 | POST | `/api/project-tasks/{task_id}/resume` | `{turn_id,request_id}` |
 | PUT | `/api/project-tasks/{task_id}/approval-policy` | `{request_id,expected_revision,mode}` |
 
-本机 review 使用已 attach 的共享 WebSocket `tool.review`，没有单独 REST 入口。tool.review 的幂等权威是原 call 与完整固定提案，不能把 task.approval.set 的任务级 request_id 规则误用为允许同 call 改提案。
+本机 review 使用已 attach 的共享 WebSocket `tool.review`，没有单独 REST 入口。tool.review 的幂等权威是原 call 与完整固定提案，不能把 task.approval.set 的账号级 request_id 规则误用为允许同 call 改提案。
 
 ## 客户端联调核对
 
-在原页面完成：三档模式及管理员上限、两端各自审批路由、reviewing/允许/拒绝/转人工、未知结果不重审、自由回答/选项/跳过/关闭、三问、超时、手动暂停/继续、同一轮多次等待、两设备竞争、丢回执重发、切页重连、旧快照晚到、取消后迟到回应。重点验证手机改档不授予 Mac 权限、同轮拒绝不能换 ID/模式重试、Reviewer 允许后暂停/撤权/离线仍阻止派发。保留本地 Runtime、本机命令审批和 journal 回归，不新增验收页面。
+在原页面完成：全局三档模式及强制人工边界、两端各自审批路由、reviewing/允许/拒绝/转人工、未知结果不重审、自由回答/选项/跳过/关闭、三问、超时、手动暂停/继续、同一轮多次等待、两设备竞争、丢回执重发、切页重连、旧快照晚到、取消后迟到回应。重点验证手机改档不授予 Mac 权限、同轮拒绝不能换 ID/模式重试、Reviewer 允许后暂停/撤权/离线仍阻止派发。保留本地 Runtime、本机命令审批和 journal 回归，不新增验收页面。
 
 服务端当前持久恢复范围是主 Task 图；子代理/团队内部的嵌套人工中断尚未支持。不要据此在客户端承诺嵌套恢复。
 
 ## 验证范围
 
-Octop 定向检查覆盖任务模式、独立 Reviewer、客户端工具协议、真实断点、审批/提问/控制及现有网页；具体命令与结果以本轮最终报告为准。按约定不重复完整门禁，不提交、推送或重启运行中的服务。AgentComputer 未修改，也未做真机端到端联调；客户端仍需实现本文的本机工作，不能把服务端验证通过当作客户端已接入。
+2026-10-19 账号全局修复已在现有 8088 服务及主工程 `mainDerivedData` App 中核对：两个已有会话和 New Task 原菜单均读取 `approve_for_me`、revision 6；未在运行账号切档或派发工具，并保留其他客户端期间写入的选择。客户端 63 个独立用例、80 次运行及核心 62 项通过，macOS/iOS 构建成功；网页 82 项、TypeScript 检查及构建通过。服务重启前完成 schema 44 一致备份，升级至 45 后原 20 张 Task/ac 表逐原列 count+SHA-256 一致；全局 revision 6 后除 `project_tasks` 预期摘要变化外，其余 19 张原表哈希仍一致。备份与核对结果位于 `/private/tmp/octop-before-global-policy-live-20261019/`，详见[审批模式文档的验收证据](project-task-approval-modes.md#验证与客户端验收)。完整门禁未重复运行，UI 自动化按约定禁用；本轮人工核对只证明全局状态同步，不代替新增真实工具派发、供应商审查或权限边界专项实测。本轮全局修复按用户要求纳入本次本地提交，未推送。

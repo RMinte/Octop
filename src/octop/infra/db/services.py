@@ -38,6 +38,7 @@ from octop.infra.db.repos.threads import ThreadRepo
 from octop.infra.db.repos.trajectory_events import TrajectoryEventRepo
 from octop.infra.db.repos.usage import UsageRepo
 from octop.infra.db.repos.user_policies import UserPolicyRepo
+from octop.infra.db.repos.user_task_approval_policies import UserTaskApprovalPolicyRepo
 from octop.infra.db.repos.users import UserRepo
 from octop.infra.db.repos.voice_providers import VoiceProviderRepo
 from octop.infra.utils.paths import PathLayout
@@ -49,6 +50,7 @@ class RepoBundle:
 
     project_sync_repo: ProjectSyncRepo
     project_task_repo: ProjectTaskRepo
+    user_task_approval_policy_repo: UserTaskApprovalPolicyRepo
     project_task_title_repo: ProjectTaskTitleRepo
     project_task_review_repo: ProjectTaskReviewRepo
     project_task_artifact_repo: ProjectTaskArtifactRepo
@@ -88,6 +90,7 @@ class RepoBundle:
             db=db,
             project_sync_repo=ProjectSyncRepo(),
             project_task_repo=ProjectTaskRepo(db),
+            user_task_approval_policy_repo=UserTaskApprovalPolicyRepo(),
             project_task_title_repo=ProjectTaskTitleRepo(db),
             project_task_review_repo=ProjectTaskReviewRepo(db),
             project_task_turn_repo=ProjectTaskTurnRepo(db),
@@ -140,6 +143,10 @@ class SharedServices:
     @property
     def project_task_repo(self) -> ProjectTaskRepo:
         return self.repos.project_task_repo
+
+    @property
+    def user_task_approval_policy_repo(self) -> UserTaskApprovalPolicyRepo:
+        return self.repos.user_task_approval_policy_repo
 
     @property
     def project_task_title_repo(self) -> ProjectTaskTitleRepo:

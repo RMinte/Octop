@@ -34,6 +34,9 @@ vi.mock("../../api/modules/projects", () => ({
     control: vi.fn(),
     respond: vi.fn(),
     setApproval: vi.fn(),
+    approvalPolicy: vi.fn(),
+    updateApprovalPolicy: vi.fn(),
+    approvalEvents: vi.fn(),
     events: vi.fn(),
     retry: vi.fn(),
     resources: vi.fn(),
@@ -160,6 +163,18 @@ let subscriptions: Array<{
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.approvalPolicy.mockResolvedValue(policy);
+  api.updateApprovalPolicy.mockImplementation(async (body) => ({
+    ...policy,
+    mode: body.mode,
+    revision: body.expected_revision + 1,
+  }));
+  api.approvalEvents.mockImplementation((_receive, signal, onOpen) => {
+    onOpen?.();
+    return new Promise<void>((resolve) =>
+      signal.addEventListener("abort", () => resolve(), { once: true }),
+    );
+  });
   sessionStorage.clear();
   snapshots = new Map([
     ["task_a", task()],

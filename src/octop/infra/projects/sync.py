@@ -12,6 +12,7 @@ from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.repos.projects import ProjectRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects import approval_policy
 from octop.infra.projects.cursors import CursorCodec, cursor_codec, cursor_reset
 from octop.infra.projects.models import ProjectModel, ProjectView
 from octop.infra.projects.service import _view
@@ -72,6 +73,7 @@ def task_page(
             and services.project_repo.get_in_transaction(conn, project_id, owner_id) is None
         ):
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        policy = approval_policy.in_transaction(conn, services, owner_id)
         head = services.project_sync_repo.head(conn, owner_id, task_scope(project_id))
         rows = services.project_task_repo.page(
             conn, owner_id, project_id, limit + 1, boundary, archived
@@ -82,7 +84,7 @@ def task_page(
         last = items[-1]
         next_page = codec.encode("history", updated_at=last.updated_at, after=last.task_id)
     return TaskListPage(
-        items=[summary(row) for row in items],
+        items=[summary(row, policy) for row in items],
         next_page_cursor=next_page,
         sync_cursor=codec.encode("sync", position=head) if cursor is None else None,
     )
@@ -207,11 +209,12 @@ def task_sync(
         limit,
     )
     changes = []
+    policy = approval_policy.current(services, owner_id)
     for row in rows:
         payload = json.loads(row.payload_json)
         payload.setdefault("web_search_enabled", True)
         deleted = payload.pop("deleted", False)
-        data = summary(ProjectTaskRow.from_row(payload))
+        data = summary(ProjectTaskRow.from_row(payload), policy)
         changes.append(
             TaskChange(
                 operation="delete" if deleted else "upsert",
