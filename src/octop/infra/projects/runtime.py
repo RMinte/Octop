@@ -35,6 +35,8 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.gateway.media.attachment_hints import content_blocks_need_vision
+from octop.infra.knowledge.hint import KnowledgeSearchHintMiddleware
+from octop.infra.knowledge.tools import SEARCH_KNOWLEDGE_TOOL, build_knowledge_tools
 from octop.infra.projects import approval_policy, approval_runtime, input_attachments, interactions
 from octop.infra.projects.approval_reviewer import TaskApprovalReviewWorker
 from octop.infra.projects.artifacts import SERVER_ARTIFACT_TOOLS, TaskArtifactPublisher
@@ -49,8 +51,16 @@ from octop.infra.projects.checkpoints import (
 from octop.infra.projects.client_tool_models import ClientToolDefinition
 from octop.infra.projects.client_tools import ClientToolBroker
 from octop.infra.projects.collaboration import TaskTeam, guard_subagents
+from octop.infra.projects.compaction import run_compaction
 from octop.infra.projects.content import TaskContent, TaskContentBlock
-from octop.infra.projects.context import capture_memory, close_pending_tools
+from octop.infra.projects.context import (
+    TaskContextMiddleware,
+    capture_memory,
+    close_pending_tools,
+    is_compaction,
+    model_context,
+    task_backend,
+)
 from octop.infra.projects.control import ASK_USER, TaskControlMiddleware, question_tool
 from octop.infra.projects.execution import TaskExecution, strip_step_metadata
 from octop.infra.projects.hitl import TaskHumanInTheLoopMiddleware
@@ -88,6 +98,7 @@ from octop.infra.projects.service import _validate
 from octop.infra.projects.stream import TASK_PROTOCOL
 from octop.infra.projects.tasks import now_ms
 from octop.infra.projects.title import TaskTitleWorker
+from octop.infra.projects.usage import message_usage, save_usage
 from octop.infra.skills.install import prepare_skillhub_package
 from octop.infra.skills.skill_package_store import SkillPackageStore
 from octop.infra.skills.skillhub_market import download_skillhub_package_files
@@ -176,6 +187,10 @@ async def run_turn(
 ) -> AsyncIterator[dict[str, Any]]:
     """Yield only public text/tool-progress events; credentials stay in-process."""
     raw = json.loads(turn.configuration_json)
+    if is_compaction(turn.prompt, raw.get("attachment_ids", [])):
+        async for event in run_compaction(services, owner_id, turn, history, factory=HarnessAgent):
+            yield event
+        return
     action_timeline_enabled = bool(raw.get("action_timeline_enabled", True))
     fields = ProjectFields.model_validate(
         {key: raw[key] for key in ProjectFields.model_fields if key in raw}
@@ -247,6 +262,13 @@ async def run_turn(
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
     user = await asyncio.to_thread(services.user_repo.get, owner_id)
     locale = normalize_locale(user.locale if user else "zh")
+    knowledge_config = {
+        "user": str(owner_id),
+        "user_is_admin": bool(user and user.role == "admin"),
+        "locale": locale,
+        "knowledge_base_ids": raw.get("knowledge_base_ids", []),
+        "knowledge_base_catalog": raw.get("knowledge_base_catalog", []),
+    }
     user_content = input_attachments.content(
         turn.prompt,
         raw.get("attachment_ids", []),
@@ -301,7 +323,7 @@ async def run_turn(
     if (
         {tool.name for tool in client_tools}
         | SERVER_ARTIFACT_TOOLS
-        | {READ_TASK_IMAGE, NOTIFY_USER, PLANNING}
+        | {READ_TASK_IMAGE, NOTIFY_USER, PLANNING, SEARCH_KNOWLEDGE_TOOL}
     ) & {tool.name for tool in tools}:
         raise OctopError.localized(ErrorCode.TASK_RESOURCE_UNAVAILABLE)
     active_mcp = [*fields.mcp_servers, *(["client"] if definitions else [])]
@@ -352,6 +374,7 @@ async def run_turn(
                 "glob",
                 "grep",
                 READ_TASK_IMAGE,
+                SEARCH_KNOWLEDGE_TOOL,
                 NOTIFY_USER,
                 PLANNING,
             },
@@ -467,7 +490,7 @@ async def run_turn(
         language=locale,
         workspace_dir=str(workspace),
         system_files_path=system_prefix,
-        backend={"type": "local_shell", "root_dir": str(workspace), "virtual_mode": True},
+        backend=task_backend(workspace, runtime_dir),
         default_model=turn.model_ref,
         providers=configs_provider,
         system_prompt=prompt,
@@ -489,9 +512,11 @@ async def run_turn(
         peer_invoke_mode="sync",
         middleware=[
             *plugin_middleware,
+            TaskContextMiddleware(turn.task_id, turn.turn_id),
             TaskControlMiddleware(services, owner_id, turn, locale, execution, save_checkpoint),
             execution,
             ReasoningRequestMiddleware(summary=raw.get("reasoning_mode") not in {None, "disabled"}),
+            KnowledgeSearchHintMiddleware(),
             TaskImageMaterializeMiddleware(services, owner_id, turn.task_id),
         ],
         ask_user_enabled=False,
@@ -509,6 +534,7 @@ async def run_turn(
         web_search_tools=raw.get("web_search_enabled", True),
         tools=[
             *publisher.tools(),
+            *build_knowledge_tools(services),
             *plugin_tools,
             question_tool(locale),
             planning.tool(),
@@ -572,10 +598,12 @@ async def run_turn(
 
     async def enrich_peer(agent_id: str, request: ChatRequest) -> ChatRequest:
         request.agent_id = agent_id
+        request.user = str(owner_id)
         request.skills = [slug for slug, _ in files]
         request.mcp_servers = active_mcp
         request.configurable = {
             **(request.configurable or {}),
+            **knowledge_config,
             CONFIG_KEY: raw.get("reasoning_overrides", {}),
         }
         return request
@@ -619,7 +647,7 @@ async def run_turn(
             source="project-task",
             skills=[slug for slug, _ in files],
             mcp_servers=active_mcp,
-            configurable={CONFIG_KEY: raw.get("reasoning_overrides", {})},
+            configurable={**knowledge_config, CONFIG_KEY: raw.get("reasoning_overrides", {})},
         )
         control_calls: dict[str, str] = {}
         visible_controls: set[str] = set()
@@ -863,6 +891,11 @@ async def run_turn(
                 elif kind == "state_update":
                     for message in (event.get("data") or {}).get("messages", []):
                         if isinstance(message, AIMessage):
+                            snapshot = message_usage(message)
+                            if snapshot is not None:
+                                await asyncio.to_thread(
+                                    save_usage, services, owner_id, turn, snapshot
+                                )
                             if not delegating:
                                 for output in record_reply(
                                     response_text.complete(
@@ -967,7 +1000,7 @@ async def run_turn(
                 close = getattr(events, "aclose", None)
                 if close is not None:
                     await close()
-            messages = [] if paused else await agent.aget_history(turn.turn_id, limit=1_000_000)
+            messages = [] if paused else await model_context(agent, turn.turn_id)
             if messages:
                 saved = await asyncio.to_thread(
                     services.project_task_turn_repo.save_context,
@@ -1046,14 +1079,18 @@ class ProjectTaskWorker:
                 uncertain = bool(
                     self.services.project_task_execution_receipt_repo.unfinished(conn, turn.turn_id)
                 )
+                maintenance = is_compaction(
+                    current.prompt,
+                    json.loads(current.configuration_json).get("attachment_ids", []),
+                )
                 interruption = TaskInterruption(
                     diagnostic(
                         "worker",
                         TimeoutError(),
-                        can_resume=bool(turn.checkpoint_id) and not uncertain,
+                        can_resume=(maintenance or bool(turn.checkpoint_id)) and not uncertain,
                         needs_reconciliation=uncertain,
                     ),
-                    "graph",
+                    "prepare" if maintenance else "graph",
                     turn.checkpoint_id,
                 )
                 if self.services.project_task_turn_repo.park_recovery(
@@ -1448,8 +1485,11 @@ class ProjectTaskWorker:
             rows = await asyncio.to_thread(self.services.project_task_turn_repo.list, turn.task_id)
             user = await asyncio.to_thread(self.services.user_repo.get, task)
             locale = normalize_locale(user.locale if user else "zh")
-            if not reply and json.loads(turn.configuration_json).get(
-                "action_timeline_enabled", True
+            configuration = json.loads(turn.configuration_json)
+            if (
+                not reply
+                and not is_compaction(turn.prompt, configuration.get("attachment_ids", []))
+                and configuration.get("action_timeline_enabled", True)
             ):
 
                 async def record_narration_usage(input_tokens: int, output_tokens: int) -> None:
@@ -1494,6 +1534,11 @@ class ProjectTaskWorker:
             )
             history: list[Any] = messages_from_dict(json.loads(context[1])) if context else []
             for previous in rows:
+                if is_compaction(
+                    previous.prompt,
+                    json.loads(previous.configuration_json).get("attachment_ids", []),
+                ):
+                    continue
                 if context and previous.pk <= context[0]:
                     if previous.pk == context[0] and previous.status != "completed":
                         history.append(

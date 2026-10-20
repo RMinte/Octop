@@ -18,6 +18,7 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.knowledge.tools import SEARCH_KNOWLEDGE_TOOL
 from octop.infra.projects import approval_policy, artifacts, input_attachments, interactions
 from octop.infra.projects.approval_models import (
     ApprovalCapabilities,
@@ -27,10 +28,12 @@ from octop.infra.projects.approval_models import (
 from octop.infra.projects.artifact_models import TaskArtifact
 from octop.infra.projects.client_tool_models import ClientID, ClientToolDefinition
 from octop.infra.projects.content import TaskContentBlock
+from octop.infra.projects.context import is_compaction
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
 from octop.infra.projects.image_tools import READ_TASK_IMAGE
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction, public_status
+from octop.infra.projects.knowledge import selection_snapshot
 from octop.infra.projects.models import (
     ProjectFields,
     ProjectModel,
@@ -94,6 +97,11 @@ class TaskExecutionOptions(ProjectModel):
         max_length=64,
         description="本轮完整 MCP 选择；省略或 null 继承项目，[] 本轮禁用。",
     )
+    knowledge_base_ids: list[Reference] | None = Field(
+        default=None,
+        max_length=64,
+        description="本轮知识库；省略或 null 选择本人默认开启的知识库，[] 禁用。显式选择须对当前用户可见，入队后固定。",
+    )
     plugins: list[Reference] | None = Field(
         default=None, max_length=64, description="本轮插件；省略或 null 继承项目，[] 禁用。"
     )
@@ -130,18 +138,25 @@ class TaskExecutionOptions(ProjectModel):
                         "reasoning_mode",
                         "reasoning_effort",
                         "action_timeline_enabled",
+                        "knowledge_base_ids",
                     },
                 ),
             }
         )
         if self.client_tools and not self.client_id:
             raise ValueError("client_tools require client_id")
+        if self.knowledge_base_ids is not None and len(self.knowledge_base_ids) != len(
+            set(self.knowledge_base_ids)
+        ):
+            raise ValueError("duplicate knowledge base reference")
         names = [tool.name for tool in self.client_tools or []]
         if len(names) != len(set(names)):
             raise ValueError("duplicate client tool names")
-        if set(names) & (artifacts.SERVER_ARTIFACT_TOOLS | {READ_TASK_IMAGE}):
+        if set(names) & (
+            artifacts.SERVER_ARTIFACT_TOOLS | {READ_TASK_IMAGE, SEARCH_KNOWLEDGE_TOOL}
+        ):
             raise ValueError(
-                "task attachment tools are server-owned and cannot be registered by clients"
+                "task built-in tools are server-owned and cannot be registered by clients"
             )
         return self
 
@@ -201,7 +216,10 @@ class TaskMessage(ProjectModel):
     request_id: RequestID = Field(
         description="本次发送的唯一标识；网络重试必须复用，相同标识不会重复执行。"
     )
-    prompt: Prompt = Field(default="", description="本轮用户文字；可为空，但须提供附件。")
+    prompt: Prompt = Field(
+        default="",
+        description="本轮用户文字；可为空但须提供附件。无附件的 /compact 为上下文压缩命令，不执行任务工具。",
+    )
     attachment_ids: list[Reference] = Field(
         default_factory=list,
         max_length=input_attachments.MAX_ATTACHMENTS,
@@ -432,6 +450,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
             reasoning_effort=configuration.get("reasoning_effort"),
             skills=configuration.get("skills", []),
             mcp_servers=configuration.get("mcp_servers", []),
+            knowledge_base_ids=configuration.get("knowledge_base_ids", []),
             plugins=configuration.get("plugins", []),
             subagents=configuration.get("subagents", []),
             memory_enabled=configuration.get("memory_enabled", True),
@@ -574,6 +593,7 @@ def _configuration(
             "reasoning_mode",
             "reasoning_effort",
             "action_timeline_enabled",
+            "knowledge_base_ids",
         },
     )
     fields = ProjectFields.model_validate(
@@ -589,6 +609,7 @@ def _configuration(
         {
             **snapshot,
             **fields.model_dump(),
+            **selection_snapshot(services, owner_id, options.knowledge_base_ids),
             **_reasoning_configuration(providers, ref, options),
             "action_timeline_enabled": (
                 options.action_timeline_enabled
@@ -645,7 +666,11 @@ def _input_configuration(
         input_attachments.is_image(row.media_type)
         for row in services.project_task_attachment_repo.for_task(conn, owner_id, task_id)
     )
-    if has_images and not ProviderStore(services.provider_repo).is_model_ref_multimodal(model_ref):
+    if (
+        has_images
+        and not is_compaction(body.prompt, body.attachment_ids)
+        and not ProviderStore(services.provider_repo).is_model_ref_multimodal(model_ref)
+    ):
         raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
     return json.dumps(
         {

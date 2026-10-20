@@ -107,21 +107,27 @@ class ProjectTaskTurnRepo:
 
     def save_context(self, turn_id: str, worker_id: str, messages_json: str) -> bool:
         with self._db.transaction() as conn:
-            # Take the same lease row lock as progress/finalization. A stale worker
-            # cannot overwrite context after recovery or a subsequent turn.
-            row = conn.execute(
-                "UPDATE project_task_turns SET worker_id=worker_id "
-                "WHERE turn_id=? AND worker_id=? AND status='running' RETURNING task_id",
-                (turn_id, worker_id),
-            ).fetchone()
-            if row is None:
-                return False
-            conn.execute(
-                "INSERT INTO project_task_contexts(task_id,turn_id,messages_json) VALUES (?,?,?) "
-                "ON CONFLICT(task_id) DO UPDATE SET turn_id=excluded.turn_id, messages_json=excluded.messages_json",
-                (row["task_id"], turn_id, messages_json),
-            )
-            return True
+            return self.save_context_in_transaction(conn, turn_id, worker_id, messages_json)
+
+    @staticmethod
+    def save_context_in_transaction(
+        conn: Any, turn_id: str, worker_id: str, messages_json: str
+    ) -> bool:
+        # Take the same lease row lock as progress/finalization. A stale worker
+        # cannot overwrite context after recovery or a subsequent turn.
+        row = conn.execute(
+            "UPDATE project_task_turns SET worker_id=worker_id "
+            "WHERE turn_id=? AND worker_id=? AND status='running' RETURNING task_id",
+            (turn_id, worker_id),
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "INSERT INTO project_task_contexts(task_id,turn_id,messages_json) VALUES (?,?,?) "
+            "ON CONFLICT(task_id) DO UPDATE SET turn_id=excluded.turn_id, messages_json=excluded.messages_json",
+            (row["task_id"], turn_id, messages_json),
+        )
+        return True
 
     @staticmethod
     def list_in_transaction(conn: Any, task_id: str) -> builtins.list[ProjectTaskTurnRow]:

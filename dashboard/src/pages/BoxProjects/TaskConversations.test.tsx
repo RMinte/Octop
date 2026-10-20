@@ -20,6 +20,7 @@ import TaskConversations from "./TaskConversations";
 vi.mock("../../api/modules/projects", () => ({
   projectTasksApi: {
     settings: vi.fn(),
+    contextUsage: vi.fn(),
     list: vi.fn(),
     sync: vi.fn(),
     get: vi.fn(),
@@ -130,6 +131,15 @@ beforeEach(() => {
   api.settings.mockResolvedValue({
     action_timeline_enabled: true,
     step_panel_enabled: true,
+  });
+  api.contextUsage.mockResolvedValue({
+    max_tokens: 128000,
+    used_tokens: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    segments: [],
+    source: "empty",
+    estimated: false,
   });
   api.list.mockResolvedValue({
     items: [fixture],
@@ -648,6 +658,215 @@ describe("项目任务对话", () => {
     await waitFor(() => expect(api.create).toHaveBeenCalledTimes(2));
     expect(api.create.mock.calls[0][1]).toEqual(api.create.mock.calls[1][1]);
   });
+  it("仅已有任务提供压缩记忆入口", async () => {
+    const user = userEvent.setup();
+    mount();
+    expect(screen.queryByRole("button", { name: "压缩记忆" })).toBeNull();
+    await user.click(await screen.findByRole("button", { name: /第一项任务/ }));
+    expect(
+      await screen.findByRole("button", { name: "压缩记忆" }),
+    ).toBeEnabled();
+  });
+  it("手动压缩只发送控制命令，保留草稿和待发附件并阻止重复点击", async () => {
+    let finishSend!: (value: TaskDetail) => void;
+    api.send.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishSend = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    const compact = await screen.findByRole("button", { name: "压缩记忆" });
+    const composer = screen.getByRole("textbox", { name: "任务消息" });
+    await user.type(composer, "保留这段追问");
+    await user.upload(
+      screen.getByLabelText("添加附件", { selector: "input" }),
+      new File(["image"], "截图.png", { type: "image/png" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "发送" })).toBeEnabled(),
+    );
+    fireEvent.click(compact);
+    fireEvent.click(compact);
+    expect(api.send).toHaveBeenCalledTimes(1);
+    expect(api.send).toHaveBeenCalledWith("task_a", {
+      request_id: expect.any(String),
+      prompt: "/compact",
+    });
+    expect(compact).toBeDisabled();
+    expect(composer).toHaveValue("保留这段追问");
+    expect(screen.getByAltText("截图.png")).toBeInTheDocument();
+    await act(async () => finishSend(fixture));
+    expect(composer).toHaveValue("保留这段追问");
+    expect(screen.getByAltText("截图.png")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(api.send.mock.calls[1][1]).toMatchObject({
+      prompt: "保留这段追问",
+      attachment_ids: ["image_a"],
+    });
+    expect(api.create).not.toHaveBeenCalled();
+  });
+  it("压缩请求失败后复用请求标识，成功后再次压缩使用新标识", async () => {
+    api.send.mockRejectedValueOnce(new Error("network unavailable"));
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    const compact = await screen.findByRole("button", { name: "压缩记忆" });
+    const composer = screen.getByRole("textbox", { name: "任务消息" });
+    await user.type(composer, "尚未发送的追问");
+    await user.click(compact);
+    await screen.findByText("network unavailable");
+    expect(composer).toHaveValue("尚未发送的追问");
+    await user.click(compact);
+    await waitFor(() => expect(api.send).toHaveBeenCalledTimes(2));
+    expect(api.send.mock.calls[0][1]).toEqual(api.send.mock.calls[1][1]);
+    await user.click(compact);
+    await waitFor(() => expect(api.send).toHaveBeenCalledTimes(3));
+    expect(api.send.mock.calls[2][1].request_id).not.toBe(
+      api.send.mock.calls[0][1].request_id,
+    );
+    expect(composer).toHaveValue("尚未发送的追问");
+  });
+  it("压缩回执丢失后通过实时详情确认，普通追问后再次压缩创建新请求", async () => {
+    api.send.mockRejectedValueOnce(new Error("network unavailable"));
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    const compact = await screen.findByRole("button", { name: "压缩记忆" });
+    await user.click(compact);
+    await screen.findByText("network unavailable");
+    const requestID = api.send.mock.calls[0][1].request_id;
+    const compactTurn = {
+      ...fixture.turns[0],
+      sequence: 2,
+      turn_id: "turn_compact",
+      request_id: requestID,
+      prompt: "/compact",
+      reply: "已压缩任务上下文",
+    };
+    await act(async () =>
+      api.events.mock.calls[0][2]({
+        type: "turn",
+        data: {
+          task: { ...fixture, list_revision: 2 },
+          turn: compactTurn,
+          cursor: "compact_confirmed",
+        },
+      }),
+    );
+    await screen.findByText("已压缩任务上下文");
+    api.send.mockImplementationOnce(async (_id, body) => ({
+      ...fixture,
+      list_revision: 3,
+      turns: [
+        fixture.turns[0],
+        compactTurn,
+        {
+          ...fixture.turns[0],
+          sequence: 3,
+          turn_id: "turn_followup",
+          request_id: body.request_id,
+          prompt: body.prompt ?? "",
+          reply: "已补充结果",
+        },
+      ],
+    }));
+    await user.type(
+      screen.getByRole("textbox", { name: "任务消息" }),
+      "继续整理",
+    );
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByText("已补充结果");
+    await user.click(compact);
+    expect(api.send.mock.calls[2][1]).toEqual({
+      request_id: expect.any(String),
+      prompt: "/compact",
+    });
+    expect(api.send.mock.calls[2][1].request_id).not.toBe(requestID);
+  });
+  it("压缩仅透传显式模型，失败后切换模型仍重试原请求", async () => {
+    api.resources.mockResolvedValue({
+      skills: [],
+      mcp_servers: [],
+      plugins: [],
+      subagents: [],
+      directory_roots: [],
+      models: [
+        { model_ref: "glm/glm", name: "GLM", supports_images: false },
+        { model_ref: "other/model", name: "Other", supports_images: false },
+      ],
+      approval: {
+        allowed_modes: ["ask_for_approval", "approve_for_me", "full_access"],
+        reviewer_ready: true,
+        execution_profile: "host_process",
+      },
+      default_model_ref: "glm/glm",
+    });
+    api.send.mockRejectedValueOnce(new Error("network unavailable"));
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    const compact = await screen.findByRole("button", { name: "压缩记忆" });
+    await user.click(screen.getByText("本轮设置"));
+    const model = await screen.findByRole("combobox", { name: "本轮模型" });
+    await user.click(model);
+    await user.click(await screen.findByText("GLM · glm/glm"));
+    await user.click(screen.getByRole("switch", { name: "自定义本轮 Skill" }));
+    await user.click(screen.getByRole("switch", { name: "自定义本轮 MCP" }));
+    await user.click(compact);
+    await screen.findByText("network unavailable");
+    expect(api.send.mock.calls[0][1]).toEqual({
+      request_id: expect.any(String),
+      prompt: "/compact",
+      options: { model_ref: "glm/glm" },
+    });
+    await user.click(model);
+    await user.click(await screen.findByText("Other · other/model"));
+    await user.click(compact);
+    expect(api.send.mock.calls[1][1]).toEqual(api.send.mock.calls[0][1]);
+    await user.click(compact);
+    expect(api.send.mock.calls[2][1].options).toEqual({
+      model_ref: "other/model",
+    });
+  });
+  it.each([
+    { state: "运行中", active_turn_id: "turn_a", archived: false },
+    { state: "已归档", active_turn_id: null, archived: true },
+  ])("任务$state时禁用手动压缩", async (changes) => {
+    api.open.mockResolvedValue({ ...fixture, ...changes });
+    mount("?task=task_a");
+    expect(
+      await screen.findByRole("button", { name: "压缩记忆" }),
+    ).toBeDisabled();
+    expect(api.send).not.toHaveBeenCalled();
+  });
+  it.each([
+    { attachments: [], compacting: true },
+    { attachments: [imageAttachment], compacting: false },
+  ])(
+    "压缩维护轮不可暂停但仍可停止，是否维护轮：$compacting",
+    async (changes) => {
+      api.open.mockResolvedValue({
+        ...fixture,
+        active_turn_id: "turn_a",
+        turns: [
+          {
+            ...fixture.turns[0],
+            prompt: "/compact",
+            attachments: changes.attachments,
+            status: "running",
+          },
+        ],
+      });
+      const user = userEvent.setup();
+      mount("?task=task_a");
+      const pause = await screen.findByRole("button", { name: "暂停" });
+      if (changes.compacting) {
+        expect(pause).toBeDisabled();
+        await user.click(pause);
+        expect(api.control).not.toHaveBeenCalled();
+      } else expect(pause).toBeEnabled();
+      await user.click(screen.getByRole("button", { name: "停止回复" }));
+      expect(api.cancel).toHaveBeenCalledWith("task_a", "turn_a");
+    },
+  );
   it("执行中可以停止，历史回复保留", async () => {
     api.open.mockResolvedValue({
       ...fixture,

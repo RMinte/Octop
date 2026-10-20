@@ -783,7 +783,7 @@
         },
         "prompt": {
           "default": "",
-          "description": "本轮用户文字；可为空，但须提供附件。",
+          "description": "本轮用户文字；可为空但须提供附件。无附件的 /compact 为上下文压缩命令，不执行任务工具。",
           "maxLength": 32768,
           "title": "Prompt",
           "type": "string"
@@ -948,6 +948,25 @@
           "description": "本轮完整 MCP 选择；省略或 null 继承项目，[] 本轮禁用。",
           "title": "Mcp Servers"
         },
+        "knowledge_base_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮知识库；省略或 null 选择本人默认开启的知识库，[] 禁用。显式选择须对当前用户可见，入队后固定。",
+          "title": "Knowledge Base Ids"
+        },
         "plugins": {
           "anyOf": [
             {
@@ -1058,7 +1077,7 @@
         },
         "prompt": {
           "default": "",
-          "description": "本轮用户文字；可为空，但须提供附件。",
+          "description": "本轮用户文字；可为空但须提供附件。无附件的 /compact 为上下文压缩命令，不执行任务工具。",
           "maxLength": 32768,
           "title": "Prompt",
           "type": "string"

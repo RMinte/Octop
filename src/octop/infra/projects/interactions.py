@@ -12,6 +12,7 @@ from octop.i18n import tr
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.context import is_compaction
 from octop.infra.projects.interaction_models import (
     ApprovalPayload,
     ApprovalResponse,
@@ -207,6 +208,10 @@ def control(
         if requests is None:
             return
         if turn.status not in {"queued", "running"} or turn.cancel_requested:
+            raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
+        if paused and is_compaction(
+            turn.prompt, json.loads(turn.configuration_json).get("attachment_ids", [])
+        ):
             raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
         if turn.wait_kind == "interrupted" and not paused:
             from octop.infra.projects import approval_runtime

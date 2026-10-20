@@ -290,6 +290,8 @@ export interface TaskTurn {
   activity: string;
   artifacts: TaskArtifact[];
   model_ref: string;
+  input_tokens?: number;
+  output_tokens?: number;
   options: TaskExecutionOptions;
   web_search_enabled: boolean;
   project_revision: number | null;
@@ -325,6 +327,7 @@ export interface TaskExecutionOptions {
   mcp_servers?: string[];
   plugins?: string[];
   subagents?: string[];
+  knowledge_base_ids?: string[] | null;
   memory_enabled?: boolean;
   team_enabled?: boolean;
 }
@@ -391,6 +394,15 @@ export interface TaskPresentationSettings {
   action_timeline_enabled: boolean;
   step_panel_enabled: boolean;
 }
+export interface TaskContextUsage {
+  max_tokens: number;
+  used_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  segments: { key: string; tokens: number }[];
+  source: "model_request" | "empty";
+  estimated: boolean;
+}
 export const projectTasksApi = {
   approvalPolicy: () =>
     request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
@@ -403,6 +415,11 @@ export const projectTasksApi = {
     }),
   approvalEvents: projectTaskSocket.approvalEvents.bind(projectTaskSocket),
   settings: () => request<TaskPresentationSettings>("/project-tasks/settings"),
+  contextUsage: (id: string, signal?: AbortSignal) =>
+    request<TaskContextUsage>(`${taskPath(id)}/context-usage`, {
+      signal,
+      cache: "no-store",
+    }),
   uploadAttachment: (file: File, signal?: AbortSignal) => {
     const body = new FormData();
     body.append("file", file);

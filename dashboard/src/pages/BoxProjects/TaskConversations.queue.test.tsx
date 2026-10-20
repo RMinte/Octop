@@ -25,6 +25,7 @@ import type { TaskMessageQueue } from "./useTaskMessageQueue";
 vi.mock("../../api/modules/projects", () => ({
   projectTasksApi: {
     settings: vi.fn(),
+    contextUsage: vi.fn(),
     list: vi.fn(),
     sync: vi.fn(),
     get: vi.fn(),
@@ -180,6 +181,15 @@ beforeEach(() => {
     action_timeline_enabled: true,
     step_panel_enabled: true,
   });
+  api.contextUsage.mockResolvedValue({
+    max_tokens: 128000,
+    used_tokens: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    segments: [],
+    source: "empty",
+    estimated: false,
+  });
   sessionStorage.clear();
   snapshots = new Map([
     ["task_a", task()],
@@ -311,6 +321,7 @@ describe("项目任务消息队列", () => {
     await mount();
     expect(screen.getByRole("button", { name: "排队" })).toBeDisabled();
     await enqueue("先整理结果");
+    expect(screen.getByRole("button", { name: "压缩记忆" })).toBeDisabled();
     fireEvent.change(composer(), { target: { value: "然后补充结论" } });
     fireEvent.keyDown(composer(), { key: "Enter", code: "Enter" });
     await waitFor(() => expect(composer()).toHaveValue(""));

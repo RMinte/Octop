@@ -351,6 +351,16 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 使用 `GET preview_url` 并附带 Bearer token 读取原始内容。视觉图片内联预览，其他文件作为附件下载；响应包含 `Cache-Control: private, no-store`、`X-Content-Type-Options: nosniff` 和受限 CSP。刷新、分页、实时事件和断线恢复均不内嵌文件字节。图片持久化 `task-image://` 引用，模型调用前临时展开；`read_task_image` 仅列出、读取当前任务视觉图片。完整接入见[任务 WebSocket 指南第 15 节](project-task-websocket.md#15-输入附件)。
 
+### 任务上下文压缩
+
+任务支持自动压缩及无附件的 `/compact` 消息命令；REST 仍使用 `POST /api/project-tasks/{task_id}/messages`，WebSocket 仍使用 `task.message`。摘要和近期消息跨轮、跨服务重启保留，公开聊天记录不删除。连续压缩的原文追加到任务独立归档，项目服务端工作目录变更后仍能读取。详情页提供“压缩记忆”按钮，保留未发送草稿和附件。维护轮只调用摘要模型，不执行任务工具或写入长期记忆；沿用幂等、权限、取消和显式恢复，不支持暂停。完整语义和任务与普通会话的能力差异见[任务 WebSocket 指南](project-task-websocket.md#任务上下文压缩)。
+
+### 任务上下文用量与知识库
+
+`GET /api/project-tasks/{task_id}/context-usage` 提供最近一次主模型请求的窗口、占用与组成估算。缺少快照返回 `source=empty`，占用为估算时标记 `estimated=true`；运行中、暂停及重启后可读，压缩后立即更新。每轮 `input_tokens/output_tokens` 继续表示累计计费用量，页面与上下文占用分开展示；已加载页汇总不冒充整个任务总量。
+
+`options.knowledge_base_ids` 用于本轮知识库选择，省略/null 取本人默认开启库，[] 禁用，共享库须显式选择。入队冻结合法 ID 和目录，检索时再次校验当前可见性；不修改项目或专家。内置 `search_knowledge` 与真实结果的结构化引用支持历史重开，来源通过现有知识库鉴权接口预览或下载。字段、权限和响应语义见[任务接入说明](project-task-websocket.md#上下文占用与计费用量)。
+
 ### 服务端附件交付
 
 任务运行时提供 `create_artifact(name,content,media_type?)`、`publish_workspace_file(path,name?)` 和 `publish_workspace_archive(paths,name)`，均在服务端执行，客户端不能注册。后两者只读取本轮服务端工作目录，不读取 `client_directory`；ZIP 工具只打包显式列出的相对文件，不扫描整个目录。有无项目都可创建附件；只有显式工具调用成功才算正式交付。没有配置服务端或客户端项目目录的独立工作区中，本轮成功写入普通成果文件后，最后完成步骤和无计划最终答复会检查本轮确有附件；缺少时要求模型先交付。已有项目目录的日常编辑不强制打包，通过命令自行生成文件仍依赖模型遵循交付指引。每轮 `artifacts` 返回稳定 ID、名称、MIME 类型、大小、SHA-256、可选来源相对路径和鉴权下载地址；REST 历史和 WebSocket 使用同一结构，重连可恢复。源文件更改/删除不影响已发布快照。单文件最多 25 MiB，每轮最多 5 份、合计 50 MiB。详细字段、错误和客户端适配见[任务 WebSocket 指南第 13 节](project-task-websocket.md#13-服务端附件交付)。

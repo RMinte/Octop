@@ -23,6 +23,7 @@ import {
   Pause,
   Play,
   Send,
+  Shrink,
   Square,
   Trash2,
   X,
@@ -51,6 +52,7 @@ import TaskInteractions from "./TaskInteractions";
 import TaskApprovalModePicker from "./TaskApprovalMode";
 import TaskWebSearch from "./TaskWebSearch";
 import TaskInputImages from "./TaskInputImages";
+import TaskContextUsage, { TaskTurnUsage } from "./TaskContextUsage";
 import { MAX_TASK_IMAGES, useTaskImages } from "./useTaskImages";
 import {
   useTaskMessageQueue,
@@ -130,6 +132,10 @@ export default function TaskConversations({
     target: string;
     body: TaskMessage | TaskCreate;
   } | null>(null);
+  const compactRequest = useRef<{
+    target: string;
+    body: TaskMessage;
+  } | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const followOutput = useRef(true);
   const retryRequest = useRef<{
@@ -146,8 +152,10 @@ export default function TaskConversations({
     (turn) => turn.turn_id === detail.active_turn_id,
   );
   const busy = !!detail?.active_turn_id;
+  const compacting =
+    activeTurn?.prompt === "/compact" && !activeTurn.attachments?.length;
   const control = async () => {
-    if (!detail || !activeTurn || controlInFlight.current) return;
+    if (!detail || !activeTurn || compacting || controlInFlight.current) return;
     controlInFlight.current = true;
     setControlling(true);
     const paused = !(
@@ -179,6 +187,15 @@ export default function TaskConversations({
     !!detail?.archived ||
     projectArchived ||
     !!(taskID && !detail);
+  const compactDisabled =
+    composerDisabled ||
+    busy ||
+    queuedItems.length > 0 ||
+    !!queued?.sendingID ||
+    updating ||
+    approvalSaving ||
+    webSearchSaving ||
+    !!deleteTarget;
   const listSummary = useRef("");
   const renameRevision = useRef<number | null>(null);
   const taskDeleted = !!taskID && isDeleted(taskID);
@@ -218,6 +235,7 @@ export default function TaskConversations({
     setOptions({});
     setWebSearchEnabled(true);
     pending.current = null;
+    compactRequest.current = null;
     retryRequest.current = null;
     followOutput.current = true;
   }, [taskID, projectID]);
@@ -254,6 +272,16 @@ export default function TaskConversations({
     if (detail && listSummary.current !== key) upsertTask(detail);
     listSummary.current = key;
   }, [detail, upsertTask]);
+
+  useEffect(() => {
+    const request = compactRequest.current;
+    if (
+      request &&
+      detail?.task_id === request.target &&
+      detail.turns.some((turn) => turn.request_id === request.body.request_id)
+    )
+      compactRequest.current = null;
+  }, [detail]);
 
   const latestReply = detail?.turns.at(-1)?.reply;
   const latestTurnID = detail?.turns.at(-1)?.turn_id;
@@ -388,6 +416,49 @@ export default function TaskConversations({
         if (alive.current && selectedProjectID.current === projectID)
           setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
       });
+    } catch (err) {
+      if (
+        alive.current &&
+        selectedTaskID.current === taskID &&
+        selectedProjectID.current === projectID
+      )
+        setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+    } finally {
+      inFlight.current = false;
+      setSending(false);
+    }
+  };
+
+  const compact = async () => {
+    if (!taskID || !detail || compactDisabled || inFlight.current) return;
+    if (compactRequest.current?.target !== taskID)
+      compactRequest.current = {
+        target: taskID,
+        body: {
+          request_id: crypto.randomUUID(),
+          prompt: "/compact",
+          ...(options.model_ref
+            ? { options: { model_ref: options.model_ref } }
+            : {}),
+        },
+      };
+    inFlight.current = true;
+    setSending(true);
+    setError("");
+    try {
+      const result = await projectTasksApi.send(
+        taskID,
+        compactRequest.current.body,
+      );
+      if (
+        !alive.current ||
+        selectedTaskID.current !== taskID ||
+        selectedProjectID.current !== projectID
+      )
+        return;
+      upsertTask(result);
+      applyWrite(result);
+      compactRequest.current = null;
     } catch (err) {
       if (
         alive.current &&
@@ -723,6 +794,14 @@ export default function TaskConversations({
                 <Space wrap>
                   <Button
                     size="small"
+                    icon={<Shrink size={15} />}
+                    disabled={compactDisabled}
+                    onClick={() => void compact()}
+                  >
+                    {t("projects.tasks.compact")}
+                  </Button>
+                  <Button
+                    size="small"
                     icon={
                       detail.archived ? (
                         <ArchiveRestore size={15} />
@@ -758,6 +837,11 @@ export default function TaskConversations({
                   </Button>
                 </Space>
               </Space>
+              <TaskContextUsage
+                taskID={detail.task_id}
+                active={busy}
+                turns={detail.turns}
+              />
               {busy && (
                 <Typography.Paragraph type="secondary">
                   {t("projects.tasks.deleteBusy")}
@@ -800,6 +884,7 @@ export default function TaskConversations({
                     </Space>
                     <Typography.Paragraph type="secondary">
                       {t("projects.tasks.modelUsed", { model: turn.model_ref })}
+                      <TaskTurnUsage turn={turn} />
                     </Typography.Paragraph>
                     <TaskTurnContent
                       turn={turn}
@@ -1140,7 +1225,10 @@ export default function TaskConversations({
                     }
                     loading={controlling}
                     disabled={
-                      reconnecting || stopping || activeTurn?.cancel_requested
+                      compacting ||
+                      reconnecting ||
+                      stopping ||
+                      activeTurn?.cancel_requested
                     }
                     title={t("projects.tasks.controlHint")}
                     onClick={() => void control()}

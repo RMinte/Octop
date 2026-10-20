@@ -48,6 +48,7 @@ from octop.infra.projects.models import (
 )
 from octop.infra.projects.runtime import ProjectTaskWorker
 from octop.infra.projects.settings import TaskSettings, load_settings
+from octop.infra.projects.usage import TaskContextUsage, read_usage
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
 from octop.infra.utils.locale import resolve_request_locale
@@ -715,6 +716,22 @@ async def task_detail(
 
 
 @task_router.get(
+    "/{task_id}/context-usage",
+    response_model=TaskContextUsage,
+    summary="读取任务上下文占用与分解",
+    description="读取本人任务最近模型请求的窗口占用；运行中、暂停及服务重启后均可读取持久快照。各组成部分为估算；压缩后占用也标记为估算。source=empty 表示尚无快照，不是已知零占用。此处输入输出为最近请求，累计计费见每轮 input_tokens/output_tokens。其他用户或不存在的任务返回 404。",
+)
+async def task_context_usage(
+    task_id: str,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> TaskContextUsage:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(read_usage, _services(server), user.id, task_id)
+
+
+@task_router.get(
     "/{task_id}/artifacts/{artifact_id}/download",
     response_class=Response,
     summary="下载任务已发布的附件",
@@ -753,7 +770,7 @@ async def download_task_artifact(
     response_model=tasks.TaskDetail,
     status_code=202,
     summary="继续任务对话",
-    description="在同一任务中发送下一轮消息，保留成功历史和标记为未完成的失败/取消正文，使用最新项目配置和本轮 options；不修改项目。归档任务须先恢复。任务执行中返回 409；同一 request_id 的相同消息返回原任务，不重复执行。",
+    description="在同一任务中发送下一轮消息，保留成功历史和标记为未完成的失败/取消正文，使用最新项目配置和本轮 options；不修改项目。无附件且正文为 /compact 时仅压缩模型上下文，保留公开历史，不执行任务工具。归档任务须先恢复。任务执行中返回 409；同一 request_id 的相同消息返回原任务，不重复执行。",
 )
 async def send_task_message(
     task_id: str,

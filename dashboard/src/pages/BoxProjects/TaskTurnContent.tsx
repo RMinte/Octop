@@ -19,6 +19,8 @@ import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { DEFAULT_TASK_PRESENTATION_SETTINGS } from "../../hooks/useTaskPresentationSettings";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
+import { parseKnowledgeCitations } from "../../utils/parseKnowledgeCitations";
+import TaskKnowledgeCitations from "./TaskKnowledgeCitations";
 import styles from "./index.module.less";
 
 function elapsedMilliseconds(start?: string | null, finish?: string | null) {
@@ -375,7 +377,10 @@ function TaskActions({
                       className={styles.taskToolData}
                       aria-label={t("projects.tasks.actionDetails.output")}
                     >
-                      {structuredText(block.output)}
+                      {block.tool_name === "search_knowledge" &&
+                      typeof block.output === "string"
+                        ? parseKnowledgeCitations(block.output).text
+                        : structuredText(block.output)}
                     </pre>
                   ) : (
                     <p>{t("projects.tasks.actionDetails.noOutput")}</p>
@@ -453,6 +458,20 @@ export default function TaskTurnContent({
     }
   }
   const answers = turn.content_blocks.filter((block) => block.type === "text");
+  const citations = [
+    ...new Map(
+      turn.content_blocks.flatMap((block) =>
+        block.type === "tool" &&
+        block.tool_name === "search_knowledge" &&
+        typeof block.output === "string"
+          ? parseKnowledgeCitations(block.output).citations.map(
+              (citation) =>
+                [`${citation.kbId}:${citation.docId}`, citation] as const,
+            )
+          : [],
+      ),
+    ).values(),
+  ];
   return (
     <>
       {showPlan ? (
@@ -472,7 +491,7 @@ export default function TaskTurnContent({
       {answers.map((answer) => (
         <LazyMarkdown
           key={answer.block_id}
-          content={answer.text}
+          content={parseKnowledgeCitations(answer.text).text}
           isStreaming={
             turn.status === "running" && answer.status === "streaming"
           }
@@ -480,10 +499,11 @@ export default function TaskTurnContent({
       ))}
       {!answers.length && turn.reply && (
         <LazyMarkdown
-          content={turn.reply}
+          content={parseKnowledgeCitations(turn.reply).text}
           isStreaming={turn.status === "running"}
         />
       )}
+      <TaskKnowledgeCitations citations={citations} />
     </>
   );
 }

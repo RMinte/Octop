@@ -18,6 +18,7 @@ import {
 } from "../../api/modules/projects";
 import { apiErrorMessage } from "../../utils/apiError";
 import ProjectSkillsField from "./ProjectSkillsField";
+import TaskKnowledgeField from "./TaskKnowledgeField";
 
 export default function TaskExecutionSettings({
   value,
@@ -242,6 +243,14 @@ export default function TaskExecutionSettings({
                         )}
                       </Form.Item>
                     ))}
+                    <TaskKnowledgeField
+                      value={value.knowledge_base_ids}
+                      onChange={(knowledge_base_ids) =>
+                        onChange({ ...value, knowledge_base_ids })
+                      }
+                      active={open}
+                      disabled={disabled}
+                    />
                     {(["memory_enabled", "team_enabled"] as const).map(
                       (key) => (
                         <Form.Item

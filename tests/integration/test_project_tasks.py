@@ -1043,6 +1043,7 @@ async def test_retry_preserves_failed_text_uses_current_configuration_and_is_ide
     retried = done["turns"][1]
     assert retried["options"] == {
         **request["options"],
+        "knowledge_base_ids": [],
         "action_timeline_enabled": True,
         "reasoning_mode": None,
         "reasoning_effort": None,
@@ -1428,6 +1429,7 @@ async def test_turn_execution_options_override_without_mutating_project_and_bind
         task["turns"][0]["options"]
         == {
             **choice,
+            "knowledge_base_ids": [],
             "action_timeline_enabled": True,
             "reasoning_mode": None,
             "reasoning_effort": None,
