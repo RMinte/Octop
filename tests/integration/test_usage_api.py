@@ -255,6 +255,8 @@ async def test_user_export_xlsx(env: Any) -> None:
     assert "按天" in wb.sheetnames
     assert "按专家" in wb.sheetnames
     assert "按模型" in wb.sheetnames
+    assert "按项目" in wb.sheetnames
+    assert "按任务" in wb.sheetnames
     detail = wb["明细"]
     headers = [cell.value for cell in detail[1]]
     assert "专家名称" in headers
@@ -265,7 +267,7 @@ async def test_user_export_xlsx(env: Any) -> None:
     # so Excel Sort does not treat 合计 as part of the contiguous data block.
     assert detail.cell(detail.max_row, 1).value == "合计"
     assert all(detail.cell(detail.max_row - 1, col).value is None for col in range(1, 5))
-    assert detail.auto_filter.ref == f"A1:P{detail.max_row - 2}"
+    assert detail.auto_filter.ref == f"A1:T{detail.max_row - 2}"
     time_vals = [
         row[time_col - 1].value
         for row in detail.iter_rows(min_row=2, max_row=detail.max_row - 2)
@@ -702,3 +704,399 @@ def test_extract_usage_returns_none_when_absent() -> None:
     assert _extract_usage_from_chunk({"type": "token", "content": "hi"}) is None
     assert _extract_usage_from_chunk({"type": "state_snapshot", "data": {}}) is None
     assert _extract_usage_from_chunk(None) is None  # type: ignore[arg-type]
+
+
+def _seed_task_usage(
+    srv: Any,
+    *,
+    owner_id: int,
+    task_id: str,
+    project_id: str | None,
+    ts: int,
+    input_tokens: int = 100,
+    output_tokens: int = 20,
+    auxiliary: bool = False,
+    archived: bool = False,
+) -> None:
+    """Populate durable task journals without starting a task worker."""
+    with srv.services.db.connect() as conn:
+        if project_id is not None:
+            conn.execute(
+                "INSERT INTO projects(project_id,owner_id,name,created_at,updated_at,archived) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(project_id) DO NOTHING",
+                (project_id, owner_id, "项目 " + project_id, ts * 1000, ts * 1000, int(archived)),
+            )
+        conn.execute(
+            "INSERT INTO project_tasks(task_id,owner_id,project_id,title,request_id,"
+            "created_at,updated_at,archived) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                task_id,
+                owner_id,
+                project_id,
+                "任务 " + task_id,
+                "request-" + task_id,
+                ts * 1000,
+                (ts + 86_400) * 1000,
+                int(archived),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO project_task_turns(turn_id,task_id,request_id,prompt,status,"
+            "configuration_json,model_ref,created_at,updated_at,input_tokens,output_tokens) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "turn-" + task_id,
+                task_id,
+                "request-" + task_id,
+                "Hello",
+                "completed",
+                "{}",
+                "task-model",
+                ts * 1000,
+                (ts + 86_400) * 1000,
+                input_tokens,
+                output_tokens,
+            ),
+        )
+        if auxiliary:
+            conn.execute(
+                "INSERT INTO project_task_titles(task_id,status,input_tokens,output_tokens) "
+                "VALUES (?,'completed',11,3)",
+                (task_id,),
+            )
+            conn.execute(
+                "INSERT INTO project_task_reviews(review_id,task_id,turn_id,owner_id,"
+                "execution_host,target_id,action_digest,proposal_json,model_ref,"
+                "created_at,updated_at,expires_at,input_tokens,output_tokens) "
+                "VALUES (?,?,?,?,'server',?,'digest','{}','review-model',?,?,?,?,?)",
+                (
+                    "review-" + task_id,
+                    task_id,
+                    "turn-" + task_id,
+                    owner_id,
+                    "target-" + task_id,
+                    ts * 1000,
+                    (ts + 86_400) * 1000,
+                    (ts + 86_400) * 1000,
+                    17,
+                    5,
+                ),
+            )
+
+
+async def test_project_task_summary_includes_all_recorded_sources(env: Any) -> None:
+    _c, srv, _admin_auth, _alice_auth, ctx = env
+    repo = srv.services.usage_repo
+    owner = ctx["alice_id"]
+    ts = 1_780_000_000
+    _seed_task_usage(
+        srv,
+        owner_id=owner,
+        task_id="task-a",
+        project_id="project-a",
+        ts=ts,
+        auxiliary=True,
+        archived=True,
+    )
+    _seed_task_usage(
+        srv,
+        owner_id=owner,
+        task_id="task-b",
+        project_id=None,
+        ts=ts,
+        input_tokens=40,
+        output_tokens=10,
+    )
+    # Imported/queued turns without a recorded token total do not inflate turns.
+    _seed_task_usage(
+        srv,
+        owner_id=owner,
+        task_id="empty",
+        project_id="project-a",
+        ts=ts,
+        input_tokens=0,
+        output_tokens=0,
+    )
+    repo.record(
+        agent_id="y",
+        user_id=owner,
+        input_tokens=20,
+        output_tokens=4,
+        uncached_input_tokens=15,
+        cache_read_tokens=5,
+        ts=ts,
+        model="expert-model",
+    )
+    total = repo.summary(user_id=owner, window="all", granularity="total")
+    assert total["total_tokens"] == 230
+    assert total["turns"] == 3
+    assert total["model_calls"] == 1
+    assert total["uncached_input_tokens"] == 15
+    assert total["cache_read_tokens"] == 5
+    assert total["cache_hit_percent"] == 25
+    assert total["total_tokens"] == repo.total_tokens_for_user(owner)
+
+    projects = repo.summary(user_id=owner, window="all", granularity="by_project")
+    assert projects["total_tokens"] == 206
+    assert projects["turns"] == 2
+    by_project = {row["key"]: row for row in projects["buckets"]}
+    assert set(by_project) == {"project-a", ""}
+    assert by_project["project-a"]["label"] == "项目 project-a"
+    assert by_project["project-a"]["total_tokens"] == 156
+    assert by_project[""]["total_tokens"] == 50
+    unassigned = repo.summary(user_id=owner, project_id="", window="all", granularity="total")
+    assert unassigned["total_tokens"] == 50
+    assert [r.task_id for r in repo.list_detail(user_id=owner, project_id="", window="all")] == [
+        "task-b"
+    ]
+    for field in (
+        "model_calls",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "uncached_input_tokens",
+    ):
+        assert projects[field] == 0
+
+    tasks = repo.summary(user_id=owner, window="all", granularity="by_task")
+    assert tasks["total_tokens"] == projects["total_tokens"]
+    assert {b["key"]: b["label"] for b in tasks["buckets"]} == {
+        "task-a": "任务 task-a",
+        "task-b": "任务 task-b",
+    }
+    agents = repo.summary(user_id=owner, window="all", granularity="by_agent")
+    assert agents["total_tokens"] == 24
+    assert [b["key"] for b in agents["buckets"]] == ["y"]
+    models = repo.summary(user_id=owner, window="all", granularity="by_model")
+    assert {b["key"]: b["total_tokens"] for b in models["buckets"]} == {
+        "task-model": 184,
+        "review-model": 22,
+        "expert-model": 24,
+    }
+    assert sum(b["turns"] for b in models["buckets"]) == 3
+
+
+async def test_multi_turn_usage_keeps_same_title_tasks_separate(env: Any) -> None:
+    _c, srv, _admin_auth, _alice_auth, ctx = env
+    owner = ctx["alice_id"]
+    for suffix in ("one", "two"):
+        _seed_task_usage(
+            srv,
+            owner_id=owner,
+            task_id="task-" + suffix,
+            project_id="project-" + suffix,
+            ts=1_780_000_000,
+            auxiliary=suffix == "one",
+        )
+    with srv.services.db.connect() as conn:
+        conn.execute("UPDATE project_tasks SET title='Same task' WHERE owner_id=?", (owner,))
+        conn.execute(
+            "INSERT INTO project_task_turns(turn_id,task_id,request_id,prompt,status,"
+            "configuration_json,model_ref,created_at,updated_at,input_tokens,output_tokens) "
+            "SELECT 'followup',task_id,'followup-request','Follow up','completed',"
+            "configuration_json,model_ref,created_at+1000,updated_at+1000,11,2 "
+            "FROM project_task_turns WHERE turn_id='turn-task-one'"
+        )
+    repo = srv.services.usage_repo
+    tasks = repo.summary(user_id=owner, window="all", granularity="by_task")
+    assert tasks["total_tokens"] == 289
+    assert tasks["turns"] == 3
+    assert {bucket["key"]: bucket["total_tokens"] for bucket in tasks["buckets"]} == {
+        "task-one": 169,
+        "task-two": 120,
+    }
+    assert {bucket["label"] for bucket in tasks["buckets"]} == {"Same task"}
+    projects = repo.summary(user_id=owner, window="all", granularity="by_project")
+    assert {bucket["key"]: bucket["total_tokens"] for bucket in projects["buckets"]} == {
+        "project-one": 169,
+        "project-two": 120,
+    }
+    assert {bucket["label"] for bucket in projects["buckets"]} == {
+        "项目 project-one",
+        "项目 project-two",
+    }
+
+
+async def test_project_task_filters_keep_user_scope_and_calendar_window(env: Any) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    c, srv, admin_auth, alice_auth, ctx = env
+    owner = ctx["alice_id"]
+    ts = int(datetime(2026, 9, 7, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+    _seed_task_usage(
+        srv,
+        owner_id=owner,
+        task_id="alice-task",
+        project_id="alice-project",
+        ts=ts,
+        auxiliary=True,
+    )
+    _seed_task_usage(
+        srv,
+        owner_id=1,
+        task_id="admin-task",
+        project_id="admin-project",
+        ts=ts,
+        input_tokens=700,
+        output_tokens=80,
+    )
+    for filter_name, filter_id in (("project_id", "alice-project"), ("task_id", "alice-task")):
+        response = await c.get(
+            "/api/usage/summary",
+            params={"window": "day:2026-09-07", "granularity": "by_task", filter_name: filter_id},
+            headers=alice_auth,
+        )
+        assert response.status_code == 200
+        assert response.json()["total_tokens"] == 156
+        assert response.json()["turns"] == 1
+        assert response.json()["buckets"][0]["key"] == "alice-task"
+        denied = await c.get(
+            "/api/usage/summary",
+            params={"window": "all", filter_name: filter_id.replace("alice", "admin")},
+            headers=alice_auth,
+        )
+        assert denied.status_code == 200
+        assert denied.json()["total_tokens"] == 0
+
+    global_usage = await c.get(
+        "/api/admin/usage/summary",
+        params={"window": "all", "granularity": "by_project", "project_id": "admin-project"},
+        headers=admin_auth,
+    )
+    assert global_usage.status_code == 200
+    assert global_usage.json()["total_tokens"] == 780
+    as_user = await c.get(
+        "/api/usage/summary",
+        params={"window": "all", "granularity": "by_task", "as_user": owner},
+        headers=admin_auth,
+    )
+    assert as_user.status_code == 200
+    assert as_user.json()["total_tokens"] == 156
+    previous_day = srv.services.usage_repo.summary(
+        user_id=owner,
+        window="day:2026-09-06",
+        granularity="by_task",
+        timezone="Asia/Shanghai",
+    )
+    assert previous_day["total_tokens"] == 0
+    # A later heartbeat/update does not move cumulative consumption to another day.
+    next_day = srv.services.usage_repo.summary(
+        user_id=owner,
+        window="day:2026-09-08",
+        granularity="by_task",
+        timezone="Asia/Shanghai",
+    )
+    assert next_day["total_tokens"] == 0
+    daily = await c.get(
+        "/api/usage/summary",
+        params={"window": "day:2026-09-07", "granularity": "by_day"},
+        headers=alice_auth,
+    )
+    assert daily.status_code == 200
+    assert [(b["key"], b["total_tokens"]) for b in daily.json()["buckets"]] == [("2026-09-07", 156)]
+
+
+async def test_project_task_detail_and_export_filter(env: Any) -> None:
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    c, srv, admin_auth, alice_auth, ctx = env
+    owner = ctx["alice_id"]
+    _seed_task_usage(
+        srv,
+        owner_id=owner,
+        task_id="export-task",
+        project_id="export-project",
+        ts=1_780_000_000,
+        auxiliary=True,
+    )
+    _seed_task_usage(
+        srv,
+        owner_id=1,
+        task_id="private-task",
+        project_id="private-project",
+        ts=1_780_000_001,
+    )
+    repo = srv.services.usage_repo
+    rows = repo.list_detail(user_id=owner, task_id="export-task", window="all")
+    assert len(rows) == 3
+    assert {row.source for row in rows} == {
+        "project_task",
+        "project_task_title",
+        "project_task_review",
+    }
+    assert all(row.project_id == "export-project" and row.task_id == "export-task" for row in rows)
+    assert all(row.project_name == "项目 export-project" for row in rows)
+    assert all(row.task_title == "任务 export-task" for row in rows)
+    assert all(row.agent_id == "" and row.thread_id == "export-task" for row in rows)
+    assert sum(row.total_tokens for row in rows) == 156
+    assert len(repo.list_detail(user_id=owner, window="all", limit=1)) == 1
+    assert repo.list_detail(user_id=owner, project_id="private-project", window="all") == []
+
+    for path, auth, params in (
+        ("/api/usage/export.xlsx", alice_auth, {"task_id": "export-task"}),
+        (
+            "/api/admin/usage/export.xlsx",
+            admin_auth,
+            {"project_id": "export-project", "user_id": owner},
+        ),
+    ):
+        response = await c.get(
+            path, params={"window": "all", **params}, headers={**auth, "Accept-Language": "zh"}
+        )
+        assert response.status_code == 200
+        workbook = load_workbook(BytesIO(response.content))
+        detail = workbook["明细"]
+        headers = [cell.value for cell in detail[1]]
+        task_col = headers.index("任务 ID")
+        assert {
+            row[task_col].value for row in detail.iter_rows(min_row=2, max_row=detail.max_row - 2)
+        } == {"export-task"}
+        assert workbook["按项目"].cell(2, 1).value == "项目 export-project"
+        assert workbook["按任务"].cell(2, 1).value == "任务 export-task"
+
+
+async def test_usage_day_buckets_preserve_day_across_dst_change(env: Any) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from octop.infra.db.repos.usage import resolve_usage_window
+
+    _c, srv, _admin_auth, _alice_auth, ctx = env
+    owner = ctx["alice_id"]
+    zone = ZoneInfo("America/New_York")
+    # The clock jumps from 01:59 to 03:00 on this date; both task turns
+    # still belong to the same local calendar day, which lasts 23 hours.
+    before = int(datetime(2026, 3, 8, 1, 30, tzinfo=zone).timestamp())
+    after = int(datetime(2026, 3, 8, 3, 30, tzinfo=zone).timestamp())
+    previous = int(datetime(2026, 3, 7, 23, 30, tzinfo=zone).timestamp())
+    for task_id, timestamp in (("before-dst", before), ("after-dst", after)):
+        _seed_task_usage(srv, owner_id=owner, task_id=task_id, project_id=None, ts=timestamp)
+    srv.services.usage_repo.record(
+        agent_id="y",
+        user_id=owner,
+        input_tokens=10,
+        output_tokens=2,
+        ts=previous,
+    )
+    summary = srv.services.usage_repo.summary(
+        user_id=owner,
+        window="all",
+        granularity="by_day",
+        timezone="America/New_York",
+    )
+    assert [(bucket["key"], bucket["total_tokens"]) for bucket in summary["buckets"]] == [
+        ("2026-03-08", 240),
+        ("2026-03-07", 12),
+    ]
+    assert summary["turns"] == 3
+    start, end = resolve_usage_window("day:2026-03-08", timezone="America/New_York")
+    assert end - start == 23 * 3600
+    detail = srv.services.usage_repo.list_detail(
+        user_id=owner,
+        window="day:2026-03-08",
+        timezone="America/New_York",
+    )
+    assert sum(row.total_tokens for row in detail) == 240

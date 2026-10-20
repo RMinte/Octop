@@ -1,9 +1,9 @@
 /**
  * Token Usage — account-level analytics.
  *
- * Views (peer Segmented): summary | by day | by expert | by model.
+ * Views (peer Segmented): summary | by day | by expert | by model | by project | by task.
  * Summary composes totals + donut/pie charts from existing
- * ``GET /api/usage/summary`` granularities (no backend changes).
+ * ``GET /api/usage/summary`` granularities.
  * Dimension views: stacked bar + sortable table.
  */
 
@@ -86,7 +86,13 @@ interface UsageSummary {
   buckets: UsageBucket[];
 }
 
-type ViewMode = "summary" | "by_day" | "by_agent" | "by_model";
+type ViewMode =
+  | "summary"
+  | "by_day"
+  | "by_agent"
+  | "by_model"
+  | "by_project"
+  | "by_task";
 type DimGranularity = Exclude<ViewMode, "summary">;
 
 const CHART_COLORS = [
@@ -137,6 +143,13 @@ function formatNumber(n: number): string {
 function formatDayTick(label: string): string {
   if (/^\d{4}-\d{2}-\d{2}$/.test(label)) return label.slice(5);
   return label;
+}
+
+function formatResourceTick(label: string): string {
+  const characters = Array.from(label);
+  return characters.length > 12
+    ? `${characters.slice(0, 12).join("")}…`
+    : label;
 }
 
 interface UsageBarSeries {
@@ -240,8 +253,9 @@ function UsageBarChart({
 function usageStatItems(
   totals: UsageSummary,
   t: (key: string) => string,
+  includeCache = true,
 ): UsageStatItem[] {
-  return [
+  const items: UsageStatItem[] = [
     {
       key: "total",
       label: t("tokenUsage.totalTokens"),
@@ -274,6 +288,9 @@ function usageStatItems(
       value: formatNumber(totals.avg_per_turn),
     },
   ];
+  return includeCache
+    ? items
+    : items.filter(({ key }) => key !== "cacheRead" && key !== "cacheHit");
 }
 
 function bucketColumnTitle(
@@ -282,7 +299,19 @@ function bucketColumnTitle(
 ): string {
   if (granularity === "by_day") return t("tokenUsage.date");
   if (granularity === "by_agent") return t("tokenUsage.expert");
+  if (granularity === "by_project") return t("tokenUsage.project");
+  if (granularity === "by_task") return t("tokenUsage.task");
   return t("tokenUsage.model");
+}
+
+function bucketChartTitle(
+  granularity: DimGranularity,
+  t: (key: string) => string,
+): string {
+  if (granularity === "by_agent") return t("tokenUsage.expertBreakdown");
+  if (granularity === "by_project") return t("tokenUsage.projectBreakdown");
+  if (granularity === "by_task") return t("tokenUsage.taskBreakdown");
+  return t("tokenUsage.modelBreakdown");
 }
 
 function resolveAgentLabels(
@@ -391,6 +420,7 @@ function toPieData(buckets: UsageBucket[], limit = 8) {
   const sorted = [...buckets].sort((a, b) => b.total_tokens - a.total_tokens);
   if (sorted.length <= limit) {
     return sorted.map((b) => ({
+      key: b.key,
       name: b.label,
       value: b.total_tokens,
       turns: b.turns,
@@ -402,6 +432,7 @@ function toPieData(buckets: UsageBucket[], limit = 8) {
   const otherTurns = rest.reduce((s, b) => s + b.turns, 0);
   return [
     ...head.map((b) => ({
+      key: b.key,
       name: b.label,
       value: b.total_tokens,
       turns: b.turns,
@@ -490,7 +521,7 @@ function DonutCard({
   colors = CHART_COLORS,
 }: {
   title: string;
-  data: { name: string; value: number }[];
+  data: { key?: string; name: string; value: number }[];
   emptyText: string;
   colors?: string[] | Record<string, string>;
 }) {
@@ -527,7 +558,10 @@ function DonutCard({
                   stroke="none"
                 >
                   {data.map((entry, i) => (
-                    <Cell key={entry.name} fill={colorFor(entry.name, i)} />
+                    <Cell
+                      key={entry.key ?? entry.name}
+                      fill={colorFor(entry.name, i)}
+                    />
                   ))}
                 </Pie>
                 <RechartsTooltip
@@ -539,13 +573,18 @@ function DonutCard({
           </div>
           <ul className={styles.donutLegend}>
             {data.map((entry, i) => (
-              <li key={entry.name} className={styles.donutLegendItem}>
+              <li
+                key={entry.key ?? entry.name}
+                className={styles.donutLegendItem}
+              >
                 <span
                   className={styles.donutLegendSwatch}
                   style={{ background: colorFor(entry.name, i) }}
                   aria-hidden
                 />
-                <span className={styles.donutLegendLabel}>{entry.name}</span>
+                <span className={styles.donutLegendLabel} title={entry.name}>
+                  {entry.name}
+                </span>
               </li>
             ))}
           </ul>
@@ -666,6 +705,7 @@ function DimensionView({
   isMobile: boolean;
 }) {
   const { t } = useTranslation();
+  const isTaskView = granularity === "by_project" || granularity === "by_task";
 
   const chartBuckets = useMemo(() => {
     if (granularity === "by_day") return [...buckets].reverse();
@@ -680,8 +720,11 @@ function DimensionView({
 
   return (
     <div className={styles.summaryBody}>
+      {isTaskView && (
+        <div className={styles.dimensionScope}>{t("tokenUsage.taskScope")}</div>
+      )}
       <UsageStats
-        items={usageStatItems(totals, t)}
+        items={usageStatItems(totals, t, !isTaskView)}
         overflowEnabled={!isMobile}
       />
 
@@ -693,11 +736,7 @@ function DimensionView({
           }}
         >
           <DonutCard
-            title={
-              granularity === "by_agent"
-                ? t("tokenUsage.expertBreakdown")
-                : t("tokenUsage.modelBreakdown")
-            }
+            title={bucketChartTitle(granularity, t)}
             data={pieData}
             emptyText={t("tokenUsage.noRecordsInRange")}
           />
@@ -710,6 +749,7 @@ function DimensionView({
               data={chartBuckets}
               height={CHART_HEIGHT.bar}
               showLegend
+              tickFormatter={isTaskView ? formatResourceTick : undefined}
               series={[
                 {
                   dataKey: "input_tokens",
@@ -758,7 +798,16 @@ function DimensionView({
             {buckets.map((b) => (
               <div key={b.key} className={styles.mobileRow}>
                 <div className={styles.mobileRowTop}>
-                  <Tag style={{ margin: 0 }}>{b.label}</Tag>
+                  {isTaskView ? (
+                    <span className={styles.resourceLabel}>
+                      <span>{b.label}</span>
+                      {b.key && (
+                        <small className={styles.resourceId}>{b.key}</small>
+                      )}
+                    </span>
+                  ) : (
+                    <Tag style={{ margin: 0 }}>{b.label}</Tag>
+                  )}
                   <span className={styles.mobileTotal}>
                     {formatNumber(b.total_tokens)}
                   </span>
@@ -787,8 +836,20 @@ function DimensionView({
                 title: bucketColumnTitle(granularity, t),
                 dataIndex: "label",
                 fixed: "left",
-                width: 160,
-                render: (v) => <Tag>{v}</Tag>,
+                width: isTaskView ? 280 : 160,
+                render: (v: string, bucket) =>
+                  isTaskView ? (
+                    <span className={styles.resourceLabel}>
+                      <span>{v}</span>
+                      {bucket.key && (
+                        <small className={styles.resourceId}>
+                          {bucket.key}
+                        </small>
+                      )}
+                    </span>
+                  ) : (
+                    <Tag>{v}</Tag>
+                  ),
               },
               {
                 title: t("tokenUsage.input"),
@@ -861,6 +922,12 @@ export default function TokenUsagePage() {
   // Admin-only: null while role unknown so we don't hit /admin before ready.
   const adminUserFilter: number | "all" | null = isAdmin ? userFilter : null;
 
+  const isTaskView = view === "by_project" || view === "by_task";
+  const effectiveAgentFilter = isTaskView ? "all" : agentFilter;
+  const exportLabel = t(
+    isTaskView ? "tokenUsage.exportAllDimensions" : "tokenUsage.exportExcel",
+  );
+
   const windowKey = useMemo(() => rangeToWindowKey(dateRange), [dateRange]);
 
   const rangePresets = useMemo(
@@ -930,6 +997,8 @@ export default function TokenUsagePage() {
       { value: "by_day", label: t("tokenUsage.byDay") },
       { value: "by_agent", label: t("tokenUsage.byExpert") },
       { value: "by_model", label: t("tokenUsage.byModel") },
+      { value: "by_project", label: t("tokenUsage.byProject") },
+      { value: "by_task", label: t("tokenUsage.byTask") },
     ],
     [t],
   );
@@ -952,55 +1021,97 @@ export default function TokenUsagePage() {
     };
   }, [isAdmin]);
 
-  const refresh = useCallback(async () => {
+  useEffect(() => {
     // Wait for role resolution before the first admin-scoped fetch so we
     // don't briefly show the caller's private totals then jump to global.
     if (role === null) return;
-    setLoading(true);
-    setError(null);
-    try {
-      if (view === "summary") {
-        const [expertRes, modelRes, dayRes] = await Promise.all([
-          fetchSummary(windowKey, "by_agent", agentFilter, adminUserFilter),
-          fetchSummary(windowKey, "by_model", agentFilter, adminUserFilter),
-          fetchSummary(windowKey, "by_day", agentFilter, adminUserFilter),
-        ]);
-        setTotals(expertRes);
-        setSummaryExpert(resolveAgentLabels(expertRes.buckets, agentNameById));
-        setSummaryModel(modelRes.buckets);
-        setSummaryDay(dayRes.buckets);
-        setDimBuckets([]);
-      } else {
-        const res = await fetchSummary(
-          windowKey,
-          view,
-          agentFilter,
-          adminUserFilter,
-        );
-        setTotals(res);
-        const buckets =
-          view === "by_agent"
-            ? resolveAgentLabels(res.buckets, agentNameById)
-            : res.buckets;
-        setDimBuckets(buckets);
+    let cancelled = false;
+    const refresh = async () => {
+      setLoading(true);
+      setError(null);
+      setTotals(null);
+      setDimBuckets([]);
+      try {
+        if (view === "summary") {
+          const [expertRes, modelRes, dayRes] = await Promise.all([
+            fetchSummary(
+              windowKey,
+              "by_agent",
+              effectiveAgentFilter,
+              adminUserFilter,
+            ),
+            fetchSummary(
+              windowKey,
+              "by_model",
+              effectiveAgentFilter,
+              adminUserFilter,
+            ),
+            fetchSummary(
+              windowKey,
+              "by_day",
+              effectiveAgentFilter,
+              adminUserFilter,
+            ),
+          ]);
+          if (cancelled) return;
+          // Daily totals include tasks; expert buckets only cover expert conversations.
+          setTotals(dayRes);
+          setSummaryExpert(
+            resolveAgentLabels(expertRes.buckets, agentNameById),
+          );
+          setSummaryModel(modelRes.buckets);
+          setSummaryDay(dayRes.buckets);
+          setDimBuckets([]);
+        } else {
+          const res = await fetchSummary(
+            windowKey,
+            view,
+            effectiveAgentFilter,
+            adminUserFilter,
+          );
+          if (cancelled) return;
+          setTotals(res);
+          const buckets =
+            view === "by_agent"
+              ? resolveAgentLabels(res.buckets, agentNameById)
+              : view === "by_project"
+              ? res.buckets.map((bucket) => ({
+                  ...bucket,
+                  label:
+                    bucket.key === ""
+                      ? t("tokenUsage.noProject")
+                      : bucket.label,
+                }))
+              : res.buckets;
+          setDimBuckets(buckets);
+        }
+      } catch (err: unknown) {
+        if (!cancelled)
+          setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [view, windowKey, agentFilter, adminUserFilter, agentNameById, role]);
-
-  useEffect(() => {
+    };
     void refresh();
-  }, [refresh]);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    view,
+    windowKey,
+    effectiveAgentFilter,
+    adminUserFilter,
+    agentNameById,
+    role,
+    t,
+  ]);
 
   const onExportExcel = useCallback(async () => {
     if (role === null) return;
     setExporting(true);
     try {
       const blob = await requestBlob(
-        usageExportPath(windowKey, agentFilter, adminUserFilter),
+        usageExportPath(windowKey, effectiveAgentFilter, adminUserFilter),
       );
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -1016,7 +1127,7 @@ export default function TokenUsagePage() {
     } finally {
       setExporting(false);
     }
-  }, [windowKey, agentFilter, adminUserFilter, role, t]);
+  }, [windowKey, effectiveAgentFilter, adminUserFilter, role, t]);
 
   return (
     <PageShell
@@ -1073,21 +1184,25 @@ export default function TokenUsagePage() {
                 t("tokenUsage.rangeEnd"),
               ]}
             />
-            <Select
-              value={agentFilter}
-              onChange={(v) => setAgentFilter(v)}
-              className={styles.toolbarFilterSelect}
-              style={{ width: isMobile ? undefined : 200 }}
-              options={agentOptions}
-            />
+            {!isTaskView && (
+              <Select
+                value={agentFilter}
+                onChange={(v) => setAgentFilter(v)}
+                className={styles.toolbarFilterSelect}
+                style={{ width: isMobile ? undefined : 200 }}
+                options={agentOptions}
+                aria-label={t("tokenUsage.expert")}
+              />
+            )}
             <Button
               icon={<Download size={14} />}
               loading={exporting}
               disabled={role === null}
               onClick={() => void onExportExcel()}
-              aria-label={t("tokenUsage.exportExcel")}
+              aria-label={exportLabel}
+              title={isTaskView ? t("tokenUsage.exportScope") : undefined}
             >
-              {isMobile ? null : t("tokenUsage.exportExcel")}
+              {isMobile ? null : exportLabel}
             </Button>
           </div>
         </div>

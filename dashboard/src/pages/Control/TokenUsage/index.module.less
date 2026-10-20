@@ -90,6 +90,25 @@
   box-sizing: border-box;
 }
 
+.dimensionScope {
+  color: var(--fn-text-secondary);
+  font-size: 12px;
+}
+
+.resourceLabel {
+  display: block;
+  max-width: 260px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.resourceId {
+  display: block;
+  margin-top: 2px;
+  color: var(--fn-text-tertiary);
+  font-size: 11px;
+}
+
 .statsHost {
   width: 100%;
   flex-shrink: 0;
@@ -403,9 +422,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
 }
 
 .mobileTotal {
+  flex-shrink: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--fn-text-primary);

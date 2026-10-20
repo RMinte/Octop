@@ -332,12 +332,14 @@ def build_usage_xlsx(
     by_day: list[dict[str, Any]],
     by_agent: list[dict[str, Any]],
     by_model: list[dict[str, Any]],
+    by_project: list[dict[str, Any]],
+    by_task: list[dict[str, Any]],
     agent_names: dict[str, str],
     usernames: dict[int, str],
     timezone: str,
     locale: str,
 ) -> bytes:
-    """Build a multi-sheet workbook: detail + by-day/agent/model with charts."""
+    """Build detail and day/expert/model/project/task sheets with charts."""
     from openpyxl import Workbook
 
     loc = normalize_locale(locale)
@@ -364,6 +366,10 @@ def build_usage_xlsx(
         _label(loc, "col_total_tokens"),
         _label(loc, "col_model_calls"),
         _label(loc, "col_source"),
+        _label(loc, "col_project_id"),
+        _label(loc, "col_project_name"),
+        _label(loc, "col_task_id"),
+        _label(loc, "col_task_title"),
     ]
     detail.append(detail_headers)
     detail_int_cols = {8, 9, 10, 11, 12, 13, 14, 15}
@@ -386,8 +392,15 @@ def build_usage_xlsx(
                 row.total_tokens,
                 row.model_calls,
                 row.source,
+                row.project_id,
+                row.project_name or (_label(loc, "no_project") if row.task_id else ""),
+                row.task_id,
+                row.task_title,
             ]
         )
+        # Project names and task titles are user text, including leading '='.
+        for col in range(17, 21):
+            detail.cell(detail.max_row, col).data_type = "s"
     ncols = len(detail_headers)
     _style_header_row(detail, ncols)
     if rows:
@@ -431,6 +444,9 @@ def build_usage_xlsx(
         sheet.append(headers)
         for record in records:
             sheet.append(record)
+            for col, value in enumerate(record, start=1):
+                if isinstance(value, str):
+                    sheet.cell(sheet.max_row, col).data_type = "s"
         n = len(records)
         ncols_local = len(headers)
         int_cols = set(sum_cols)
@@ -557,6 +573,38 @@ def build_usage_xlsx(
         chart_anchor="G3",
         chart_kind="col",
     )
+
+    for kind, buckets in (("project", by_project), ("task", by_task)):
+        _write_category_sheet(
+            title_key=f"sheet_by_{kind}",
+            chart_title_key=f"chart_by_{kind}",
+            headers=[
+                _label(loc, "col_project_name" if kind == "project" else "col_task_title"),
+                _label(loc, f"col_{kind}_id"),
+                _label(loc, "col_input_tokens"),
+                _label(loc, "col_output_tokens"),
+                _label(loc, "col_total_tokens"),
+                _label(loc, "col_turns"),
+            ],
+            records=[
+                [
+                    str(bucket.get("label") or bucket.get("key") or _label(loc, "no_project")),
+                    str(bucket.get("key") or ""),
+                    int(bucket.get("input_tokens") or 0),
+                    int(bucket.get("output_tokens") or 0),
+                    int(bucket.get("total_tokens") or 0),
+                    int(bucket.get("turns") or 0),
+                ]
+                for bucket in buckets
+            ],
+            label_col=1,
+            sum_cols=[3, 4, 5, 6],
+            chart_cat_col=1,
+            chart_data_min=3,
+            chart_data_max=4,
+            chart_anchor="H3",
+            chart_kind="col",
+        )
 
     buf = BytesIO()
     wb.save(buf)

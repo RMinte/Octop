@@ -14,7 +14,6 @@ from octop.infra.db.repos._base import (
     DbRow,
     insert_returning_id,
     now_ts,
-    sql_unix_day_bucket,
 )
 
 _DAY_S = 86_400
@@ -22,6 +21,57 @@ _DAY_WINDOW_RE = re.compile(r"^day:(\d{4}-\d{2}-\d{2})$")
 _MONTH_WINDOW_RE = re.compile(r"^month:(\d{4}-\d{2})$")
 _RANGE_WINDOW_RE = re.compile(r"^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$")
 DETAIL_EXPORT_LIMIT = 50_000
+
+# Task journals store millisecond timestamps and only input/output totals.
+# Keep unknown breakdowns at zero rather than inferring calls or cache usage.
+# Title jobs have no usage timestamp; their usage belongs to the first turn,
+# whose model is also the one the naming worker uses.
+_USAGE_SQL = """
+    SELECT id, ts, agent_id, user_id, thread_id, model,
+        input_tokens, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+        output_tokens, reasoning_tokens, total_tokens, model_calls, source,
+        '' AS project_id, '' AS task_id, '' AS project_name, '' AS task_title, 1 AS usage_turns
+    FROM usage_log
+    UNION ALL
+    SELECT r.id, CAST(r.created_at / 1000 AS BIGINT), '', t.owner_id, t.task_id, r.model_ref,
+        r.input_tokens, 0, 0, 0, r.output_tokens, 0,
+        r.input_tokens + r.output_tokens, 0, 'project_task',
+        COALESCE(t.project_id, ''), t.task_id, COALESCE(p.name, ''), t.title, 1
+    FROM project_task_turns r
+    JOIN project_tasks t ON t.task_id = r.task_id
+    LEFT JOIN projects p ON p.project_id = t.project_id AND p.owner_id = t.owner_id
+    WHERE r.input_tokens <> 0 OR r.output_tokens <> 0
+    UNION ALL
+    SELECT r.id, CAST(r.created_at / 1000 AS BIGINT), '', t.owner_id, t.task_id, r.model_ref,
+        j.input_tokens, 0, 0, 0, j.output_tokens, 0,
+        j.input_tokens + j.output_tokens, 0, 'project_task_title',
+        COALESCE(t.project_id, ''), t.task_id, COALESCE(p.name, ''), t.title, 0
+    FROM project_task_titles j
+    JOIN project_tasks t ON t.task_id = j.task_id
+    JOIN project_task_turns r ON r.task_id = t.task_id AND r.request_id = t.request_id
+    LEFT JOIN projects p ON p.project_id = t.project_id AND p.owner_id = t.owner_id
+    WHERE j.input_tokens <> 0 OR j.output_tokens <> 0
+    UNION ALL
+    SELECT j.id, CAST(j.created_at / 1000 AS BIGINT), '', t.owner_id, t.task_id, j.model_ref,
+        j.input_tokens, 0, 0, 0, j.output_tokens, 0,
+        j.input_tokens + j.output_tokens, 0, 'project_task_review',
+        COALESCE(t.project_id, ''), t.task_id, COALESCE(p.name, ''), t.title, 0
+    FROM project_task_reviews j
+    JOIN project_tasks t ON t.task_id = j.task_id AND t.owner_id = j.owner_id
+    LEFT JOIN projects p ON p.project_id = t.project_id AND p.owner_id = t.owner_id
+    WHERE j.input_tokens <> 0 OR j.output_tokens <> 0
+"""
+_TOKEN_FIELDS = (
+    "input_tokens",
+    "uncached_input_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "model_calls",
+)
+_SUM_SQL = ", ".join(f"COALESCE(SUM({field}), 0) AS {field}" for field in _TOKEN_FIELDS)
 
 
 @dataclass(frozen=True)
@@ -41,6 +91,10 @@ class UsageRow:
     total_tokens: int
     model_calls: int
     source: str
+    project_id: str = ""
+    task_id: str = ""
+    project_name: str = ""
+    task_title: str = ""
 
     @classmethod
     def from_row(cls, r: DbRow) -> UsageRow:
@@ -60,6 +114,10 @@ class UsageRow:
             total_tokens=r["total_tokens"],
             model_calls=r["model_calls"],
             source=r["source"],
+            project_id=r["project_id"],
+            task_id=r["task_id"],
+            project_name=r["project_name"],
+            task_title=r["task_title"],
         )
 
 
@@ -193,23 +251,59 @@ class UsageRepo:
 
     # --- read / aggregate ------------------------------------------------
 
+    @staticmethod
+    def _day_buckets(
+        conn: Any, where_sql: str, params: list[Any], timezone: str
+    ) -> list[dict[str, Any]]:
+        """Fold timestamps into server calendar days, including DST boundaries."""
+        zone = _zoneinfo(timezone)
+        buckets: dict[str, dict[str, Any]] = {}
+        rows = conn.execute(
+            f"""
+            SELECT ts, {_SUM_SQL}, COALESCE(SUM(usage_turns), 0) AS turns
+            FROM ({_USAGE_SQL}) AS usage WHERE {where_sql}
+            GROUP BY ts ORDER BY ts DESC
+            """,
+            params,
+        )
+        for row in rows:
+            day = datetime.fromtimestamp(row["ts"], tz=zone).date().isoformat()
+            if day not in buckets:
+                if len(buckets) == 100:
+                    break
+                buckets[day] = {
+                    "key": day,
+                    "label": day,
+                    **dict.fromkeys((*_TOKEN_FIELDS, "turns"), 0),
+                }
+            for field in (*_TOKEN_FIELDS, "turns"):
+                buckets[day][field] += int(row[field])
+        return list(buckets.values())
+
     def _scope_filter(
         self,
         *,
         user_id: int | None,
         agent_id: str | None,
+        project_id: str | None,
+        task_id: str | None,
         window: str,
         timezone: str,
     ) -> tuple[str, list[Any], int, int]:
         start, end = resolve_usage_window(window, timezone=timezone)
         where: list[str] = ["ts >= ?", "ts < ?"]
         params: list[Any] = [start, end]
-        if user_id is not None:
-            where.append("user_id = ?")
-            params.append(user_id)
-        if agent_id is not None:
-            where.append("agent_id = ?")
-            params.append(agent_id)
+        for column, value in (
+            ("user_id", user_id),
+            ("agent_id", agent_id),
+            ("project_id", project_id),
+            ("task_id", task_id),
+        ):
+            if value is not None:
+                where.append(f"{column} = ?")
+                params.append(value)
+        if project_id is not None or task_id is not None:
+            where.append("task_id <> ''")
         return " AND ".join(where), params, start, end
 
     def summary(
@@ -217,71 +311,64 @@ class UsageRepo:
         *,
         user_id: int | None = None,
         agent_id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
         window: str = "last_30d",
         granularity: str = "by_day",
         timezone: str = "UTC",
     ) -> dict[str, Any]:
-        """Aggregate usage rows, optionally filtered to one user/agent.
+        """Aggregate expert and independent task usage within the requested scope.
 
-        ``user_id=None`` and ``agent_id=None`` returns global totals
-        (admin scope); otherwise rows are scoped accordingly.
+        Task/project views include task consumption only; the agent view includes
+        expert sessions only. Title and review costs contribute tokens, not turns.
         """
         where_sql, params, start, end = self._scope_filter(
             user_id=user_id,
             agent_id=agent_id,
+            project_id=project_id,
+            task_id=task_id,
             window=window,
             timezone=timezone,
         )
+        if granularity in {"by_project", "by_task"}:
+            where_sql += " AND task_id <> ''"
+        elif granularity == "by_agent":
+            where_sql += " AND task_id = ''"
 
-        # Roll-up totals
+        sum_sql = _SUM_SQL + ", COALESCE(SUM(usage_turns), 0) AS turns"
         with self._db.connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT
-                    COALESCE(SUM(input_tokens), 0)  AS input_tokens,
-                    COALESCE(SUM(uncached_input_tokens), 0) AS uncached_input_tokens,
-                    COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                    COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                    COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
-                    COALESCE(SUM(total_tokens), 0)  AS total_tokens,
-                    COALESCE(SUM(model_calls), 0) AS model_calls,
-                    COUNT(*)                         AS turns
-                FROM usage_log WHERE {where_sql}
+                SELECT {sum_sql},
+                    COALESCE(SUM(CASE WHEN task_id = '' THEN input_tokens ELSE 0 END), 0)
+                        AS cache_input_tokens
+                FROM ({_USAGE_SQL}) AS usage WHERE {where_sql}
                 """,
                 params,
             ).fetchone()
-            totals = {
-                "input_tokens": int(row["input_tokens"]),
-                "uncached_input_tokens": int(row["uncached_input_tokens"]),
-                "cache_read_tokens": int(row["cache_read_tokens"]),
-                "cache_write_tokens": int(row["cache_write_tokens"]),
-                "output_tokens": int(row["output_tokens"]),
-                "reasoning_tokens": int(row["reasoning_tokens"]),
-                "total_tokens": int(row["total_tokens"]),
-                "model_calls": int(row["model_calls"]),
-                "turns": int(row["turns"]),
-            }
+            totals = {field: int(row[field]) for field in (*_TOKEN_FIELDS, "turns")}
+            cache_input_tokens = int(row["cache_input_tokens"])
 
+            bucket_exprs = {
+                "by_agent": "agent_id",
+                "by_model": "COALESCE(NULLIF(model, ''), '(unknown)')",
+                "by_project": "project_id",
+                "by_task": "task_id",
+            }
             buckets: list[dict[str, Any]] = []
             if granularity == "by_day":
-                day_expr = sql_unix_day_bucket("ts", dialect=self._db.dialect)
+                buckets = self._day_buckets(conn, where_sql, params, timezone)
+            elif bucket_expr := bucket_exprs.get(granularity):
+                label_expr = {
+                    "by_project": "MAX(project_name)",
+                    "by_task": "MAX(task_title)",
+                }.get(granularity, bucket_expr)
                 bucket_rows = conn.execute(
                     f"""
-                    SELECT
-                        {day_expr} AS bucket,
-                        SUM(input_tokens)  AS input_tokens,
-                        SUM(uncached_input_tokens) AS uncached_input_tokens,
-                        SUM(cache_read_tokens) AS cache_read_tokens,
-                        SUM(cache_write_tokens) AS cache_write_tokens,
-                        SUM(output_tokens) AS output_tokens,
-                        SUM(reasoning_tokens) AS reasoning_tokens,
-                        SUM(total_tokens)  AS total_tokens,
-                        SUM(model_calls) AS model_calls,
-                        COUNT(*)            AS turns
-                    FROM usage_log WHERE {where_sql}
-                    GROUP BY bucket
-                    ORDER BY bucket DESC
+                    SELECT {bucket_expr} AS bucket, {label_expr} AS label, {sum_sql}
+                    FROM ({_USAGE_SQL}) AS usage WHERE {where_sql}
+                    GROUP BY {bucket_expr}
+                    ORDER BY total_tokens DESC, bucket
                     LIMIT 100
                     """,
                     params,
@@ -289,99 +376,16 @@ class UsageRepo:
                 buckets = [
                     {
                         "key": r["bucket"],
-                        "label": r["bucket"],
-                        "input_tokens": int(r["input_tokens"] or 0),
-                        "uncached_input_tokens": int(r["uncached_input_tokens"] or 0),
-                        "cache_read_tokens": int(r["cache_read_tokens"] or 0),
-                        "cache_write_tokens": int(r["cache_write_tokens"] or 0),
-                        "output_tokens": int(r["output_tokens"] or 0),
-                        "reasoning_tokens": int(r["reasoning_tokens"] or 0),
-                        "total_tokens": int(r["total_tokens"] or 0),
-                        "model_calls": int(r["model_calls"] or 0),
-                        "turns": int(r["turns"] or 0),
+                        "label": r["label"],
+                        **{field: int(r[field]) for field in (*_TOKEN_FIELDS, "turns")},
                     }
                     for r in bucket_rows
                 ]
-            elif granularity == "by_agent":
-                bucket_rows = conn.execute(
-                    f"""
-                    SELECT
-                        agent_id           AS bucket,
-                        SUM(input_tokens)  AS input_tokens,
-                        SUM(uncached_input_tokens) AS uncached_input_tokens,
-                        SUM(cache_read_tokens) AS cache_read_tokens,
-                        SUM(cache_write_tokens) AS cache_write_tokens,
-                        SUM(output_tokens) AS output_tokens,
-                        SUM(reasoning_tokens) AS reasoning_tokens,
-                        SUM(total_tokens)  AS total_tokens,
-                        SUM(model_calls) AS model_calls,
-                        COUNT(*)            AS turns
-                    FROM usage_log WHERE {where_sql}
-                    GROUP BY bucket
-                    ORDER BY total_tokens DESC
-                    LIMIT 100
-                    """,
-                    params,
-                ).fetchall()
-                buckets = [
-                    {
-                        "key": r["bucket"],
-                        "label": r["bucket"],
-                        "input_tokens": int(r["input_tokens"] or 0),
-                        "uncached_input_tokens": int(r["uncached_input_tokens"] or 0),
-                        "cache_read_tokens": int(r["cache_read_tokens"] or 0),
-                        "cache_write_tokens": int(r["cache_write_tokens"] or 0),
-                        "output_tokens": int(r["output_tokens"] or 0),
-                        "reasoning_tokens": int(r["reasoning_tokens"] or 0),
-                        "total_tokens": int(r["total_tokens"] or 0),
-                        "model_calls": int(r["model_calls"] or 0),
-                        "turns": int(r["turns"] or 0),
-                    }
-                    for r in bucket_rows
-                ]
-            elif granularity == "by_model":
-                bucket_rows = conn.execute(
-                    f"""
-                    SELECT
-                        COALESCE(NULLIF(model, ''), '(unknown)') AS bucket,
-                        SUM(input_tokens)  AS input_tokens,
-                        SUM(uncached_input_tokens) AS uncached_input_tokens,
-                        SUM(cache_read_tokens) AS cache_read_tokens,
-                        SUM(cache_write_tokens) AS cache_write_tokens,
-                        SUM(output_tokens) AS output_tokens,
-                        SUM(reasoning_tokens) AS reasoning_tokens,
-                        SUM(total_tokens)  AS total_tokens,
-                        SUM(model_calls) AS model_calls,
-                        COUNT(*)            AS turns
-                    FROM usage_log WHERE {where_sql}
-                    GROUP BY bucket
-                    ORDER BY total_tokens DESC
-                    LIMIT 100
-                    """,
-                    params,
-                ).fetchall()
-                buckets = [
-                    {
-                        "key": r["bucket"],
-                        "label": r["bucket"],
-                        "input_tokens": int(r["input_tokens"] or 0),
-                        "uncached_input_tokens": int(r["uncached_input_tokens"] or 0),
-                        "cache_read_tokens": int(r["cache_read_tokens"] or 0),
-                        "cache_write_tokens": int(r["cache_write_tokens"] or 0),
-                        "output_tokens": int(r["output_tokens"] or 0),
-                        "reasoning_tokens": int(r["reasoning_tokens"] or 0),
-                        "total_tokens": int(r["total_tokens"] or 0),
-                        "model_calls": int(r["model_calls"] or 0),
-                        "turns": int(r["turns"] or 0),
-                    }
-                    for r in bucket_rows
-                ]
-            # ``total`` granularity → no buckets
 
         avg = totals["total_tokens"] // totals["turns"] if totals["turns"] else 0
         cache_hit_percent = (
-            round(totals["cache_read_tokens"] / totals["input_tokens"] * 100)
-            if totals["input_tokens"]
+            round(totals["cache_read_tokens"] / cache_input_tokens * 100)
+            if cache_input_tokens
             else 0
         )
         return {
@@ -400,18 +404,21 @@ class UsageRepo:
         *,
         user_id: int | None = None,
         agent_id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
         window: str = "last_30d",
         timezone: str = "UTC",
         limit: int = DETAIL_EXPORT_LIMIT,
     ) -> list[UsageRow]:
-        """Return usage_log rows for Excel export (oldest → newest).
+        """Return expert and task usage for Excel export (oldest → newest).
 
-        When ``limit`` truncates, keep the *newest* ``limit`` rows, then
-        return them in ascending time order for the sheet.
+        When ``limit`` truncates, keep the newest ``limit`` usage records.
         """
         where_sql, params, _start, _end = self._scope_filter(
             user_id=user_id,
             agent_id=agent_id,
+            project_id=project_id,
+            task_id=task_id,
             window=window,
             timezone=timezone,
         )
@@ -419,25 +426,13 @@ class UsageRepo:
         with self._db.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT
-                    id, ts, agent_id, user_id, thread_id, model,
-                    input_tokens, uncached_input_tokens,
-                    cache_read_tokens, cache_write_tokens,
-                    output_tokens, reasoning_tokens, total_tokens,
-                    model_calls, source
-                FROM (
-                    SELECT
-                        id, ts, agent_id, user_id, thread_id, model,
-                        input_tokens, uncached_input_tokens,
-                        cache_read_tokens, cache_write_tokens,
-                        output_tokens, reasoning_tokens, total_tokens,
-                        model_calls, source
-                    FROM usage_log
+                SELECT * FROM (
+                    SELECT * FROM ({_USAGE_SQL}) AS usage
                     WHERE {where_sql}
-                    ORDER BY ts DESC, id DESC
+                    ORDER BY ts DESC, source DESC, id DESC
                     LIMIT ?
                 ) AS recent
-                ORDER BY ts ASC, id ASC
+                ORDER BY ts ASC, source ASC, id ASC
                 """,
                 [*params, cap],
             ).fetchall()

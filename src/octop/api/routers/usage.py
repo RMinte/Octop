@@ -1,4 +1,4 @@
-"""Token usage router — query the usage_log ledger.
+"""Token usage router — query expert and independent task consumption.
 
   GET /api/usage/summary             → caller's own roll-up
   GET /api/usage/summary?as_user=N   → admin scope; another user's roll-up
@@ -11,17 +11,18 @@ Query params:
   window      = today | yesterday | last_7d | last_30d | all
                 | day:YYYY-MM-DD | month:YYYY-MM
                 | range:YYYY-MM-DD:YYYY-MM-DD   (default last_30d)
-  granularity = total | by_day | by_agent | by_model            (default by_day)
+  granularity = total | by_day | by_agent | by_model | by_project | by_task
 """
 
 from __future__ import annotations
 
 import re
 from io import BytesIO
-from typing import Any, cast
+from typing import Any, Literal, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from octop.api.common.content_disposition import content_disposition
 from octop.api.common.usage_xlsx import build_usage_xlsx
@@ -37,6 +38,42 @@ _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
 _DAY_WINDOW_RE = re.compile(r"^day:(\d{4}-\d{2}-\d{2})$")
 _MONTH_WINDOW_RE = re.compile(r"^month:(\d{4}-\d{2})$")
 _RANGE_WINDOW_RE = re.compile(r"^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$")
+
+
+UsageGranularity = Literal["total", "by_day", "by_agent", "by_model", "by_project", "by_task"]
+
+
+class UsageCounts(BaseModel):
+    input_tokens: int
+    uncached_input_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    total_tokens: int
+    model_calls: int = Field(
+        description="Recorded model calls; task journals do not retain this count."
+    )
+    turns: int = Field(
+        description="Expert usage records and task turns with usage; excludes title/review jobs."
+    )
+
+
+class UsageBucket(UsageCounts):
+    key: str = Field(
+        description="Date, public resource ID or model reference. Empty project ID means no project."
+    )
+    label: str = Field(description="Project name, task title or the bucket key.")
+
+
+class UsageSummary(UsageCounts):
+    window: str
+    granularity: str
+    range_start: int
+    range_end: int
+    avg_per_turn: int
+    cache_hit_percent: int
+    buckets: list[UsageBucket]
 
 
 def _resolve_user_scope(
@@ -69,6 +106,8 @@ def _summary_or_raise(
     server: Any,
     user_id: int | None,
     agent_id: str | None,
+    project_id: str | None,
+    task_id: str | None,
     window: str,
     granularity: str,
 ) -> dict[str, Any]:
@@ -78,6 +117,8 @@ def _summary_or_raise(
             server.services.usage_repo.summary(
                 user_id=user_id,
                 agent_id=agent_id,
+                project_id=project_id,
+                task_id=task_id,
                 window=window,
                 granularity=granularity,
                 timezone=_server_timezone(server),
@@ -137,6 +178,8 @@ def _export_response(
     server: Any,
     user_id: int | None,
     agent_id: str | None,
+    project_id: str | None,
+    task_id: str | None,
     window: str,
 ) -> StreamingResponse:
     timezone = _server_timezone(server)
@@ -145,6 +188,8 @@ def _export_response(
         rows = server.services.usage_repo.list_detail(
             user_id=user_id,
             agent_id=agent_id,
+            project_id=project_id,
+            task_id=task_id,
             window=window,
             timezone=timezone,
         )
@@ -155,6 +200,8 @@ def _export_response(
         server=server,
         user_id=user_id,
         agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
         window=window,
         granularity="by_day",
     )["buckets"]
@@ -162,6 +209,8 @@ def _export_response(
         server=server,
         user_id=user_id,
         agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
         window=window,
         granularity="by_agent",
     )["buckets"]
@@ -169,8 +218,29 @@ def _export_response(
         server=server,
         user_id=user_id,
         agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
         window=window,
         granularity="by_model",
+    )["buckets"]
+
+    by_project = _summary_or_raise(
+        server=server,
+        user_id=user_id,
+        agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
+        window=window,
+        granularity="by_project",
+    )["buckets"]
+    by_task = _summary_or_raise(
+        server=server,
+        user_id=user_id,
+        agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
+        window=window,
+        granularity="by_task",
     )["buckets"]
 
     payload = build_usage_xlsx(
@@ -178,6 +248,8 @@ def _export_response(
         by_day=by_day,
         by_agent=by_agent,
         by_model=by_model,
+        by_project=by_project,
+        by_task=by_task,
         agent_names=_agent_name_map(server),
         usernames=_username_map(server),
         timezone=timezone,
@@ -191,11 +263,20 @@ def _export_response(
     )
 
 
-@router.get("/usage/summary")
+@router.get(
+    "/usage/summary",
+    response_model=UsageSummary,
+    summary="查看我的 Token 用量",
+    description="按天、模型、专家、项目或任务汇总。项目和任务包含标题与审批消耗；专家视图只统计专家会话。仅管理员可通过 as_user 查看他人用量。",
+)
 async def user_summary(
     window: str = "last_30d",
-    granularity: str = "by_day",
+    granularity: UsageGranularity = "by_day",
     agent_id: str | None = None,
+    project_id: str | None = Query(
+        default=None, description="Filter task usage by public project ID; empty means no project."
+    ),
+    task_id: str | None = Query(default=None, description="Filter usage by public task ID."),
     as_user: int | None = None,
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
@@ -206,6 +287,8 @@ async def user_summary(
         server=server,
         user_id=user_id,
         agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
         window=window,
         granularity=granularity,
     )
@@ -213,13 +296,18 @@ async def user_summary(
 
 @router.get(
     "/usage/export.xlsx",
-    summary="Export usage_log detail as Excel",
+    summary="导出我的 Token 用量",
+    description="导出用量明细与按天、专家、模型、项目、任务汇总，支持相同的范围筛选。",
     response_class=StreamingResponse,
 )
 async def user_export(
     request: Request,
     window: str = "last_30d",
     agent_id: str | None = None,
+    project_id: str | None = Query(
+        default=None, description="Filter task usage by public project ID; empty means no project."
+    ),
+    task_id: str | None = Query(default=None, description="Filter usage by public task ID."),
     as_user: int | None = None,
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
@@ -231,6 +319,8 @@ async def user_export(
         server=server,
         user_id=user_id,
         agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
         window=window,
     )
 
@@ -240,12 +330,21 @@ async def user_export(
 admin_router = APIRouter()
 
 
-@admin_router.get("/usage/summary")
+@admin_router.get(
+    "/usage/summary",
+    response_model=UsageSummary,
+    summary="查看全局 Token 用量",
+    description="仅管理员可用。支持按用户、专家、项目、任务和时间范围筛选。项目和任务视图只统计独立任务消耗，专家视图只统计专家会话。",
+)
 async def admin_summary(
     window: str = "last_30d",
-    granularity: str = "by_day",
+    granularity: UsageGranularity = "by_day",
     user_id: int | None = None,
     agent_id: str | None = None,
+    project_id: str | None = Query(
+        default=None, description="Filter task usage by public project ID; empty means no project."
+    ),
+    task_id: str | None = Query(default=None, description="Filter usage by public task ID."),
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
@@ -257,6 +356,8 @@ async def admin_summary(
         server=server,
         user_id=user_id,
         agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
         window=window,
         granularity=granularity,
     )
@@ -264,7 +365,8 @@ async def admin_summary(
 
 @admin_router.get(
     "/usage/export.xlsx",
-    summary="Export global usage_log detail as Excel",
+    summary="导出全局 Token 用量",
+    description="仅管理员可用。导出筛选范围内的专家和独立任务消耗明细及汇总。",
     response_class=StreamingResponse,
 )
 async def admin_export(
@@ -272,6 +374,10 @@ async def admin_export(
     window: str = "last_30d",
     user_id: int | None = None,
     agent_id: str | None = None,
+    project_id: str | None = Query(
+        default=None, description="Filter task usage by public project ID; empty means no project."
+    ),
+    task_id: str | None = Query(default=None, description="Filter usage by public task ID."),
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
 ) -> StreamingResponse:
@@ -282,5 +388,7 @@ async def admin_export(
         server=server,
         user_id=user_id,
         agent_id=agent_id,
+        project_id=project_id,
+        task_id=task_id,
         window=window,
     )

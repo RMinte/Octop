@@ -976,11 +976,19 @@ endpoint (public, mounted directly in `api/app.py`).
 
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
-| `GET`    | `/usage/summary` | user | token usage summary for the current user |
-| `GET`    | `/admin/usage` | admin | global token usage summary |
+| `GET`    | `/usage/summary` | user | 当前用户的 token 用量；管理员可用 `as_user` 查看指定用户 |
+| `GET`    | `/admin/usage/summary` | admin | 全部用户的 token 用量；可用 `user_id` 缩小范围 |
+| `GET`    | `/usage/export.xlsx` | user | 导出相同用户、时间和资源筛选范围的用量明细与分组 |
+| `GET`    | `/admin/usage/export.xlsx` | admin | 导出全局或指定用户的用量明细与分组 |
 | `GET`    | `/admin/overview` | admin | `{user_count, agent_count, ...}` |
 | `GET`    | `/admin/audit-log` | admin | recent audit rows |
 | `GET`    | `/admin/metrics` | admin | `{messages_total, stream_errors_total, cron_runs_total, cron_errors_total, agent_active, ...}` |
+
+用量汇总支持 `granularity=total|by_day|by_agent|by_model|by_project|by_task`，默认 `by_day`；所有用量接口支持 `window` 时间范围，以及 `agent_id`、`project_id`、`task_id` 精确筛选。`by_project`、`by_task` 仅统计独立任务，`by_agent` 仅统计专家会话，其余维度合并两类来源。项目与任务分组以公共 ID 为 `key`、当前项目名或任务标题为 `label`，同名资源分别计量；未关联项目的任务在项目分组中使用空 `key`、空 `label`，客户端显示「未关联项目」。
+
+任务用量读取已有的轮次、标题生成、自动审核记录，包含已记录的上下文压缩与进展说明消耗；标题和审核增加 token 合计，但不增加会话轮次。保留的归档项目仍参与统计。任务的计量记录只有累计输入/输出，因此缓存、推理、模型调用次数字段中的 `0` 表示尚无细分数据；缓存命中率仅按专家会话中已有细分记录的输入计算。轮次含旁路累计消耗时，模型按该轮 `model_ref` 归属。时间范围采用服务端时区；任务按轮次/审核记录的创建时间归属，标题按任务首轮创建时间归属，不能作为逐次模型请求账单使用。已删除记录与没有输入/输出记录的历史对话无法从本接口恢复用量。
+
+分组最多返回 100 个桶：日期取最近 100 天，其余按 token 合计取前 100 组；响应顶层合计始终覆盖筛选范围的全部记录。Excel 包含明细、按天、按专家、按模型、按项目、按任务六张工作表；明细追加项目 ID、项目名称、任务 ID、任务标题。明细最多导出最近 50,000 条计量记录，分组沿用上述 100 桶限制。
 
 ## Envs
 
