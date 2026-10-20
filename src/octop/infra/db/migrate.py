@@ -1935,7 +1935,7 @@ def _ensure_artifact_suffix_categories_schema(db: DatabasePool, path: Path) -> N
 def _ensure_independent_projects_schema(db: DatabasePool) -> None:
     """Apply only the independent project/task DDL, preserving historical tables.
 
-    Versions 21–27 belonged to the retired expert-bound model. Keep 28–49
+    Versions 21–27 belonged to the retired expert-bound model. Keep 28–50
     numbered as applied locally; never replay that model or lower its watermark.
     """
     tables = {
@@ -1947,7 +1947,7 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
         42: ("project_task_attachments",),
         45: ("user_task_approval_policies",),
     }
-    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 49]
+    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 50]
     for version, path in versions:
         if version == 29:
             _ensure_column(db, "projects", "client_directory", "TEXT")
@@ -2061,6 +2061,13 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
             )
         elif version == 49:
             _ensure_artifact_suffix_categories_schema(db, path)
+        elif version == 50:
+            _ensure_column(db, "project_tasks", "import_source", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(db, "project_tasks", "external_session_id", "TEXT NOT NULL DEFAULT ''")
+            with db.transaction() as conn:
+                for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
+                    if not stmt.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
+                        conn.execute(stmt)
         elif version == 47 or any(not _table_exists(db, table) for table in tables[version]):
             with db.transaction() as conn:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
@@ -2078,7 +2085,7 @@ def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
     for version, path in _discover(db.dialect):
-        if 28 <= version <= 49 or version <= _current_version(db):
+        if 28 <= version <= 50 or version <= _current_version(db):
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.

@@ -92,6 +92,45 @@ class ProjectTaskTurnRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
 
+    @staticmethod
+    def insert_imported(conn: Any, row: ProjectTaskTurnRow) -> None:
+        conn.execute(
+            "INSERT INTO project_task_turns(turn_id,task_id,request_id,prompt,reply,status,"
+            "configuration_json,model_ref,created_at,updated_at,content_blocks_json,"
+            "content_revision,finished_at) VALUES (?,?,?,?,?,'completed',?,'',?,?,?,?,?)",
+            (
+                row.turn_id,
+                row.task_id,
+                row.request_id,
+                row.prompt,
+                row.reply,
+                row.configuration_json,
+                row.created_at,
+                row.updated_at,
+                row.content_blocks_json,
+                row.content_revision,
+                row.finished_at,
+            ),
+        )
+
+    @staticmethod
+    def update_imported(conn: Any, row: ProjectTaskTurnRow) -> None:
+        conn.execute(
+            "UPDATE project_task_turns SET reply=?,configuration_json=?,updated_at=?,"
+            "content_blocks_json=?,content_revision=?,finished_at=? "
+            "WHERE turn_id=? AND task_id=? AND status='completed'",
+            (
+                row.reply,
+                row.configuration_json,
+                row.updated_at,
+                row.content_blocks_json,
+                row.content_revision,
+                row.finished_at,
+                row.turn_id,
+                row.task_id,
+            ),
+        )
+
     def list(self, task_id: str) -> builtins.list[ProjectTaskTurnRow]:
         with self._db.connect() as conn:
             return self.list_in_transaction(conn, task_id)

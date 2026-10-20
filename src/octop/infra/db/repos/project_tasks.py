@@ -29,6 +29,8 @@ class ProjectTaskRow:
     approval_updated_at: int = 0
     approval_requests_json: str = "[]"
     web_search_enabled: bool = True
+    import_source: str = ""
+    external_session_id: str = ""
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -50,6 +52,8 @@ class ProjectTaskRow:
             strict_int(row["approval_updated_at"]),
             str(row["approval_requests_json"]),
             bool(row["web_search_enabled"]),
+            str(row["import_source"]),
+            str(row["external_session_id"]),
         )
 
 
@@ -151,8 +155,9 @@ class ProjectTaskRepo:
         conn.execute(
             "INSERT INTO project_tasks(task_id, owner_id, project_id, title, request_id, "
             "active_turn_id, created_at, updated_at, status, title_source, "
-            "approval_mode, approval_revision, approval_updated_at, web_search_enabled) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?, ?)",
+            "approval_mode, approval_revision, approval_updated_at, web_search_enabled, "
+            "import_source, external_session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?, ?, ?, ?)",
             (
                 row.task_id,
                 row.owner_id,
@@ -167,9 +172,28 @@ class ProjectTaskRepo:
                 row.approval_revision,
                 row.approval_updated_at,
                 int(row.web_search_enabled),
+                row.import_source,
+                row.external_session_id,
             ),
         )
         record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
+
+    @staticmethod
+    def refresh_import(
+        conn: Any, row: ProjectTaskRow, title: str, updated_at: int, *, content_changed: bool
+    ) -> None:
+        result = conn.execute(
+            "UPDATE project_tasks SET title=CASE WHEN title_source IN ('provisional','imported') "
+            "THEN ? ELSE title END, title_source=CASE WHEN title_source='provisional' "
+            "THEN 'imported' ELSE title_source END, updated_at=?, list_revision=list_revision+1 "
+            "WHERE task_id=? AND owner_id=? AND (?=1 OR title_source='provisional' "
+            "OR (title_source='imported' AND title<>?)) RETURNING *",
+            (title, updated_at, row.task_id, row.owner_id, int(content_changed), title),
+        ).fetchone()
+        if result is None:
+            return
+        saved = ProjectTaskRow.from_row(result)
+        record_change(conn, saved.owner_id, task_scope(saved.project_id), saved.task_id, saved)
 
     @staticmethod
     def approval_changed(conn: Any, owner_id: int) -> None:

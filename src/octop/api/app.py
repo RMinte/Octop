@@ -191,6 +191,7 @@ def build_app(server: OctopServer) -> FastAPI:
         plugins,
         preferences,
         proactive_care,
+        project_imports,
         project_tasks_ws,
         projects,
         providers,
@@ -225,6 +226,8 @@ def build_app(server: OctopServer) -> FastAPI:
         [
             _RouterMount(setup.router, "/api", ["setup"]),
             _RouterMount(auth.router, "/api/auth", ["auth"]),
+            _RouterMount(project_imports.router, "/api", ["projects"]),
+            _RouterMount(project_imports.task_router, "/api", ["projects"]),
             _RouterMount(projects.router, "/api", ["projects"]),
             _RouterMount(projects.task_router, "/api", ["projects"]),
             _RouterMount(project_tasks_ws.router, "/api", ["projects"]),

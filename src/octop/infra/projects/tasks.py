@@ -29,6 +29,7 @@ from octop.infra.projects.artifact_models import TaskArtifact
 from octop.infra.projects.client_tool_models import ClientID, ClientToolDefinition
 from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.context import is_compaction
+from octop.infra.projects.conversation_import_models import ImportedTurnHistory, ImportSource
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
 from octop.infra.projects.image_tools import READ_TASK_IMAGE
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
@@ -269,6 +270,10 @@ class TaskCreate(ProjectTaskCreate):
 
 
 class TaskTurn(ProjectModel):
+    imported_history: ImportedTurnHistory | None = Field(
+        default=None,
+        description="外部来源的可见历史副本；不构成 Octop 工具执行、授权或文件修改回执。",
+    )
     sequence: int = Field(description="轮次稳定排序序号，可能不连续；资源标识仍使用 turn_id。")
     turn_id: str
     request_id: str
@@ -342,6 +347,10 @@ class TaskTurn(ProjectModel):
 
 
 class TaskSummary(ProjectModel):
+    import_source: ImportSource | None = Field(
+        default=None, description="任务导入来源；原生任务为 null。"
+    )
+    external_session_id: str | None = Field(default=None, description="来源会话 ID，仅本人可见。")
     task_id: str
     project_id: str | None
     title: str
@@ -383,6 +392,8 @@ def _datetime(value: int) -> datetime:
 
 def summary(row: ProjectTaskRow, policy: TaskApprovalPolicy) -> TaskSummary:
     return TaskSummary(
+        import_source=cast(ImportSource, row.import_source) if row.import_source else None,
+        external_session_id=row.external_session_id or None,
         task_id=row.task_id,
         project_id=row.project_id,
         title=row.title,
@@ -406,6 +417,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
             if block.status == "streaming":
                 block.status = "interrupted"
     return TaskTurn(
+        imported_history=configuration.get("imported_history"),
         sequence=t.pk,
         turn_id=t.turn_id,
         request_id=t.request_id,
@@ -445,7 +457,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         ),
         options=TaskExecutionOptions(
             action_timeline_enabled=configuration.get("action_timeline_enabled", True),
-            model_ref=t.model_ref,
+            model_ref=t.model_ref or None,
             reasoning_mode=configuration.get("reasoning_mode"),
             reasoning_effort=configuration.get("reasoning_effort"),
             skills=configuration.get("skills", []),

@@ -14,6 +14,7 @@ from octop.infra.db.repos.care_push import CarePushRepo
 from octop.infra.db.repos.channels import ChannelRepo
 from octop.infra.db.repos.connectors import ConnectorRepo
 from octop.infra.db.repos.cron import CronJobRepo
+from octop.infra.db.repos.external_imports import ExternalImportRepo
 from octop.infra.db.repos.invites import InviteRepo
 from octop.infra.db.repos.knowledge import KnowledgeRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
@@ -60,6 +61,7 @@ class RepoBundle:
     project_task_tool_call_repo: ProjectTaskToolCallRepo
     project_task_turn_repo: ProjectTaskTurnRepo
     project_repo: ProjectRepo
+    external_import_repo: ExternalImportRepo
     user_repo: UserRepo
     user_policy_repo: UserPolicyRepo
     invite_repo: InviteRepo
@@ -101,6 +103,7 @@ class RepoBundle:
             project_task_attachment_repo=ProjectTaskAttachmentRepo(),
             project_task_execution_receipt_repo=ProjectTaskExecutionReceiptRepo(),
             project_repo=ProjectRepo(db),
+            external_import_repo=ExternalImportRepo(),
             user_repo=UserRepo(db),
             user_policy_repo=UserPolicyRepo(db),
             invite_repo=InviteRepo(db),
@@ -182,6 +185,10 @@ class SharedServices:
     @property
     def project_repo(self) -> ProjectRepo:
         return self.repos.project_repo
+
+    @property
+    def external_import_repo(self) -> ExternalImportRepo:
+        return self.repos.external_import_repo
 
     @property
     def user_repo(self) -> UserRepo:

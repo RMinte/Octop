@@ -1534,7 +1534,9 @@ class ProjectTaskWorker:
             )
             history: list[Any] = messages_from_dict(json.loads(context[1])) if context else []
             for previous in rows:
-                if is_compaction(
+                if not json.loads(previous.configuration_json).get(
+                    "imported_history"
+                ) and is_compaction(
                     previous.prompt,
                     json.loads(previous.configuration_json).get("attachment_ids", []),
                 ):

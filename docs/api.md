@@ -1,5 +1,9 @@
 # API Reference
 
+## Codex / Claude 数据导入（2026-10-20）
+
+客户端选择并转换的项目、会话与逐项配置统一导入 Octop：`POST /api/projects/import`、`POST /api/project-tasks/import`、`POST /api/projects/import/configurations`。项目保存客户端路径，会话保存为可继续追问的任务；Skill、MCP、插件、行动指南和设置各为独立的 `pendingActivation` 副本。配置列表与详情支持按本人读取，导入不自动安装或激活。完整字段、来源去重、附件上传和增量冲突规则见 [数据导入接入说明](project-data-import.md)。
+
 ## 独立项目和任务接口（2026-10-15）
 
 独立项目和多轮任务统一使用 `/api/projects` 与 `/api/project-tasks`。当前客户端没有使用 AgentComputer 专用协议，因此移除 `/api/agentcomputer/v1` 及其 Bridge 转发；暂不提供远程项目和任务访问。旧专家绑定、Run、事件、文档和命令回执协议不恢复，已有 `ac_*` 数据原样保留，不迁移、不删除。
