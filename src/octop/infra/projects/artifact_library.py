@@ -51,7 +51,7 @@ def page(
     fingerprint = hashlib.sha256(
         json.dumps(filters, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
-    codec = cursor_codec(services, owner_id, f"artifact-library-v1:{fingerprint}")
+    codec = cursor_codec(services, owner_id, f"artifact-library-v2:{fingerprint}")
     cursor = codec.decode(query.page_cursor, "history") if query.page_cursor is not None else None
     boundary = (cursor.updated_at, cursor.after) if cursor else None
     with services.db.read_snapshot() as conn:
@@ -72,6 +72,7 @@ def page(
             project_id=query.project_id,
             task_id=query.task_id,
             kind=query.kind,
+            business_category=query.business_category,
             archived=query.archived,
             q=query.q,
             limit=query.limit + 1,

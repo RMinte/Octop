@@ -109,12 +109,20 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
                     {
                         "id": "create-report",
                         "name": "create_artifact",
-                        "args": {"name": "报告.md", "content": "实际报告内容"},
+                        "args": {
+                            "name": "报告.md",
+                            "content": "实际报告内容",
+                            "business_category": "report",
+                        },
                     },
                     {
                         "id": "publish-slides",
                         "name": "publish_workspace_file",
-                        "args": {"path": "slides.pptx", "name": "演示.pptx"},
+                        "args": {
+                            "path": "slides.pptx",
+                            "name": "演示.pptx",
+                            "business_category": "data",
+                        },
                     },
                 ],
             ),
@@ -163,6 +171,10 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
         assert live["data"]["turn"]["status"] == "running"
         attached = live["data"]["turn"]["artifacts"]
         assert {a["name"] for a in attached} == {"报告.md", "演示.pptx"}
+        assert {a["name"]: a["business_category"] for a in attached} == {
+            "报告.md": "report",
+            "演示.pptx": "data",
+        }
         assert {"create_artifact", "publish_workspace_file"} <= names
         assert not {"client__create_artifact", "client__publish_workspace_file"} & names
         assert str(root) not in json.dumps(attached) and "binary-server-delivery" not in json.dumps(
@@ -190,6 +202,7 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
         assert done["status"] == "completed" and done["turns"][0]["artifacts"] == attached
         replies = [json.loads(m.content) for m in observed[-1] if isinstance(m, ToolMessage)]
         assert {r["artifact_id"] for r in replies} == {a["artifact_id"] for a in attached}
+        assert {r["business_category"] for r in replies} == {"report", "data"}
         assert all(r["status"] == "attached" for r in replies)
         assert server.services.agent_repo.list_all() == experts
     finally:
@@ -243,6 +256,7 @@ async def test_no_project_text_attachment_and_tool_failure_do_not_fake_delivery(
     assert len(attachments) == 1 and attachments[0]["name"] == "note.txt", [
         m.content for m in observed[-1] if isinstance(m, ToolMessage)
     ]
+    assert attachments[0]["business_category"] == "uncategorized"
     assert (await client.get(attachments[0]["download_url"], headers=auth)).content == b""
     results = [json.loads(m.content) for m in observed[-1] if isinstance(m, ToolMessage)]
     assert {r["error_code"] for r in results if r.get("is_error")} == {
@@ -503,6 +517,91 @@ async def test_call_idempotency_survives_source_deletion_and_turn_completion(pub
     assert data == b"pdf snapshot"
 
 
+@pytest.mark.parametrize(
+    "tool_name,arguments,category",
+    [
+        ("create_artifact", {"name": "note.md", "content": "note"}, "report"),
+        ("publish_workspace_file", {"path": "source.md"}, "data"),
+        ("publish_workspace_archive", {"paths": ["source.md"], "name": "source.zip"}, "workflow"),
+    ],
+)
+async def test_all_publish_tool_wrappers_persist_business_category(
+    publisher_env, tool_name, arguments, category
+):
+    client, _, auth, publisher, root, task = publisher_env
+    (root / "source.md").write_bytes(b"source content")
+    tool = next(tool for tool in publisher.tools() if tool.name == tool_name)
+    result = await tool.ainvoke(
+        {
+            "type": "tool_call",
+            "id": "category-call",
+            "name": tool_name,
+            "args": {**arguments, "business_category": category},
+        }
+    )
+    published = json.loads(result.content)
+    assert published["status"] == "attached", published
+    assert published["business_category"] == category
+    detail = await client.get(
+        f"/api/project-tasks/artifacts/{published['artifact_id']}", headers=auth
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["business_category"] == category
+    history = await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)
+    assert history.status_code == 200, history.text
+    assert history.json()["turns"][0]["artifacts"] == [
+        {key: value for key, value in published.items() if key != "status"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "tool_name,method_name,args_model,legacy_arguments",
+    [
+        (
+            "create_artifact",
+            "create",
+            CreateArtifactArgs,
+            {"name": "legacy.md", "content": "legacy content", "media_type": None},
+        ),
+        (
+            "publish_workspace_file",
+            "publish",
+            PublishWorkspaceFileArgs,
+            {"path": "legacy.md", "name": None},
+        ),
+        (
+            "publish_workspace_archive",
+            "archive",
+            PublishWorkspaceArchiveArgs,
+            {"paths": ["legacy.md"], "name": "legacy.zip"},
+        ),
+    ],
+)
+async def test_business_category_preserves_legacy_request_hash_and_replay(
+    publisher_env, tool_name, method_name, args_model, legacy_arguments
+):
+    _, _, _, publisher, root, _ = publisher_env
+    (root / "legacy.md").write_bytes(b"legacy source")
+    expected_hash = hashlib.sha256(
+        json.dumps([tool_name, legacy_arguments], sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+    omitted = args_model.model_validate(legacy_arguments)
+    explicit = args_model.model_validate({**legacy_arguments, "business_category": "uncategorized"})
+    assert publisher._request_hash(tool_name, omitted) == expected_hash
+    assert publisher._request_hash(tool_name, explicit) == expected_hash
+    operation = getattr(publisher, method_name)
+    original = await operation("legacy-call", omitted)
+    assert original.business_category == "uncategorized"
+    (root / "legacy.md").unlink()
+    assert await operation("legacy-call", explicit) == original
+    with pytest.raises(OctopError) as conflict:
+        await operation(
+            "legacy-call",
+            args_model.model_validate({**legacy_arguments, "business_category": "report"}),
+        )
+    assert conflict.value.code == "TASK_ARTIFACT_CONFLICT"
+
+
 async def test_archive_publishes_only_explicit_files_and_replays_without_sources(publisher_env):
     _, server, _, publisher, root, task = publisher_env
     (root / "app").mkdir()
@@ -688,7 +787,8 @@ async def test_snapshots_survive_database_backup_and_repeated_migrations(publish
 
     _, server, _, publisher, _, task = publisher_env
     artifact = await publisher.create(
-        "durable", CreateArtifactArgs(name="proof.txt", content="backup proof")
+        "durable",
+        CreateArtifactArgs(name="proof.txt", content="backup proof", business_category="workflow"),
     )
     backup = tmp_path / "backup.sqlite"
     snapshot_sqlite_file(server.services.db.path, backup)
@@ -764,6 +864,20 @@ async def test_historical_attachment_pagination_and_archived_download(publisher_
 def test_publish_requires_a_server_workspace_relative_path(path):
     with pytest.raises(ValidationError):
         PublishWorkspaceFileArgs(path=path)
+
+
+@pytest.mark.parametrize("category", ["document", "reports", "all", "", None])
+@pytest.mark.parametrize(
+    "args_model,arguments",
+    [
+        (CreateArtifactArgs, {"name": "note.md", "content": "note"}),
+        (PublishWorkspaceFileArgs, {"path": "note.md"}),
+        (PublishWorkspaceArchiveArgs, {"paths": ["note.md"], "name": "notes.zip"}),
+    ],
+)
+def test_publish_business_category_rejects_invalid_values(args_model, arguments, category):
+    with pytest.raises(ValidationError):
+        args_model.model_validate({**arguments, "business_category": category})
 
 
 @pytest.mark.parametrize("name", sorted(artifacts.SERVER_ARTIFACT_TOOLS))

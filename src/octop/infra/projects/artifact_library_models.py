@@ -14,6 +14,7 @@ from octop.infra.utils.artifact_kinds import ArtifactKind, ascii_lower
 LibraryScope = Literal["all", "project", "standalone"]
 LibraryArchive = Literal["all", "active", "archived"]
 LibraryKind = ArtifactKind | Literal["all"]
+LibraryBusinessCategory = Literal["all", "report", "data", "workflow", "uncategorized"]
 
 
 class ArtifactLibraryQuery(ProjectModel):
@@ -21,6 +22,7 @@ class ArtifactLibraryQuery(ProjectModel):
     project_id: str | None = Field(default=None, min_length=1, max_length=256)
     task_id: str | None = Field(default=None, min_length=1, max_length=256)
     kind: LibraryKind = "all"
+    business_category: LibraryBusinessCategory = "all"
     archived: LibraryArchive = "all"
     q: str = Field(default="", max_length=200)
     limit: int = Field(default=50, ge=1, le=100)

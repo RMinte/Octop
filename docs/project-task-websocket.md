@@ -975,11 +975,13 @@ create_artifact、publish_workspace_file 和 publish_workspace_archive 均由 Oc
 
 | 服务端工具 | 模型参数 | 成功行为 |
 | --- | --- | --- |
-| create_artifact | name、content、可选 media_type | 将完整 UTF-8 文本保存成不可变附件，不修改工作目录；支持 txt、md、csv、json、html 等文本格式 |
-| publish_workspace_file | path、可选 name | 从该轮服务端工作目录读取已有普通文件，保存不可变附件；PPTX、PDF、DOCX 等使用真实文件字节 |
-| publish_workspace_archive | paths、name | 将明确列出的相对文件保存成一个 ZIP 附件，保留文件相对目录结构；不接受目录或扫描整个工作区 |
+| create_artifact | name、content、可选 media_type、business_category | 将完整 UTF-8 文本保存成不可变附件，不修改工作目录；支持 txt、md、csv、json、html 等文本格式 |
+| publish_workspace_file | path、可选 name、business_category | 从该轮服务端工作目录读取已有普通文件，保存不可变附件；PPTX、PDF、DOCX 等使用真实文件字节 |
+| publish_workspace_archive | paths、name、可选 business_category | 将明确列出的相对文件保存成一个 ZIP 附件，保留文件相对目录结构；不接受目录或扫描整个工作区 |
 
 工具名没有 client__ 前缀。账号、task_id、turn_id、工具调用标识和服务端工作目录由运行时绑定，模型不能通过参数覆盖。参数的机器可读结构见 JSON Schema 中的 CreateArtifactArgs、PublishWorkspaceFileArgs 和 PublishWorkspaceArchiveArgs；它们是模型工具参数，不是客户端 WebSocket 命令。
+
+三个工具均可声明 `business_category`：`report`（报告）、`data`（数据）、`workflow`（流程）、`uncategorized`（未分类），省略时为未分类，不能传 null 或查询专用值 all。发布方按实际用途填写，服务端不按格式或内容自动推断；同一份 PDF 可以是报告或流程。历史成果升级后为未分类，内容及原发布摘要保持。省略和显式未分类同义，明确分类参与发布幂等摘要，原调用 ID 更改分类会冲突。
 
 publish_workspace_file 的 path 必须是非空的工作目录相对路径，使用正斜线分隔；拒绝绝对路径、..、.、空路径段、反斜线和冒号，拒绝符号链接及目录。只有服务端工作目录可读：项目有 directory 时使用本轮采用的目录，没有时使用任务自己的服务端工作目录。client_directory 仍只是元数据，服务端不会访问该位置，也不自动将请求转发给客户端。文件在读取过程中变化时发布失败，不产生附件。
 
@@ -1004,8 +1006,11 @@ publish_workspace_archive 的 paths 是 1–100 个互不重复的相对文件�
 | source_path | 发布已有文件时的服务端工作目录相对路径；直接创建文本或生成 ZIP 为 null |
 | download_url | 当前 Octop 实例下的相对鉴权下载地址，不包含访问令牌 |
 | created_at | 服务端生成的 UTC ISO 8601 时间 |
+| business_category | 必返回的业务分类：report/data/workflow/uncategorized；历史及未声明成果为 uncategorized，与资料库 file_kind 格式字段独立 |
 
 客户端按 task_id、turn_id 合并完整轮次，按 artifact_id 渲染附件；数组顺序为发布顺序。task.subscribe 的 cursor 同时覆盖文字和附件状态。重新连接或加载历史后使用服务端 artifacts 恢复文件卡，不从 Markdown 文件路径、工具活动文字或 source_path 推断附件，也不追加重复卡片。服务端工具失败或模型仅提到文件名时，不产生附件。
+
+跨任务资料库使用 `GET /api/project-tasks/artifacts?business_category=report` 等筛选；默认 all 包含未分类成果。分类与搜索、来源、格式和归档状态在服务端求交后分页，并绑定分页游标；旧版资料库游标及切换类别后复用游标返回 `409 PROJECT_SYNC_RESET`。完整契约见[资料库说明](project-task-artifact-library.md#业务分类)。
 
 发布成功的工具返回值包含 status=attached 和同一份附件元数据；模型随后继续当前轮次。工具收到受控失败时返回 is_error、error_code、message，模型可纠正参数或说明失败。工具成功、工具结果被模型消费、任务 completed 是不同事实：取消或生成失败不会回滚已经成功保存的附件。
 

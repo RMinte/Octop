@@ -31,6 +31,7 @@ from octop.infra.projects.approval_models import ApprovalPolicyUpdate, TaskAppro
 from octop.infra.projects.artifact_library_models import (
     ArtifactLibraryQuery,
     LibraryArchive,
+    LibraryBusinessCategory,
     LibraryKind,
     LibraryScope,
     TaskArtifactLibraryItem,
@@ -354,6 +355,10 @@ def _artifact_library_query(
         default=None, min_length=1, max_length=256, description="可选来源任务 ID，与其他条件求交。"
     ),
     kind: LibraryKind = Query(default="all", description="文件浏览分类，默认全部类型。"),
+    business_category: LibraryBusinessCategory = Query(
+        default="all",
+        description="独立业务分类：report 报告、data 数据、workflow 流程、uncategorized 未分类；all 包含全部，含未分类。与文件格式及其他条件求交。",
+    ),
     archived: LibraryArchive = Query(
         default="all",
         description="all 包含归档成果；active 仅任务与项目均未归档；archived 为任一已归档。",
@@ -377,6 +382,7 @@ def _artifact_library_query(
             project_id=project_id,
             task_id=task_id,
             kind=kind,
+            business_category=business_category,
             archived=archived,
             q=q,
             limit=limit,
@@ -392,7 +398,7 @@ def _artifact_library_query(
     "/artifacts",
     response_model=TaskArtifactLibraryPage,
     summary="按发布时间列出我的任务成果资料",
-    description="跨项目和无项目任务读取本人正式发布的文件元数据，按发布时间倒序、同一时间按成果 ID 倒序分页，默认 50 条、最多 100。支持文件名、项目、任务、类型和归档筛选，默认包含归档及来源轮次失败或取消后的已发布成果。不读取文件内容，不扫描工作目录。游标失效返回 409 PROJECT_SYNC_RESET。",
+    description="跨项目和无项目任务读取本人正式发布的文件元数据，按发布时间倒序、同一时间按成果 ID 倒序分页，默认 50 条、最多 100。支持文件名、项目、任务、文件类型、独立业务分类和归档筛选，全部条件先求交再分页。业务分类由发布方显式声明，历史及未声明成果为 uncategorized，默认 all 仍包含它们。游标绑定全部筛选，失效返回 409 PROJECT_SYNC_RESET。不读取文件内容，不扫描工作目录。",
 )
 async def task_artifact_library(
     response: Response,

@@ -12,18 +12,19 @@
 
 `project_task_artifacts` 的主要字段如下。SQLite 使用 BLOB 保存内容，PostgreSQL 使用 BYTEA。
 
-| 字段                            | 含义                                         |
-| ------------------------------- | -------------------------------------------- |
-| `id`                            | 数据库内部整数主键，不作为 API 资源 ID       |
-| `artifact_id`                   | 全局唯一的公开成果 ID                        |
-| `task_id`                       | 关联 `project_tasks.task_id`                 |
-| `turn_id`                       | 关联 `project_task_turns.turn_id`            |
-| `tool_call_id` / `request_hash` | 发布调用身份与参数摘要；同轮同调用只发布一次 |
-| `name` / `media_type`           | 发布文件名和记录的 MIME 类型                 |
-| `byte_count` / `sha256`         | 文件长度及完整性校验摘要                     |
-| `source_path`                   | 可选的服务端工作区相对来源路径               |
-| `content`                       | 发布时保存的不可变原始字节                   |
-| `created_at`                    | 发布时间，数据库内为 UTC 毫秒时间戳          |
+| 字段                            | 含义                                                         |
+| ------------------------------- | ------------------------------------------------------------ |
+| `id`                            | 数据库内部整数主键，不作为 API 资源 ID                       |
+| `artifact_id`                   | 全局唯一的公开成果 ID                                        |
+| `task_id`                       | 关联 `project_tasks.task_id`                                 |
+| `turn_id`                       | 关联 `project_task_turns.turn_id`                            |
+| `tool_call_id` / `request_hash` | 发布调用身份与参数摘要；同轮同调用只发布一次                 |
+| `name` / `media_type`           | 发布文件名和记录的 MIME 类型                                 |
+| `byte_count` / `sha256`         | 文件长度及完整性校验摘要                                     |
+| `source_path`                   | 可选的服务端工作区相对来源路径                               |
+| `business_category`             | 发布方显式声明的业务分类；历史及未声明成果为 `uncategorized` |
+| `content`                       | 发布时保存的不可变原始字节                                   |
+| `created_at`                    | 发布时间，数据库内为 UTC 毫秒时间戳                          |
 
 关系为：
 
@@ -48,7 +49,7 @@ erDiagram
 
 资料库按发布事实收录，不要求轮次最终为 `completed`。同一轮先成功发布文件、随后失败或取消时，已发布文件仍然有效；列表返回该轮当前状态，供界面解释来源。没有成功发布的文件不展示为成果。
 
-现状依据：[发布事务及限额](../src/octop/infra/projects/artifacts.py#L172)、[项目文件编辑不强制发布的用例](../tests/integration/test_project_task_artifacts.py#L405)。
+现状依据：[发布事务及限额](../src/octop/infra/projects/artifacts.py#L174)、[项目文件编辑不强制发布的用例](../tests/integration/test_project_task_artifacts.py#L419)。
 
 ### 输入附件和知识库分别管理
 
@@ -86,21 +87,23 @@ Authorization: Bearer <access_token>
 Accept-Language: zh-CN
 ```
 
-| 参数          | 规则                                                                             |
-| ------------- | -------------------------------------------------------------------------------- |
-| `scope`       | `all`、`project` 或 `standalone`，默认 `all`。`all` 同时包含项目任务和无项目任务 |
-| `project_id`  | `scope=project` 时必填；其他 scope 携带此参数返回 422                            |
-| `task_id`     | 可选，限定某个任务；与其他筛选条件求交                                           |
-| `kind`        | `all` 或下文定义的文件类型，默认 `all`                                           |
-| `archived`    | `all`、`active` 或 `archived`，默认 `all`                                        |
-| `q`           | 文件名的字面子串，最多 200 个字符；去除首尾空白，空串等同省略                    |
-| `limit`       | 默认 50，范围 1–100                                                              |
-| `page_cursor` | 下一页不透明游标；非空且最多 4096 个字符                                         |
+| 参数                | 规则                                                                               |
+| ------------------- | ---------------------------------------------------------------------------------- |
+| `scope`             | `all`、`project` 或 `standalone`，默认 `all`。`all` 同时包含项目任务和无项目任务   |
+| `project_id`        | `scope=project` 时必填；其他 scope 携带此参数返回 422                              |
+| `task_id`           | 可选，限定某个任务；与其他筛选条件求交                                             |
+| `kind`              | `all` 或下文定义的文件类型，默认 `all`                                             |
+| `business_category` | `all`、`report`、`data`、`workflow` 或 `uncategorized`，默认 `all`，与其他条件求交 |
+| `archived`          | `all`、`active` 或 `archived`，默认 `all`                                          |
+| `q`                 | 文件名的字面子串，最多 200 个字符；去除首尾空白，空串等同省略                      |
+| `limit`             | 默认 50，范围 1–100                                                                |
+| `page_cursor`       | 下一页不透明游标；非空且最多 4096 个字符                                           |
 
 筛选示例：
 
 ```http
 GET /api/project-tasks/artifacts?scope=project&project_id=project_example&kind=document&q=报告
+GET /api/project-tasks/artifacts?scope=project&project_id=project_example&business_category=report&q=季度
 GET /api/project-tasks/artifacts?scope=standalone&archived=active
 GET /api/project-tasks/artifacts?task_id=task_example
 ```
@@ -126,6 +129,7 @@ GET /api/project-tasks/artifacts?task_id=task_example
       "download_url": "/api/project-tasks/task_example/artifacts/artifact_example/download",
       "created_at": "2026-10-20T02:00:00Z",
       "file_kind": "document",
+      "business_category": "report",
       "task_title": "生成季度分析报告",
       "task_archived": false,
       "turn_status": "completed",
@@ -138,7 +142,7 @@ GET /api/project-tasks/artifacts?task_id=task_example
 }
 ```
 
-每个条目为 `TaskArtifactLibraryItem`，复用现有 `TaskArtifact` 全部字段，增加下表字段。现有任务历史与 WebSocket 的 `TaskTurn.artifacts` 保持原结构。
+每个条目为 `TaskArtifactLibraryItem`，复用现有 `TaskArtifact` 全部字段，增加下表字段。`TaskArtifact` 同步新增必返回的 `business_category`；任务历史、WebSocket 的 `TaskTurn.artifacts` 和工具发布结果也返回该字段。
 
 `created_at` 继续返回 UTC 的 ISO 8601 时间；界面按 Octop `default_timezone` 显示，不直接采用浏览器或设备本地时区。
 
@@ -151,9 +155,29 @@ GET /api/project-tasks/artifacts?task_id=task_example
 
 `next_page_cursor=null` 表示当前筛选下已无后续记录；空列表也返回此结构。第一版不返回精确总数或分类统计，避免每次翻页都执行全量计数。
 
+### 业务分类
+
+`business_category` 按成果用途独立保存，文件格式 `file_kind` 沿用原有计算规则，两者分别筛选。每份成果只有一个业务分类，列表条目和单份详情均必返回非空的小写枚举值。
+
+| 界面标签 | 返回值和筛选值        | 含义                               |
+| -------- | --------------------- | ---------------------------------- |
+| 报告     | `report`              | 报告、分析结论等成果               |
+| 数据     | `data`                | 数据集、数据导出等成果             |
+| 流程     | `workflow`            | 可复用的操作流程、自动化流程等成果 |
+| 未分类   | `uncategorized`       | 未明确声明用途的成果及历史成果     |
+| 全部     | `all`，仅筛选参数可用 | 包含上述全部业务分类，包括未分类   |
+
+分类由三个服务端发布工具 `create_artifact`、`publish_workspace_file`、`publish_workspace_archive` 的可选 `business_category` 参数声明。发布方根据任务目标和实际用途填写，省略时保存为 `uncategorized`；`null`、空串、`all` 或格式名称如 `document` 都不是合法发布值。ZIP 包按整个成果包的用途声明。
+
+例如，流程说明 PDF 可以是 `file_kind=document`、`business_category=workflow`，Markdown 报告可以是 `file_kind=text`、`business_category=report`。服务端不根据扩展名、MIME、名称或正文推断业务分类。分类随发布快照固定，本次不新增修改历史成果分类的接口。
+
+schema 48 将已有成果的新增字段设为 `uncategorized`，保留文件字节、公开 ID、发布时间及发布调用摘要。历史文件仍在默认“全部”和显式“未分类”中可见。发布参数省略或显式指定未分类不改变原幂等摘要；明确分类参与摘要，同一工具调用更改分类返回 `TASK_ARTIFACT_CONFLICT`。
+
+业务分类与搜索、来源、文件类型和归档状态全部求交，SQL 应用所有条件后才执行分页。例如 `business_category=report&kind=text&q=季度` 只返回文件名匹配的文本报告，不在已取出的一页结果上过滤。
+
 ### 文件类型和搜索
 
-`file_kind` 采用固定枚举及版本化映射，不引入桌面示例中的 Reports、Data、Routines 业务分类。
+`file_kind` 保留原格式枚举和固定映射；“报告／数据／流程”使用独立的 `business_category`，不能将两者互相替代。
 
 | 分类           | 典型扩展名                                                                                            |
 | -------------- | ----------------------------------------------------------------------------------------------------- |
@@ -178,9 +202,11 @@ GET /api/project-tasks/artifacts?task_id=task_example
 
 固定按 `created_at DESC, artifact_id DESC` 排序，下一页严格查询小于上页最后一条的二元位置。发布时间相同的文件由唯一 `artifact_id` 确定顺序。取 `limit + 1` 条判断是否还有下一页，不使用 offset。
 
-复用现有 `CursorCodec` 的签名能力及 `history` 编码格式，以发布时间和成果 ID 保存位置；使用独立 scope，例如 `artifact-library-v1:<filter_hash>`。规范化后的 `scope/project_id/task_id/kind/archived/q` 全部进入筛选指纹；`limit` 可在翻页时调整。账号、实例和恢复纪元由现有 codec 绑定，客户端不得解析或修改游标。
+复用现有 `CursorCodec` 的签名能力及 `history` 编码格式，以发布时间和成果 ID 保存位置；使用独立 scope `artifact-library-v2:<filter_hash>`。规范化后的 `scope/project_id/task_id/kind/business_category/archived/q` 全部进入筛选指纹；`limit` 可在翻页时调整。账号、实例和恢复纪元由现有 codec 绑定，客户端不得解析或修改游标。
 
 篡改游标、切换账号或筛选后复用游标、跨实例使用时，沿用 `409 PROJECT_SYNC_RESET`，客户端清空该筛选列表并重新读取首页。合法的其他参数错误仍返回 422。
+
+业务分类契约上线后，旧版本分页游标也返回上述重置错误。客户端升级或切换业务分类时重新读取首页，不沿用旧筛选的游标。
 
 分页不维持跨请求数据库快照。每页查询时权限、删除和归档筛选实时生效；名称取当前值。新增成果通过刷新首页获取，客户端按 `artifact_id` 合并去重。第一版不承诺实时全局增量同步，也不把成果游标混入已有任务列表同步游标。
 
@@ -219,7 +245,7 @@ Authorization: Bearer <access_token>
 ```sql
 SELECT
     a.artifact_id, a.task_id, a.turn_id, a.name, a.media_type,
-    a.byte_count, a.sha256, a.source_path, a.created_at,
+    a.byte_count, a.sha256, a.source_path, a.created_at, a.business_category,
     t.title AS task_title, t.archived AS task_archived,
     r.status AS turn_status,
     p.project_id, p.name AS project_name, p.archived AS project_archived
@@ -228,7 +254,7 @@ JOIN project_tasks t ON t.task_id = a.task_id
 JOIN project_task_turns r ON r.turn_id = a.turn_id AND r.task_id = t.task_id
 LEFT JOIN projects p ON p.project_id = t.project_id AND p.owner_id = t.owner_id
 WHERE t.owner_id = :current_owner_id
--- 按规范化参数追加 scope、归档、文件名及类型条件。
+-- 按规范化参数追加 scope、归档、文件名、格式及业务分类条件。
 -- 后续页追加 (a.created_at, a.artifact_id) < (:last_created_at, :last_artifact_id)。
 ORDER BY a.created_at DESC, a.artifact_id DESC
 LIMIT :limit_plus_one;
@@ -251,7 +277,9 @@ CREATE INDEX idx_task_artifacts_task_created
 
 SQLite 的代表性多账号查询计划已检查：跨任务及项目筛选从任务索引进入，再通过新的任务成果复合索引联查并排序；单任务筛选直接使用该复合索引，不额外排序。实际性能随本人文件数量及数据分布变化；PostgreSQL 查询计划尚未实测。
 
-第一版不增加业务表、不复制 BLOB、不回填历史成果、不改原发布事务。新增 `047_task_artifact_library.sql` 与 `.pg.sql`，并将独立项目迁移范围扩展到 47；已应用 v46 的本地数据库也会补齐索引，原成果记录和字节保留。
+schema 47 不增加业务表、不复制 BLOB、不重新发布历史成果。`047_task_artifact_library.sql` 与 `.pg.sql` 为已应用 v46 的数据库补齐索引，保留原成果记录和字节。
+
+业务分类追加 `048_task_artifact_business_category.sql` 与 `.pg.sql`，新增带四值约束、非空且默认未分类的列。当前 schema 为 48，已应用 v47 的数据库可升级；幂等修复覆盖记录水位为 48 或更高但物理列缺失的场景。本次未新增分类索引，PostgreSQL 实库及分类查询计划仍待验证。
 
 ### 分层和路由注册
 
@@ -272,9 +300,11 @@ SQLite 的代表性多账号查询计划已检查：跨任务及项目筛选从�
 
 ## 客户端对接和生命周期
 
-AgentComputer2 当前 iOS 资料库通过 `TaskArtifactLibraryService` 遍历本地会话、收集 assistant 消息中的成果，并按任务分组；桌面 `LibraryView` 仍包含示例数据。当前这条本地资料库链路没有 Octop 成果查询或下载请求。因此本方案提供的是新的服务端契约，本轮不修改 Swift 或 UI。
+资料库客户端已完成分页、文件名搜索、详情、鉴权下载和完整性校验的联调。本次补充业务分类字段及筛选参数，供客户端启用“报告／数据／流程”筛选；本轮不修改 Swift 或 UI。
 
-后续对接服务端资料库时，直接调用成果列表，不先拉取全部任务和所有历史轮次。用 `artifact_id` 作为服务端条目标识；它是不透明字符串，不能按客户端本地 UUID 模型强制解析。客户端缓存属于本机展示数据，不承担服务端文件权威存储职责。
+客户端继续直接调用成果列表，不先拉取全部任务和所有历史轮次。用 `artifact_id` 作为服务端条目标识；它是不透明字符串，不能按客户端本地 UUID 模型强制解析。客户端缓存属于本机展示数据，不承担服务端文件权威存储职责。
+
+卡片摘要目前由客户端下载小型文本后提取，服务端摘要字段后续补充，不阻塞分类筛选接入。PostgreSQL 实库和查询计划仍属于后续验证项。
 
 本地会话成果与 Octop 成果具有不同来源，不能仅按文件名或 SHA-256 自动合并。接入时先明确当前展示的数据来源；本方案不自动迁移或上传客户端已有成果，也不探测 `client_directory`。
 
@@ -296,37 +326,35 @@ AgentComputer2 当前 iOS 资料库通过 `TaskArtifactLibraryService` 遍历本
 
 服务端元数据查询和接口已经实现，客户端后续可按上述契约接入。针对性验证覆盖以下范围，不新增客户端测试或验收页面。
 
-| 验证范围       | 通过标准                                                                                                            |
-| -------------- | ------------------------------------------------------------------------------------------------------------------- |
-| 历史成果       | 现有数据无需重新发布，即可跨任务查询；项目与无项目任务均覆盖                                                        |
-| 权限           | 列表、详情和下载均隔离账号；他人项目、任务、成果返回 404；管理员无隐式跨账号读取                                    |
-| 正式发布边界   | 工作区未发布文件和用户输入附件不会出现；重复文件名或相同内容保留不同发布记录                                        |
-| 状态与生命周期 | 覆盖运行中发布、后续失败或取消、项目及任务分别归档、删除任务和删除项目                                              |
-| 分页           | 相同发布时间不重不漏；支持翻到末页；中途删除可继续；筛选、账号或游标用途不匹配返回重置错误                          |
-| 搜索与分类     | 中文、ASCII 大小写、字面 `%` 和 `_`、无扩展名、未知 MIME、扩展名与 MIME 冲突均有用例；SQLite 和 PostgreSQL 行为一致 |
-| 下载与预览     | 中文名称、完整性校验、已删除文件和原工作区已变更均符合原下载契约                                                    |
-| 数据库成本     | 列表与详情不选取 BLOB，不按条目发起额外来源查询；核对多账号数据下查询计划                                           |
-| HTTP 和文档    | `/artifacts` 不被当成任务 ID；OpenAPI 展示参数、分页响应和错误；旧历史及下载契约保持可用                            |
+| 验证范围       | 通过标准                                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 历史成果       | 现有数据无需重新发布，即可跨任务查询；项目与无项目任务均覆盖                                                                      |
+| 权限           | 列表、详情和下载均隔离账号；他人项目、任务、成果返回 404；管理员无隐式跨账号读取                                                  |
+| 正式发布边界   | 工作区未发布文件和用户输入附件不会出现；重复文件名或相同内容保留不同发布记录                                                      |
+| 状态与生命周期 | 覆盖运行中发布、后续失败或取消、项目及任务分别归档、删除任务和删除项目                                                            |
+| 分页           | 相同发布时间不重不漏；支持翻到末页；中途删除可继续；筛选、账号或游标用途不匹配返回重置错误                                        |
+| 搜索与分类     | 中文、ASCII 大小写、字面 `%` 和 `_`、无扩展名、未知 MIME、扩展名与 MIME 冲突均有用例；跨数据库语义按契约实现，PostgreSQL 实库待验 |
+| 业务分类       | 四个分类与全部、分类独立于格式、与搜索和来源求交、筛选先于分页、游标重置、历史未分类保留、三工具透传及原发布摘要保持              |
+| 下载与预览     | 中文名称、完整性校验、已删除文件和原工作区已变更均符合原下载契约                                                                  |
+| 数据库成本     | 列表与详情不选取 BLOB，不按条目发起额外来源查询；核对多账号数据下查询计划                                                         |
+| HTTP 和文档    | `/artifacts` 不被当成任务 ID；OpenAPI 展示参数、分页响应和错误；旧历史及下载契约保持可用                                          |
 
-对应测试位于 `tests/integration/test_project_task_artifact_library.py`、`tests/unit/utils/test_artifact_kinds.py` 及现有数据库迁移用例。现有成果发布和下载、API 文档契约也纳入回归验证。本次没有新增错误码或修改中英文语言包；PostgreSQL 尚未进行实库验收。
+对应测试位于 `tests/integration/test_project_task_artifact_library.py`、`tests/integration/test_project_task_artifacts.py`、`tests/unit/utils/test_artifact_kinds.py` 及数据库迁移用例。现有发布、下载、OpenAPI 和 WebSocket schema 同步验证；中英文发布指引说明分类用途与来源，未新增错误码。PostgreSQL 尚未进行实库验收。
 
 ## 现状核对依据
 
-服务端代码核对基于 `feature/agentcomputer-foundation` 的本地提交 `3694b9bf` 及当时工作区内容。接口现状与本方案新增项已在上文分别标明。
+初版文件关联核对基于 `feature/agentcomputer-foundation` 的 `3694b9bf`；资料库接口于 `81316abd` 实现，本次业务分类以最新主目录提交 `af6522f2` 为基线补充。客户端接入状态依据本次联调结论。
 
-| 事实                     | 代码位置                                                                    |
-| ------------------------ | --------------------------------------------------------------------------- |
-| 成果统一表与任务轮次外键 | `src/octop/infra/db/migrations/037_task_artifacts.sql:2`；PG 同名迁移       |
-| 发布时保存快照           | `src/octop/infra/projects/artifacts.py:172`                                 |
-| 下载归属与完整性校验     | `src/octop/infra/projects/artifacts.py:111`                                 |
-| 当前成果公开字段         | `src/octop/infra/projects/artifact_models.py:100`                           |
-| 现有历史附带成果         | `src/octop/infra/projects/tasks.py:464`                                     |
-| 删除任务清理成果         | `src/octop/infra/db/repos/project_tasks.py:110`                             |
-| 删除项目清理任务         | `src/octop/infra/projects/service.py:158`                                   |
-| 输入附件另表保存         | `src/octop/infra/db/migrations/042_task_input_attachments.sql:2`            |
-| 现有签名游标             | `src/octop/infra/projects/cursors.py:32`                                    |
-| 客户端本地成果聚合       | AgentComputer2 `AgentComputer/Services/TaskArtifactLibraryService.swift:25` |
-| 客户端本地文件快照       | AgentComputer2 `AgentComputer/Services/AI/ArtifactStore.swift:308`          |
-| 桌面资料库示例           | AgentComputer2 `AgentComputer/Features/Library/LibraryView.swift:65`        |
+| 事实                     | 代码位置                                                              |
+| ------------------------ | --------------------------------------------------------------------- |
+| 成果统一表与任务轮次外键 | `src/octop/infra/db/migrations/037_task_artifacts.sql:2`；PG 同名迁移 |
+| 发布时保存快照           | `src/octop/infra/projects/artifacts.py:174`                           |
+| 下载归属与完整性校验     | `src/octop/infra/projects/artifacts.py:113`                           |
+| 当前成果公开字段         | `src/octop/infra/projects/artifact_models.py:113`                     |
+| 现有历史附带成果         | `src/octop/infra/projects/tasks.py:483`                               |
+| 删除任务清理成果         | `src/octop/infra/db/repos/project_tasks.py:110`                       |
+| 删除项目清理任务         | `src/octop/infra/projects/service.py:158`                             |
+| 输入附件另表保存         | `src/octop/infra/db/migrations/042_task_input_attachments.sql:2`      |
+| 现有签名游标             | `src/octop/infra/projects/cursors.py:34`                              |
 
 仓库早期 `agentcomputer-project-documents.md` 中的 `/api/agentcomputer/v1` 项目文档接口属于历史方案，不作为此次资料库接口基础。

@@ -9,7 +9,10 @@ from typing import Any
 from octop.infra.db.repos._base import DbRow, strict_int
 from octop.infra.utils.artifact_kinds import ARTIFACT_KIND_RULES, ascii_lower
 
-_COLUMNS = "artifact_id,task_id,turn_id,tool_call_id,request_hash,name,media_type,byte_count,sha256,source_path,created_at"
+_COLUMNS = (
+    "artifact_id,task_id,turn_id,tool_call_id,request_hash,name,media_type,byte_count,"
+    "sha256,source_path,created_at,business_category"
+)
 _LIBRARY_COLUMNS = ",".join(f"a.{column}" for column in _COLUMNS.split(",")) + (
     ",t.title AS task_title,t.archived AS task_archived,r.status AS turn_status,"
     "p.project_id,p.name AS project_name,p.archived AS project_archived,"
@@ -67,6 +70,7 @@ class ProjectTaskArtifactRow:
     sha256: str
     source_path: str | None
     created_at: int
+    business_category: str = "uncategorized"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskArtifactRow:
@@ -82,6 +86,7 @@ class ProjectTaskArtifactRow:
             str(row["sha256"]),
             str(row["source_path"]) if row["source_path"] is not None else None,
             strict_int(row["created_at"]),
+            str(row["business_category"]),
         )
 
 
@@ -128,6 +133,7 @@ class ProjectTaskArtifactRepo:
         project_id: str | None = None,
         task_id: str | None = None,
         kind: str = "all",
+        business_category: str = "all",
         archived: str = "all",
         q: str = "",
         limit: int = 51,
@@ -150,6 +156,9 @@ class ProjectTaskArtifactRepo:
         if kind != "all":
             clauses.append(f"({_KIND_SQL})=?")
             params.extend((*_KIND_PARAMS, kind))
+        if business_category != "all":
+            clauses.append("a.business_category=?")
+            params.append(business_category)
         query = ascii_lower(q.strip())
         if query:
             clauses.append(_ascii_lower_sql("a.name") + " LIKE ? ESCAPE '!'")
@@ -212,7 +221,7 @@ class ProjectTaskArtifactRepo:
     @staticmethod
     def insert(conn: Any, row: ProjectTaskArtifactRow, content: bytes) -> None:
         conn.execute(
-            f"INSERT INTO project_task_artifacts({_COLUMNS},content) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO project_task_artifacts({_COLUMNS},content) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 row.artifact_id,
                 row.task_id,
@@ -225,6 +234,7 @@ class ProjectTaskArtifactRepo:
                 row.sha256,
                 row.source_path,
                 row.created_at,
+                row.business_category,
                 content,
             ),
         )

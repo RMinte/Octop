@@ -5,19 +5,24 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, field_validator
 
 from octop.infra.projects.models import ProjectModel
 
 ArtifactName = Annotated[str, StringConstraints(min_length=1, max_length=240)]
+ArtifactBusinessCategory = Literal["report", "data", "workflow", "uncategorized"]
 
 
 class CreateArtifactArgs(ProjectModel):
     name: ArtifactName = Field(description="附件文件名，含文本格式扩展名，不含目录。")
     content: str = Field(description="完整 UTF-8 文本内容；不会写入工作目录。")
     media_type: str | None = Field(default=None, max_length=128, description="可选 MIME 类型。")
+    business_category: ArtifactBusinessCategory = Field(
+        default="uncategorized",
+        description="发布方声明的业务用途：report 报告、data 数据、workflow 流程、uncategorized 未分类；独立于文件格式，省略时未分类。",
+    )
 
     @field_validator("name")
     @classmethod
@@ -38,6 +43,10 @@ class PublishWorkspaceFileArgs(ProjectModel):
     path: str = Field(min_length=1, max_length=4096, description="服务端工作目录内文件的相对路径。")
     name: ArtifactName | None = Field(
         default=None, description="可选附件文件名，省略沿用源文件名。"
+    )
+    business_category: ArtifactBusinessCategory = Field(
+        default="uncategorized",
+        description="发布方声明的业务用途：report 报告、data 数据、workflow 流程、uncategorized 未分类；独立于文件格式，省略时未分类。",
     )
 
     @field_validator("path")
@@ -67,6 +76,10 @@ class PublishWorkspaceArchiveArgs(ProjectModel):
         description="明确选定的服务端工作目录相对文件路径；不接受目录、通配符或自动扫描。",
     )
     name: ArtifactName = Field(description="交付 ZIP 文件名，必须以 .zip 结尾，不含目录。")
+    business_category: ArtifactBusinessCategory = Field(
+        default="uncategorized",
+        description="整个成果包的业务用途：report 报告、data 数据、workflow 流程、uncategorized 未分类；不按 ZIP 格式推断。",
+    )
 
     @field_validator("paths")
     @classmethod
@@ -110,3 +123,6 @@ class TaskArtifact(ProjectModel):
     )
     download_url: str = Field(description="需要当前账号鉴权的相对 HTTP 下载地址；不包含令牌。")
     created_at: datetime
+    business_category: ArtifactBusinessCategory = Field(
+        description="发布时声明并保存的业务用途；历史成果和未声明成果为 uncategorized，不根据格式推断。"
+    )
