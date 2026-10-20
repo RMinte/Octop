@@ -68,6 +68,53 @@ def pause(db, repo, *, now=2_000, wait_kind="approval"):
         )
 
 
+def test_narration_write_cannot_replace_newer_content_or_started_answer(turns):
+    _db, repo = turns
+    repo.claim("worker-one", 1_000)
+    assert not repo.progress(
+        "timing-turn",
+        "worker-one",
+        "",
+        "",
+        1_100,
+        content_blocks_json='[{"text":"latest"}]',
+        content_revision=5,
+    )
+    assert repo.progress(
+        "timing-turn",
+        "worker-one",
+        "",
+        "",
+        1_200,
+        content_blocks_json='[{"text":"stale"}]',
+        content_revision=4,
+        require_active=True,
+    )
+    assert repo.get("timing-turn").content_blocks_json == '[{"text":"latest"}]'
+    assert not repo.progress(
+        "timing-turn",
+        "worker-one",
+        "First answer token",
+        "",
+        1_300,
+        content_blocks_json='[{"text":"answer"}]',
+        content_revision=5,
+    )
+    assert repo.progress(
+        "timing-turn",
+        "worker-one",
+        "",
+        "",
+        1_400,
+        content_blocks_json='[{"text":"late narration"}]',
+        content_revision=5,
+        require_active=True,
+    )
+    saved = repo.get("timing-turn")
+    assert saved.reply == "First answer token" and saved.content_revision == 5
+    assert saved.content_blocks_json == '[{"text":"answer"}]'
+
+
 @pytest.mark.parametrize("wait_kind", ["approval", "question", "client_tool", "user"])
 def test_first_claim_excludes_queue_and_keeps_wait_and_restart_wall_time(turns, wait_kind):
     db, repo = turns

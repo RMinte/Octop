@@ -4,6 +4,8 @@
 
 本次保持协议版本 3，新增轮次/摘要状态 `interrupted`、可空的 `TaskTurn.recovery` 和审批续接关联 `supersedes_interaction_id`。客户端必须识别新状态与恢复字段，不能将中断当作完成或把恢复映射成 `task.retry`；AgentComputer Swift/UI 恢复入口本次未接线。
 
+2026 年 10 月 19 日后续更新将公开进展和动作说明改为独立异步旁路，主执行不再等待开场通知或宿主 brief；沿用现有内容块和字段，无新 API 字段或迁移。本次不修改 Swift/UI，旧客户端开场/brief 验收记录继续保留当时事实。
+
 客户端通过一条经过认证的连接提交消息，并订阅多个任务的实时状态。服务端保存任务及轮次，连接断开后任务由执行服务继续处理；重新连接只恢复订阅。执行服务所在电脑休眠时无法保证持续执行，本机模式在唤醒后核对断点续接；需要 Mac 合盖期间持续执行，应部署到独立常开主机。模型执行槽保持串行，主 Task 等待客户端工具时保存检查点并释放执行槽，其他排队任务可以继续；生成中的正文按约 0.5 秒的保存节奏更新。
 
 这是 Octop 的任务协议，不使用 OpenAI 的 `response.create` 或 `function_call_output` 消息。当前支持文字、图片和通用文件输入、独立的思考内容、正式执行计划、步骤结果、工具参数与公开返回内容、停止、服务端附件交付，以及客户端工具声明、调用和结果回传。主 Task 支持三档任务审批模式、远端独立 Reviewer、提问和手动暂停恢复；`client_directory` 只保存路径，不授予客户端文件访问能力。客户端工具接入见[第 12 节](#12-客户端工具完整接入协议)，服务端附件见[第 13 节](#13-服务端附件交付)，输入附件见[第 15 节](#15-输入附件)。
@@ -398,7 +400,7 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 
 | options 字段 | 省略或 null | 显式值 |
 | --- | --- | --- |
-| action_timeline_enabled | 使用入队时全局默认值，生效值随轮次冻结 | 严格布尔值；控制本轮公开进展及适用工作工具必填宿主 brief，不改变计划调度或步骤面板显示 |
+| action_timeline_enabled | 使用入队时全局默认值，生效值随轮次冻结 | 严格布尔值；控制本轮宿主进展及异步公开进展/动作说明，不改变计划调度、审批或步骤面板显示 |
 | model_ref | 使用发送时的默认可用模型 | 1–512 字符；不可用报错，不静默换模型 |
 | reasoning_mode | 使用所选模型的默认模式 | auto / enabled / disabled；不支持的模式返回 422 TASK_REASONING_INVALID |
 | reasoning_effort | 使用所选模型的默认强度 | 必须来自该模型 reasoning_config.efforts；不支持的值或关闭思考时指定强度返回 422 TASK_REASONING_INVALID |
@@ -421,7 +423,7 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 
 | 环境变量 | 生效范围 |
 | --- | --- |
-| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮公开进展及适用工作工具必填宿主 brief 的生成默认值，同时提供当前过程显示偏好 |
+| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮宿主进展及异步公开进展/动作说明的生成默认值，同时提供当前过程显示偏好 |
 | `OCTOP_TASK_STEP_PANEL_ENABLED` | 已有计划的步骤面板显示默认值，不控制计划是否创建或执行 |
 
 接受 true/false、1/0、yes/no、on/off，忽略大小写和两端空白。环境保存先校验这两键，非法值返回 `400 TASK_SETTINGS_INVALID`，不保存本次环境修改，错误只含设置名。
@@ -442,13 +444,15 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 {"type":"task.message","id":"command-classic-001","task_id":"task_example","data":{"request_id":"message-classic-001","prompt":"继续处理","options":{"action_timeline_enabled":false}}}
 ```
 
-关闭本轮动作生成时，不注册 message_notify_user、不注入宿主 brief 提示和 schema 字段；普通工具执行、输出、时间和 Provider 公开思考继续记录。业务工具自己定义的同名字段不受该开关影响。
+关闭本轮动作生成时，不启动进展旁路，也不生成宿主开场或要求宿主 brief；普通工具执行、输出、时间和 Provider 公开思考继续记录。业务工具自己定义的同名字段不受该开关影响。
 
-开启时，无论有无计划，适用工作工具的模型侧宿主 brief 均为必填、非空字符串，最多 240 字符。缺失或无效调用在审批授权消费和实际派发前被拒绝，模型可根据工具错误纠正。控制工具豁免、同名业务字段及旧恢复边界见下文“执行计划和动作链路”。这不把历史内容块的可空 brief 改为传输必填。
+开启时，宿主立即保存已收到请求及计划当前步骤的意图进展，独立异步模型随后补充公开文案。工具标签立即可用，brief 可缺失/null；生成后更新原 call_id 块，最多 240 字符，主执行不等待。主模型新请求隐藏 message_notify_user，注册表仅用于正常结束原有调用。计划、审批与同名业务字段规则见下文“执行计划和动作链路”。
 
 当前显示设置与冻结的生成策略分开。`step_panel_enabled && turn.plan != null` 时仅显示计划面板：步骤结果、当前一条短活动、已知时间/耗时和产物入口，不在步骤内铺开思考/进展/工具列表，也不并列 Process。无可见计划时，action_timeline_enabled=true 显示结构化 Process 的公开进展与工具，默认隐藏原始思考；false 显示经典思考与工具事实。切换不删记录，不补生已关闭轮次的进展，答案始终独立。
 
 客户端在进入和恢复前台及配置保存后刷新安全设置。网页与 APP 已接安全设置和互斥展示；最新 AgentComputer `4be12673` 已复用原阶段、结果、工具行和命令卡，并接入显式开场与整轮计时。客户端 H/I 真实复验已覆盖有效 brief 的具体标题，以及无计划调用缺失 brief 在审批前被拒、补正后仅执行一次；240 字符边界、提问豁免及后续宿主错误归因修正未由这次实测覆盖，详见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)。
+
+上述 H/I 是旧门控合同的历史实测；同日后续旁路方案已替代开场/brief 执行前置，不改写旧记录，也不将历史实测视为新旁路的客户端验收。
 
 ### APP 思考内容接入
 
@@ -462,9 +466,9 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 | type | `text` 回答文字；`reasoning` 可展示思考；`reasoning_summary` 供应商返回的思考摘要；`tool` 工具活动；`plan` 计划更新；`progress` 公开进展 |
 | text | 本块累计文字，客户端替换，不重复追加 |
 | status | `streaming` 仍在生成/执行；`completed` 此块结束；`failed` 工具返回错误；`interrupted` 未完成即停止或中断 |
-| tool_call_id / tool_name | 工具调用身份和名称；progress 使用通知的 tool_call_id，其他非工具块通常为 null |
+| tool_call_id / tool_name | 工具调用身份和名称；旁路 progress 使用稳定的 `narration:...` 身份，不代表真实工具调用；旧通知 progress 保留原调用 ID，其他非工具块通常为 null |
 | tool_label | 服务端本地化动作名称；brief 缺省时可回退到它或 tool_name |
-| brief | 传输字段可缺失/null，历史未知不补造；新动作模式下适用工作工具的生成约束为非空且最多 240 字符；不是业务参数或成功证明 |
+| brief | 可缺失/null；独立旁路生成后按原 call_id 更新同一工具块，最多 240 字符；历史未知不补造，不是业务参数、执行前置或成功证明 |
 | introduction | progress 的宿主开场标记：本轮第一条成功保存的公开进展为 true，后续进展为 false；历史未知为 null，不能按文字猜测 |
 | plan | plan 块携带该修订完整计划；其他类型为 null |
 | plan_id / step_id | 生成/执行当时固定的计划和步骤关联；未知或旧数据为 null |
@@ -476,6 +480,8 @@ options 只影响本轮，不写回项目。相同 request_id 的网络重发保
 例如同一轮可以依次收到“摘要① → 工具 A → 摘要② → 回答① → 回答②”。模型响应、供应商摘要项、思考/正文切换和工具调用是分段边界，网络 token 批次与 Markdown 换行不是分段依据。并行工具各有独立标识，完成顺序不改变其原始位置。`completed` 只表示当前内容块结束，不表示任务完成，也不代表回答内容已经通过验证。
 
 普通正文先等待本次模型响应的工具意图确认：带工具调用的正文和计划执行中的正文作为 reasoning 过程保存；确认无工具且不在执行计划时，才发布 text/reply。因此首次建计划或工具纠正说明不会混入答案；公开摘要仍按原类型保存。异常或取消前已收到但尚未分类的正文只保留为过程，不冒充最终答案。
+
+计划 completed 或 blocked 后，宿主已在本次模型请求中禁用工具，最终阶段的正文到达时直接更新 text/reply，无需等待整段响应结束。该阶段若异常或取消，已收到的部分答案仍保留，轮次状态继续表明是否正常完成。
 
 TaskTurn 另提供可空的 started_at、finished_at、processing_duration_ms：首次实际领取执行时记录 started_at，审批/暂停/恢复不重置，完成/失败/取消时记录 finished_at。时长为两者间墙钟毫秒数，包含审批、暂停与恢复等待，排除首次排队；运行中及任一边界未知时为 null。它与单个工具的 duration_ms 分开。旧记录不从 updated_at 或接收时间回填，也不以各工具耗时之和推算。
 
@@ -536,19 +542,21 @@ TaskTurn 另提供可空的 started_at、finished_at、processing_duration_ms：
 
 每次有效计划变化先保存完整 `type:"plan"` 块，再向模型返回成功收据并推进。该块保留 tool_call_id、tool_name:"planning" 和 arguments，供恢复时重建调用幂等缓存；已保存 create 重播不重新分配身份。TaskTurn.plan 从最后一个计划块投影，不是第二份存储。计划块 status:"completed" 只表示该快照已记录。
 
-动作生成启用时，主模型须先单独调用 message_notify_user(text)，确认成功后再于下一次模型响应执行工作或 mark_step。通知会先保存 progress 块及 introduction 标记，再返回成功回执；同一响应中的工作不能借通知并发完成而被放行。planning create/get 和提问可在开场前调用。无效或保存失败的通知不放行工作；关闭动作生成时不要求通知。text 非空且最多 2000 字符，带稳定调用身份和已知步骤关联，相同调用重放不重复追加或重新分类。
+动作生成启用时，宿主立即保存已收到请求的 progress，计划启动当前步骤时保存该步骤意图。独立异步模型只根据用户目标、已保存计划及真实工具开始/结束等事实摘要补充文案；主执行不等待模型通知或 brief，也不消费其私有思考。开场的 introduction=true，后续进展为 false，历史未知仍为 null。旁路 progress 的 tool_call_id 是稳定的 `narration:...` 身份，不是真实工具调用。
 
-审批/暂停恢复只读取本轮已保存且 introduction=true 的 completed progress；历史缺标记不猜测为已接受开场，需要模型发送新的有效通知。旧轮的进展不会授权新轮。进展不进入 reply、不修改步骤状态。成功规划和通知不重复显示为普通工具；失败保留失败工具块，没有成功进展。计划面板和 Process 的展示互斥，不会停止这些执行记录的保存。
+主模型的新请求隐藏 message_notify_user；原注册项保留，以使已有通知调用和回执正常结束，不作为新的通知生成入口或执行授权。审批/暂停恢复沿用当前轮已保存的计划、进展和调用身份，不重跑旧开场或补跑旧说明；历史 introduction 缺失不猜测，不要求模型另发通知才能继续。进展不进入 reply、不回灌模型、不修改步骤状态或执行事实。计划面板和 Process 的展示互斥，不会停止这些记录的保存。
 
-思考/正文在模型响应开始时固定步骤上下文；工具、通知在执行时固定 plan_id + step_id。模型侧可选 task_step_id 只允许当前有效执行步。动作生成开启时，有计划和无计划的适用工作调用都必须提供宿主 brief：字符串去除两端空白后非空，原值最多 240 字符，注入的模型 schema 将其列为 required。planning、message_notify_user 和 ask_user_question 缺失 brief 豁免，显式非法参数仍按适用规则校验。关闭动作生成时不注入、不要求宿主 brief。
+每轮旁路最多一个模型请求在途和一个可替换的最新待处理事实快照，同一身份去重，旧版本结果丢弃。复用该轮 model_ref，但使用独立请求参数：8 秒超时、最多 512 个输出 token，公开纯文本最多 240 字符；按声明能力关闭思考，不能关闭时选支持的低 effort。不新增模型开关、不修改全局配置，生成失败、超时或无有效文本时保留宿主提示/工具标签，主执行继续。
 
-宿主只扩展发给模型的 schema；业务工具原定义已有同名 brief 时，保留其原类型、required 和业务意义，不额外收紧，也不把业务值当作宿主摘要。无同名业务字段的 MCP 等工作工具同样适用宿主元数据合同。每次工作调用均校验，不因 call_id 曾开始而豁免；未执行的新旧调用缺失/无效 brief 时，在审批授权消费和实际派发前返回工具错误，供模型纠正，不能修改已批准参数来补全。已派发客户端结果仍按原 call_id 消费，原生 respond 恢复不重新调用 handler，不因补 brief 重新派发。通过校验与现有审批后，仅剥离宿主元数据再派发。APP 不额外把这两项加到业务工具定义或本机派发参数，也不为历史可空字段补造摘要或改写已有完成记录。
+思考/正文在模型响应开始时固定步骤上下文；真实工具开始后固定 plan_id + step_id，生成说明沿用原关联。模型侧可选 task_step_id 只允许当前有效执行步。工具开始时立即显示 tool_label；brief 可空，生成后更新原 call_id 的同一块，保留 block_id、数组位置、业务参数和时间。主回答开始、暂停或等待、取消与终态时关闭旁路，不等待在途清理；迟到内容丢弃，已收到的 usage 仍原子累加到原 turn，包含终态之后才收到的已知用量。
+
+宿主只扩展发给模型的步骤 schema；不再注入或要求宿主 brief。业务工具原定义已有同名 brief 时，保留其原类型、required 和业务意义，不额外收紧，也不把业务值当作宿主摘要。不能为了文案修改已批准参数。已派发客户端结果仍按原 call_id 消费，原生 respond 恢复不重新调用 handler，不因补 brief 重新派发。通过校验与现有审批后，仅剥离宿主元数据再派发。APP 不额外把这两项加到业务工具定义或本机派发参数，也不为历史可空字段补造摘要或改写已有完成记录。
 
 客户端保留 `(plan_id, step_id)` 和原始块顺序用于恢复与追溯，不从文字或下标补绑无 ID 记录。已有历史计划、退役步骤、旧计划活动和未关联记录正常保存；它们无需作为新计划面板里的完整动作列表展示，面板关闭后仍可通过过程区查看。
 
 工具 arguments 是实际业务参数，output 只保存实际 ToolMessage.content 的 JSON 值，不公开 private artifact、additional_kwargs 或加密推理。底层已经截断的内容无法恢复。参数/输出属于已鉴权任务的展示数据，不是本机执行指令。started_at 仅在实际调度后填入，审批等待不是执行；finished_at 是服务端观察到结束的时间，duration_ms 是已记录的执行耗时，未知为空，不从轮次时间推算。
 
-宿主准入失败与真实用户拒绝分开：brief、开场、步骤/批次校验及 question_limit 等错误若经 HITL 恢复，使用服务端内部 `octop_host_error` 决定，固定匹配原 call_id 与工具名，生成 `ToolMessage(status="error")` 和原本地化原因。内容块 status 为 failed，output 保存原始错误字符串，不拼接 `User rejected…` 或另套旧 JSON 错误包；未执行调用没有开始/结束时间与耗时。真正的用户 deny 继续走原生 reject，已派发客户端的实际 result_json 继续走原 respond，不能将这些语义互换。
+宿主准入失败与真实用户拒绝分开：步骤/批次校验及 question_limit 等错误若经 HITL 恢复，使用服务端内部 `octop_host_error` 决定，固定匹配原 call_id 与工具名，生成 `ToolMessage(status="error")` 和原本地化原因。内容块 status 为 failed，output 保存原始错误字符串，不拼接 `User rejected…` 或另套旧 JSON 错误包；未执行调用没有开始/结束时间与耗时。真正的用户 deny 继续走原生 reject，已派发客户端的实际 result_json 继续走原 respond，不能将这些语义互换。旧开场/brief 准入错误保留原值，新请求不再受这两项文案门控。
 
 该分支不是公开 WebSocket 命令或 allowed_decisions 的新值，客户端不提交它，也不把 output 类型收窄为字符串。任务 HITL 适配保留原中间件名称和槽位，保持检查点拓扑，主任务审批映射不泄漏到子代理/peer。已完成历史保留真实原值，包括 I 当时误带拒绝前缀的输出；本轮审计没有待恢复的旧 inline 项，不做历史重写或新增迁移。
 
@@ -805,7 +813,7 @@ client_id 是当前登录用户下的**路由标识**，不是独立的设备认
 | 字段 | 约束 |
 | --- | --- |
 | client_tools | 省略、null 或 [] 表示本轮不提供客户端工具；不继承前轮和项目。非空时必须带 client_id，最多 64 项 |
-| name | 首位英文字母，后接字母、数字、下划线，总长 1–48 字符；本轮唯一。create_artifact、publish_workspace_file 为服务端保留工具名，客户端不能注册 |
+| name | 首位英文字母，后接字母、数字、下划线，总长 1–48 字符；本轮唯一。create_artifact、publish_workspace_file、publish_workspace_archive 为服务端保留工具名，客户端不能注册 |
 | description | 1–4096 字符，说明工具的功能、参数及执行条件 |
 | input_schema | 根 type=object 的 Draft 2020-12 JSON Schema，序列化后最多 32 KiB；只支持 # 开头的文档内引用，不允许 $id 或远程引用 |
 
@@ -908,7 +916,7 @@ REST 创建/追问/重试也接受相同 options 字段，格式错误走标准 
 
 ## 13 服务端附件交付
 
-create_artifact 和 publish_workspace_file 均由 Octop 服务端提供。客户端不注册这两个工具，也不执行、不上传这两个工具的文件内容。客户端在普通任务轮次中读取 artifacts，按需下载和预览。无项目任务同样可使用两个服务端工具。
+create_artifact、publish_workspace_file 和 publish_workspace_archive 均由 Octop 服务端提供。客户端不注册这些工具，也不执行或上传它们的文件内容。客户端在普通任务轮次中读取 artifacts，按需下载和预览。无项目任务同样可使用这些工具。
 
 ### 13.1 工具语义与执行边界
 
@@ -916,12 +924,17 @@ create_artifact 和 publish_workspace_file 均由 Octop 服务端提供。客户
 | --- | --- | --- |
 | create_artifact | name、content、可选 media_type | 将完整 UTF-8 文本保存成不可变附件，不修改工作目录；支持 txt、md、csv、json、html 等文本格式 |
 | publish_workspace_file | path、可选 name | 从该轮服务端工作目录读取已有普通文件，保存不可变附件；PPTX、PDF、DOCX 等使用真实文件字节 |
+| publish_workspace_archive | paths、name | 将明确列出的相对文件保存成一个 ZIP 附件，保留文件相对目录结构；不接受目录或扫描整个工作区 |
 
-工具名没有 client__ 前缀。账号、task_id、turn_id、工具调用标识和服务端工作目录由运行时绑定，模型不能通过参数覆盖。参数的机器可读结构见 JSON Schema 中的 CreateArtifactArgs 和 PublishWorkspaceFileArgs；它们是模型工具参数，不是客户端 WebSocket 命令。
+工具名没有 client__ 前缀。账号、task_id、turn_id、工具调用标识和服务端工作目录由运行时绑定，模型不能通过参数覆盖。参数的机器可读结构见 JSON Schema 中的 CreateArtifactArgs、PublishWorkspaceFileArgs 和 PublishWorkspaceArchiveArgs；它们是模型工具参数，不是客户端 WebSocket 命令。
 
 publish_workspace_file 的 path 必须是非空的工作目录相对路径，使用正斜线分隔；拒绝绝对路径、..、.、空路径段、反斜线和冒号，拒绝符号链接及目录。只有服务端工作目录可读：项目有 directory 时使用本轮采用的目录，没有时使用任务自己的服务端工作目录。client_directory 仍只是元数据，服务端不会访问该位置，也不自动将请求转发给客户端。文件在读取过程中变化时发布失败，不产生附件。
 
 name 是单个文件名，最长 240 字符，不含目录、冒号或控制字符；前后不能有空白。create_artifact 的 media_type 省略或 null 时按扩展名推断，非空时只能是 MIME 类型本身，不带 charset 等参数。create_artifact 不把字符串伪装成 PPTX、PDF、DOCX；这些格式应先在服务端生成文件，再用 publish_workspace_file 发布。
+
+publish_workspace_archive 的 paths 是 1–100 个互不重复的相对文件路径，沿用单文件的路径、普通文件和稳定读取校验；name 必须以 .zip 结尾。只读取明确列出的文件，不递归读取目录、系统文件或未选中的项目内容。累计原文件最多 50 MiB，生成 ZIP 仍受单份附件 25 MiB 限制。
+
+软件、网页及文档生成请求应主动交付必要文件，多文件成果优先发布明确清单 ZIP。独立任务工作区（directory=null 且 client_directory=null）本轮成功 write_file/edit_file 后，没有本轮真实附件时不允许直接完成最后步骤，工具保持可用供模型纠正；无计划答复同样先要求交付。普通项目目录内的修改不强制导出，命令工具自行生成文件的场景依赖交付指引。客户端保存成果仍须通过已授权的 client__ 工具，附件发布不表示已经写入客户端目录。
 
 每份附件最多 25 MiB，每轮最多 5 份、合计 50 MiB；额度按持久化记录计算，服务重启不重置。失败调用不占用额度。同一轮、同一个工具调用 ID、相同参数重试返回同一 artifact_id，即使源文件已经删除；相同调用 ID 改用其他参数报冲突。新的工具调用 ID 可以发布新的快照。
 
@@ -935,7 +948,7 @@ name 是单个文件名，最长 240 字符，不含目录、冒号或控制字�
 | task_id / turn_id | 所属任务和轮次 |
 | name / media_type | 文件显示名和 MIME 类型 |
 | byte_count / sha256 | 原始字节数和 SHA-256 十六进制摘要；用于校验下载及本地缓存 |
-| source_path | 发布已有文件时的服务端工作目录相对路径；直接创建文本为 null |
+| source_path | 发布已有文件时的服务端工作目录相对路径；直接创建文本或生成 ZIP 为 null |
 | download_url | 当前 Octop 实例下的相对鉴权下载地址，不包含访问令牌 |
 | created_at | 服务端生成的 UTC ISO 8601 时间 |
 

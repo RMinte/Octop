@@ -58,7 +58,7 @@ class ProjectFields(ProjectModel):
         default=None,
         min_length=1,
         max_length=4096,
-        description="客户端工作目录：用户电脑上的绝对路径，支持 macOS/Linux、Windows 盘符及 UNC 路径。仅保存位置，不在服务端检查该目录，不上传、读取或同步文件；可为 null。",
+        description="客户端工作目录：用户电脑上的绝对路径，支持 macOS/Linux、Windows 盘符及 UNC 路径。项目文件工作使用该目录及本机工具；服务端只保存路径，不检查、读取或同步其文件；可为 null。",
     )
 
     instructions: str = Field(default="", max_length=32768, description="项目自己的行动指南。")

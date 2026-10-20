@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import mimetypes
 import stat
@@ -12,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from octop_harness.backends.workspace import BackendWorkspace
@@ -23,6 +25,7 @@ from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.artifact_models import (
     CreateArtifactArgs,
+    PublishWorkspaceArchiveArgs,
     PublishWorkspaceFileArgs,
     TaskArtifact,
 )
@@ -31,7 +34,9 @@ from octop.infra.utils.ulid import new_ulid
 MAX_ARTIFACT_BYTES = 25 * 1024 * 1024
 MAX_TURN_BYTES = 50 * 1024 * 1024
 MAX_ARTIFACTS_PER_TURN = 5
-SERVER_ARTIFACT_TOOLS = frozenset({"create_artifact", "publish_workspace_file"})
+SERVER_ARTIFACT_TOOLS = frozenset(
+    {"create_artifact", "publish_workspace_file", "publish_workspace_archive"}
+)
 _TEXT_EXTENSIONS = frozenset(
     {
         ".txt",
@@ -72,6 +77,10 @@ class _CreateToolArgs(CreateArtifactArgs):
 
 
 class _PublishToolArgs(PublishWorkspaceFileArgs):
+    call_id: Annotated[str, InjectedToolCallId]
+
+
+class _ArchiveToolArgs(PublishWorkspaceArchiveArgs):
     call_id: Annotated[str, InjectedToolCallId]
 
 
@@ -196,7 +205,8 @@ class TaskArtifactPublisher:
 
     @staticmethod
     def _request_hash(
-        tool_name: str, arguments: CreateArtifactArgs | PublishWorkspaceFileArgs
+        tool_name: str,
+        arguments: CreateArtifactArgs | PublishWorkspaceFileArgs | PublishWorkspaceArchiveArgs,
     ) -> str:
         encoded = json.dumps(
             [tool_name, arguments.model_dump()], sort_keys=True, ensure_ascii=False
@@ -279,6 +289,40 @@ class TaskArtifactPublisher:
             arguments.path,
         )
 
+    def _archive_bytes(self, paths: list[str]) -> bytes:
+        output = io.BytesIO()
+        total = 0
+        with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+            for path in paths:
+                content = self._source_bytes(path)
+                total += len(content)
+                if total > MAX_TURN_BYTES:
+                    raise OctopError.localized(ErrorCode.TASK_ARTIFACT_LIMIT)
+                archive.writestr(path, content)
+                if output.tell() > MAX_ARTIFACT_BYTES:
+                    raise OctopError.localized(ErrorCode.TASK_ARTIFACT_LIMIT)
+        return output.getvalue()
+
+    async def archive(self, call_id: str, arguments: PublishWorkspaceArchiveArgs) -> TaskArtifact:
+        request_hash = self._request_hash("publish_workspace_archive", arguments)
+        existing = await asyncio.to_thread(self._lookup, call_id, request_hash)
+        if existing is not None:
+            return existing
+        if self.workspace is None:
+            raise OctopError.localized(ErrorCode.TASK_ARTIFACT_UNAVAILABLE)
+        content = await asyncio.to_thread(self._archive_bytes, arguments.paths)
+        return await asyncio.to_thread(
+            self._save, call_id, request_hash, arguments.name, "application/zip", content, None
+        )
+
+    async def has_artifacts(self) -> bool:
+        def attached() -> bool:
+            with self.services.db.read_snapshot() as conn:
+                count, _ = self.services.project_task_artifact_repo.usage(conn, self.turn.turn_id)
+                return count > 0
+
+        return await asyncio.to_thread(attached)
+
     async def _result(self, operation: Callable[[], Awaitable[TaskArtifact]]) -> str:
         try:
             artifact = await operation()
@@ -318,6 +362,15 @@ class TaskArtifactPublisher:
                 lambda: self.publish(call_id, PublishWorkspaceFileArgs(path=path, name=name))
             )
 
+        async def publish_workspace_archive(
+            paths: list[str],
+            name: str,
+            call_id: Annotated[str, InjectedToolCallId],
+        ) -> str:
+            return await self._result(
+                lambda: self.archive(call_id, PublishWorkspaceArchiveArgs(paths=paths, name=name))
+            )
+
         return [
             StructuredTool.from_function(
                 coroutine=create_artifact,
@@ -330,5 +383,11 @@ class TaskArtifactPublisher:
                 name="publish_workspace_file",
                 description=tr("projects.publish_workspace_file_description", self.locale),
                 args_schema=_PublishToolArgs,
+            ),
+            StructuredTool.from_function(
+                coroutine=publish_workspace_archive,
+                name="publish_workspace_archive",
+                description=tr("projects.publish_workspace_archive_description", self.locale),
+                args_schema=_ArchiveToolArgs,
             ),
         ]

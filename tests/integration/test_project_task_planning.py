@@ -160,8 +160,10 @@ async def test_real_plan_progress_and_tool_results_restore_without_duplicates(
             ws,
             lambda frame: (
                 frame["type"] == "turn"
+                and frame["data"]["turn"]["plan"] is not None
                 and any(
-                    block["type"] == "progress" for block in frame["data"]["turn"]["content_blocks"]
+                    block["type"] == "progress" and block["tool_call_id"] == "report-progress"
+                    for block in frame["data"]["turn"]["content_blocks"]
                 )
             ),
         )
@@ -175,7 +177,9 @@ async def test_real_plan_progress_and_tool_results_restore_without_duplicates(
         assert initial_plan["active_step_id"] == initial_plan["steps"][0]["step_id"]
         assert live_turn["plan_revision"] == 1
         progress = next(
-            block for block in live_turn["content_blocks"] if block["type"] == "progress"
+            block
+            for block in live_turn["content_blocks"]
+            if block["type"] == "progress" and block["tool_call_id"] == "report-progress"
         )
         assert progress["tool_call_id"] == "report-progress"
         assert progress["text"] == "我会先生成报告，再整理交付说明。"
@@ -207,10 +211,26 @@ async def test_real_plan_progress_and_tool_results_restore_without_duplicates(
     assert turn["reply"] == "报告已交付。"
     final_text = next(block for block in blocks if block["type"] == "text")
     assert final_text["plan_id"] is None and final_text["step_id"] is None
-    reports = [block for block in blocks if block["type"] == "progress"]
+    reports = [
+        block
+        for block in blocks
+        if block["type"] == "progress"
+        and block["tool_call_id"] in {"report-progress", "delivery-progress"}
+    ]
     assert reports[0] == progress and len(reports) == 2
     assert reports[1]["plan_id"] == initial_plan["plan_id"]
     assert reports[1]["step_id"] == initial_plan["steps"][1]["step_id"]
+    host_reports = [
+        block
+        for block in blocks
+        if block["type"] == "progress" and block["tool_call_id"].startswith("narration:")
+    ]
+    assert [block["tool_call_id"] for block in host_reports] == [
+        "narration:opening",
+        f"narration:plan:{initial_plan['plan_id']}:1",
+        f"narration:plan:{initial_plan['plan_id']}:2",
+    ]
+    assert [block["introduction"] for block in host_reports] == [True, False, False]
     tools = [block for block in blocks if block["type"] == "tool"]
     assert len(tools) == 1
     assert tools[0]["tool_call_id"] == "report-create"
@@ -239,10 +259,11 @@ async def test_real_plan_progress_and_tool_results_restore_without_duplicates(
     assert notify.status == "success" and notify.artifact == {
         "type": "task_progress",
         "text": progress["text"],
-        "introduction": True,
+        "introduction": False,
     }
-    assert progress["introduction"] is True
-    assert {"planning", "message_notify_user", "create_artifact"} <= observed[0][2]
+    assert progress["introduction"] is False
+    assert {"planning", "create_artifact"} <= observed[0][2]
+    assert "message_notify_user" not in observed[0][2]
     assert "write_todos" not in observed[0][2]
     saved = server.services.project_task_turn_repo.get(turn["turn_id"])
     assert json.loads(saved.content_blocks_json) == blocks
@@ -293,7 +314,9 @@ async def test_real_plan_progress_and_tool_results_restore_without_duplicates(
     assert first["plan"] == plans[-1] and first["content_blocks"] == blocks
     assert second["plan"] is None and second["plan_revision"] == 0
     assert second["reply"] == "这是普通追问的答案。"
-    assert [block["type"] for block in second["content_blocks"]] == ["text"]
+    assert [block["type"] for block in second["content_blocks"]] == ["progress", "text"]
+    assert second["content_blocks"][0]["tool_call_id"] == "narration:opening"
+    assert second["content_blocks"][0]["introduction"] is True
     assert len(agents) == 2
 
 
@@ -365,7 +388,17 @@ async def test_cancelled_and_failed_turns_preserve_unfinished_plan(
     assert turn["reply"] == "" and turn["artifacts"] == []
     assert turn["plan"] == initial_plan
     assert turn["plan_revision"] == 1
-    assert [block["type"] for block in turn["content_blocks"]] == ["plan"]
+    assert [block["type"] for block in turn["content_blocks"]] == ["progress", "plan", "progress"]
+    assert turn["content_blocks"][1]["plan"] == initial_plan
+    reports = [block for block in turn["content_blocks"] if block["type"] == "progress"]
+    assert [block["tool_call_id"] for block in reports] == [
+        "narration:opening",
+        f"narration:plan:{initial_plan['plan_id']}:1",
+    ]
+    assert [block["introduction"] for block in reports] == [True, False]
+    assert all(block["status"] == "completed" and block["text"] for block in reports)
+    assert reports[1]["plan_id"] == initial_plan["plan_id"]
+    assert reports[1]["step_id"] == initial_plan["active_step_id"]
     saved = server.services.project_task_turn_repo.get(turn["turn_id"])
     assert json.loads(saved.content_blocks_json) == turn["content_blocks"]
     reopened = (await client.get(f"/api/project-tasks/{created['task_id']}", headers=auth)).json()
@@ -431,7 +464,13 @@ async def test_failed_notification_after_checkpoint_restore_remains_a_failed_act
     task = (await client.get(f"/api/project-tasks/{created['task_id']}", headers=auth)).json()
     turn = task["turns"][0]
     assert task["status"] == "waiting_approval" and len(turn["interactions"]) == 2
-    assert [block["type"] for block in turn["content_blocks"]] == ["plan", "progress"]
+    original_blocks = [
+        block
+        for block in turn["content_blocks"]
+        if not (block["tool_call_id"] or "").startswith("narration:")
+    ]
+    assert [block["type"] for block in original_blocks] == ["plan", "progress"]
+    assert original_blocks[1]["tool_call_id"] == "accepted-opening"
     initial_plan = turn["plan"]
     assert initial_plan["revision"] == 1 and initial_plan["active_step_id"]
     item = turn["interactions"][-1]
@@ -447,11 +486,25 @@ async def test_failed_notification_after_checkpoint_restore_remains_a_failed_act
     assert len(done["turns"]) == 1 and done["turns"][0]["turn_id"] == turn["turn_id"]
     final = done["turns"][0]
     blocks = final["content_blocks"]
-    assert [block["type"] for block in blocks] == ["plan", "progress", "tool", "plan", "text"]
+    original_blocks = [
+        block for block in blocks if not (block["tool_call_id"] or "").startswith("narration:")
+    ]
+    assert [block["type"] for block in original_blocks] == [
+        "plan",
+        "progress",
+        "tool",
+        "plan",
+        "text",
+    ]
+    assert [
+        block["tool_call_id"]
+        for block in blocks
+        if (block["tool_call_id"] or "").startswith("narration:")
+    ] == ["narration:opening", f"narration:plan:{initial_plan['plan_id']}:1"]
     assert final["plan_revision"] == 2
     assert final["plan"]["plan_id"] == initial_plan["plan_id"]
     assert [step["status"] for step in final["plan"]["steps"]] == ["blocked", "pending"]
-    failed = blocks[2]
+    failed = next(block for block in blocks if block["tool_call_id"] == "invalid-notification")
     assert failed["tool_call_id"] == "invalid-notification"
     assert failed["tool_name"] == "message_notify_user" and failed["status"] == "failed"
     assert failed["tool_label"]
@@ -910,7 +963,11 @@ async def test_approval_restore_does_not_import_a_previous_turn_plan(
     assert "approval-resume-proof" in tool["output"]
     assert tool["plan_id"] == (expected_plan["plan_id"] if new_plan else None)
     assert tool["step_id"] == (expected_plan["active_step_id"] if new_plan else None)
-    notifications = [block for block in restored["content_blocks"] if block["type"] == "progress"]
+    notifications = [
+        block
+        for block in restored["content_blocks"]
+        if block["type"] == "progress" and block["tool_call_id"] == "current-turn-opening"
+    ]
     assert len(notifications) == int(action_timeline_enabled)
     if notifications:
         assert notifications[0]["tool_call_id"] == "current-turn-opening"
@@ -918,6 +975,19 @@ async def test_approval_restore_does_not_import_a_previous_turn_plan(
         assert notifications[0]["step_id"] == (
             expected_plan["active_step_id"] if new_plan else None
         )
+        assert notifications[0]["introduction"] is False
+    host_reports = [
+        block
+        for block in restored["content_blocks"]
+        if block["type"] == "progress" and block["tool_call_id"].startswith("narration:")
+    ]
+    expected_reports = []
+    if action_timeline_enabled:
+        expected_reports.append("narration:opening")
+        if new_plan:
+            expected_reports.append(f"narration:plan:{expected_plan['plan_id']}:1")
+    assert [block["tool_call_id"] for block in host_reports] == expected_reports
+    assert all(block["status"] == "completed" and block["text"] for block in host_reports)
     messages = observed[-1][1]
     assert (
         sum(

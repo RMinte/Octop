@@ -204,6 +204,21 @@ class TaskContent:
         )
         self.revision += 1
 
+    def refine_progress(self, call_id: str, text: str) -> None:
+        """Refine an existing display entry without moving it in the timeline."""
+        for block in self.blocks:
+            if block.type == "progress" and block.tool_call_id == call_id:
+                if block.text != text:
+                    block.text = text
+                    self.revision += 1
+                return
+
+    def refine_brief(self, call_id: str, text: str) -> None:
+        block = self._tools.get(call_id)
+        if block is not None and block.brief != text:
+            block.brief = text
+            self.revision += 1
+
     def end_tool(
         self,
         call_id: str,

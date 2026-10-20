@@ -190,6 +190,154 @@ async def test_tool_response_prose_never_enters_answer_even_before_plan_creation
     assert json.loads(saved.content_blocks_json) == turn["content_blocks"]
 
 
+@pytest.mark.parametrize("plan_status", ["completed", "blocked"])
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+async def test_terminal_plan_streams_answer_before_model_finishes(
+    env_with_provider, monkeypatch, plan_status, outcome
+):
+    client, server, auth = env_with_provider
+    first, last = "已核对计划结果，", "这是完整交付说明。"
+    plan_prose, step_prose = "我会先建立计划。", "记录本步骤的实际结果。"
+    paused, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    requests = []
+
+    class Model(FakeMessagesListChatModel):
+        tool_names: set[str] = set()
+
+        def bind_tools(self, tools, **kwargs):
+            self.tool_names = {tool.name for tool in tools}
+            return self
+
+        def bind(self, **kwargs):
+            self.tool_names = set()
+            return super().bind(**kwargs)
+
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            requests.append(set(self.tool_names))
+            index = self.i
+            self.i += 1
+            if index < 2:
+                response = (
+                    action_response(
+                        plan_prose,
+                        "planning",
+                        "create-plan",
+                        command="create",
+                        title="核对并交付结果",
+                        steps=["核对实际结果"],
+                    )
+                    if index == 0
+                    else step_command(
+                        "mark_step",
+                        "finish-plan",
+                        status=plan_status,
+                        result="已核对实际结果。",
+                    )(messages)
+                )
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        id=f"planning-{index}", content=plan_prose if index == 0 else step_prose
+                    )
+                )
+                call = response.tool_calls[0]
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        id=f"planning-{index}",
+                        content="",
+                        tool_call_chunks=[
+                            {
+                                "name": call["name"],
+                                "args": json.dumps(call["args"]),
+                                "id": call["id"],
+                                "index": 0,
+                            }
+                        ],
+                    )
+                )
+                return
+            assert index == 2
+            try:
+                yield ChatGenerationChunk(message=AIMessageChunk(id="answer", content=first))
+                paused.set()
+                await release.wait()
+                if outcome == "failed":
+                    raise RuntimeError("simulated final-answer interruption")
+                yield ChatGenerationChunk(message=AIMessageChunk(id="answer", content=last))
+            finally:
+                stopped.set()
+
+    model = Model(responses=[])
+
+    class Factory(ChatModelFactory):
+        def get_chat_model(self, ref):
+            return model
+
+    monkeypatch.setattr(
+        runtime,
+        "HarnessAgent",
+        lambda cfg, **kwargs: HarnessAgent(cfg, model_factory=Factory(cfg.providers), **kwargs),
+    )
+    emitted = observe_output(monkeypatch)
+    created = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={
+            "request_id": str(uuid4()),
+            "prompt": "核对结果并记录计划，再交付说明。",
+            "options": {"action_timeline_enabled": False},
+        },
+    )
+    assert created.status_code == 202, created.text
+    task_id = created.json()["task_id"]
+    base = f"/api/project-tasks/{task_id}"
+
+    async def visible_partial_answer():
+        while True:
+            live = (await client.get(base, headers=auth)).json()
+            if live["turns"][0]["reply"] == first:
+                return live
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(paused.wait(), timeout=3)
+        live = await asyncio.wait_for(visible_partial_answer(), timeout=3)
+        turn = live["turns"][0]
+        assert live["status"] == "running" and not stopped.is_set()
+        assert text_content(turn) == first
+        assert turn["plan"]["steps"][0]["status"] == plan_status
+        assert turn["reasoning"] == plan_prose + step_prose
+        assert requests[:2] and all("planning" in tools for tools in requests[:2])
+        assert requests[-1] == set()
+        assert [(kind, text) for _, kind, text in emitted] == [
+            ("reasoning", plan_prose),
+            ("reasoning", step_prose),
+            ("token", first),
+        ]
+        if outcome == "cancelled":
+            cancelled = await client.post(
+                base + "/cancel", headers=auth, json={"turn_id": turn["turn_id"]}
+            )
+            assert cancelled.status_code == 200, cancelled.text
+        else:
+            release.set()
+        task = await settled(client, auth, task_id)
+        expected_status = "failed" if plan_status == "blocked" else outcome
+        if outcome == "cancelled":
+            expected_status = "cancelled"
+        assert task["status"] == expected_status, task
+        turn = task["turns"][0]
+        expected_answer = first + last if outcome == "completed" else first
+        assert turn["reply"] == text_content(turn) == expected_answer
+        assert turn["reasoning"] == plan_prose + step_prose
+        assert all(block["status"] != "streaming" for block in turn["content_blocks"])
+        assert len(requests) == 3 and stopped.is_set()
+        saved = server.services.project_task_turn_repo.get(turn["turn_id"])
+        assert saved.reply == expected_answer
+        assert json.loads(saved.content_blocks_json) == turn["content_blocks"]
+    finally:
+        release.set()
+
+
 async def test_same_prompt_followup_and_approval_resume_preserve_answer_classification(
     env_with_provider, monkeypatch
 ):

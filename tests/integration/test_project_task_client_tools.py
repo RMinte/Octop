@@ -218,6 +218,13 @@ async def test_real_harness_waits_for_client_and_receives_actual_result(
         assert final["data"]["turn"]["reply"] == "已根据客户端笔记完成回答", final
         assert final["data"]["turn"]["status"] == "completed"
         assert "client__read_note" in names
+        system_content = observed[0][0].content
+        system = (
+            system_content
+            if isinstance(system_content, str)
+            else "\n".join(str(block.get("text", "")) for block in system_content)
+        )
+        assert '"client_tools": ["client__read_note"]' in system
         replies = [m for m in observed[-1] if isinstance(m, ToolMessage)]
         assert any(
             m.tool_call_id == "model-tool-001" and "client-note-proof" in str(m.content)

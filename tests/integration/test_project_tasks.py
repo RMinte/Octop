@@ -496,8 +496,24 @@ async def test_real_harness_reads_project_files_and_loads_selected_skills_mcp(
     tool_results = [str(m.content) for m in observed[-1] if isinstance(m, ToolMessage)]
     assert any("project-file-proof" in r for r in tool_results), tool_results
     assert any("mcp-note-proof" in r for r in tool_results), tool_results
-    system = str(observed[0][0].content)
+    system_content = observed[0][0].content
+    system = (
+        system_content
+        if isinstance(system_content, str)
+        else "\n".join(str(block.get("text", "")) for block in system_content)
+    )
     assert "project-instructions-proof" in system
+    assert (
+        json.dumps(
+            {
+                "server_workspace": str(workspace),
+                "client_directory": "Z:\\unavailable-client",
+                "client_tools": [],
+            },
+            ensure_ascii=False,
+        )
+        in system
+    )
     assert "hub-skill-proof-description" in system and "review" in system, system
     assert server.services.agent_repo.list_all() == before
     assert done["turns"][0]["input_tokens"] == 5

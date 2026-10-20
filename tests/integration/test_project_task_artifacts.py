@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 from dataclasses import replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
+from zipfile import ZipFile
 
 import pytest
+from langgraph.prebuilt.tool_node import ToolCallRequest
 from pydantic import ValidationError
 
 from octop.infra.db.migrate import run_migrations
@@ -17,7 +23,19 @@ from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import RepoBundle
 from octop.infra.errors import OctopError
 from octop.infra.projects import artifacts, runtime, tasks
-from octop.infra.projects.artifact_models import CreateArtifactArgs, PublishWorkspaceFileArgs
+from octop.infra.projects import execution as execution_module
+from octop.infra.projects.artifact_models import (
+    CreateArtifactArgs,
+    PublishWorkspaceArchiveArgs,
+    PublishWorkspaceFileArgs,
+)
+from octop.infra.projects.execution import TaskExecution
+from tests.integration.test_project_task_planning import (
+    latest_plan,
+    planning_models,
+    step_command,
+    tool_call,
+)
 from tests.integration.test_project_tasks import settled
 from tests.integration.test_project_tasks_ws import command, connected, until
 from tests.support.auth import create_user, resolve_user_id
@@ -233,6 +251,203 @@ async def test_no_project_text_attachment_and_tool_failure_do_not_fake_delivery(
     }
 
 
+async def test_standalone_plan_cannot_finish_before_publishing_generated_application(
+    env_with_provider, monkeypatch
+):
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    client, _, auth = env_with_provider
+    files = {
+        "notes-app/index.html": "<title>Notes</title>",
+        "notes-app/app.js": "const notes = [];",
+    }
+
+    def deliver_after_rejection(messages):
+        rejected = next(
+            message
+            for message in reversed(messages)
+            if isinstance(message, ToolMessage) and message.tool_call_id == "premature-finish"
+        )
+        assert rejected.status == "error" and "publish_workspace_archive" in rejected.content
+        assert latest_plan(messages)["revision"] == 1
+        return tool_call(
+            "publish_workspace_archive", "deliver-app", paths=list(files), name="notes-app.zip"
+        )
+
+    observed, _ = planning_models(
+        monkeypatch,
+        [
+            tool_call(
+                "planning",
+                "make-plan",
+                command="create",
+                title="创建笔记应用",
+                steps=["实现并交付应用"],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": f"write-{index}",
+                        "name": "write_file",
+                        "args": {"file_path": "/" + path, "content": content},
+                    }
+                    for index, (path, content) in enumerate(files.items())
+                ],
+            ),
+            step_command(
+                "mark_step", "premature-finish", status="completed", result="文件已写入服务端。"
+            ),
+            deliver_after_rejection,
+            step_command(
+                "mark_step", "actual-finish", status="completed", result="应用已打包并附加。"
+            ),
+            AIMessage(content="笔记应用已作为 ZIP 交付。"),
+        ],
+    )
+    response = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={
+            "request_id": str(uuid4()),
+            "prompt": "制作可使用的笔记网页。",
+            "options": {"action_timeline_enabled": False},
+        },
+    )
+    assert response.status_code == 202, response.text
+    final = await settled(client, auth, response.json()["task_id"])
+    assert final["status"] == "completed", final
+    turn = final["turns"][0]
+    assert turn["plan_revision"] == 2 and turn["plan"]["steps"][0]["status"] == "completed"
+    assert turn["reply"] == "笔记应用已作为 ZIP 交付。" and len(observed) == 6
+    assert len(turn["artifacts"]) == 1
+    attachment = turn["artifacts"][0]
+    assert attachment["name"] == "notes-app.zip" and attachment["media_type"] == "application/zip"
+    download = await client.get(attachment["download_url"], headers=auth)
+    with ZipFile(io.BytesIO(download.content)) as archive:
+        assert set(archive.namelist()) == set(files)
+        assert {name: archive.read(name).decode() for name in archive.namelist()} == files
+
+
+async def test_unplanned_file_task_gets_delivery_correction_before_final_answer(
+    env_with_provider, monkeypatch
+):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    client, _, auth = env_with_provider
+    premature = "文件已保存在服务端 app.html，需要 ZIP 可以再告诉我。"
+
+    def publish_after_correction(messages):
+        assert isinstance(messages[-1], HumanMessage)
+        assert "publish_workspace_file" in messages[-1].content
+        assert messages[-2].content == premature
+        return tool_call("publish_workspace_file", "deliver-file", path="app.html")
+
+    observed, _ = planning_models(
+        monkeypatch,
+        [
+            tool_call("write_file", "write-app", file_path="/app.html", content="<h1>Ready</h1>"),
+            AIMessage(content=premature),
+            publish_after_correction,
+            AIMessage(content="应用文件已附加，可直接下载。"),
+        ],
+    )
+    response = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={
+            "request_id": str(uuid4()),
+            "prompt": "生成一个网页文件。",
+            "options": {"action_timeline_enabled": False},
+        },
+    )
+    assert response.status_code == 202, response.text
+    final = await settled(client, auth, response.json()["task_id"])
+    assert final["status"] == "completed", final
+    turn = final["turns"][0]
+    assert turn["reply"] == "应用文件已附加，可直接下载。" and len(observed) == 4
+    assert premature not in turn["reply"] and turn["reasoning"].count(premature) == 1
+    assert len(turn["artifacts"]) == 1 and turn["artifacts"][0]["name"] == "app.html"
+    downloaded = await client.get(turn["artifacts"][0]["download_url"], headers=auth)
+    assert downloaded.content == b"<h1>Ready</h1>"
+
+
+async def test_repeated_path_only_answers_cannot_complete_a_standalone_file_task(
+    env_with_provider, monkeypatch
+):
+    from langchain_core.messages import AIMessage
+
+    client, _, auth = env_with_provider
+    observed, _ = planning_models(
+        monkeypatch,
+        [
+            tool_call("write_file", "write-app", file_path="/app.html", content="<h1>Ready</h1>"),
+            AIMessage(content="文件在服务端 app.html，之后可以打包。"),
+            AIMessage(content="仍然只提供服务端路径。"),
+        ],
+    )
+    response = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={
+            "request_id": str(uuid4()),
+            "prompt": "生成网页。",
+            "options": {"action_timeline_enabled": False},
+        },
+    )
+    assert response.status_code == 202, response.text
+    final = await settled(client, auth, response.json()["task_id"])
+    assert final["status"] == "failed", final
+    assert final["turns"][0]["reply"] == "" and final["turns"][0]["artifacts"] == []
+    assert len(observed) == 3
+
+
+async def test_existing_project_edits_do_not_require_a_downloadable_copy(
+    env_with_provider, monkeypatch, tmp_path
+):
+    from langchain_core.messages import AIMessage
+
+    client, _, auth = env_with_provider
+    root = tmp_path / "existing-project"
+    root.mkdir()
+    (root / "app.js").write_text("const before = 1;", encoding="utf-8")
+    project_response = await client.post(
+        "/api/projects",
+        headers={**auth, "Idempotency-Key": str(uuid4())},
+        json={"name": "Existing", "directory": str(root)},
+    )
+    assert project_response.status_code == 201, project_response.text
+    observed, _ = planning_models(
+        monkeypatch,
+        [
+            tool_call(
+                "edit_file",
+                "edit-app",
+                file_path="/app.js",
+                old_string="before",
+                new_string="after",
+            ),
+            AIMessage(content="项目文件已修改。"),
+        ],
+    )
+    response = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={
+            "request_id": str(uuid4()),
+            "project_id": project_response.json()["project_id"],
+            "prompt": "修改这个已有项目文件。",
+            "options": {"action_timeline_enabled": False},
+        },
+    )
+    assert response.status_code == 202, response.text
+    final = await settled(client, auth, response.json()["task_id"])
+    assert final["status"] == "completed", final
+    assert final["turns"][0]["reply"] == "项目文件已修改。"
+    assert final["turns"][0]["artifacts"] == [] and len(observed) == 2
+    assert (root / "app.js").read_text(encoding="utf-8") == "const after = 1;"
+
+
 @pytest.fixture
 async def publisher_env(env_with_provider, tmp_path, monkeypatch):
     client, server, auth = env_with_provider
@@ -286,6 +501,108 @@ async def test_call_idempotency_survives_source_deletion_and_turn_completion(pub
     owner = await resolve_user_id(client, auth, "admin")
     _, data = artifacts.download(server.services, owner, task["task_id"], original.artifact_id)
     assert data == b"pdf snapshot"
+
+
+async def test_archive_publishes_only_explicit_files_and_replays_without_sources(publisher_env):
+    _, server, _, publisher, root, task = publisher_env
+    (root / "app").mkdir()
+    (root / "app" / "index.html").write_text("<h1>Notes</h1>", encoding="utf-8")
+    (root / "app" / "app.js").write_text("const notes = [];", encoding="utf-8")
+    (root / "unrelated-secret.txt").write_text("must not package", encoding="utf-8")
+    arguments = PublishWorkspaceArchiveArgs(paths=["app/index.html", "app/app.js"], name="app.zip")
+    artifact = await publisher.archive("zip-call", arguments)
+    assert await publisher.has_artifacts()
+    metadata, data = artifacts.download(
+        server.services, publisher.owner_id, task["task_id"], artifact.artifact_id
+    )
+    assert metadata.media_type == "application/zip"
+    with ZipFile(io.BytesIO(data)) as archive:
+        assert archive.namelist() == arguments.paths
+        assert archive.read("app/index.html") == b"<h1>Notes</h1>"
+        assert archive.read("app/app.js") == b"const notes = [];"
+    (root / "app" / "app.js").unlink()
+    assert await publisher.archive("zip-call", arguments) == artifact
+    with pytest.raises(OctopError) as conflict:
+        await publisher.archive(
+            "zip-call", PublishWorkspaceArchiveArgs(paths=["unrelated-secret.txt"], name="app.zip")
+        )
+    assert conflict.value.code == "TASK_ARTIFACT_CONFLICT"
+
+
+async def test_restored_completed_plan_can_publish_only_while_delivery_is_missing(
+    publisher_env, monkeypatch
+):
+    _, _, _, publisher, root, _ = publisher_env
+    (root / "app.html").write_bytes(b"<h1>Recovered app</h1>")
+    monkeypatch.setattr(
+        execution_module,
+        "get_config",
+        lambda: {"configurable": {"thread_id": publisher.turn.turn_id}},
+    )
+    monkeypatch.setattr(execution_module, "get_stream_writer", lambda: lambda _: None)
+    middleware = TaskExecution(
+        SimpleNamespace(phase="completed", binding=lambda step_id=None: (None, None)),
+        "en",
+        publisher.turn.turn_id,
+        artifact_publisher=publisher,
+    )
+    middleware.restore(
+        [
+            {
+                "type": "tool",
+                "tool_name": "write_file",
+                "tool_call_id": "previous-write",
+                "status": "completed",
+                "started_at": datetime.now(UTC).isoformat(),
+                "arguments": {"file_path": "/app.html"},
+            }
+        ]
+    )
+    tool = next(tool for tool in publisher.tools() if tool.name == "publish_workspace_file")
+    call = {
+        "name": tool.name,
+        "args": {"path": "app.html"},
+        "id": "recovered-delivery",
+        "type": "tool_call",
+    }
+    assert await middleware.delivery_pending()
+    assert middleware.rejection(call, tool) is None
+
+    async def dispatch(actual):
+        return await actual.tool.ainvoke(actual.tool_call)
+
+    result = await middleware.run(
+        ToolCallRequest(tool_call=call, tool=tool, state={}, runtime=None), dispatch
+    )
+    delivered = json.loads(result.content)
+    assert delivered["status"] == "attached" and delivered["name"] == "app.html"
+    assert not await middleware.delivery_pending()
+    assert middleware.rejection(call, tool) is not None
+
+
+async def test_archive_rejects_directories_missing_files_and_uncompressed_size_limit(
+    publisher_env, monkeypatch
+):
+    _, _, _, publisher, root, _ = publisher_env
+    (root / "directory").mkdir()
+    for source, expected in [
+        ("directory", "TASK_ARTIFACT_INVALID"),
+        ("missing.txt", "TASK_ARTIFACT_UNAVAILABLE"),
+    ]:
+        with pytest.raises(OctopError) as rejected:
+            await publisher.archive(
+                source, PublishWorkspaceArchiveArgs(paths=[source], name="app.zip")
+            )
+        assert rejected.value.code == expected
+    (root / "one.txt").write_bytes(b"123")
+    (root / "two.txt").write_bytes(b"456")
+    monkeypatch.setattr(artifacts, "MAX_TURN_BYTES", 5)
+    with pytest.raises(OctopError) as limited:
+        await publisher.archive(
+            "too-large", PublishWorkspaceArchiveArgs(paths=["one.txt", "two.txt"], name="app.zip")
+        )
+    assert limited.value.code == "TASK_ARTIFACT_LIMIT"
+    assert not await publisher.has_artifacts()
 
 
 async def test_download_ownership_and_task_scope_are_enforced(publisher_env):
@@ -449,7 +766,7 @@ def test_publish_requires_a_server_workspace_relative_path(path):
         PublishWorkspaceFileArgs(path=path)
 
 
-@pytest.mark.parametrize("name", ["create_artifact", "publish_workspace_file"])
+@pytest.mark.parametrize("name", sorted(artifacts.SERVER_ARTIFACT_TOOLS))
 def test_clients_cannot_register_server_artifact_tools(name):
     with pytest.raises(ValidationError):
         tasks.TaskExecutionOptions.model_validate(
@@ -464,3 +781,18 @@ def test_clients_cannot_register_server_artifact_tools(name):
                 ],
             }
         )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"paths": [], "name": "app.zip"},
+        {"paths": ["app.html", "app.html"], "name": "app.zip"},
+        {"paths": ["../secret"], "name": "app.zip"},
+        {"paths": ["/absolute.txt"], "name": "app.zip"},
+        {"paths": ["app.html"], "name": "app.txt"},
+    ],
+)
+def test_archive_requires_a_safe_explicit_manifest(arguments):
+    with pytest.raises(ValidationError):
+        PublishWorkspaceArchiveArgs.model_validate(arguments)

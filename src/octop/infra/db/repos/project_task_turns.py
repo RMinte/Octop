@@ -222,12 +222,24 @@ class ProjectTaskTurnRepo:
         reasoning: str | None = None,
         content_blocks_json: str | None = None,
         content_revision: int | None = None,
+        require_active: bool = False,
     ) -> bool:
         with self._db.connect() as conn:
+            active = (
+                " AND cancel_requested=0 AND pause_requested=0 AND reply=''"
+                if require_active
+                else ""
+            )
+            revision_args: tuple[int, ...] = ()
+            if require_active and content_revision is not None:
+                active += " AND content_revision<=?"
+                revision_args = (content_revision,)
             r = conn.execute(
                 "UPDATE project_task_turns SET reply=?, activity=?, updated_at=?, reasoning=COALESCE(?,reasoning), "
                 "content_blocks_json=COALESCE(?,content_blocks_json), content_revision=COALESCE(?,content_revision) "
-                "WHERE turn_id=? AND worker_id=? AND status='running' RETURNING cancel_requested",
+                "WHERE turn_id=? AND worker_id=? AND status='running'"
+                + active
+                + " RETURNING cancel_requested",
                 (
                     reply,
                     activity,
@@ -237,6 +249,7 @@ class ProjectTaskTurnRepo:
                     content_revision,
                     turn_id,
                     worker_id,
+                    *revision_args,
                 ),
             ).fetchone()
         return r is None or bool(r["cancel_requested"])
@@ -475,12 +488,11 @@ class ProjectTaskTurnRepo:
             == 1
         )
 
-    def record_usage(
-        self, turn_id: str, worker_id: str, input_tokens: int, output_tokens: int
-    ) -> None:
+    def record_usage(self, turn_id: str, input_tokens: int, output_tokens: int) -> None:
+        """Add known request usage, including a cancelled request's late receipt."""
         with self._db.connect() as conn:
             conn.execute(
-                "UPDATE project_task_turns SET input_tokens=?, output_tokens=? "
-                "WHERE turn_id=? AND worker_id=? AND status='running'",
-                (input_tokens, output_tokens, turn_id, worker_id),
+                "UPDATE project_task_turns SET input_tokens=input_tokens+?, "
+                "output_tokens=output_tokens+? WHERE turn_id=?",
+                (input_tokens, output_tokens, turn_id),
             )

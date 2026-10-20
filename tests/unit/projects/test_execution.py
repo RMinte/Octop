@@ -10,12 +10,12 @@ import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, ToolException
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from octop.i18n import tr
 from octop.infra.projects import execution
@@ -43,12 +43,6 @@ def captured(monkeypatch):
     monkeypatch.setattr(execution, "get_config", lambda: config)
     monkeypatch.setattr(execution, "get_stream_writer", lambda: events.append)
     return events, config
-
-
-def ready_execution(*args, **kwargs):
-    middleware = TaskExecution(*args, **kwargs)
-    middleware.accept_opening()
-    return middleware
 
 
 def request(name="read_note", *, args=None, tool=None, call_id="call"):
@@ -91,7 +85,7 @@ async def test_model_only_schema_and_context_are_copies(captured):
     handler = AsyncMock(return_value=response)
 
     assert (
-        await ready_execution(Planning(), "zh", "root").awrap_model_call(original, handler)
+        await TaskExecution(Planning(), "zh", "root").awrap_model_call(original, handler)
         is response
     )
 
@@ -103,13 +97,19 @@ async def test_model_only_schema_and_context_are_copies(captured):
     assert schema["properties"][STEP_METADATA]["description"] == tr(
         "projects.task_step_metadata", "zh"
     )
-    assert schema["required"] == ["path", "brief"]
-    assert schema["properties"]["brief"]["minLength"] == 1
-    assert schema["properties"]["brief"]["maxLength"] == 240
+    assert schema["required"] == ["path"]
+    assert "brief" not in schema["properties"]
     assert forwarded.tools[0] is not tool
     assert forwarded.tools[1] is original.tools[1]
     assert tool.args_schema.model_json_schema() == original_schema
-    assert events == [{"type": "task_step_context", "plan_id": "plan", "step_id": "step-a"}]
+    assert events == [
+        {
+            "type": "task_step_context",
+            "plan_id": "plan",
+            "step_id": "step-a",
+            "tools_disabled": False,
+        }
+    ]
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -125,11 +125,12 @@ async def test_dictionary_schemas_keep_their_format_and_original_parameters(capt
     tool = {"type": "function", "function": function} if wrapped else function
     original = deepcopy(tool)
     handler = AsyncMock(return_value=ModelResponse(result=[]))
-    await ready_execution(Planning(), "en", "root").awrap_model_call(model_request([tool]), handler)
+    await TaskExecution(Planning(), "en", "root").awrap_model_call(model_request([tool]), handler)
     forwarded = handler.await_args.args[0].tools[0]
     schema = forwarded["function"]["parameters"] if wrapped else forwarded["parameters"]
     assert STEP_METADATA in schema["properties"]
-    assert schema["required"] == ["path", "brief"]
+    assert schema["required"] == ["path"]
+    assert "brief" not in schema["properties"]
     assert tool == original
 
 
@@ -148,7 +149,7 @@ async def test_a_business_parameter_with_the_same_name_is_not_host_metadata(capt
         args_schema=BusinessArgs,
         coroutine=business,
     )
-    middleware = ready_execution(Planning(), "en", "root")
+    middleware = TaskExecution(Planning(), "en", "root")
     handler = AsyncMock(return_value=ModelResponse(result=[]))
     await middleware.awrap_model_call(model_request([tool]), handler)
     forwarded = handler.await_args.args[0].tools[0]
@@ -175,7 +176,7 @@ async def test_a_business_parameter_with_the_same_name_is_not_host_metadata(capt
 async def test_subagent_models_and_tools_do_not_emit_root_facts(captured, configurable):
     events, config = captured
     config["configurable"] = configurable
-    middleware = ready_execution(Planning(), "en", "root")
+    middleware = TaskExecution(Planning(), "en", "root")
     model = model_request([note_tool()])
     model_handler = AsyncMock(return_value=ModelResponse(result=[]))
     await middleware.awrap_model_call(model, model_handler)
@@ -187,10 +188,96 @@ async def test_subagent_models_and_tools_do_not_emit_root_facts(captured, config
     assert events == []
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+async def test_client_project_hides_server_writes_and_keeps_read_export_and_client_tools(
+    captured, nested, native
+):
+    _, config = captured
+    if nested:
+        config["configurable"]["ls_agent_type"] = "subagent"
+    blocked = {"write_file", "edit_file", "execute"}
+    allowed = {
+        "read_file",
+        "ls",
+        "publish_workspace_file",
+        "publish_workspace_archive",
+        "client__write_file",
+        "client__exec_command",
+    }
+    tools = [note_tool(name) for name in sorted(blocked | allowed)]
+    if native:
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": tool.name, "parameters": {"type": "object", "properties": {}}},
+            }
+            for tool in tools
+        ]
+    original = model_request(tools)
+    middleware = TaskExecution(Planning(), "en", "root", client_directory="C:\\selected-project")
+    handler = AsyncMock(
+        return_value=ModelResponse(result=[AIMessage(content="Waiting for the client.")])
+    )
+    await middleware.awrap_model_call(original, handler)
+    forwarded = handler.await_args.args[0]
+    assert {execution._tool_name(tool) for tool in forwarded.tools} == allowed
+    assert {execution._tool_name(tool) for tool in original.tools} == blocked | allowed
+
+
+@pytest.mark.parametrize("name", ["write_file", "edit_file", "execute"])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_client_project_rejects_unadvertised_server_writes_before_dispatch(
+    captured, name, nested
+):
+    events, config = captured
+    if nested:
+        config["configurable"]["ls_agent_type"] = "subagent"
+    middleware = TaskExecution(Planning(), "en", "root", client_directory="C:\\selected-project")
+    actual = request(name, args={"file_path": "/replacement/app.js"})
+    assert middleware.rejection(actual.tool_call) == tr("projects.client_workspace_required", "en")
+    handler = AsyncMock()
+    result = await middleware.run(actual, handler)
+    assert result.status == "error" and "client__" in result.content
+    handler.assert_not_awaited()
+    assert events == []
+
+
+async def test_client_project_does_not_force_a_server_attachment_from_restored_writes(captured):
+    publisher = SimpleNamespace(has_artifacts=AsyncMock(return_value=False))
+    planning = SimpleNamespace(phase="unplanned", binding=lambda step_id=None: (None, None))
+    middleware = TaskExecution(
+        planning,
+        "en",
+        "root",
+        artifact_publisher=publisher,
+        client_directory="C:\\selected-project",
+    )
+    middleware.restore(
+        [
+            {
+                "type": "tool",
+                "tool_name": "write_file",
+                "tool_call_id": "old-server-write",
+                "status": "completed",
+                "started_at": datetime.now(UTC).isoformat(),
+                "arguments": {"file_path": "/old/app.html"},
+            }
+        ]
+    )
+    assert not await middleware.delivery_pending()
+    handler = AsyncMock(
+        return_value=ModelResponse(result=[AIMessage(content="The local channel is not ready.")])
+    )
+    await middleware.awrap_model_call(model_request([note_tool("read_file")]), handler)
+    assert handler.await_count == 1
+    publisher.has_artifacts.assert_not_awaited()
+
+
 async def test_tool_ownership_is_fixed_at_start_and_only_public_output_is_emitted(captured):
     events, _ = captured
     planning = Planning()
-    middleware = ready_execution(planning, "en", "root")
+    middleware = TaskExecution(planning, "en", "root")
     original = request(
         args={"path": "note.md", STEP_METADATA: "step-b", "brief": "Read the note"},
         tool=note_tool(),
@@ -228,7 +315,7 @@ async def test_tool_ownership_is_fixed_at_start_and_only_public_output_is_emitte
 async def test_invalid_binding_never_dispatches_or_creates_execution_facts(captured, step_id):
     events, _ = captured
     handler = AsyncMock()
-    result = await ready_execution(Planning(), "zh", "root").run(
+    result = await TaskExecution(Planning(), "zh", "root").run(
         request(args={STEP_METADATA: step_id, "brief": "Read the note"}), handler
     )
     assert result.status == "error" and result.tool_call_id == "call"
@@ -241,7 +328,7 @@ async def test_no_plan_context_has_no_fabricated_step(captured):
     events, _ = captured
     planning = SimpleNamespace(phase="unplanned", binding=lambda step_id=None: (None, None))
     handler = AsyncMock(return_value=ToolMessage(content="Read", tool_call_id="call"))
-    await ready_execution(planning, "en", "root").run(
+    await TaskExecution(planning, "en", "root").run(
         request(args={"brief": "Read the note"}), handler
     )
     assert events[0]["plan_id"] is None and events[0]["step_id"] is None
@@ -264,7 +351,7 @@ async def test_command_uses_only_the_matching_tool_message_and_keeps_errors(capt
     )
     handler = AsyncMock(return_value=result)
     assert (
-        await ready_execution(Planning(), "en", "root").run(
+        await TaskExecution(Planning(), "en", "root").run(
             request(args={"brief": "Read the note"}), handler
         )
         is result
@@ -279,7 +366,7 @@ async def test_command_uses_only_the_matching_tool_message_and_keeps_errors(capt
 async def test_exceptions_and_cancellation_finish_without_exposing_exception_text(captured, error):
     events, _ = captured
     with pytest.raises(type(error)):
-        await ready_execution(Planning(), "en", "root").run(
+        await TaskExecution(Planning(), "en", "root").run(
             request(args={"brief": "Read the note"}), AsyncMock(side_effect=error)
         )
     assert [event["type"] for event in events] == ["task_tool_start", "task_tool_end"]
@@ -290,7 +377,7 @@ async def test_exceptions_and_cancellation_finish_without_exposing_exception_tex
 async def test_graph_interrupt_has_no_false_end_and_resume_keeps_the_started_step(captured):
     events, _ = captured
     planning = Planning()
-    middleware = ready_execution(planning, "en", "root")
+    middleware = TaskExecution(planning, "en", "root")
     call = request(args={STEP_METADATA: "step-b", "brief": "Read the note"})
     with pytest.raises(GraphInterrupt):
         await middleware.run(call, AsyncMock(side_effect=GraphInterrupt()))
@@ -306,7 +393,7 @@ async def test_restart_restores_real_start_and_ignores_unknown_client_timestamps
     events, _ = captured
     planning = Planning()
     planning.running.clear()
-    middleware = ready_execution(planning, "en", "root")
+    middleware = TaskExecution(planning, "en", "root")
     started = datetime.now(UTC).isoformat()
     middleware.restore(
         [
@@ -340,7 +427,7 @@ async def test_planning_is_excluded_from_execution_metadata(captured):
     events, _ = captured
     call = request("planning", args={"command": "get"})
     handler = AsyncMock(return_value=ToolMessage(content="Plan", tool_call_id="call"))
-    await ready_execution(Planning(), "en", "root").run(call, handler)
+    await TaskExecution(Planning(), "en", "root").run(call, handler)
     assert handler.await_args.args[0] is call
     assert events == []
 
@@ -349,7 +436,7 @@ async def test_planning_is_excluded_from_execution_metadata(captured):
 async def test_parallel_tools_keep_bindings_in_either_completion_order(captured, first):
     events, _ = captured
     planning = Planning()
-    middleware = ready_execution(planning, "en", "root")
+    middleware = TaskExecution(planning, "en", "root")
     gates = {call_id: asyncio.Event() for call_id in ("call-a", "call-b")}
     both_started = asyncio.Event()
     entered = []
@@ -398,7 +485,7 @@ async def test_parallel_tools_keep_bindings_in_either_completion_order(captured,
 
 async def test_real_graph_delivers_context_and_public_execution_custom_events(monkeypatch):
     monkeypatch.setattr(execution, "tr", lambda key, locale: "Optional task step ownership.")
-    middleware = ready_execution(Planning(), "en", "root")
+    middleware = TaskExecution(Planning(), "en", "root")
     tool = note_tool()
 
     async def node(state):
@@ -446,10 +533,19 @@ async def test_finished_plan_withdraws_tools_and_rejects_dispatch(captured, phas
     planning = Planning()
     planning.phase = phase
     planning.active = None
-    middleware = ready_execution(planning, "en", "root")
+    middleware = TaskExecution(planning, "en", "root")
     model_handler = AsyncMock(return_value=ModelResponse(result=[]))
     await middleware.awrap_model_call(model_request([note_tool()]), model_handler)
     assert model_handler.await_args.args[0].tools == []
+    assert model_handler.await_args.args[0].tool_choice is None
+    assert events == [
+        {
+            "type": "task_step_context",
+            "plan_id": "plan",
+            "step_id": None,
+            "tools_disabled": True,
+        }
+    ]
     events.clear()
     handler = AsyncMock()
     result = await middleware.run(request(), handler)
@@ -458,9 +554,90 @@ async def test_finished_plan_withdraws_tools_and_rejects_dispatch(captured, phas
     assert events == []
 
 
+async def test_delivery_guard_requires_a_successful_write_and_current_turn_attachment(captured):
+    publisher = SimpleNamespace(has_artifacts=AsyncMock(return_value=False))
+    middleware = TaskExecution(Planning(), "en", "root", artifact_publisher=publisher)
+    write = request("write_file", args={"file_path": "/app.html", "content": "proof"})
+    await middleware.run(
+        write,
+        AsyncMock(return_value=ToolMessage(content="failed", tool_call_id="call", status="error")),
+    )
+    await middleware.require_delivery()
+    publisher.has_artifacts.assert_not_awaited()
+    await middleware.run(
+        write, AsyncMock(return_value=ToolMessage(content="written", tool_call_id="call"))
+    )
+    with pytest.raises(ToolException, match="publish_workspace_archive"):
+        await middleware.require_delivery()
+    publisher.has_artifacts.return_value = True
+    await middleware.require_delivery()
+
+
+@pytest.mark.parametrize(
+    ("wrote_files", "attached", "allowed"),
+    [(False, False, False), (True, True, False), (True, False, True)],
+)
+async def test_completed_plan_allows_only_verified_missing_delivery(
+    captured, wrote_files, attached, allowed
+):
+    publisher = SimpleNamespace(has_artifacts=AsyncMock(return_value=attached))
+    planning = Planning()
+    planning.phase, planning.active = "completed", None
+    middleware = TaskExecution(planning, "en", "root", artifact_publisher=publisher)
+    if wrote_files:
+        middleware.restore(
+            [
+                {
+                    "type": "tool",
+                    "tool_name": "write_file",
+                    "tool_call_id": "saved-write",
+                    "status": "completed",
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "arguments": {"file_path": "/app.html"},
+                }
+            ]
+        )
+    call = request("create_artifact", args={"name": "forbidden.txt", "content": "not allowed"})
+    assert (
+        middleware.rejection(call.tool_call) is not None
+    )  # Closed until verified, including restore.
+    assert await middleware.delivery_pending() is allowed
+    model_handler = AsyncMock(return_value=ModelResponse(result=[]))
+    if allowed:
+        model_handler.return_value = ModelResponse(
+            result=[AIMessage(content="", tool_calls=[call.tool_call])]
+        )
+    await middleware.awrap_model_call(model_request([note_tool("create_artifact")]), model_handler)
+    assert (middleware.rejection(call.tool_call) is None) is allowed
+    handler = AsyncMock(return_value=ToolMessage(content="attached", tool_call_id="call"))
+    result = await middleware.run(call, handler)
+    assert handler.await_count == int(allowed)
+    assert (result.status == "success") is allowed
+    assert (model_handler.await_args.args[0].tools == []) is not allowed
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "streaming"])
+async def test_restored_write_receipts_preserve_delivery_requirement(captured, status):
+    publisher = SimpleNamespace(has_artifacts=AsyncMock(return_value=False))
+    middleware = TaskExecution(Planning(), "en", "root", artifact_publisher=publisher)
+    middleware.restore(
+        [
+            {
+                "type": "tool",
+                "tool_name": "write_file",
+                "tool_call_id": "saved-write",
+                "status": status,
+                "started_at": datetime.now(UTC).isoformat(),
+                "arguments": {"file_path": "/app.html"},
+            }
+        ]
+    )
+    assert await middleware.delivery_pending() is (status == "completed")
+
+
 async def test_disabled_action_generation_keeps_actual_execution_records(captured):
     events, _ = captured
-    middleware = ready_execution(Planning(), "en", "root", action_timeline_enabled=False)
+    middleware = TaskExecution(Planning(), "en", "root", action_timeline_enabled=False)
     model_handler = AsyncMock(return_value=ModelResponse(result=[]))
     await middleware.awrap_model_call(model_request([note_tool()]), model_handler)
     assert "brief" not in model_handler.await_args.args[0].tools[0].tool_call_schema["properties"]
@@ -475,7 +652,7 @@ async def test_disabled_action_generation_keeps_actual_execution_records(capture
 
 async def test_brief_is_public_metadata_and_never_a_business_argument(captured):
     events, _ = captured
-    middleware = ready_execution(Planning(), "en", "root")
+    middleware = TaskExecution(Planning(), "en", "root")
     handler = AsyncMock(return_value=ToolMessage(content="Result", tool_call_id="call"))
     original = request(args={"path": "note.md", "brief": " Read the note to verify its facts. "})
     await middleware.run(original, handler)
@@ -497,7 +674,7 @@ async def test_brief_named_business_field_is_retained(captured):
         args_schema=BusinessArgs,
         coroutine=business,
     )
-    middleware = ready_execution(Planning(), "en", "root")
+    middleware = TaskExecution(Planning(), "en", "root")
     model_handler = AsyncMock(return_value=ModelResponse(result=[]))
     original_schema = deepcopy(tool.tool_call_schema.model_json_schema())
     await middleware.awrap_model_call(model_request([tool]), model_handler)
@@ -515,6 +692,31 @@ async def test_brief_named_business_field_is_retained(captured):
     assert captured[0][0]["arguments"] == {"brief": 42} and captured[0][0]["brief"] is None
 
 
+async def test_business_brief_still_uses_the_business_schema_validation(captured):
+    class BusinessArgs(BaseModel):
+        brief: int
+
+    async def business(brief):
+        return str(brief)
+
+    tool = StructuredTool.from_function(
+        name="business",
+        description="Read a business value.",
+        args_schema=BusinessArgs,
+        coroutine=business,
+    )
+
+    async def execute(actual):
+        assert actual.tool_call["args"] == {"brief": "invalid integer"}
+        return await actual.tool.ainvoke(actual.tool_call)
+
+    with pytest.raises(ValidationError):
+        await TaskExecution(Planning(), "en", "root").run(
+            request("business", args={"brief": "invalid integer"}, tool=tool), execute
+        )
+    assert captured[0][-1]["failed"] is True
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -527,54 +729,26 @@ async def test_brief_named_business_field_is_retained(captured):
         {"brief": "读" * 241},
     ],
 )
-async def test_work_without_a_valid_brief_never_dispatches(captured, args):
-    handler = AsyncMock()
-    result = await ready_execution(Planning(), "zh", "root").run(request(args=args), handler)
-    assert result.status == "error"
-    assert result.content == tr("projects.task_brief_invalid", "zh")
-    handler.assert_not_awaited()
-    assert captured[0] == []
+async def test_missing_or_invalid_display_brief_does_not_block_execution(captured, args):
+    handler = AsyncMock(return_value=ToolMessage(content="Actual result", tool_call_id="call"))
+    result = await TaskExecution(Planning(), "zh", "root").run(request(args=args), handler)
+    assert result.content == "Actual result"
+    handler.assert_awaited_once()
+    assert handler.await_args.args[0].tool_call["args"] == {}
+    assert captured[0][0]["brief"] is None
+    assert [event["type"] for event in captured[0]] == ["task_tool_start", "task_tool_end"]
 
 
 async def test_brief_length_counts_unicode_scalars(captured):
     handler = AsyncMock(return_value=ToolMessage(content="Result", tool_call_id="call"))
-    await ready_execution(Planning(), "en", "root").run(
-        request(args={"brief": "读" * 240}), handler
-    )
+    await TaskExecution(Planning(), "en", "root").run(request(args={"brief": "读" * 240}), handler)
     handler.assert_awaited_once()
     assert captured[0][0]["brief"] == "读" * 240
 
 
-@pytest.mark.parametrize("invalid", [{}, {"brief": " "}])
-async def test_reused_active_call_id_cannot_bypass_brief_validation(captured, invalid):
-    middleware = ready_execution(Planning(), "en", "root")
-    entered, release = asyncio.Event(), asyncio.Event()
-    dispatched = []
-
-    async def execute(actual):
-        dispatched.append(actual.tool_call["args"]["path"])
-        entered.set()
-        await release.wait()
-        return ToolMessage(content="Read", tool_call_id="call")
-
-    first = asyncio.create_task(
-        middleware.run(request(args={"path": "first.md", "brief": "Read the first note"}), execute)
-    )
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        second = await middleware.run(request(args={"path": "second.md", **invalid}), execute)
-        assert second.status == "error"
-        assert second.content == tr("projects.task_brief_invalid", "en")
-        assert dispatched == ["first.md"]
-    finally:
-        release.set()
-        await first
-    assert [event["type"] for event in captured[0]] == ["task_tool_start", "task_tool_end"]
-
-
-@pytest.mark.parametrize("name", ["planning", "message_notify_user", "ask_user_question"])
+@pytest.mark.parametrize("name", ["planning", "ask_user_question"])
 async def test_control_tools_do_not_require_host_briefs(captured, name):
-    middleware = ready_execution(Planning(), "en", "root")
+    middleware = TaskExecution(Planning(), "en", "root")
     tool = note_tool(name)
     handler = AsyncMock(return_value=ModelResponse(result=[]))
     await middleware.awrap_model_call(model_request([tool]), handler)
@@ -584,7 +758,7 @@ async def test_control_tools_do_not_require_host_briefs(captured, name):
     assert middleware.rejection(request(name).tool_call, tool) is None
 
 
-async def test_provider_input_schema_requires_brief_without_mutating_original(captured):
+async def test_provider_input_schema_never_adds_a_display_brief(captured):
     tool = {
         "name": "mcp_read",
         "input_schema": {
@@ -594,108 +768,44 @@ async def test_provider_input_schema_requires_brief_without_mutating_original(ca
         },
     }
     original = deepcopy(tool)
-    middleware = ready_execution(Planning(), "en", "root")
+    middleware = TaskExecution(Planning(), "en", "root")
     handler = AsyncMock(return_value=ModelResponse(result=[]))
     await middleware.awrap_model_call(model_request([tool]), handler)
     projected = handler.await_args.args[0].tools[0]
-    assert projected["input_schema"]["required"] == ["path", "brief"]
+    assert projected["input_schema"]["required"] == ["path"]
+    assert "brief" not in projected["input_schema"]["properties"]
     await middleware.awrap_model_call(model_request([projected]), handler)
-    assert handler.await_args.args[0].tools[0]["input_schema"]["required"] == ["path", "brief"]
+    assert handler.await_args.args[0].tools[0]["input_schema"]["required"] == ["path"]
     assert tool == original
 
 
-@pytest.mark.parametrize(
-    "name,args,allowed",
-    [
-        ("read_note", {}, False),
-        ("planning", {"command": "mark_step"}, False),
-        ("planning", {"command": ["create"]}, False),
-        ("planning", {"command": "create"}, True),
-        ("planning", {"command": "get"}, True),
-        ("message_notify_user", {"text": "Opening"}, True),
-        ("ask_user_question", {}, True),
-    ],
-)
-async def test_work_requires_a_durable_opening_with_explicit_exemptions(
-    captured, name, args, allowed
+@pytest.mark.parametrize("status", ["completed", "streaming", "failed"])
+async def test_old_progress_records_do_not_gate_work(captured, status):
+    middleware = TaskExecution(Planning(), "en", "root")
+    middleware.restore(
+        [{"type": "progress", "status": status, "introduction": True, "tool_call_id": "opening"}]
+    )
+    handler = AsyncMock(return_value=ToolMessage(content="Read", tool_call_id="call"))
+    await middleware.run(request(), handler)
+    handler.assert_awaited_once()
+    assert captured[0][0]["brief"] is None
+
+
+@pytest.mark.parametrize("representation", ["tool", "function", "wrapped"])
+async def test_new_model_requests_hide_notifications_but_existing_calls_can_finish(
+    captured, representation
 ):
     middleware = TaskExecution(Planning(), "en", "root")
-    call = request(name, args=args)
-    error = middleware.rejection(call.tool_call)
-    assert (error is None) is allowed
-    if not allowed:
-        handler = AsyncMock()
-        result = await middleware.run(call, handler)
-        assert result.status == "error"
-        assert result.content == tr("projects.progress_opening_required", "en")
-        handler.assert_not_awaited()
-        assert captured[0] == []
-
-
-async def test_notice_success_cannot_authorize_work_in_the_same_response(captured):
-    events, _ = captured
-    middleware = TaskExecution(Planning(), "en", "root")
+    notify = note_tool("message_notify_user")
+    if representation != "tool":
+        notify = {"name": "message_notify_user", "parameters": {"type": "object"}}
+        if representation == "wrapped":
+            notify = {"type": "function", "function": notify}
     model = AsyncMock(return_value=ModelResponse(result=[]))
-    await middleware.awrap_model_call(model_request([note_tool()]), model)
-    middleware.accept_opening()
-    handler = AsyncMock(return_value=ToolMessage(content="Actual result", tool_call_id="call"))
-    blocked = await middleware.run(request(args={"brief": "Read the note"}), handler)
-    assert blocked.status == "error"
-    handler.assert_not_awaited()
-    await middleware.awrap_model_call(model_request([note_tool()]), model)
-    events.clear()
-    allowed = await middleware.run(request(args={"brief": "Read the note"}), handler)
-    assert allowed.content == "Actual result" and handler.await_count == 1
-    assert [event["type"] for event in events] == ["task_tool_start", "task_tool_end"]
-
-
-@pytest.mark.parametrize(
-    "status,introduction,accepted",
-    [
-        ("completed", True, True),
-        ("completed", False, False),
-        ("completed", None, False),
-        ("streaming", True, False),
-        ("failed", True, False),
-    ],
-)
-async def test_restore_accepts_only_explicit_completed_introduction(
-    captured, status, introduction, accepted
-):
-    middleware = TaskExecution(Planning(), "en", "root")
-    middleware.restore(
-        [
-            {
-                "type": "progress",
-                "status": status,
-                "introduction": introduction,
-                "tool_call_id": "opening",
-            }
-        ]
-    )
-    assert (
-        middleware.rejection(request(args={"brief": "Read the note"}).tool_call) is None
-    ) is accepted
-
-
-async def test_restored_opening_does_not_authorize_its_interrupted_sibling_work(captured):
-    middleware = TaskExecution(Planning(), "en", "root")
-    middleware.restore(
-        [
-            {
-                "type": "progress",
-                "status": "completed",
-                "introduction": True,
-                "tool_call_id": "opening",
-            }
-        ]
-    )
-    middleware.restore_model_calls(
-        [
-            request("message_notify_user", call_id="opening").tool_call,
-            request(call_id="work").tool_call,
-        ]
-    )
-    assert middleware.rejection(request().tool_call) is not None
-    middleware.restore_model_calls([request(call_id="later-work").tool_call])
-    assert middleware.rejection(request(args={"brief": "Read the note"}).tool_call) is None
+    await middleware.awrap_model_call(model_request([notify, note_tool()]), model)
+    assert len(model.await_args.args[0].tools) == 1
+    assert model.await_args.args[0].tools[0].name == "read_note"
+    handler = AsyncMock(return_value=ToolMessage(content="Saved", tool_call_id="call"))
+    result = await middleware.run(request("message_notify_user"), handler)
+    assert result.content == "Saved"
+    handler.assert_awaited_once()

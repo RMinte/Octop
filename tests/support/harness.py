@@ -192,6 +192,7 @@ def patch_harness(fake_agent: Any | None = None):
             side_effect=_constructor,
         ),
         patch("octop.infra.projects.title.ChatModelFactory") as title_factory,
+        patch("octop.infra.projects.narration.ChatModelFactory") as narration_factory,
     ):
         from langchain_core.messages import AIMessage
 
@@ -199,4 +200,9 @@ def patch_harness(fake_agent: Any | None = None):
         title_model._harness_max_output_tokens = 8_192
         title_model.ainvoke = AsyncMock(return_value=AIMessage(content=""))
         title_factory.return_value.aclose = AsyncMock()
+        narration_model = narration_factory.return_value.get_chat_model.return_value
+        narration_model._harness_max_output_tokens = 512
+        narration_model.model_copy.return_value = narration_model
+        narration_model.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+        narration_factory.return_value.aclose = AsyncMock()
         yield agent

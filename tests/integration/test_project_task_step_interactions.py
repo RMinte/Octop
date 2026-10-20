@@ -28,7 +28,15 @@ from tests.integration.test_project_tasks_ws import command, connected
 def step_harness(env_with_provider, monkeypatch):
     client, server, auth = env_with_provider
 
-    def install(kind, *, invalid=False, mixed=False, business_field=False, invalid_brief=None):
+    def install(
+        kind,
+        *,
+        invalid=False,
+        mixed=False,
+        business_field=False,
+        invalid_brief=None,
+        business_brief=False,
+    ):
         observed, effects, arguments = [], [], []
 
         async def guarded(value: str) -> str:
@@ -119,12 +127,10 @@ def step_harness(env_with_provider, monkeypatch):
                                 "command": "mark_step",
                                 "expected_revision": plan["revision"],
                                 "step_id": plan["active_step_id"],
-                                "status": "skipped"
-                                if invalid or mixed or invalid_brief is not None
-                                else "completed",
+                                "status": "skipped" if action.status == "error" else "completed",
                                 "result": (
                                     "Action was not executed: "
-                                    if invalid or mixed or invalid_brief is not None
+                                    if action.status == "error"
                                     else "Action returned: "
                                 )
                                 + str(action.content),
@@ -166,6 +172,9 @@ def step_harness(env_with_provider, monkeypatch):
         if business_field:
             definition["input_schema"]["properties"]["task_step_id"] = {"type": "integer"}
             definition["input_schema"]["required"].append("task_step_id")
+        if business_brief:
+            definition["input_schema"]["properties"]["brief"] = {"type": "integer"}
+            definition["input_schema"]["required"].append("brief")
         options = {"client_id": CLIENT, "client_tools": [definition]} if kind == "client" else {}
         return observed, effects, arguments, options
 
@@ -314,31 +323,160 @@ async def test_invalid_ownership_and_mixed_planning_never_dispatch_native_wait_a
 
 @pytest.mark.parametrize("kind", ["client", "question", "server"])
 @pytest.mark.parametrize("brief", [42, "   ", "x" * 241])
-async def test_invalid_brief_never_dispatches_native_wait_actions(step_harness, kind, brief):
+async def test_invalid_display_brief_does_not_block_native_wait_actions(step_harness, kind, brief):
     client, server, auth, install = step_harness
-    _, effects, _, options = install(kind, invalid_brief=brief)
-    response = await client.post(
+    observed, effects, raw, options = install(kind, invalid_brief=brief)
+    task, turn = await start(step_harness, options)
+    assert raw[0]["brief"] == brief and effects == []
+    assert (
+        task["status"]
+        == {
+            "client": "waiting_client_tool",
+            "question": "waiting_answer",
+            "server": "waiting_approval",
+        }[kind]
+    )
+    original = deepcopy(raw[0])
+    business = {
+        key: value for key, value in original.items() if key not in {"task_step_id", "brief"}
+    }
+    session = None
+    try:
+        if kind == "client":
+            with server.services.db.connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM project_task_tool_calls WHERE turn_id=?", (turn.turn_id,)
+                ).fetchall()
+            assert len(rows) == 1 and json.loads(rows[0]["arguments_json"]) == business
+            session, ws = await connected(client, auth)
+            await command(ws, "client.attach", "display-brief-attach", client_id=CLIENT)
+            call = {
+                "task_id": task["task_id"],
+                "turn_id": turn.turn_id,
+                "call_id": rows[0]["call_id"],
+            }
+            token = (await claim(ws, call))["data"]["claim_token"]
+            receipt = await result(ws, call, token, {"proof": "from-client"})
+            assert receipt["type"] == "result"
+        else:
+            item = task["turns"][0]["interactions"][0]
+            if kind == "server":
+                assert item["payload"]["arguments"] == original
+                decision = approval(item)
+            else:
+                assert item["payload"]["question"] == "Which format?"
+                assert not {"task_step_id", "brief"} & item["payload"].keys()
+                decision = {
+                    "request_id": str(uuid4()),
+                    "expected_revision": item["revision"],
+                    "response": {"kind": "question", "action": "answer", "answer": "Markdown"},
+                }
+            response = await respond((client, None, auth), task, item, decision)
+            assert response.status_code == 200, response.text
+        done = await settled(client, auth, task["task_id"])
+        assert done["status"] == "completed", done
+        final = done["turns"][0]
+        assert effects == (["proof"] if kind == "server" else [])
+        messages = [
+            message
+            for message in observed[-1]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "step-action"
+        ]
+        assert len(messages) == 1 and messages[0].status == "success"
+        block = next(b for b in final["content_blocks"] if b["tool_call_id"] == "step-action")
+        assert block["status"] == "completed" and block["arguments"] == business
+        assert raw[0] == original
+        assert final["plan"]["steps"][0]["status"] == "completed"
+        assert "Action returned:" in final["plan"]["steps"][0]["result"]
+        if kind == "client":
+            assert json.loads(messages[0].content)["output"] == {"proof": "from-client"}
+            assert await result(ws, call, token, {"proof": "from-client"}) == receipt
+            with server.services.db.connect() as conn:
+                assert (
+                    conn.execute(
+                        "SELECT COUNT(*) FROM project_task_tool_calls WHERE turn_id=?",
+                        (turn.turn_id,),
+                    ).fetchone()[0]
+                    == 1
+                )
+        else:
+            assert (await respond((client, None, auth), task, item, decision)).status_code == 200
+            if kind == "server":
+                assert effects == ["proof"]
+                assert final["interactions"][0]["payload"]["arguments"] == original
+            else:
+                assert (
+                    json.loads(messages[0].content)["answers"][0]["result"]["answer"] == "Markdown"
+                )
+        assert (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()[
+            "turns"
+        ][0] == final
+    finally:
+        if session is not None:
+            await session.__aexit__(None, None, None)
+
+
+async def test_client_business_brief_remains_a_required_typed_argument(step_harness):
+    client, server, auth, install = step_harness
+    observed, _, raw, options = install("client", business_brief=True, invalid_brief=42)
+    task, turn = await start(step_harness, options)
+    assert task["status"] == "waiting_client_tool"
+    with server.services.db.connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM project_task_tool_calls WHERE turn_id=?", (turn.turn_id,)
+        ).fetchone()
+    assert json.loads(row["arguments_json"]) == {"path": "note.md", "brief": 42}
+    assert options["client_tools"][0]["input_schema"]["properties"]["brief"] == {"type": "integer"}
+    assert "brief" in options["client_tools"][0]["input_schema"]["required"]
+    assert raw[0]["brief"] == 42
+    session, ws = await connected(client, auth)
+    try:
+        await command(ws, "client.attach", "business-brief-attach", client_id=CLIENT)
+        call = {"task_id": task["task_id"], "turn_id": turn.turn_id, "call_id": row["call_id"]}
+        token = (await claim(ws, call))["data"]["claim_token"]
+        receipt = await result(ws, call, token, {"proof": "business-field-retained"})
+        assert receipt["type"] == "result"
+        done = await settled(client, auth, task["task_id"])
+        assert done["status"] == "completed", done
+        block = next(
+            b for b in done["turns"][0]["content_blocks"] if b["tool_call_id"] == "step-action"
+        )
+        assert block["arguments"] == {"path": "note.md", "brief": 42}
+        message = next(
+            m
+            for m in observed[-1]
+            if isinstance(m, ToolMessage) and m.tool_call_id == "step-action"
+        )
+        assert message.status == "success"
+        assert await result(ws, call, token, {"proof": "business-field-retained"}) == receipt
+    finally:
+        await session.__aexit__(None, None, None)
+
+
+async def test_invalid_business_brief_still_fails_its_original_schema(step_harness):
+    client, server, auth, install = step_harness
+    _, effects, _, options = install("client", business_brief=True, invalid_brief="invalid integer")
+    created = await client.post(
         "/api/project-tasks",
         headers=auth,
         json={
             "request_id": str(uuid4()),
-            "prompt": "Reject an invalid action brief",
+            "prompt": "Validate the original business brief",
             "options": options,
         },
     )
-    assert response.status_code == 202
-    task = await settled(client, auth, response.json()["task_id"])
-    assert task["status"] == "completed", task
-    turn = task["turns"][0]
-    assert not turn["interactions"] and effects == []
+    assert created.status_code == 202, created.text
+    done = await settled(client, auth, created.json()["task_id"])
+    assert done["status"] == "failed", done
+    final = done["turns"][0]
+    assert final["error_code"] == "TASK_EXECUTION_FAILED"
+    assert final["recovery"]["cause_type"] == "ValidationError"
+    assert effects == [] and final["interactions"] == []
     with server.services.db.connect() as conn:
         assert (
             conn.execute(
-                "SELECT COUNT(*) FROM project_task_tool_calls WHERE turn_id=?", (turn["turn_id"],)
+                "SELECT COUNT(*) FROM project_task_tool_calls WHERE turn_id=?", (final["turn_id"],)
             ).fetchone()[0]
             == 0
         )
-    block = next(b for b in turn["content_blocks"] if b["tool_call_id"] == "step-action")
-    assert block["status"] == "failed" and block["started_at"] is None
-    assert block["arguments"] is not None and "brief" not in block["arguments"]
-    assert turn["plan"]["steps"][0]["status"] == "skipped"
+    assert final["plan"]["steps"][0]["status"] == "in_progress"

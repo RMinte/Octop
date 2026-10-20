@@ -36,6 +36,19 @@ def test_executing_plan_prose_is_process_text_even_without_tool_calls():
     assert text.complete(has_tools=False) == []
 
 
+def test_explicitly_tool_free_response_streams_without_waiting_for_completion():
+    text = TaskResponseText()
+    assert text.begin(executing=False, tools_disabled=True) == []
+    answer = token("Actual verified result.")
+    assert text.append(answer) == [answer]
+    assert text.append({"type": "message_end"}) == [{"type": "message_end"}]
+    assert text.complete(has_tools=False) == []
+    assert text.begin(executing=False) == []
+    prose = token("A later response may still use tools.")
+    assert text.append(prose) == []
+    assert text.complete(has_tools=True) == [{**prose, "type": "reasoning"}]
+
+
 def test_new_response_does_not_inherit_tool_classification_or_step_binding():
     text = TaskResponseText()
     prose = token("Preparing work.", step_id="step-a")

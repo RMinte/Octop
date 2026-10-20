@@ -341,7 +341,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 ### 服务端附件交付
 
-任务运行时提供 `create_artifact(name,content,media_type?)` 和 `publish_workspace_file(path,name?)`，两者均在服务端执行，客户端不能注册。后者只读取本轮服务端工作目录，不读取 `client_directory`。有无项目都可创建附件；只有显式工具调用成功才算正式交付。每轮 `artifacts` 返回稳定 ID、名称、MIME 类型、大小、SHA-256、可选来源相对路径和鉴权下载地址；REST 历史和 WebSocket 使用同一结构，重连可恢复。源文件更改/删除不影响已发布快照。单文件最多 25 MiB，每轮最多 5 份、合计 50 MiB。详细字段、错误和客户端适配见[任务 WebSocket 指南第 13 节](project-task-websocket.md#13-服务端附件交付)。
+任务运行时提供 `create_artifact(name,content,media_type?)`、`publish_workspace_file(path,name?)` 和 `publish_workspace_archive(paths,name)`，均在服务端执行，客户端不能注册。后两者只读取本轮服务端工作目录，不读取 `client_directory`；ZIP 工具只打包显式列出的相对文件，不扫描整个目录。有无项目都可创建附件；只有显式工具调用成功才算正式交付。没有配置服务端或客户端项目目录的独立工作区中，本轮成功写入普通成果文件后，最后完成步骤和无计划最终答复会检查本轮确有附件；缺少时要求模型先交付。已有项目目录的日常编辑不强制打包，通过命令自行生成文件仍依赖模型遵循交付指引。每轮 `artifacts` 返回稳定 ID、名称、MIME 类型、大小、SHA-256、可选来源相对路径和鉴权下载地址；REST 历史和 WebSocket 使用同一结构，重连可恢复。源文件更改/删除不影响已发布快照。单文件最多 25 MiB，每轮最多 5 份、合计 50 MiB。详细字段、错误和客户端适配见[任务 WebSocket 指南第 13 节](project-task-websocket.md#13-服务端附件交付)。
 
 ### 任务 WebSocket：命令与实时状态
 
@@ -459,7 +459,11 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 
 每轮还返回 `content_blocks`（按发生顺序的摘要、思考、回答和工具活动）及 `content_revision`（内容版本）。内容块是完整快照，客户端按版本替换并保留 block_id 的展示状态；有块时不重复渲染累计 reply/reasoning。历史未记录分段时数组为空，继续展示原文。公开摘要来自模型实际返回，GLM 的 reasoning_content 保持思考类型。字段与恢复规则见 [有序内容块](project-task-websocket.md#有序内容块)。
 
-公开动作开启时，首个成功持久化通知带 `introduction=true`，工作须等待其成功回执后的下一次模型响应；同批通知不能并发放行工作，关闭动作生成时不适用。TaskTurn 的 `started_at/finished_at/processing_duration_ms` 分别为首次实际开始、终态及其墙钟毫秒跨度，包含审批/暂停等待、排除首次排队；历史或运行中的未知值为 null。带工具响应的普通正文归过程，只有确认无工具且未处于计划执行中的正文进入答案。
+2026 年 10 月 19 日后续公开进展方案：动作生成开启时，宿主立即保存已收到请求的开场及计划当前步骤的意图进展，首条带 `introduction=true`。独立异步模型只根据用户目标、已保存计划和真实工具事实补充文案，主执行不等待通知或宿主 brief。工具 `tool_label` 立即可用，`brief` 可缺失/null，生成后最多 240 字符，按原 call_id 更新同一工具块；不修改业务 schema、计划、审批或执行事实。主模型新请求隐藏 `message_notify_user`，注册表只保留已有调用的正常结束路径；生成文案不进入 reply，也不回灌模型。
+
+每轮旁路最多一个模型请求在途和一个可替换的最新待处理快照，同身份去重、过期结果丢弃。复用该轮 model_ref，但独立使用 8 秒超时、最多 512 个输出 token 和支持的关闭思考/低 effort 参数，不新增模型开关或修改全局配置。主回答开始、暂停或等待、取消及终态时关闭旁路，迟到内容丢弃；已收到的 usage 仍原子加到原 turn，与主模型计量互不覆盖。恢复不重跑旧开场或补跑旧说明。旁路 progress 的 tool_call_id 使用稳定 `narration:...` 身份，不是真实工具调用；协议与现有字段保持不变，无新 API 字段、迁移或 Swift/UI 修改。此前开场/必填 brief 门控的交付和客户端实测只保留为历史记录，当前规则见[独立异步公开进展](project-task-planning-and-progress.md#独立异步公开进展)。
+
+TaskTurn 的 `started_at/finished_at/processing_duration_ms` 分别为首次实际开始、终态及其墙钟毫秒跨度，包含审批/暂停等待、排除首次排队；历史或运行中的未知值为 null。带工具响应的普通正文归过程，只有确认无工具且未处于计划执行中的正文进入答案。计划完成或受阻后，已禁用工具的最终请求直接流式写入答案，不等待整段响应分类。
 
 当前实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
 

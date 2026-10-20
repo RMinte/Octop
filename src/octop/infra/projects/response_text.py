@@ -1,4 +1,4 @@
-"""Classify ordinary model text only after its response's tool intent is known."""
+"""Stream tool-free answers; otherwise wait until the response's intent is known."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ class TaskResponseText:
         self._kind: str | None = "reasoning" if executing else None
         self._buffer: list[dict[str, Any]] = []
 
-    def begin(self, *, executing: bool) -> list[dict[str, Any]]:
+    def begin(self, *, executing: bool, tools_disabled: bool = False) -> list[dict[str, Any]]:
         # An unresolved previous response is process text, never a final answer.
         pending = self.complete(has_tools=True)
-        self._kind = "reasoning" if executing else None
+        self._kind = "token" if tools_disabled else "reasoning" if executing else None
         return pending
 
     def append(self, event: dict[str, Any]) -> list[dict[str, Any]]:

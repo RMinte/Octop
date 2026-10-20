@@ -1759,6 +1759,7 @@
     "create_artifact": "Create attachment",
     "read_task_image": "Read task image",
     "publish_workspace_file": "Attach workspace file",
+    "publish_workspace_archive": "Package and deliver files",
     "send_file_to_user": "Send file",
     "mobile_screenshot": "Mobile screenshot",
     "mobile_tap": "Mobile tap",

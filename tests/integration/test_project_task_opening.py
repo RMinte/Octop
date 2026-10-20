@@ -1,14 +1,12 @@
-"""Durable opening notices admit work across real Harness rounds and cold resumes."""
+"""Display notifications never gate real work, approval, or cold resume."""
 
 from __future__ import annotations
 
-import json
 from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
-from langgraph.config import get_config
 
 from octop.infra.projects import runtime
 from tests.integration.test_project_capabilities import follow_up
@@ -71,7 +69,7 @@ def notification(call_id="opening", text="I will record the requested fact."):
 
 
 def work(call_id="work", value="proof"):
-    return tool_call("record_fact", call_id, value=value, brief="Record the requested fact")
+    return tool_call("record_fact", call_id, value=value)
 
 
 def tool_block(turn, call_id):
@@ -90,122 +88,99 @@ def assert_not_dispatched(block):
 
 
 @pytest.mark.parametrize("approval_required", [False, True])
-async def test_work_without_a_notice_is_rejected_before_dispatch(
+async def test_work_without_a_model_notice_reaches_execution_or_approval(
     opening_harness, approval_required
 ):
-    client, _, auth, install = opening_harness
-    effects, observed, _ = install(
-        [work(), AIMessage(content="The work was not executed.")],
-        approval_required=approval_required,
-    )
-    created = await start(opening_harness)
-    done = await settled(client, auth, created["task_id"])
-    assert done["status"] == "completed", done
-    assert effects == []
-    turn = done["turns"][0]
-    assert turn["interactions"] == []
-    assert_not_dispatched(tool_block(turn, "work"))
-    result = next(
-        message
-        for message in observed[-1][1]
-        if isinstance(message, ToolMessage) and message.tool_call_id == "work"
-    )
-    assert result.status == "error"
-    assert not any(block["type"] == "progress" for block in turn["content_blocks"])
-
-
-async def test_successful_notice_is_durable_before_the_next_response_can_work(opening_harness):
     client, server, auth, install = opening_harness
-
-    def after_opening(messages):
-        result = next(
-            message
-            for message in messages
-            if isinstance(message, ToolMessage) and message.tool_call_id == "opening"
-        )
-        assert result.status == "success" and result.artifact["introduction"] is True
-        saved = server.services.project_task_turn_repo.get(
-            get_config()["configurable"]["thread_id"]
-        )
-        notices = [
-            block for block in json.loads(saved.content_blocks_json) if block["type"] == "progress"
-        ]
-        assert len(notices) == 1 and notices[0]["introduction"] is True
-        return work()
-
-    effects, _, _ = install([notification(), after_opening, AIMessage(content="Recorded.")])
+    effects, observed, _ = install(
+        [work(), AIMessage(content="Recorded.")], approval_required=approval_required
+    )
     created = await start(opening_harness)
+    if approval_required:
+        await parked(server, created["active_turn_id"])
+        waiting = (
+            await client.get(f"/api/project-tasks/{created['task_id']}", headers=auth)
+        ).json()
+        assert waiting["status"] == "waiting_approval" and effects == []
+        item = waiting["turns"][0]["interactions"][0]
+        assert item["payload"]["arguments"] == {"value": "proof"}
+        assert (await respond(opening_harness, waiting, item, approval(item))).status_code == 200
     done = await settled(client, auth, created["task_id"])
     assert done["status"] == "completed", done
     assert effects == ["proof"]
     turn = done["turns"][0]
     block = tool_block(turn, "work")
-    assert block["status"] == "completed" and block["started_at"]
-    assert block["arguments"] == {"value": "proof"}
-    assert block["output"] == "Recorded: proof"
-    assert (
-        next(b for b in turn["content_blocks"] if b["type"] == "progress")["introduction"] is True
+    assert block["status"] == "completed" and block["arguments"] == {"value": "proof"}
+    assert block["brief"] is None
+    result = next(
+        message
+        for message in observed[-1][1]
+        if isinstance(message, ToolMessage) and message.tool_call_id == "work"
+    )
+    assert result.status == "success"
+    root_requests = [tools for role, _, tools in observed if role == "project-task"]
+    assert len(root_requests) == 2 and all(
+        "message_notify_user" not in tools for tools in root_requests
     )
 
 
-async def test_notice_and_work_in_one_response_require_a_later_retry(opening_harness):
+async def test_existing_notice_and_work_in_one_response_run_without_a_text_retry(opening_harness):
     client, _, auth, install = opening_harness
     mixed = AIMessage(
         content="",
-        tool_calls=[
-            *notification().tool_calls,
-            *work("same-response").tool_calls,
-        ],
+        tool_calls=[*notification().tool_calls, *work("same-response").tool_calls],
     )
-    effects, _, _ = install([mixed, work("later-response"), AIMessage(content="Recorded once.")])
+    effects, observed, _ = install([mixed, AIMessage(content="Recorded once.")])
     created = await start(opening_harness)
     done = await settled(client, auth, created["task_id"])
     assert done["status"] == "completed", done
     assert effects == ["proof"]
     turn = done["turns"][0]
-    assert_not_dispatched(tool_block(turn, "same-response"))
-    assert tool_block(turn, "later-response")["status"] == "completed"
-    notices = [block for block in turn["content_blocks"] if block["type"] == "progress"]
-    assert len(notices) == 1 and notices[0]["introduction"] is True
+    assert tool_block(turn, "same-response")["status"] == "completed"
+    notices = [
+        block
+        for block in turn["content_blocks"]
+        if block["type"] == "progress" and block["tool_call_id"] == "opening"
+    ]
+    assert len(notices) == 1
+    tools = [message for message in observed[-1][1] if isinstance(message, ToolMessage)]
+    assert {message.tool_call_id for message in tools} == {"opening", "same-response"}
+    assert all(message.status == "success" for message in tools)
+    assert len(observed) == 2
 
 
-async def test_failed_notice_does_not_admit_work(opening_harness):
+async def test_invalid_existing_notice_does_not_block_following_work(opening_harness):
     client, _, auth, install = opening_harness
-    effects, observed, _ = install(
-        [
-            notification(text=" "),
-            work(),
-            AIMessage(content="The invalid notice did not admit work."),
-        ]
-    )
+    effects, observed, _ = install([notification(text=" "), work(), AIMessage(content="Recorded.")])
     created = await start(opening_harness)
     done = await settled(client, auth, created["task_id"])
     assert done["status"] == "completed", done
-    assert effects == []
+    assert effects == ["proof"]
     turn = done["turns"][0]
-    assert_not_dispatched(tool_block(turn, "work"))
-    assert not any(block["type"] == "progress" for block in turn["content_blocks"])
+    assert tool_block(turn, "work")["status"] == "completed"
     failure = next(
         message
         for message in observed[-1][1]
         if isinstance(message, ToolMessage) and message.tool_call_id == "opening"
     )
     assert failure.status == "error"
+    assert not any(
+        block["type"] == "progress" and block["tool_call_id"] == "opening"
+        for block in turn["content_blocks"]
+    )
 
 
-async def test_cold_approval_resume_reuses_only_this_turns_durable_opening(opening_harness):
+async def test_cold_approval_without_model_notice_dispatches_once(opening_harness):
     client, server, auth, install = opening_harness
     effects, _, agents = install(
-        [notification(), work(), AIMessage(content="Approved work completed.")],
-        approval_required=True,
+        [work(), AIMessage(content="Approved work completed.")], approval_required=True
     )
     created = await start(opening_harness)
     await parked(server, created["active_turn_id"])
     task = (await client.get(f"/api/project-tasks/{created['task_id']}", headers=auth)).json()
     turn = task["turns"][0]
-    notices = [block for block in turn["content_blocks"] if block["type"] == "progress"]
-    assert len(notices) == 1 and notices[0]["introduction"] is True
     assert effects == [] and task["status"] == "waiting_approval"
+    assert tool_block(turn, "work")["started_at"] is None
     item = turn["interactions"][0]
     decision = approval(item)
     await server.project_task_worker.close()
@@ -216,22 +191,19 @@ async def test_cold_approval_resume_reuses_only_this_turns_durable_opening(openi
     assert done["status"] == "completed", done
     assert effects == ["proof"] and len(agents) == 2
     final = done["turns"][0]
-    assert [block for block in final["content_blocks"] if block["type"] == "progress"] == notices
     assert tool_block(final, "work")["status"] == "completed"
+    assert len([b for b in final["content_blocks"] if b["type"] == "tool"]) == 1
     assert (await respond(opening_harness, task, item, decision)).status_code == 200
     assert effects == ["proof"]
 
 
-async def test_follow_up_does_not_inherit_opening_or_replay_cache_from_prior_turn(opening_harness):
+async def test_follow_up_work_keeps_turns_isolated_without_model_notices(opening_harness):
     client, _, auth, install = opening_harness
     effects, _, _ = install(
         [
-            notification(text="I will record the first fact."),
             work(value="first"),
             AIMessage(content="First done."),
             work(value="second"),
-            notification(text="I will now record the second fact."),
-            work("new-work", "second"),
             AIMessage(content="Second done."),
         ]
     )
@@ -249,29 +221,5 @@ async def test_follow_up_does_not_inherit_opening_or_replay_cache_from_prior_tur
     assert effects == ["first", "second"]
     assert done["turns"][0]["content_blocks"] == first["turns"][0]["content_blocks"]
     second = done["turns"][1]
-    assert_not_dispatched(tool_block(second, "work"))
-    assert tool_block(second, "new-work")["status"] == "completed"
-    notices = [block for block in second["content_blocks"] if block["type"] == "progress"]
-    assert len(notices) == 1 and notices[0]["introduction"] is True
-    assert notices[0]["text"] == "I will now record the second fact."
-
-
-async def test_progress_persistence_failure_prevents_all_following_dispatch(
-    opening_harness, monkeypatch
-):
-    client, _, auth, install = opening_harness
-    effects, observed, _ = install([notification(), work(), AIMessage(content="Unreachable.")])
-    original = runtime.progress_tool
-
-    def failing_tool(locale, persist=None):
-        async def fail(text, call_id):
-            raise RuntimeError("Progress checkpoint did not confirm persistence")
-
-        return original(locale, fail)
-
-    monkeypatch.setattr(runtime, "progress_tool", failing_tool)
-    created = await start(opening_harness)
-    done = await settled(client, auth, created["task_id"])
-    assert done["status"] == "failed", done
-    assert effects == [] and len(observed) == 1
-    assert not any(block["tool_call_id"] == "work" for block in done["turns"][0]["content_blocks"])
+    assert tool_block(second, "work")["status"] == "completed"
+    assert tool_block(second, "work")["output"] == "Recorded: second"

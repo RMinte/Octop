@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -48,7 +49,7 @@ from octop.infra.projects.checkpoints import (
 from octop.infra.projects.client_tool_models import ClientToolDefinition
 from octop.infra.projects.client_tools import ClientToolBroker
 from octop.infra.projects.collaboration import TaskTeam, guard_subagents
-from octop.infra.projects.content import TaskContent
+from octop.infra.projects.content import TaskContent, TaskContentBlock
 from octop.infra.projects.context import capture_memory, close_pending_tools
 from octop.infra.projects.control import ASK_USER, TaskControlMiddleware, question_tool
 from octop.infra.projects.execution import TaskExecution, strip_step_metadata
@@ -58,6 +59,13 @@ from octop.infra.projects.image_tools import READ_TASK_IMAGE, read_image_tool
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction
 from octop.infra.projects.models import ProjectFields, SkillBinding
+from octop.infra.projects.narration import (
+    ProgressSnapshot,
+    TaskProgressAgent,
+    TaskProgressNarrator,
+    progress_context,
+    tool_progress_facts,
+)
 from octop.infra.projects.planning import PLANNING, TaskPlanning, plan_report
 from octop.infra.projects.progress import (
     NOTIFY_USER,
@@ -278,6 +286,18 @@ async def run_turn(
     ]
     broker = ClientToolBroker(services, owner_id, turn, options.get("client_id") or "", definitions)
     client_tools = broker.tools()
+    prompt += "\n\n" + tr(
+        "projects.task_environment_prompt",
+        locale,
+        environment=json.dumps(
+            {
+                "server_workspace": str(workspace),
+                "client_directory": fields.client_directory,
+                "client_tools": [tool.name for tool in client_tools],
+            },
+            ensure_ascii=False,
+        ),
+    )
     if (
         {tool.name for tool in client_tools}
         | SERVER_ARTIFACT_TOOLS
@@ -360,6 +380,8 @@ async def run_turn(
     )
 
     async def persist_plan(plan: TaskPlan, call_id: str, arguments: dict[str, Any]) -> None:
+        if plan.steps and all(step.status in {"completed", "skipped"} for step in plan.steps):
+            await execution.require_delivery()
         sink = _plan_persistence.get()
         if sink is not None:
             await sink(plan, call_id, arguments)
@@ -390,9 +412,15 @@ async def run_turn(
         ):
             planning.restore_call(block.tool_call_id, block.arguments, block.plan)
     execution = TaskExecution(
-        planning, locale, turn.turn_id, action_timeline_enabled=action_timeline_enabled
+        planning,
+        locale,
+        turn.turn_id,
+        action_timeline_enabled=action_timeline_enabled,
+        artifact_publisher=publisher if fields.directory is None else None,
+        client_directory=fields.client_directory,
     )
     execution.restore(restored_content.dump())
+    await execution.delivery_pending()
 
     async def save_checkpoint() -> None:
         saver = agent.checkpointer
@@ -432,8 +460,6 @@ async def run_turn(
             )
             if stopped:
                 raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
-        if introduction:
-            execution.accept_opening()
         return introduction
 
     cfg = HarnessAgentConfig(
@@ -634,8 +660,7 @@ async def run_turn(
                 "step_id": step_id,
                 "arguments": strip_step_metadata(call, registered.get(call["name"]))["args"],
             }
-            with contextlib.suppress(ValueError):
-                detail["brief"] = execution.brief_for_call(call, registered.get(call["name"]))
+            detail["brief"] = execution.brief_for_call(call, registered.get(call["name"]))
             call_details[call_id] = {**call_details.get(call_id, {}), **detail}
             if call["name"] in {NOTIFY_USER, PLANNING}:
                 control_calls[call_id] = call["name"]
@@ -657,7 +682,6 @@ async def run_turn(
                 None,
             )
             if last_model is not None:
-                execution.restore_model_calls(last_model.tool_calls)
                 for call in last_model.tool_calls:
                     intent(call)
             if recovery_mode == "graph":
@@ -725,7 +749,10 @@ async def run_turn(
                         continue
                     if data.get("type") == "task_step_context":
                         for output in record_reply(
-                            response_text.begin(executing=planning.phase == "executing")
+                            response_text.begin(
+                                executing=planning.phase == "executing",
+                                tools_disabled=data.get("tools_disabled") is True,
+                            )
                         ):
                             yield output
                         response_binding = data.get("plan_id"), data.get("step_id")
@@ -963,11 +990,8 @@ async def run_turn(
                 await asyncio.to_thread(
                     services.project_task_turn_repo.record_usage,
                     turn.turn_id,
-                    turn.worker_id,
-                    turn.input_tokens
-                    + sum(int(values.get("input_tokens") or 0) for values in usage.values()),
-                    turn.output_tokens
-                    + sum(int(values.get("output_tokens") or 0) for values in usage.values()),
+                    sum(int(values.get("input_tokens") or 0) for values in usage.values()),
+                    sum(int(values.get("output_tokens") or 0) for values in usage.values()),
                 )
             finally:
                 await team.close()
@@ -1205,8 +1229,16 @@ class ProjectTaskWorker:
         failure: TaskRecovery | None = None
         locale = normalize_locale(None)
         output_lock = asyncio.Lock()
+        narrator: TaskProgressNarrator | None = None
+        narration_stopped = False
 
-        async def save_output() -> bool:
+        async def stop_narration() -> None:
+            nonlocal narration_stopped
+            narration_stopped = True
+            if narrator is not None:
+                await narrator.close()
+
+        async def save_output(*, require_active: bool = False) -> bool:
             return await asyncio.to_thread(
                 self.services.project_task_turn_repo.progress,
                 turn.turn_id,
@@ -1217,13 +1249,169 @@ class ProjectTaskWorker:
                 reasoning=reasoning,
                 content_blocks_json=json.dumps(content.dump(), ensure_ascii=False),
                 content_revision=content.revision,
+                require_active=require_active,
             )
 
         async def persist_plan(plan: TaskPlan, call_id: str, arguments: dict[str, Any]) -> None:
             async with output_lock:
+                previous = content.revision
                 content.update_plan(plan, call_id=call_id, arguments=arguments)
+                snapshot = narrate_plan(plan) if content.revision != previous else None
                 if await save_output():
                     raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+                if snapshot is not None and narrator is not None:
+                    narrator.submit(snapshot)
+
+        def narrate_plan(plan: TaskPlan) -> ProgressSnapshot | None:
+            if narrator is None or narration_stopped:
+                return None
+            step = next((s for s in plan.steps if s.step_id == plan.active_step_id), None)
+            if step is None:
+                return None
+            key = f"plan:{plan.plan_id}:{plan.revision}"
+            content.report_progress(
+                f"narration:{key}",
+                tr("projects.progress_plan", locale, step=step.content),
+                plan_id=plan.plan_id,
+                step_id=step.step_id,
+                introduction=False,
+            )
+            return ProgressSnapshot(
+                key=key,
+                facts={
+                    "stage": "plan_update",
+                    "goal": turn.prompt[:2000],
+                    "title": plan.title,
+                    "step": step.content,
+                    "step_status": step.status,
+                    "revision": plan.revision,
+                    "context": progress_context(content),
+                },
+                plan_id=plan.plan_id,
+                step_id=step.step_id,
+            )
+
+        def tool_digest(block: TaskContentBlock) -> str:
+            source = json.dumps(
+                [block.status, block.output, block.started_at, block.finished_at],
+                default=str,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            return hashlib.sha256(source.encode()).hexdigest()
+
+        restored_tool_sources = {
+            block.tool_call_id: tool_digest(block)
+            for block in content.blocks
+            if block.type == "tool"
+        }
+
+        def narrate_tool(call_id: str, *, finished: bool) -> None:
+            if narrator is None or narration_stopped:
+                return
+            block = next(
+                (b for b in content.blocks if b.type == "tool" and b.tool_call_id == call_id),
+                None,
+            )
+            if block is None or block.started_at is None:
+                return
+            facts = tool_progress_facts(content, block, finished=finished)
+            facts["goal"] = turn.prompt[:2000]
+            digest = tool_digest(block)
+            if restored_tool_sources.get(call_id) == digest:
+                return
+            narrator.submit(
+                ProgressSnapshot(
+                    key=f"tool:{call_id}:{'end' if finished else 'start'}:{digest}",
+                    facts=facts,
+                    plan_id=block.plan_id,
+                    step_id=block.step_id,
+                    tool_call_id=call_id,
+                    source_digest=digest,
+                )
+            )
+
+        async def publish_narration(snapshot: ProgressSnapshot, text: str) -> None:
+            nonlocal narration_stopped
+            async with output_lock:
+                if (
+                    narration_stopped
+                    or self.closing
+                    or reply
+                    or narrator is None
+                    or not narrator.is_current(snapshot)
+                ):
+                    return
+                current = await asyncio.to_thread(
+                    self.services.project_task_turn_repo.get, turn.turn_id
+                )
+                if (
+                    current is None
+                    or current.status != "running"
+                    or current.cancel_requested
+                    or current.pause_requested
+                    or current.worker_id != self.worker_id
+                    or narration_stopped
+                ):
+                    return
+                previous_revision = content.revision
+                if snapshot.tool_call_id is not None:
+                    block = next(
+                        (
+                            b
+                            for b in content.blocks
+                            if b.type == "tool" and b.tool_call_id == snapshot.tool_call_id
+                        ),
+                        None,
+                    )
+                    if (
+                        block is None
+                        or (block.plan_id, block.step_id) != (snapshot.plan_id, snapshot.step_id)
+                        or block.status != snapshot.facts["status"]
+                        or tool_digest(block) != snapshot.source_digest
+                    ):
+                        return
+                    previous_text = block.brief
+                    content.refine_brief(snapshot.tool_call_id, text)
+                else:
+                    plan = content.plan
+                    if snapshot.plan_id is not None and (
+                        plan is None
+                        or plan.plan_id != snapshot.plan_id
+                        or plan.revision != snapshot.facts["revision"]
+                    ):
+                        return
+                    if snapshot.key == "opening" and plan is not None:
+                        return
+                    block = next(
+                        (
+                            b
+                            for b in content.blocks
+                            if b.type == "progress"
+                            and b.tool_call_id == f"narration:{snapshot.key}"
+                        ),
+                        None,
+                    )
+                    if block is None:
+                        return
+                    previous_text = block.text
+                    content.refine_progress(f"narration:{snapshot.key}", text)
+                try:
+                    stopped = await save_output(require_active=True)
+                except BaseException:
+                    if snapshot.tool_call_id is not None:
+                        block.brief = previous_text
+                    else:
+                        block.text = previous_text or ""
+                    content.revision = previous_revision
+                    raise
+                if stopped:
+                    if snapshot.tool_call_id is not None:
+                        block.brief = previous_text
+                    else:
+                        block.text = previous_text or ""
+                    content.revision = previous_revision
+                    narration_stopped = True
 
         sink_token = _plan_persistence.set(persist_plan)
 
@@ -1260,6 +1448,47 @@ class ProjectTaskWorker:
             rows = await asyncio.to_thread(self.services.project_task_turn_repo.list, turn.task_id)
             user = await asyncio.to_thread(self.services.user_repo.get, task)
             locale = normalize_locale(user.locale if user else "zh")
+            if not reply and json.loads(turn.configuration_json).get(
+                "action_timeline_enabled", True
+            ):
+
+                async def record_narration_usage(input_tokens: int, output_tokens: int) -> None:
+                    await asyncio.to_thread(
+                        self.services.project_task_turn_repo.record_usage,
+                        turn.turn_id,
+                        input_tokens,
+                        output_tokens,
+                    )
+
+                progress_agent = TaskProgressAgent(
+                    self.services,
+                    task,
+                    turn.model_ref,
+                    locale,
+                    record_usage=record_narration_usage,
+                )
+                narrator = TaskProgressNarrator(progress_agent.generate, publish_narration)
+                narrator.start()
+                if not any(
+                    b.type == "progress" and b.tool_call_id == "narration:opening"
+                    for b in content.blocks
+                ):
+                    async with output_lock:
+                        content.report_progress(
+                            "narration:opening",
+                            tr("projects.progress_received", locale),
+                            introduction=not any(
+                                b.type == "progress" and b.introduction is True
+                                for b in content.blocks
+                            ),
+                        )
+                        if await save_output():
+                            raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+                    narrator.submit(
+                        ProgressSnapshot(
+                            key="opening", facts={"stage": "received", "goal": turn.prompt[:2000]}
+                        )
+                    )
             context = await asyncio.to_thread(
                 self.services.project_task_turn_repo.context, turn.task_id
             )
@@ -1296,76 +1525,99 @@ class ProjectTaskWorker:
                     ]
                 )
             async for event in run_turn(self.services, task, turn, history):
-                if event["type"] == "token":
-                    reply += event["content"]
-                    content.append(
-                        "text",
-                        event["content"],
-                        event.get("block_key", ""),
-                        plan_id=event.get("plan_id"),
-                        step_id=event.get("step_id"),
-                    )
-                elif event["type"] in {"reasoning", "reasoning_summary"}:
-                    reasoning += event["content"]
-                    content.append(
-                        event["type"],
-                        event["content"],
-                        event.get("block_key", ""),
-                        plan_id=event.get("plan_id"),
-                        step_id=event.get("step_id"),
-                    )
-                elif event["type"] == "message_end":
-                    content.end_text()
-                elif event["type"] == "tool_start":
-                    activity = event["name"]
-                    content.start_tool(
-                        event["call_id"],
-                        activity,
-                        event.get("label"),
-                        plan_id=event.get("plan_id"),
-                        step_id=event.get("step_id"),
-                        arguments=event.get("arguments"),
-                        started_at=event.get("started_at"),
-                        brief=event.get("brief"),
-                    )
-                elif event["type"] == "tool_end":
-                    content.end_tool(
-                        event["call_id"],
-                        failed=event["failed"],
-                        output=event.get("output"),
-                        finished_at=event.get("finished_at"),
-                        duration_ms=event.get("duration_ms"),
-                    )
-                    activity = ""
-                elif event["type"] == "activity":
-                    activity = event["name"]
-                    if activity:
-                        content.start_tool("", activity)
-                    else:
-                        content.end_tool("")
-                elif event["type"] == "pause":
-                    pause = event
-                elif event["type"] == "plan":
-                    content.update_plan(
-                        event["plan"],
-                        call_id=event.get("call_id"),
-                        arguments=event.get("arguments"),
-                    )
-                elif event["type"] == "progress":
-                    content.report_progress(
-                        event["call_id"],
-                        event["content"],
-                        plan_id=event.get("plan_id"),
-                        step_id=event.get("step_id"),
-                        introduction=event.get("introduction"),
-                    )
-                elif event["type"] == "tool_receipt":
-                    content.end_tool(
-                        event["call_id"],
-                        failed=event["failed"],
-                        output=event["output"],
-                        from_receipt=True,
-                    )
+                if event["type"] in {"token", "pause"}:
+                    await stop_narration()
+                async with output_lock:
+                    if event["type"] == "token":
+                        first_answer_token = not reply
+                        reply += event["content"]
+                        content.append(
+                            "text",
+                            event["content"],
+                            event.get("block_key", ""),
+                            plan_id=event.get("plan_id"),
+                            step_id=event.get("step_id"),
+                        )
+                        if first_answer_token and await save_output():
+                            raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+                    elif event["type"] in {"reasoning", "reasoning_summary"}:
+                        reasoning += event["content"]
+                        content.append(
+                            event["type"],
+                            event["content"],
+                            event.get("block_key", ""),
+                            plan_id=event.get("plan_id"),
+                            step_id=event.get("step_id"),
+                        )
+                    elif event["type"] == "message_end":
+                        content.end_text()
+                    elif event["type"] == "tool_start":
+                        activity = event["name"]
+                        content.start_tool(
+                            event["call_id"],
+                            activity,
+                            event.get("label"),
+                            plan_id=event.get("plan_id"),
+                            step_id=event.get("step_id"),
+                            arguments=event.get("arguments"),
+                            started_at=event.get("started_at"),
+                            brief=event.get("brief"),
+                        )
+                        if event.get("started_at") is not None:
+                            if await save_output():
+                                raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+                            narrate_tool(event["call_id"], finished=False)
+                    elif event["type"] == "tool_end":
+                        content.end_tool(
+                            event["call_id"],
+                            failed=event["failed"],
+                            output=event.get("output"),
+                            finished_at=event.get("finished_at"),
+                            duration_ms=event.get("duration_ms"),
+                        )
+                        activity = ""
+                        if await save_output():
+                            raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+                        narrate_tool(event["call_id"], finished=True)
+                    elif event["type"] == "activity":
+                        activity = event["name"]
+                        if activity:
+                            content.start_tool("", activity)
+                        else:
+                            content.end_tool("")
+                    elif event["type"] == "pause":
+                        pause = event
+                    elif event["type"] == "plan":
+                        previous_revision = content.revision
+                        content.update_plan(
+                            event["plan"],
+                            call_id=event.get("call_id"),
+                            arguments=event.get("arguments"),
+                        )
+                        if content.revision != previous_revision:
+                            snapshot = narrate_plan(event["plan"])
+                            if await save_output():
+                                raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+                            if snapshot is not None and narrator is not None:
+                                narrator.submit(snapshot)
+                    elif event["type"] == "progress":
+                        content.report_progress(
+                            event["call_id"],
+                            event["content"],
+                            plan_id=event.get("plan_id"),
+                            step_id=event.get("step_id"),
+                            introduction=event.get("introduction"),
+                        )
+                    elif event["type"] == "tool_receipt":
+                        content.end_tool(
+                            event["call_id"],
+                            failed=event["failed"],
+                            output=event["output"],
+                            from_receipt=True,
+                        )
+                        if await save_output():
+                            raise OctopError.localized(ErrorCode.TASK_INTERRUPTED)
+                        narrate_tool(event["call_id"], finished=True)
             if pause is None and not reply.strip():
                 raise OctopError.localized(ErrorCode.TASK_EXECUTION_FAILED)
         except TaskInterruption as exc:
@@ -1386,6 +1638,7 @@ class ProjectTaskWorker:
             status, error = "failed", "TASK_EXECUTION_FAILED"
             failure = diagnostic("runtime", exc, can_resume=False, reason_code=error)
         finally:
+            await stop_narration()
             _plan_persistence.reset(sink_token)
             _progress_persistence.reset(progress_sink_token)
             beat.cancel()

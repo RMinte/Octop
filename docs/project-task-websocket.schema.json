@@ -3210,6 +3210,34 @@
       "title": "PublishWorkspaceFileArgs",
       "type": "object"
     },
+    "PublishWorkspaceArchiveArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "description": "明确选定的服务端工作目录相对文件路径；不接受目录、通配符或自动扫描。",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Paths",
+          "type": "array"
+        },
+        "name": {
+          "description": "交付 ZIP 文件名，必须以 .zip 结尾，不含目录。",
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "paths",
+        "name"
+      ],
+      "title": "PublishWorkspaceArchiveArgs",
+      "type": "object"
+    },
     "ReadyEvent": {
       "type": "object",
       "properties": {

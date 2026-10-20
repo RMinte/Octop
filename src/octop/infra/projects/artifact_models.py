@@ -60,6 +60,31 @@ class PublishWorkspaceFileArgs(ProjectModel):
         return validate_name(value) if value is not None else None
 
 
+class PublishWorkspaceArchiveArgs(ProjectModel):
+    paths: list[str] = Field(
+        min_length=1,
+        max_length=100,
+        description="明确选定的服务端工作目录相对文件路径；不接受目录、通配符或自动扫描。",
+    )
+    name: ArtifactName = Field(description="交付 ZIP 文件名，必须以 .zip 结尾，不含目录。")
+
+    @field_validator("paths")
+    @classmethod
+    def valid_paths(cls, values: list[str]) -> list[str]:
+        paths = [PublishWorkspaceFileArgs(path=value).path for value in values]
+        if len(paths) != len(set(paths)):
+            raise ValueError("archive paths must be unique")
+        return paths
+
+    @field_validator("name")
+    @classmethod
+    def valid_name(cls, value: str) -> str:
+        value = validate_name(value)
+        if PurePosixPath(value).suffix.lower() != ".zip":
+            raise ValueError("a ZIP filename is required")
+        return value
+
+
 def validate_name(value: str) -> str:
     if (
         not 1 <= len(value) <= 240

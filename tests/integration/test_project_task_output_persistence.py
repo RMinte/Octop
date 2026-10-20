@@ -19,10 +19,13 @@ async def test_failed_heartbeat_still_finalizes_and_preserves_received_output(
     original_progress = repo.progress
 
     def fail_first_progress(*args, **kwargs):
-        progress_calls.append(args[2])
-        if len(progress_calls) == 1:
-            loop.call_soon_threadsafe(heartbeat_failed.set)
-            raise RuntimeError("Injected heartbeat write failure")
+        # The host now persists its opening before entering the model stream.
+        # Inject failure only after the answer has arrived at the heartbeat.
+        if args[2] == reply:
+            progress_calls.append(args[2])
+            if len(progress_calls) == 1:
+                loop.call_soon_threadsafe(heartbeat_failed.set)
+                raise RuntimeError("Injected heartbeat write failure")
         return original_progress(*args, **kwargs)
 
     async def fake_run(services, owner, turn, history):

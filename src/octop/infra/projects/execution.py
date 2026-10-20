@@ -8,12 +8,12 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.tool import ToolCall
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from langgraph.config import get_config, get_stream_writer
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -21,12 +21,16 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from octop.i18n import tr
+from octop.infra.projects.artifacts import SERVER_ARTIFACT_TOOLS
+
+if TYPE_CHECKING:
+    from octop.infra.projects.artifacts import TaskArtifactPublisher
 
 STEP_METADATA = "task_step_id"
 BRIEF_METADATA = "brief"
 BRIEF_LIMIT = 240
 PLANNING_TOOL = "planning"
-_BRIEF_EXEMPT_TOOLS = frozenset({PLANNING_TOOL, "message_notify_user", "ask_user_question"})
+_SERVER_PROJECT_WRITES = frozenset({"write_file", "edit_file", "execute"})
 ToolHandler = Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]]
 
 
@@ -58,9 +62,7 @@ def strip_step_metadata(call: ToolCall, tool: BaseTool | None = None) -> ToolCal
     return {**call, "args": arguments}
 
 
-def _with_step_schema(
-    schema: dict[str, Any], description: str, brief: str | None = None
-) -> dict[str, Any]:
+def _with_step_schema(schema: dict[str, Any], description: str) -> dict[str, Any]:
     copied = deepcopy(schema)
     properties = copied.setdefault("properties", {})
     if STEP_METADATA not in properties:
@@ -68,33 +70,23 @@ def _with_step_schema(
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": description,
         }
-    if brief is not None and BRIEF_METADATA not in properties:
-        properties[BRIEF_METADATA] = {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": BRIEF_LIMIT,
-            "description": brief,
-        }
-        required = copied.setdefault("required", [])
-        if BRIEF_METADATA not in required:
-            required.append(BRIEF_METADATA)
     return copied
 
 
-def _model_tool(
-    tool: BaseTool | dict[str, Any], description: str, brief: str | None = None
-) -> BaseTool | dict[str, Any]:
+def _tool_name(tool: BaseTool | dict[str, Any]) -> str | None:
+    if isinstance(tool, BaseTool):
+        return tool.name
+    function = tool.get("function", tool)
+    name = function.get("name") if isinstance(function, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def _model_tool(tool: BaseTool | dict[str, Any], description: str) -> BaseTool | dict[str, Any]:
     if isinstance(tool, BaseTool):
         if tool.name == PLANNING_TOOL:
             return tool
         return tool.model_copy(
-            update={
-                "args_schema": _with_step_schema(
-                    _tool_schema(tool),
-                    description,
-                    None if tool.name in _BRIEF_EXEMPT_TOOLS else brief,
-                )
-            }
+            update={"args_schema": _with_step_schema(_tool_schema(tool), description)}
         )
     # Preserve provider-native tool dictionaries rather than changing their format.
     copied = deepcopy(tool)
@@ -105,9 +97,7 @@ def _model_tool(
     schema = function.get(schema_key)
     if not isinstance(schema, dict):
         return tool
-    function[schema_key] = _with_step_schema(
-        schema, description, None if function.get("name") in _BRIEF_EXEMPT_TOOLS else brief
-    )
+    function[schema_key] = _with_step_schema(schema, description)
     return copied
 
 
@@ -150,25 +140,41 @@ class TaskExecution(AgentMiddleware[Any, Any]):
         root_turn_id: str,
         *,
         action_timeline_enabled: bool = True,
+        artifact_publisher: TaskArtifactPublisher | None = None,
+        client_directory: str | None = None,
     ) -> None:
         self.planning = planning
         self.locale = locale
         self.root_turn_id = root_turn_id
         self.action_timeline_enabled = action_timeline_enabled
+        self.artifact_publisher = artifact_publisher
+        self.client_directory = client_directory
+        self._wrote_files = False
+        self._missing_delivery = False
         self._started: dict[str, _StartedTool] = {}
-        self._opening_accepted = False
-        self._response_opening: bool | None = None
-        self._introduction_calls: set[str] = set()
 
-    def accept_opening(self) -> None:
-        """The caller must first confirm that this turn's progress is durable."""
-        self._opening_accepted = True
+    def _record_write(self, name: str, arguments: Mapping[str, Any]) -> None:
+        path = arguments.get("file_path", arguments.get("path"))
+        if (
+            name in {"write_file", "edit_file"}
+            and isinstance(path, str)
+            and path.lstrip("/").split("/", 1)[0] not in {".octop", "inbound"}
+        ):
+            self._wrote_files = True
 
-    def restore_model_calls(self, calls: Sequence[ToolCall]) -> None:
-        """An opening in this interrupted batch cannot authorize its sibling work."""
-        self._response_opening = self._opening_accepted and not any(
-            call.get("id") in self._introduction_calls for call in calls
+    async def delivery_pending(self) -> bool:
+        self._missing_delivery = (
+            not self.client_directory
+            and self.artifact_publisher is not None
+            and self._wrote_files
+            and not await self.artifact_publisher.has_artifacts()
         )
+        return self._missing_delivery
+
+    async def require_delivery(self) -> None:
+        """Keep a standalone file-producing task open until a real attachment exists."""
+        if await self.delivery_pending():
+            raise ToolException(tr("projects.artifacts_delivery_required", self.locale))
 
     def _is_root(self) -> bool:
         try:
@@ -188,13 +194,12 @@ class TaskExecution(AgentMiddleware[Any, Any]):
         """Restore only real, unfinished starts; unknown client-tool times stay unknown."""
         for block in blocks:
             if (
-                block.get("type") == "progress"
+                block.get("type") == "tool"
                 and block.get("status") == "completed"
-                and block.get("introduction") is True
+                and block.get("started_at")
+                and isinstance(block.get("arguments"), Mapping)
             ):
-                self.accept_opening()
-                if isinstance(block.get("tool_call_id"), str):
-                    self._introduction_calls.add(block["tool_call_id"])
+                self._record_write(str(block.get("tool_name")), block["arguments"])
             call_id, started_at = block.get("tool_call_id"), block.get("started_at")
             if (
                 block.get("type") != "tool"
@@ -225,30 +230,30 @@ class TaskExecution(AgentMiddleware[Any, Any]):
         if not self.action_timeline_enabled or _business_field(tool, BRIEF_METADATA):
             return None
         value = call["args"].get(BRIEF_METADATA)
-        if value is None and call["name"] in _BRIEF_EXEMPT_TOOLS:
-            return None
         if not isinstance(value, str) or not value.strip() or len(value) > BRIEF_LIMIT:
-            raise ValueError("invalid action brief")
+            return None
         return value.strip()
 
     def rejection(self, call: ToolCall, tool: BaseTool | None = None) -> str | None:
-        if self.planning.phase in {"completed", "blocked"} and call["name"] != PLANNING_TOOL:
+        if rejected := self._client_write_rejection(call["name"]):
+            return rejected
+        if (
+            self.planning.phase in {"completed", "blocked"}
+            and call["name"] != PLANNING_TOOL
+            and not (
+                self.planning.phase == "completed"
+                and self._missing_delivery
+                and call["name"] in SERVER_ARTIFACT_TOOLS
+            )
+        ):
             return tr("projects.planning_work_unavailable", self.locale)
         if not self.action_timeline_enabled and call["name"] == "message_notify_user":
             return tr("projects.progress_disabled", self.locale)
-        exempt = call["name"] in {"message_notify_user", "ask_user_question"} or (
-            call["name"] == PLANNING_TOOL and call["args"].get("command") in ("create", "get")
-        )
-        opening = (
-            self._opening_accepted if self._response_opening is None else self._response_opening
-        )
-        if self.action_timeline_enabled and not opening and not exempt:
-            return tr("projects.progress_opening_required", self.locale)
-        if call["name"] != PLANNING_TOOL:
-            try:
-                self.brief_for_call(call, tool)
-            except ValueError:
-                return tr("projects.task_brief_invalid", self.locale)
+        return None
+
+    def _client_write_rejection(self, name: str) -> str | None:
+        if self.client_directory and name in _SERVER_PROJECT_WRITES:
+            return tr("projects.client_workspace_required", self.locale)
         return None
 
     async def awrap_model_call(
@@ -256,21 +261,81 @@ class TaskExecution(AgentMiddleware[Any, Any]):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
+        if self.client_directory:
+            request = request.override(
+                tools=[
+                    tool for tool in request.tools if _tool_name(tool) not in _SERVER_PROJECT_WRITES
+                ]
+            )
         if not self._is_root():
             return await handler(request)
-        self._response_opening = self._opening_accepted
         plan_id, step_id = self.planning.binding()
-        get_stream_writer()({"type": "task_step_context", "plan_id": plan_id, "step_id": step_id})
-        description = tr("projects.task_step_metadata", self.locale)
-        if self.planning.phase in {"completed", "blocked"}:
-            return await handler(request.override(tools=[], tool_choice=None))
-        brief = (
-            tr("projects.task_brief_metadata", self.locale)
-            if self.action_timeline_enabled
-            else None
+        delivery_only = self.planning.phase == "completed" and await self.delivery_pending()
+        tools_disabled = self.planning.phase in {"completed", "blocked"} and not delivery_only
+        get_stream_writer()(
+            {
+                "type": "task_step_context",
+                "plan_id": plan_id,
+                "step_id": step_id,
+                "tools_disabled": tools_disabled,
+            }
         )
-        tools = [_model_tool(tool, description, brief) for tool in request.tools]
-        return await handler(request.override(tools=tools))
+        description = tr("projects.task_step_metadata", self.locale)
+        if tools_disabled:
+            return await handler(request.override(tools=[], tool_choice=None))
+        tools = [
+            _model_tool(tool, description)
+            for tool in request.tools
+            if _tool_name(tool) != "message_notify_user"
+            and (not delivery_only or _tool_name(tool) in SERVER_ARTIFACT_TOOLS)
+        ]
+        actual = request.override(tools=tools)
+        correction = tr("projects.artifacts_delivery_required", self.locale)
+        if delivery_only:
+            actual = actual.override(
+                messages=[*actual.messages, HumanMessage(content=correction)],
+                tool_choice="required",
+            )
+        response = await handler(actual)
+
+        def has_tools(result: ModelResponse[Any]) -> bool:
+            return any(
+                isinstance(message, AIMessage)
+                and bool(message.tool_calls or message.invalid_tool_calls)
+                for message in result.result
+            )
+
+        if not has_tools(response) and self.planning.phase in {"unplanned", "completed"}:
+            if delivery_only:
+                await self.require_delivery()
+            elif await self.delivery_pending():
+                # The first answer is still buffered by TaskResponseText. Start a new
+                # response so it becomes process text before asking for a real delivery.
+                get_stream_writer()(
+                    {
+                        "type": "task_step_context",
+                        "plan_id": plan_id,
+                        "step_id": step_id,
+                        "tools_disabled": False,
+                    }
+                )
+                response = await handler(
+                    actual.override(
+                        messages=[
+                            *actual.messages,
+                            *[
+                                message
+                                for message in response.result
+                                if isinstance(message, AIMessage)
+                            ],
+                            HumanMessage(content=correction),
+                        ],
+                        tool_choice="required",
+                    )
+                )
+                if not has_tools(response):
+                    await self.require_delivery()
+        return response
 
     def _finish(
         self, call_id: str, started: _StartedTool, message: ToolMessage | None, *, failed: bool
@@ -300,13 +365,18 @@ class TaskExecution(AgentMiddleware[Any, Any]):
         self, request: ToolCallRequest, handler: ToolHandler
     ) -> ToolMessage | Command[Any]:
         call = request.tool_call
-        if not self._is_root():
-            return await handler(request)
-        rejected = self.rejection(call, request.tool)
+        root = self._is_root()
+        rejected = (
+            self.rejection(call, request.tool)
+            if root
+            else self._client_write_rejection(call["name"])
+        )
         if rejected is not None:
             return ToolMessage(
                 content=rejected, name=call["name"], tool_call_id=str(call["id"]), status="error"
             )
+        if not root:
+            return await handler(request)
         if call["name"] == PLANNING_TOOL:
             return await handler(request)
         call_id = str(call["id"])
@@ -321,15 +391,7 @@ class TaskExecution(AgentMiddleware[Any, Any]):
                     tool_call_id=call_id,
                     status="error",
                 )
-            try:
-                brief = self.brief_for_call(call, request.tool)
-            except ValueError:
-                return ToolMessage(
-                    content=tr("projects.task_brief_invalid", self.locale),
-                    name=call["name"],
-                    tool_call_id=call_id,
-                    status="error",
-                )
+            brief = self.brief_for_call(call, request.tool)
             started = _StartedTool(plan_id, step_id, datetime.now(UTC), time.monotonic())
             self._started[call_id] = started
             get_stream_writer()(
@@ -357,6 +419,8 @@ class TaskExecution(AgentMiddleware[Any, Any]):
             self._finish(call_id, started, None, failed=True)
             raise
         message = _tool_message(result, call_id)
+        if message is not None and message.status != "error":
+            self._record_write(call["name"], actual.tool_call["args"])
         self._finish(
             call_id, started, message, failed=message is not None and message.status == "error"
         )

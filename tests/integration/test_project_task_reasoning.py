@@ -35,6 +35,16 @@ def configure_reasoning(server, *, toggle=True, adapter="thinking", default_mode
     )
 
 
+def host_opening(turn):
+    openings = [block for block in turn["content_blocks"] if block["type"] == "progress"]
+    assert len(openings) == 1
+    opening = openings[0]
+    assert opening["tool_call_id"] == "narration:opening"
+    assert opening["introduction"] is True and opening["status"] == "completed"
+    assert opening["text"] and opening["plan_id"] is None and opening["step_id"] is None
+    return opening
+
+
 async def test_real_task_harness_applies_reasoning_settings_and_saves_separate_output(
     env_with_provider, monkeypatch
 ):
@@ -79,8 +89,12 @@ async def test_real_task_harness_applies_reasoning_settings_and_saves_separate_o
     turn = task["turns"][0]
     assert turn["reasoning"] == "模型返回的思考内容"
     assert turn["reply"] == "正式回复"
-    assert [block["type"] for block in turn["content_blocks"]] == ["reasoning", "text"]
-    assert [block["text"] for block in turn["content_blocks"]] == ["模型返回的思考内容", "正式回复"]
+    opening = host_opening(turn)
+    output = [block for block in turn["content_blocks"] if block["type"] in {"reasoning", "text"}]
+    assert [block["type"] for block in output] == ["reasoning", "text"]
+    assert [block["text"] for block in output] == ["模型返回的思考内容", "正式回复"]
+    assert all(block["block_id"] != opening["block_id"] for block in output)
+    assert turn["options"]["action_timeline_enabled"] is True
     assert turn["options"]["reasoning_mode"] == "enabled"
     assert turn["options"]["reasoning_effort"] == "high"
     assert observed == ["high"]
@@ -114,7 +128,11 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
                 ws,
                 "task.create",
                 "reasoning-create",
-                data={"request_id": str(uuid4()), "prompt": "Think"},
+                data={
+                    "request_id": str(uuid4()),
+                    "prompt": "Think",
+                    "options": {"action_timeline_enabled": True},
+                },
             )
         )["data"]
         await ws.send_json(
@@ -130,8 +148,16 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
             lambda f: f["type"] == "turn" and f["data"]["turn"]["reasoning"] == "先核对已有信息。",
         )
         assert live["data"]["turn"]["reply"] == ""
-        first_block = live["data"]["turn"]["content_blocks"][0]
+        opening = host_opening(live["data"]["turn"])
+        first_reasoning = [
+            block
+            for block in live["data"]["turn"]["content_blocks"]
+            if block["type"] == "reasoning"
+        ]
+        assert len(first_reasoning) == 1
+        first_block = first_reasoning[0]
         assert first_block["type"] == "reasoning" and first_block["status"] == "streaming"
+        assert first_block["block_id"] != opening["block_id"]
         first.set()
         longer = await until(
             ws,
@@ -142,7 +168,15 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
         )
         assert longer["data"]["task"]["list_revision"] == live["data"]["task"]["list_revision"]
         assert longer["data"]["cursor"] != live["data"]["cursor"]
-        assert longer["data"]["turn"]["content_blocks"][0]["block_id"] == first_block["block_id"]
+        longer_reasoning = [
+            block
+            for block in longer["data"]["turn"]["content_blocks"]
+            if block["type"] == "reasoning"
+        ]
+        assert len(longer_reasoning) == 1
+        assert longer_reasoning[0]["block_id"] == first_block["block_id"]
+        assert longer_reasoning[0]["text"] == "先核对已有信息。再确认结论。"
+        assert host_opening(longer["data"]["turn"]) == opening
         assert longer["data"]["turn"]["content_revision"] > live["data"]["turn"]["content_revision"]
         cursor = longer["data"]["cursor"]
         if status == "cancelled":
@@ -157,6 +191,16 @@ async def test_reasoning_only_updates_stream_and_survive_terminal_states_and_rec
         assert done["status"] == status, done
         assert done["turns"][0]["reasoning"] == "先核对已有信息。再确认结论。"
         assert done["turns"][0]["reply"] == ("正式答案" if status == "completed" else "")
+        assert host_opening(done["turns"][0]) == opening
+        output = [
+            block
+            for block in done["turns"][0]["content_blocks"]
+            if block["type"] in {"reasoning", "text"}
+        ]
+        assert [block["type"] for block in output] == (
+            ["reasoning", "text"] if status == "completed" else ["reasoning"]
+        )
+        assert output[0]["block_id"] == first_block["block_id"]
         assert all(block["status"] != "streaming" for block in done["turns"][0]["content_blocks"])
     finally:
         first.set()

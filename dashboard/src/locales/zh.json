@@ -1759,6 +1759,7 @@
     "create_artifact": "创建附件",
     "read_task_image": "读取任务图片",
     "publish_workspace_file": "发布工作目录文件",
+    "publish_workspace_archive": "打包并交付文件",
     "send_file_to_user": "发送文件",
     "mobile_screenshot": "手机截图",
     "mobile_tap": "手机点击",
