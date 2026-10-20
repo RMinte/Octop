@@ -17,6 +17,7 @@ ArtifactKind = Literal[
     "video",
     "other",
 ]
+ArtifactBusinessCategory = Literal["document", "presentation", "spreadsheet", "image", "other"]
 
 # Version 1: extensions take precedence over MIME. SQL filters consume this same
 # table, so classification stays identical before and after pagination.
@@ -224,12 +225,32 @@ ARTIFACT_KIND_RULES: tuple[tuple[ArtifactKind, tuple[str, ...], tuple[str, ...]]
     ),
 )
 
+_KIND_EXTENSIONS = {kind: extensions for kind, extensions, _ in ARTIFACT_KIND_RULES}
+ARTIFACT_CATEGORY_RULES: tuple[tuple[ArtifactBusinessCategory, tuple[str, ...]], ...] = (
+    (
+        "document",
+        _KIND_EXTENSIONS["document"] + _KIND_EXTENSIONS["text"] + _KIND_EXTENSIONS["code"],
+    ),
+    ("presentation", _KIND_EXTENSIONS["presentation"]),
+    ("spreadsheet", _KIND_EXTENSIONS["spreadsheet"]),
+    ("image", _KIND_EXTENSIONS["image"]),
+)
+
 _ASCII_LOWER = str.maketrans(ascii_uppercase, ascii_lowercase)
 
 
 def ascii_lower(value: str) -> str:
     """Fold ASCII letters only; preserve every other character literally."""
     return value.translate(_ASCII_LOWER)
+
+
+def artifact_business_category(name: str) -> ArtifactBusinessCategory:
+    """Classify the final publication filename by suffix, without MIME fallback."""
+    lowered_name = ascii_lower(name)
+    for category, extensions in ARTIFACT_CATEGORY_RULES:
+        if lowered_name.endswith(extensions):
+            return category
+    return "other"
 
 
 def artifact_kind(name: str, media_type: str) -> ArtifactKind:

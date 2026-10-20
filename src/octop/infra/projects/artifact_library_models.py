@@ -14,7 +14,9 @@ from octop.infra.utils.artifact_kinds import ArtifactKind, ascii_lower
 LibraryScope = Literal["all", "project", "standalone"]
 LibraryArchive = Literal["all", "active", "archived"]
 LibraryKind = ArtifactKind | Literal["all"]
-LibraryBusinessCategory = Literal["all", "report", "data", "workflow", "uncategorized"]
+LibraryBusinessCategory = Literal[
+    "all", "document", "presentation", "spreadsheet", "image", "other"
+]
 
 
 class ArtifactLibraryQuery(ProjectModel):

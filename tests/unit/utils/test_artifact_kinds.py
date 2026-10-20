@@ -5,7 +5,12 @@ from __future__ import annotations
 import sqlite3
 
 from octop.infra.db.repos.project_task_artifacts import _KIND_PARAMS, _KIND_SQL
-from octop.infra.utils.artifact_kinds import ARTIFACT_KIND_RULES, artifact_kind, ascii_lower
+from octop.infra.utils.artifact_kinds import (
+    ARTIFACT_KIND_RULES,
+    artifact_business_category,
+    artifact_kind,
+    ascii_lower,
+)
 
 
 def test_ascii_case_folding_preserves_non_ascii_characters():
@@ -34,3 +39,18 @@ def test_sql_and_metadata_kind_agree_for_every_extension_and_mime():
                 (*_KIND_PARAMS, name, media_type),
             ).fetchone()[0]
             assert actual == artifact_kind(name, media_type) == expected, (name, media_type)
+
+
+def test_business_categories_merge_text_code_and_documents_and_ignore_mime():
+    for kind, extensions, _ in ARTIFACT_KIND_RULES:
+        expected = (
+            "document"
+            if kind in {"document", "text", "code"}
+            else kind
+            if kind in {"presentation", "spreadsheet", "image"}
+            else "other"
+        )
+        for suffix in extensions:
+            assert artifact_business_category("result" + suffix.upper()) == expected
+    for name in ("README", "report.unknown", "report.pdf.zip", "config.İNI"):
+        assert artifact_business_category(name) == "other"

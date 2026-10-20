@@ -97,11 +97,11 @@ TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy=
 
 条目复用 `TaskArtifact` 的公开字段，补充 `file_kind`、`task_title`、`task_archived`、`turn_status` 及可空的 `project_id/project_name/project_archived`。`GET /api/project-tasks/artifacts/{artifact_id}` 返回相同结构的单份元数据；下载继续使用原 `download_url`。列表和详情不加载文件字节、不依赖模型；归档后仍可读取，发布后轮次失败或取消不移除文件。永久删除任务或项目会删除对应成果。输入附件与未发布工作文件不收录。
 
-列表、详情、任务历史和发布结果均必返回独立的 `business_category`：`report`（报告）、`data`（数据）、`workflow`（流程）或 `uncategorized`（未分类）。资料库列表和详情继续返回按原格式规则计算的 `file_kind`。查询参数 `business_category` 接受这四个值及默认值 `all`；all 包含未分类成果。例如 `GET /api/project-tasks/artifacts?business_category=report&kind=text&q=季度` 按业务用途、格式与文件名求交后分页，来源和归档筛选同样参与交集。
+资料库统一使用六个筛选标签：全部、文本和PDF、幻灯片、表格、图片、其他。列表、详情、任务历史和发布结果的 `business_category` 必返回 `document`（文本和PDF）、`presentation`（幻灯片）、`spreadsheet`（表格）、`image`（图片）或 `other`（其他）。查询参数 `business_category` 接受这五个值及默认值 `all`（全部）。资料库列表和详情继续返回原格式字段 `file_kind`，原 `kind` 筛选保持可用。例如 `GET /api/project-tasks/artifacts?business_category=document&kind=text&q=季度` 按资料分类、详细格式与文件名求交后分页，来源和归档筛选同样参与交集。
 
-分类由 `create_artifact`、`publish_workspace_file`、`publish_workspace_archive` 发布时的可选同名参数显式声明，省略时未分类；不按扩展名或 MIME 推断。schema 48 为历史成果增加默认未分类列，保留原内容、ID、发布时间及调用摘要；历史成果仍在“全部”和“未分类”中可见。`all` 仅用于查询，不是发布或返回值；非法分类返回请求校验错误。省略或显式未分类保持旧发布幂等摘要，明确分类参与摘要，同一调用改分类会冲突。
+主分类由服务端按最终发布文件名后缀自动保存，忽略 ASCII 大小写，不使用 MIME 补充：文档、纯文本和代码配置文件归入文本和PDF；演示文稿、表格及图片各自归类；压缩包、音视频、未知后缀和无后缀文件归入其他。`create_artifact`、`publish_workspace_file`、`publish_workspace_archive` 不再接受 `business_category` 参数；重命名发布时以最终 `name` 分类，ZIP 按 ZIP 本身归入其他。schema 49 将所有已有成果按同一后缀规则回填，保留原内容、ID、发布时间及发布调用摘要。`all` 仅用于查询，不是存储或返回值；旧报告、数据、流程和未分类枚举不再接受。
 
-分页游标绑定账号、实例及全部筛选（包括 `business_category`），改变筛选、篡改或复用其他用途游标返回 `409 PROJECT_SYNC_RESET`；业务分类契约上线前的旧游标同样重置，客户端重新读取首页。查询不是跨请求快照，新增成果通过刷新首页获取。卡片摘要继续由客户端下载小型文本后提取，服务端摘要字段后续补充；PostgreSQL 实库及查询计划仍待验证。完整参数、分类、权限和生命周期见[资料库技术说明](project-task-artifact-library.md)。
+分页游标使用 `artifact-library-v3` 用途并绑定账号、实例及全部筛选（包括 `business_category`），改变筛选、篡改或复用其他用途游标返回 `409 PROJECT_SYNC_RESET`；v1/v2 的旧游标同样重置，客户端重新读取首页。查询不是跨请求快照，新增成果通过刷新首页获取。卡片摘要继续由客户端下载小型文本后提取，服务端摘要字段后续补充；PostgreSQL 实库及查询计划仍待验证。完整参数、分类、权限和生命周期见[资料库技术说明](project-task-artifact-library.md)。
 
 ### 项目同步和任务列表分页
 

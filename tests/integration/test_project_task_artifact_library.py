@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from uuid import uuid4
 
@@ -10,6 +11,9 @@ import pytest
 
 from octop.infra.db.repos.project_task_artifacts import ProjectTaskArtifactRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
+from octop.infra.projects.artifact_library_models import ArtifactLibraryQuery
+from octop.infra.projects.cursors import cursor_codec
+from octop.infra.utils.artifact_kinds import artifact_business_category
 from tests.support.auth import create_user, resolve_user_id
 
 BASE = "/api/project-tasks/artifacts"
@@ -60,7 +64,6 @@ def seed_artifact(
     created_at=2000,
     media_type="application/octet-stream",
     content=b"immutable original",
-    business_category="uncategorized",
 ):
     with services.db.transaction() as conn:
         services.project_task_artifact_repo.insert(
@@ -77,7 +80,7 @@ def seed_artifact(
                 hashlib.sha256(content).hexdigest(),
                 f"output/{name}",
                 created_at,
-                business_category=business_category,
+                business_category=artifact_business_category(name),
             ),
             content,
         )
@@ -205,7 +208,7 @@ async def test_library_filters_before_paging_and_searches_literal_names(library_
     for changed in (
         {"q": "different"},
         {"kind": "all"},
-        {"business_category": "report"},
+        {"business_category": "document"},
         {"archived": "all"},
         {"scope": "standalone"},
         {"task_id": "active_task"},
@@ -256,44 +259,35 @@ async def test_library_kind_filters_use_extension_then_mime_fallback(library_env
         assert filtered.json()["next_page_cursor"] is None
 
 
-async def test_business_categories_are_explicit_and_independent_of_file_kind(library_env):
+async def test_business_categories_follow_name_suffix_without_mime_fallback(library_env):
     client, services, auth, owner = library_env
     seed_task(services, owner, "categories_task")
-    for artifact_id, name, category in (
-        ("report_markdown", "report.md", "report"),
-        ("data_markdown", "data.md", "data"),
-        ("workflow_markdown", "workflow.md", "workflow"),
-        ("report_csv", "report.csv", "report"),
-        ("unclassified_pdf", "report.pdf", "uncategorized"),
-    ):
-        seed_artifact(
-            services, "categories_task", artifact_id, name=name, business_category=category
-        )
+    examples = (
+        ("document", "报告.PDF", "image/png", "document", "document"),
+        ("text", "notes.MD", "application/pdf", "document", "text"),
+        ("code", "script.PY", "image/png", "document", "code"),
+        ("slides", "slides.PPTX", "application/pdf", "presentation", "presentation"),
+        ("table", "table.CSV", "application/pdf", "spreadsheet", "spreadsheet"),
+        ("image", "picture.PNG", "application/pdf", "image", "image"),
+        ("archive", "report.pdf.ZIP", "application/pdf", "other", "archive"),
+        ("mime_only", "report.unknown", "application/pdf", "other", "document"),
+        ("no_suffix", "README", "text/plain", "other", "text"),
+        ("non_ascii", "config.İNI", "text/plain", "other", "text"),
+    )
+    for artifact_id, name, media_type, _, _ in examples:
+        seed_artifact(services, "categories_task", artifact_id, name=name, media_type=media_type)
     listed = await client.get(BASE, headers=auth)
     assert listed.status_code == 200, listed.text
     by_id = {item["artifact_id"]: item for item in listed.json()["items"]}
-    assert set(by_id) == {
-        "report_markdown",
-        "data_markdown",
-        "workflow_markdown",
-        "report_csv",
-        "unclassified_pdf",
-    }
-    assert {
-        by_id[name]["file_kind"]
-        for name in ("report_markdown", "data_markdown", "workflow_markdown")
-    } == {"text"}
-    assert by_id["report_csv"]["file_kind"] == "spreadsheet"
-    assert by_id["unclassified_pdf"]["business_category"] == "uncategorized"
+    assert set(by_id) == {example[0] for example in examples}
+    for artifact_id, _, _, category, kind in examples:
+        assert by_id[artifact_id]["business_category"] == category
+        assert by_id[artifact_id]["file_kind"] == kind
     assert (await client.get(BASE, headers=auth, params={"business_category": "all"})).json() == (
         listed.json()
     )
-    for category, expected in (
-        ("report", {"report_markdown", "report_csv"}),
-        ("data", {"data_markdown"}),
-        ("workflow", {"workflow_markdown"}),
-        ("uncategorized", {"unclassified_pdf"}),
-    ):
+    for category in ("document", "presentation", "spreadsheet", "image", "other"):
+        expected = {item[0] for item in examples if item[3] == category}
         filtered = await client.get(BASE, headers=auth, params={"business_category": category})
         assert filtered.status_code == 200, filtered.text
         assert {item["artifact_id"] for item in filtered.json()["items"]} == expected
@@ -311,26 +305,25 @@ async def test_business_category_intersects_search_source_and_state_before_pagin
     seed_task(services, owner, "category_other", project_id=other_project["project_id"])
     seed_task(services, owner, "category_standalone")
     seed_task(services, owner, "category_archived", project_id=project["project_id"], archived=True)
-    for task_id, artifact_id, name, category, created_at in (
-        ("category_project", "matching_old", "quarter-old.md", "report", 1000),
-        ("category_project", "matching_new", "QUARTER-new.md", "report", 2000),
-        ("category_project", "wrong_category", "quarter-data.md", "data", 3000),
-        ("category_project", "wrong_name", "annual.md", "report", 4000),
-        ("category_project", "wrong_format", "quarter.csv", "report", 5000),
-        ("category_other", "wrong_project", "quarter.md", "report", 6000),
-        ("category_standalone", "wrong_scope", "quarter.md", "report", 7000),
-        ("category_archived", "wrong_state", "quarter.md", "report", 8000),
+    for task_id, artifact_id, name, created_at in (
+        ("category_project", "matching_old", "quarter-old.md", 1000),
+        ("category_project", "matching_new", "QUARTER-new.md", 2000),
+        ("category_project", "wrong_category", "quarter-data.csv", 3000),
+        ("category_project", "wrong_name", "annual.md", 4000),
+        ("category_project", "wrong_format", "quarter.pdf", 5000),
+        ("category_other", "wrong_project", "quarter.md", 6000),
+        ("category_standalone", "wrong_scope", "quarter.md", 7000),
+        ("category_archived", "wrong_state", "quarter.md", 8000),
     ):
         seed_artifact(
             services,
             task_id,
             artifact_id,
             name=name,
-            business_category=category,
             created_at=created_at,
         )
     filters = {
-        "business_category": "report",
+        "business_category": "document",
         "q": "quarter",
         "kind": "text",
         "scope": "project",
@@ -347,7 +340,7 @@ async def test_business_category_intersects_search_source_and_state_before_pagin
     assert second.status_code == 200, second.text
     assert [item["artifact_id"] for item in second.json()["items"]] == ["matching_old"]
     assert second.json()["next_page_cursor"] is None
-    for category in ("data", "all", "uncategorized"):
+    for category in ("spreadsheet", "all", "other"):
         rejected = await client.get(
             BASE,
             headers=auth,
@@ -362,7 +355,7 @@ async def test_business_category_intersects_search_source_and_state_before_pagin
         result = await client.get(
             BASE,
             headers=auth,
-            params={"business_category": "data", "q": "quarter", **source},
+            params={"business_category": "spreadsheet", "q": "quarter", **source},
         )
         assert [item["artifact_id"] for item in result.json()["items"]] == ["wrong_category"]
 
@@ -374,9 +367,9 @@ async def test_library_owner_isolation_and_untrusted_cursors(library_env):
     alice_project = await create_project(client, alice, "Alice private project")
     seed_task(services, owner, "admin_task")
     seed_task(services, alice_owner, "alice_task", project_id=alice_project["project_id"])
-    seed_artifact(services, "admin_task", "admin_a", business_category="report")
-    seed_artifact(services, "admin_task", "admin_b", business_category="report")
-    seed_artifact(services, "alice_task", "alice_a", business_category="report")
+    seed_artifact(services, "admin_task", "admin_a")
+    seed_artifact(services, "admin_task", "admin_b")
+    seed_artifact(services, "alice_task", "alice_a")
     assert (await client.get(BASE)).status_code == 401
     assert (await client.get(f"{BASE}/admin_a")).status_code == 401
     assert [
@@ -385,10 +378,10 @@ async def test_library_owner_isolation_and_untrusted_cursors(library_env):
     assert [
         item["artifact_id"] for item in (await client.get(BASE, headers=alice)).json()["items"]
     ] == ["alice_a"]
-    categorized = await client.get(BASE, headers=auth, params={"business_category": "report"})
+    categorized = await client.get(BASE, headers=auth, params={"business_category": "document"})
     assert [item["artifact_id"] for item in categorized.json()["items"]] == ["admin_b", "admin_a"]
     alice_categorized = await client.get(
-        BASE, headers=alice, params={"business_category": "report"}
+        BASE, headers=alice, params={"business_category": "document"}
     )
     assert [item["artifact_id"] for item in alice_categorized.json()["items"]] == ["alice_a"]
     for params in (
@@ -407,6 +400,20 @@ async def test_library_owner_isolation_and_untrusted_cursors(library_env):
         assert rejected.json()["error"]["code"] == "PROJECT_SYNC_RESET"
 
 
+async def test_library_rejects_cursors_from_previous_category_contract(library_env):
+    client, services, auth, owner = library_env
+    filters = ArtifactLibraryQuery().model_dump(exclude={"limit", "page_cursor"})
+    fingerprint = hashlib.sha256(
+        json.dumps(filters, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+    cursor = cursor_codec(services, owner, f"artifact-library-v2:{fingerprint}").encode(
+        "history", updated_at=2000, after="old-artifact"
+    )
+    rejected = await client.get(BASE, headers=auth, params={"page_cursor": cursor})
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "PROJECT_SYNC_RESET"
+
+
 @pytest.mark.parametrize(
     "params",
     [
@@ -415,7 +422,10 @@ async def test_library_owner_isolation_and_untrusted_cursors(library_env):
         {"project_id": "anything"},
         {"scope": "standalone", "project_id": "anything"},
         {"kind": "unknown"},
-        {"business_category": "document"},
+        {"business_category": "report"},
+        {"business_category": "data"},
+        {"business_category": "workflow"},
+        {"business_category": "uncategorized"},
         {"business_category": "reports"},
         {"business_category": ""},
         {"archived": "unknown"},
@@ -474,10 +484,11 @@ async def test_library_routes_have_readable_openapi_models(env):
     } <= item["properties"].keys()
     assert "business_category" in item["required"]
     assert set(item["properties"]["business_category"]["enum"]) == {
-        "report",
-        "data",
-        "workflow",
-        "uncategorized",
+        "document",
+        "presentation",
+        "spreadsheet",
+        "image",
+        "other",
     }
     parameter = next(
         item
@@ -488,10 +499,11 @@ async def test_library_routes_have_readable_openapi_models(env):
     assert parameter["schema"]["default"] == "all"
     assert set(parameter["schema"]["enum"]) == {
         "all",
-        "report",
-        "data",
-        "workflow",
-        "uncategorized",
+        "document",
+        "presentation",
+        "spreadsheet",
+        "image",
+        "other",
     }
     assert "content" not in item["properties"]
 

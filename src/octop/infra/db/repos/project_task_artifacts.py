@@ -7,7 +7,11 @@ from string import ascii_lowercase, ascii_uppercase
 from typing import Any
 
 from octop.infra.db.repos._base import DbRow, strict_int
-from octop.infra.utils.artifact_kinds import ARTIFACT_KIND_RULES, ascii_lower
+from octop.infra.utils.artifact_kinds import (
+    ARTIFACT_KIND_RULES,
+    artifact_business_category,
+    ascii_lower,
+)
 
 _COLUMNS = (
     "artifact_id,task_id,turn_id,tool_call_id,request_hash,name,media_type,byte_count,"
@@ -70,7 +74,7 @@ class ProjectTaskArtifactRow:
     sha256: str
     source_path: str | None
     created_at: int
-    business_category: str = "uncategorized"
+    business_category: str = "other"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskArtifactRow:
@@ -234,7 +238,7 @@ class ProjectTaskArtifactRepo:
                 row.sha256,
                 row.source_path,
                 row.created_at,
-                row.business_category,
+                artifact_business_category(row.name),
                 content,
             ),
         )

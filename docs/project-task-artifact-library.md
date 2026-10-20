@@ -22,7 +22,7 @@
 | `name` / `media_type`           | 发布文件名和记录的 MIME 类型                                 |
 | `byte_count` / `sha256`         | 文件长度及完整性校验摘要                                     |
 | `source_path`                   | 可选的服务端工作区相对来源路径                               |
-| `business_category`             | 发布方显式声明的业务分类；历史及未声明成果为 `uncategorized` |
+| `business_category`             | 服务端按最终发布文件名后缀计算并保存的资料分类               |
 | `content`                       | 发布时保存的不可变原始字节                                   |
 | `created_at`                    | 发布时间，数据库内为 UTC 毫秒时间戳                          |
 
@@ -93,7 +93,7 @@ Accept-Language: zh-CN
 | `project_id`        | `scope=project` 时必填；其他 scope 携带此参数返回 422                              |
 | `task_id`           | 可选，限定某个任务；与其他筛选条件求交                                             |
 | `kind`              | `all` 或下文定义的文件类型，默认 `all`                                             |
-| `business_category` | `all`、`report`、`data`、`workflow` 或 `uncategorized`，默认 `all`，与其他条件求交 |
+| `business_category` | `all`、`document`、`presentation`、`spreadsheet`、`image` 或 `other`，默认 `all`，与其他条件求交 |
 | `archived`          | `all`、`active` 或 `archived`，默认 `all`                                          |
 | `q`                 | 文件名的字面子串，最多 200 个字符；去除首尾空白，空串等同省略                      |
 | `limit`             | 默认 50，范围 1–100                                                                |
@@ -103,7 +103,7 @@ Accept-Language: zh-CN
 
 ```http
 GET /api/project-tasks/artifacts?scope=project&project_id=project_example&kind=document&q=报告
-GET /api/project-tasks/artifacts?scope=project&project_id=project_example&business_category=report&q=季度
+GET /api/project-tasks/artifacts?scope=project&project_id=project_example&business_category=document&q=季度
 GET /api/project-tasks/artifacts?scope=standalone&archived=active
 GET /api/project-tasks/artifacts?task_id=task_example
 ```
@@ -129,7 +129,7 @@ GET /api/project-tasks/artifacts?task_id=task_example
       "download_url": "/api/project-tasks/task_example/artifacts/artifact_example/download",
       "created_at": "2026-10-20T02:00:00Z",
       "file_kind": "document",
-      "business_category": "report",
+      "business_category": "document",
       "task_title": "生成季度分析报告",
       "task_archived": false,
       "turn_status": "completed",
@@ -155,29 +155,30 @@ GET /api/project-tasks/artifacts?task_id=task_example
 
 `next_page_cursor=null` 表示当前筛选下已无后续记录；空列表也返回此结构。第一版不返回精确总数或分类统计，避免每次翻页都执行全量计数。
 
-### 业务分类
+### 资料分类
 
-`business_category` 按成果用途独立保存，文件格式 `file_kind` 沿用原有计算规则，两者分别筛选。每份成果只有一个业务分类，列表条目和单份详情均必返回非空的小写枚举值。
+界面统一展示全部、文本和PDF、幻灯片、表格、图片、其他六个筛选。沿用 `business_category` 字段和查询参数名称，字段含义改为按文件后缀自动归类。每份成果只有一个资料分类，列表条目、单份详情、任务历史和发布结果均必返回非空的小写枚举值。
 
-| 界面标签 | 返回值和筛选值        | 含义                               |
-| -------- | --------------------- | ---------------------------------- |
-| 报告     | `report`              | 报告、分析结论等成果               |
-| 数据     | `data`                | 数据集、数据导出等成果             |
-| 流程     | `workflow`            | 可复用的操作流程、自动化流程等成果 |
-| 未分类   | `uncategorized`       | 未明确声明用途的成果及历史成果     |
-| 全部     | `all`，仅筛选参数可用 | 包含上述全部业务分类，包括未分类   |
+| 界面标签 | 返回值和筛选值        | 后缀规则 |
+| -------- | --------------------- | -------- |
+| 全部     | `all`，仅筛选参数可用 | 包含所有五个类别 |
+| 文本和PDF | `document`           | 文档 `.pdf/.doc/.docx/.odt/.rtf/.pages`，纯文本 `.txt/.md/.markdown/.log/.rst/.adoc`，以及下文 `code` 的代码和配置后缀 |
+| 幻灯片   | `presentation`        | `.ppt/.pptx/.odp/.key` |
+| 表格     | `spreadsheet`         | `.csv/.tsv/.xls/.xlsx/.ods/.numbers` |
+| 图片     | `image`               | `.png/.jpg/.jpeg/.gif/.webp/.svg/.heic/.heif/.avif/.bmp/.ico/.tif/.tiff` |
+| 其他     | `other`               | 其余文件，包括压缩包、音视频、未知后缀及无后缀文件 |
 
-分类由三个服务端发布工具 `create_artifact`、`publish_workspace_file`、`publish_workspace_archive` 的可选 `business_category` 参数声明。发布方根据任务目标和实际用途填写，省略时保存为 `uncategorized`；`null`、空串、`all` 或格式名称如 `document` 都不是合法发布值。ZIP 包按整个成果包的用途声明。
+三个服务端发布工具 `create_artifact`、`publish_workspace_file`、`publish_workspace_archive` 不再接受 `business_category` 输入。服务端以最终发布的 `name` 按固定后缀映射计算分类，忽略 ASCII 大小写，不使用 MIME、正文或成果用途补充判断。重命名发布以新的显示文件名为准，例如将 `source.txt` 发布为 `结果.csv` 时归入表格；ZIP 按 ZIP 本身归入其他，不根据压缩包内文件推断。
 
-例如，流程说明 PDF 可以是 `file_kind=document`、`business_category=workflow`，Markdown 报告可以是 `file_kind=text`、`business_category=report`。服务端不根据扩展名、MIME、名称或正文推断业务分类。分类随发布快照固定，本次不新增修改历史成果分类的接口。
+例如，PDF 与 Markdown 均为 `business_category=document`，但详细格式分别保留为 `file_kind=document` 和 `file_kind=text`。无后缀文件即使记录的 MIME 是 `application/pdf`，主分类仍为 `other`。完整后缀集合来自固定映射中的 document/text/code、presentation、spreadsheet、image 分组，详见 `infra/utils/artifact_kinds.py`。
 
-schema 48 将已有成果的新增字段设为 `uncategorized`，保留文件字节、公开 ID、发布时间及发布调用摘要。历史文件仍在默认“全部”和显式“未分类”中可见。发布参数省略或显式指定未分类不改变原幂等摘要；明确分类参与摘要，同一工具调用更改分类返回 `TASK_ARTIFACT_CONFLICT`。
+schema 49 对所有已有成果按最终文件名的相同后缀规则全量回填，替换原报告、数据、流程和未分类值。保留文件字节、公开 ID、发布时间及原发布调用摘要；当前和历史文件始终在默认“全部”中可见，无法识别后缀的文件在“其他”中可见。无需重新发布或读取文件内容，不新增修改分类接口。`all` 仅用于查询，不作为存储或返回值；旧 `report/data/workflow/uncategorized` 查询值不再接受。
 
-业务分类与搜索、来源、文件类型和归档状态全部求交，SQL 应用所有条件后才执行分页。例如 `business_category=report&kind=text&q=季度` 只返回文件名匹配的文本报告，不在已取出的一页结果上过滤。
+资料分类与搜索、来源、详细格式和归档状态全部求交，SQL 应用所有条件后才执行分页。例如 `business_category=document&kind=text&q=季度` 只返回文件名匹配的纯文本成果，不在已取出的一页结果上过滤。
 
 ### 文件类型和搜索
 
-`file_kind` 保留原格式枚举和固定映射；“报告／数据／流程”使用独立的 `business_category`，不能将两者互相替代。
+`file_kind` 和 `kind` 保留原详细格式枚举和固定映射。`business_category` 是上述五类资料分组，其中 `document` 合并详细格式中的 document/text/code；两种筛选分别保留并求交。
 
 | 分类           | 典型扩展名                                                                                            |
 | -------------- | ----------------------------------------------------------------------------------------------------- |
@@ -202,11 +203,11 @@ schema 48 将已有成果的新增字段设为 `uncategorized`，保留文件字
 
 固定按 `created_at DESC, artifact_id DESC` 排序，下一页严格查询小于上页最后一条的二元位置。发布时间相同的文件由唯一 `artifact_id` 确定顺序。取 `limit + 1` 条判断是否还有下一页，不使用 offset。
 
-复用现有 `CursorCodec` 的签名能力及 `history` 编码格式，以发布时间和成果 ID 保存位置；使用独立 scope `artifact-library-v2:<filter_hash>`。规范化后的 `scope/project_id/task_id/kind/business_category/archived/q` 全部进入筛选指纹；`limit` 可在翻页时调整。账号、实例和恢复纪元由现有 codec 绑定，客户端不得解析或修改游标。
+复用现有 `CursorCodec` 的签名能力及 `history` 编码格式，以发布时间和成果 ID 保存位置；使用独立 scope `artifact-library-v3:<filter_hash>`。规范化后的 `scope/project_id/task_id/kind/business_category/archived/q` 全部进入筛选指纹；`limit` 可在翻页时调整。账号、实例和恢复纪元由现有 codec 绑定，客户端不得解析或修改游标。
 
 篡改游标、切换账号或筛选后复用游标、跨实例使用时，沿用 `409 PROJECT_SYNC_RESET`，客户端清空该筛选列表并重新读取首页。合法的其他参数错误仍返回 422。
 
-业务分类契约上线后，旧版本分页游标也返回上述重置错误。客户端升级或切换业务分类时重新读取首页，不沿用旧筛选的游标。
+后缀分类契约上线后，v1/v2 旧版本分页游标也返回上述重置错误。客户端升级或切换资料分类时重新读取首页，不沿用旧筛选的游标。
 
 分页不维持跨请求数据库快照。每页查询时权限、删除和归档筛选实时生效；名称取当前值。新增成果通过刷新首页获取，客户端按 `artifact_id` 合并去重。第一版不承诺实时全局增量同步，也不把成果游标混入已有任务列表同步游标。
 
@@ -254,7 +255,7 @@ JOIN project_tasks t ON t.task_id = a.task_id
 JOIN project_task_turns r ON r.turn_id = a.turn_id AND r.task_id = t.task_id
 LEFT JOIN projects p ON p.project_id = t.project_id AND p.owner_id = t.owner_id
 WHERE t.owner_id = :current_owner_id
--- 按规范化参数追加 scope、归档、文件名、格式及业务分类条件。
+-- 按规范化参数追加 scope、归档、文件名、详细格式及资料分类条件。
 -- 后续页追加 (a.created_at, a.artifact_id) < (:last_created_at, :last_artifact_id)。
 ORDER BY a.created_at DESC, a.artifact_id DESC
 LIMIT :limit_plus_one;
@@ -279,7 +280,7 @@ SQLite 的代表性多账号查询计划已检查：跨任务及项目筛选从�
 
 schema 47 不增加业务表、不复制 BLOB、不重新发布历史成果。`047_task_artifact_library.sql` 与 `.pg.sql` 为已应用 v46 的数据库补齐索引，保留原成果记录和字节。
 
-业务分类追加 `048_task_artifact_business_category.sql` 与 `.pg.sql`，新增带四值约束、非空且默认未分类的列。当前 schema 为 48，已应用 v47 的数据库可升级；幂等修复覆盖记录水位为 48 或更高但物理列缺失的场景。本次未新增分类索引，PostgreSQL 实库及分类查询计划仍待验证。
+schema 48 的 `048_task_artifact_business_category.sql` 与 `.pg.sql` 已为成果增加分类列。该版本已在本地服务实际应用，因此本次追加 `049_task_artifact_suffix_categories.sql` 与 `.pg.sql`，将列约束改为 `document/presentation/spreadsheet/image/other` 五值、非空且默认 `other`，并按文件名后缀全量回填已有成果。当前 schema 为 49，保留成果原内容、公开 ID、发布时间、外键、索引和调用摘要。本次未新增分类索引，PostgreSQL 实库及分类查询计划仍待验证。
 
 ### 分层和路由注册
 
@@ -300,7 +301,7 @@ schema 47 不增加业务表、不复制 BLOB、不重新发布历史成果。`0
 
 ## 客户端对接和生命周期
 
-资料库客户端已完成分页、文件名搜索、详情、鉴权下载和完整性校验的联调。本次补充业务分类字段及筛选参数，供客户端启用“报告／数据／流程”筛选；本轮不修改 Swift 或 UI。
+资料库客户端已完成分页、文件名搜索、详情、鉴权下载和完整性校验的联调。本次服务端分类契约改为“全部／文本和PDF／幻灯片／表格／图片／其他”，沿用 `business_category` 字段和查询参数，供客户端同步筛选标签和枚举；本轮不修改 Swift 或 UI。
 
 客户端继续直接调用成果列表，不先拉取全部任务和所有历史轮次。用 `artifact_id` 作为服务端条目标识；它是不透明字符串，不能按客户端本地 UUID 模型强制解析。客户端缓存属于本机展示数据，不承担服务端文件权威存储职责。
 
@@ -334,16 +335,16 @@ schema 47 不增加业务表、不复制 BLOB、不重新发布历史成果。`0
 | 状态与生命周期 | 覆盖运行中发布、后续失败或取消、项目及任务分别归档、删除任务和删除项目                                                            |
 | 分页           | 相同发布时间不重不漏；支持翻到末页；中途删除可继续；筛选、账号或游标用途不匹配返回重置错误                                        |
 | 搜索与分类     | 中文、ASCII 大小写、字面 `%` 和 `_`、无扩展名、未知 MIME、扩展名与 MIME 冲突均有用例；跨数据库语义按契约实现，PostgreSQL 实库待验 |
-| 业务分类       | 四个分类与全部、分类独立于格式、与搜索和来源求交、筛选先于分页、游标重置、历史未分类保留、三工具透传及原发布摘要保持              |
+| 资料分类       | 五个分类与全部、后缀忽略大小写、发布改名、无 MIME 补充、未知及无后缀归其他、与搜索和来源求交、筛选先于分页、v1/v2 游标重置、历史按后缀回填及原发布摘要保持 |
 | 下载与预览     | 中文名称、完整性校验、已删除文件和原工作区已变更均符合原下载契约                                                                  |
 | 数据库成本     | 列表与详情不选取 BLOB，不按条目发起额外来源查询；核对多账号数据下查询计划                                                         |
 | HTTP 和文档    | `/artifacts` 不被当成任务 ID；OpenAPI 展示参数、分页响应和错误；旧历史及下载契约保持可用                                          |
 
-对应测试位于 `tests/integration/test_project_task_artifact_library.py`、`tests/integration/test_project_task_artifacts.py`、`tests/unit/utils/test_artifact_kinds.py` 及数据库迁移用例。现有发布、下载、OpenAPI 和 WebSocket schema 同步验证；中英文发布指引说明分类用途与来源，未新增错误码。PostgreSQL 尚未进行实库验收。
+对应测试位于 `tests/integration/test_project_task_artifact_library.py`、`tests/integration/test_project_task_artifacts.py`、`tests/unit/utils/test_artifact_kinds.py` 及数据库迁移用例。现有发布、下载、OpenAPI 和 WebSocket schema 同步验证；中英文发布指引说明按后缀自动分类，未新增错误码。PostgreSQL 尚未进行实库验收。
 
 ## 现状核对依据
 
-初版文件关联核对基于 `feature/agentcomputer-foundation` 的 `3694b9bf`；资料库接口于 `81316abd` 实现，本次业务分类以最新主目录提交 `af6522f2` 为基线补充。客户端接入状态依据本次联调结论。
+初版文件关联核对基于 `feature/agentcomputer-foundation` 的 `3694b9bf`；资料库接口于 `81316abd` 实现，后缀分类以最新主目录提交 `c9c218f9` 为基线调整。客户端接入状态依据此前联调结论。
 
 | 事实                     | 代码位置                                                              |
 | ------------------------ | --------------------------------------------------------------------- |

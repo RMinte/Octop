@@ -51,7 +51,7 @@ def page(
     fingerprint = hashlib.sha256(
         json.dumps(filters, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
-    codec = cursor_codec(services, owner_id, f"artifact-library-v2:{fingerprint}")
+    codec = cursor_codec(services, owner_id, f"artifact-library-v3:{fingerprint}")
     cursor = codec.decode(query.page_cursor, "history") if query.page_cursor is not None else None
     boundary = (cursor.updated_at, cursor.after) if cursor else None
     with services.db.read_snapshot() as conn:

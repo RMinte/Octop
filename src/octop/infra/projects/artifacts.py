@@ -24,11 +24,14 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.artifact_models import (
-    ArtifactBusinessCategory,
     CreateArtifactArgs,
     PublishWorkspaceArchiveArgs,
     PublishWorkspaceFileArgs,
     TaskArtifact,
+)
+from octop.infra.utils.artifact_kinds import (
+    ArtifactBusinessCategory,
+    artifact_business_category,
 )
 from octop.infra.utils.ulid import new_ulid
 
@@ -179,7 +182,6 @@ class TaskArtifactPublisher:
         media_type: str,
         content: bytes,
         source_path: str | None,
-        business_category: ArtifactBusinessCategory = "uncategorized",
     ) -> TaskArtifact:
         if len(content) > MAX_ARTIFACT_BYTES:
             raise OctopError.localized(ErrorCode.TASK_ARTIFACT_LIMIT)
@@ -202,7 +204,7 @@ class TaskArtifactPublisher:
                 hashlib.sha256(content).hexdigest(),
                 source_path,
                 int(time.time() * 1000),
-                business_category,
+                artifact_business_category(name),
             )
             self.services.project_task_artifact_repo.insert(conn, row, content)
         return view(row)
@@ -213,9 +215,6 @@ class TaskArtifactPublisher:
         arguments: CreateArtifactArgs | PublishWorkspaceFileArgs | PublishWorkspaceArchiveArgs,
     ) -> str:
         fields = arguments.model_dump()
-        if fields["business_category"] == "uncategorized":
-            # The default carries no additional intent; keep existing publication receipts valid.
-            fields.pop("business_category")
         encoded = json.dumps([tool_name, fields], sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(encoded.encode()).hexdigest()
 
@@ -234,7 +233,6 @@ class TaskArtifactPublisher:
             arguments.media_type or mimetypes.guess_type(arguments.name)[0] or "text/plain",
             arguments.content.encode("utf-8"),
             None,
-            arguments.business_category,
         )
 
     def _source_bytes(self, relative_path: str) -> bytes:
@@ -294,7 +292,6 @@ class TaskArtifactPublisher:
             mimetypes.guess_type(name)[0] or "application/octet-stream",
             content,
             arguments.path,
-            arguments.business_category,
         )
 
     def _archive_bytes(self, paths: list[str]) -> bytes:
@@ -327,7 +324,6 @@ class TaskArtifactPublisher:
             "application/zip",
             content,
             None,
-            arguments.business_category,
         )
 
     async def has_artifacts(self) -> bool:
@@ -360,7 +356,6 @@ class TaskArtifactPublisher:
             content: str,
             call_id: Annotated[str, InjectedToolCallId],
             media_type: str | None = None,
-            business_category: ArtifactBusinessCategory = "uncategorized",
         ) -> str:
             return await self._result(
                 lambda: self.create(
@@ -369,7 +364,6 @@ class TaskArtifactPublisher:
                         name=name,
                         content=content,
                         media_type=media_type,
-                        business_category=business_category,
                     ),
                 )
             )
@@ -378,14 +372,11 @@ class TaskArtifactPublisher:
             path: str,
             call_id: Annotated[str, InjectedToolCallId],
             name: str | None = None,
-            business_category: ArtifactBusinessCategory = "uncategorized",
         ) -> str:
             return await self._result(
                 lambda: self.publish(
                     call_id,
-                    PublishWorkspaceFileArgs(
-                        path=path, name=name, business_category=business_category
-                    ),
+                    PublishWorkspaceFileArgs(path=path, name=name),
                 )
             )
 
@@ -393,14 +384,11 @@ class TaskArtifactPublisher:
             paths: list[str],
             name: str,
             call_id: Annotated[str, InjectedToolCallId],
-            business_category: ArtifactBusinessCategory = "uncategorized",
         ) -> str:
             return await self._result(
                 lambda: self.archive(
                     call_id,
-                    PublishWorkspaceArchiveArgs(
-                        paths=paths, name=name, business_category=business_category
-                    ),
+                    PublishWorkspaceArchiveArgs(paths=paths, name=name),
                 )
             )
 

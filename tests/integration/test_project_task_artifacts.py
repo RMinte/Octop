@@ -112,7 +112,6 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
                         "args": {
                             "name": "报告.md",
                             "content": "实际报告内容",
-                            "business_category": "report",
                         },
                     },
                     {
@@ -121,7 +120,6 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
                         "args": {
                             "path": "slides.pptx",
                             "name": "演示.pptx",
-                            "business_category": "data",
                         },
                     },
                 ],
@@ -172,8 +170,8 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
         attached = live["data"]["turn"]["artifacts"]
         assert {a["name"] for a in attached} == {"报告.md", "演示.pptx"}
         assert {a["name"]: a["business_category"] for a in attached} == {
-            "报告.md": "report",
-            "演示.pptx": "data",
+            "报告.md": "document",
+            "演示.pptx": "presentation",
         }
         assert {"create_artifact", "publish_workspace_file"} <= names
         assert not {"client__create_artifact", "client__publish_workspace_file"} & names
@@ -202,7 +200,7 @@ async def test_real_tools_stream_and_restore_immutable_attachments(
         assert done["status"] == "completed" and done["turns"][0]["artifacts"] == attached
         replies = [json.loads(m.content) for m in observed[-1] if isinstance(m, ToolMessage)]
         assert {r["artifact_id"] for r in replies} == {a["artifact_id"] for a in attached}
-        assert {r["business_category"] for r in replies} == {"report", "data"}
+        assert {r["business_category"] for r in replies} == {"document", "presentation"}
         assert all(r["status"] == "attached" for r in replies)
         assert server.services.agent_repo.list_all() == experts
     finally:
@@ -256,7 +254,7 @@ async def test_no_project_text_attachment_and_tool_failure_do_not_fake_delivery(
     assert len(attachments) == 1 and attachments[0]["name"] == "note.txt", [
         m.content for m in observed[-1] if isinstance(m, ToolMessage)
     ]
-    assert attachments[0]["business_category"] == "uncategorized"
+    assert attachments[0]["business_category"] == "document"
     assert (await client.get(attachments[0]["download_url"], headers=auth)).content == b""
     results = [json.loads(m.content) for m in observed[-1] if isinstance(m, ToolMessage)]
     assert {r["error_code"] for r in results if r.get("is_error")} == {
@@ -520,23 +518,28 @@ async def test_call_idempotency_survives_source_deletion_and_turn_completion(pub
 @pytest.mark.parametrize(
     "tool_name,arguments,category",
     [
-        ("create_artifact", {"name": "note.md", "content": "note"}, "report"),
-        ("publish_workspace_file", {"path": "source.md"}, "data"),
-        ("publish_workspace_archive", {"paths": ["source.md"], "name": "source.zip"}, "workflow"),
+        (
+            "create_artifact",
+            {"name": "note.MD", "content": "note", "media_type": "image/png"},
+            "document",
+        ),
+        ("publish_workspace_file", {"path": "source.md", "name": "renamed.PPTX"}, "presentation"),
+        ("publish_workspace_archive", {"paths": ["source.md"], "name": "source.ZIP"}, "other"),
     ],
 )
-async def test_all_publish_tool_wrappers_persist_business_category(
+async def test_all_publish_tool_wrappers_classify_final_name_automatically(
     publisher_env, tool_name, arguments, category
 ):
     client, _, auth, publisher, root, task = publisher_env
     (root / "source.md").write_bytes(b"source content")
     tool = next(tool for tool in publisher.tools() if tool.name == tool_name)
+    assert "business_category" not in tool.args_schema.model_json_schema()["properties"]
     result = await tool.ainvoke(
         {
             "type": "tool_call",
             "id": "category-call",
             "name": tool_name,
-            "args": {**arguments, "business_category": category},
+            "args": arguments,
         }
     )
     published = json.loads(result.content)
@@ -555,49 +558,63 @@ async def test_all_publish_tool_wrappers_persist_business_category(
 
 
 @pytest.mark.parametrize(
-    "tool_name,method_name,args_model,legacy_arguments",
+    "tool_name,method_name,args_model,legacy_arguments,expected_category",
     [
         (
             "create_artifact",
             "create",
             CreateArtifactArgs,
             {"name": "legacy.md", "content": "legacy content", "media_type": None},
+            "document",
         ),
         (
             "publish_workspace_file",
             "publish",
             PublishWorkspaceFileArgs,
             {"path": "legacy.md", "name": None},
+            "document",
         ),
         (
             "publish_workspace_archive",
             "archive",
             PublishWorkspaceArchiveArgs,
             {"paths": ["legacy.md"], "name": "legacy.zip"},
+            "other",
         ),
     ],
 )
 async def test_business_category_preserves_legacy_request_hash_and_replay(
-    publisher_env, tool_name, method_name, args_model, legacy_arguments
+    publisher_env, tool_name, method_name, args_model, legacy_arguments, expected_category
 ):
-    _, _, _, publisher, root, _ = publisher_env
+    _, server, _, publisher, root, _ = publisher_env
     (root / "legacy.md").write_bytes(b"legacy source")
     expected_hash = hashlib.sha256(
         json.dumps([tool_name, legacy_arguments], sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
     omitted = args_model.model_validate(legacy_arguments)
-    explicit = args_model.model_validate({**legacy_arguments, "business_category": "uncategorized"})
     assert publisher._request_hash(tool_name, omitted) == expected_hash
-    assert publisher._request_hash(tool_name, explicit) == expected_hash
     operation = getattr(publisher, method_name)
     original = await operation("legacy-call", omitted)
-    assert original.business_category == "uncategorized"
+    assert original.business_category == expected_category
+    with server.services.db.connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT request_hash FROM project_task_artifacts WHERE artifact_id=?",
+                (original.artifact_id,),
+            ).fetchone()[0]
+            == expected_hash
+        )
     (root / "legacy.md").unlink()
-    assert await operation("legacy-call", explicit) == original
+    assert await operation("legacy-call", omitted) == original
     with pytest.raises(OctopError) as conflict:
         await operation(
             "legacy-call",
-            args_model.model_validate({**legacy_arguments, "business_category": "report"}),
+            args_model.model_validate(
+                {
+                    **legacy_arguments,
+                    "name": "changed.md" if method_name != "archive" else "changed.zip",
+                }
+            ),
         )
     assert conflict.value.code == "TASK_ARTIFACT_CONFLICT"
 
@@ -788,7 +805,7 @@ async def test_snapshots_survive_database_backup_and_repeated_migrations(publish
     _, server, _, publisher, _, task = publisher_env
     artifact = await publisher.create(
         "durable",
-        CreateArtifactArgs(name="proof.txt", content="backup proof", business_category="workflow"),
+        CreateArtifactArgs(name="proof.txt", content="backup proof"),
     )
     backup = tmp_path / "backup.sqlite"
     snapshot_sqlite_file(server.services.db.path, backup)
@@ -866,7 +883,7 @@ def test_publish_requires_a_server_workspace_relative_path(path):
         PublishWorkspaceFileArgs(path=path)
 
 
-@pytest.mark.parametrize("category", ["document", "reports", "all", "", None])
+@pytest.mark.parametrize("category", ["document", "report", "all", "", None])
 @pytest.mark.parametrize(
     "args_model,arguments",
     [
@@ -875,7 +892,7 @@ def test_publish_requires_a_server_workspace_relative_path(path):
         (PublishWorkspaceArchiveArgs, {"paths": ["note.md"], "name": "notes.zip"}),
     ],
 )
-def test_publish_business_category_rejects_invalid_values(args_model, arguments, category):
+def test_publish_business_category_is_read_only(args_model, arguments, category):
     with pytest.raises(ValidationError):
         args_model.model_validate({**arguments, "business_category": category})
 

@@ -1813,12 +1813,13 @@
           "type": "string"
         },
         "business_category": {
-          "description": "发布时声明并保存的业务用途；历史成果和未声明成果为 uncategorized，不根据格式推断。",
+          "description": "按最终文件名后缀自动保存的资料分类：document 文本和 PDF、presentation 幻灯片、spreadsheet 表格、image 图片、other 其他；历史成果按同一规则回填。",
           "enum": [
-            "report",
-            "data",
-            "workflow",
-            "uncategorized"
+            "document",
+            "presentation",
+            "spreadsheet",
+            "image",
+            "other"
           ],
           "title": "Business Category",
           "type": "string"
@@ -3200,18 +3201,6 @@
           "default": null,
           "description": "可选 MIME 类型。",
           "title": "Media Type"
-        },
-        "business_category": {
-          "default": "uncategorized",
-          "description": "发布方声明的业务用途：report 报告、data 数据、workflow 流程、uncategorized 未分类；独立于文件格式，省略时未分类。",
-          "enum": [
-            "report",
-            "data",
-            "workflow",
-            "uncategorized"
-          ],
-          "title": "Business Category",
-          "type": "string"
         }
       },
       "required": [
@@ -3245,18 +3234,6 @@
           "default": null,
           "description": "可选附件文件名，省略沿用源文件名。",
           "title": "Name"
-        },
-        "business_category": {
-          "default": "uncategorized",
-          "description": "发布方声明的业务用途：report 报告、data 数据、workflow 流程、uncategorized 未分类；独立于文件格式，省略时未分类。",
-          "enum": [
-            "report",
-            "data",
-            "workflow",
-            "uncategorized"
-          ],
-          "title": "Business Category",
-          "type": "string"
         }
       },
       "required": [
@@ -3283,18 +3260,6 @@
           "maxLength": 240,
           "minLength": 1,
           "title": "Name",
-          "type": "string"
-        },
-        "business_category": {
-          "default": "uncategorized",
-          "description": "整个成果包的业务用途：report 报告、data 数据、workflow 流程、uncategorized 未分类；不按 ZIP 格式推断。",
-          "enum": [
-            "report",
-            "data",
-            "workflow",
-            "uncategorized"
-          ],
-          "title": "Business Category",
           "type": "string"
         }
       },
