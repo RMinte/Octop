@@ -55,8 +55,17 @@ async def ws_env(env_with_provider, monkeypatch):
         gate.set()
 
 
-async def test_ws_streams_text_queues_other_tasks_and_cancels_exact_turn(ws_env):
+async def test_ws_streams_text_queues_other_tasks_and_cancels_exact_turn(ws_env, monkeypatch):
     client, server, auth, calls, _ = ws_env
+    subscribed = asyncio.Event()
+    original_run = runtime.run_turn
+
+    async def run(services, owner, turn, history):
+        await subscribed.wait()
+        async for event in original_run(services, owner, turn, history):
+            yield event
+
+    monkeypatch.setattr(runtime, "run_turn", run)
     experts = server.services.agent_repo.list_all()
     session, ws = await connected(client, auth)
     try:
@@ -66,6 +75,8 @@ async def test_ws_streams_text_queues_other_tasks_and_cancels_exact_turn(ws_env)
         same = await command(ws, "task.create", "create-again", data=payload)
         assert same["data"]["task_id"] == first["task_id"]
         await command(ws, "task.subscribe", "watch-first", task_id=first["task_id"])
+        # Publish after subscription is acknowledged to exercise a new live frame.
+        subscribed.set()
         live = await until(
             ws,
             lambda f: f["type"] == "turn" and f["data"]["turn"]["reply"] == "实时中文",

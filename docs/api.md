@@ -50,6 +50,8 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | GET | `/api/project-tasks/resources` | 本轮可用的模型、Skill 和 MCP 引用 |
 | POST | `/api/project-tasks/attachments` | multipart 的 file 上传本人任务输入附件，返回 201 和附件元数据 |
 | GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入附件的鉴权读取，图片预览、其他文件下载 |
+| GET | `/api/project-tasks/artifacts` | 跨任务成果资料库，按文件发布时间倒序分页，支持项目、任务、类型、文件名及归档筛选 |
+| GET | `/api/project-tasks/artifacts/{artifact_id}` | 本人成果的元数据及当前来源任务和项目信息 |
 | WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
 | GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
 | PATCH | `/api/project-tasks/{task_id}` | 修改名称、网络搜索开关、归档或恢复，校验 expected_revision |
@@ -86,6 +88,16 @@ TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy=
 客户端新增领取凭证绑定的 `tool.review`，结果位于原 `ClientToolCall.review`，不会完成原调用或自动恢复模型。执行电脑须保留本机授权，核对动作和上下文摘要，并在派发前通过 `tool.get` 检查 `dispatch_allowed`、`manual_review_required`、暂停/取消和截止时间。服务端不探测客户端路径。完整字段见[任务协议](project-task-websocket.md#142-客户端远端审查-toolreview)及[客户端交接](agentcomputer-task-interactions.md)。本次未修改 AgentComputer。
 
 成对的 SQLite/PostgreSQL schema 41 包含断点、交互、任务模式与审查记录；已记录 41 的本地库也幂等补齐缺失列和表。已有任务默认人工审批，已有数据保留。本轮使用 SQLite 与模拟模型验证，未发起真实供应商审查或进行 PostgreSQL 实机验收。
+
+### 任务成果资料库
+
+`GET /api/project-tasks/artifacts` 直接查询当前账号所有仍存在任务正式发布的成果，包含项目任务和无项目任务，不需要逐任务读取会话。固定按文件发布的 `created_at DESC, artifact_id DESC` 排序，与任务最近活动时间无关。返回 `items` 和 `next_page_cursor`，默认 50 条、最多 100 条；使用原筛选条件和 `page_cursor` 继续读取，末页游标为 null。
+
+`scope` 默认 `all`，可选 `standalone` 或 `project`；`scope=project` 必须携带 `project_id`，其他 scope 不接受该参数。可使用 `task_id` 进一步限定，`kind` 筛选文件类型，`q` 搜索文件名的字面子串（ASCII 字母忽略大小写，去首尾空白，最多 200 字符）。`archived=all|active|archived` 默认 all，active 要求任务和所属项目均未归档，archived 匹配任一已归档。指定他人或不存在的项目/任务返回 404，合法但交集为空的筛选返回空列表。
+
+条目复用 `TaskArtifact` 的公开字段，补充 `file_kind`、`task_title`、`task_archived`、`turn_status` 及可空的 `project_id/project_name/project_archived`。`GET /api/project-tasks/artifacts/{artifact_id}` 返回相同结构的单份元数据；下载继续使用原 `download_url`。列表和详情不加载文件字节、不依赖模型；归档后仍可读取，发布后轮次失败或取消不移除文件。永久删除任务或项目会删除对应成果。输入附件与未发布工作文件不收录。
+
+分页游标绑定账号、实例及全部筛选，改变筛选、篡改或复用其他用途游标返回 `409 PROJECT_SYNC_RESET`；客户端重新读取首页。查询不是跨请求快照，新增成果通过刷新首页获取。完整参数、分类、权限和生命周期见[资料库技术说明](project-task-artifact-library.md)。
 
 ### 项目同步和任务列表分页
 

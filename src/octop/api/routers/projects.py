@@ -8,7 +8,9 @@ import time
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, File, Header, Query, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from octop.api.common.content_disposition import content_disposition
 from octop.api.common.upload_limit import read_upload_capped
@@ -17,6 +19,7 @@ from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import (
     approval_policy,
+    artifact_library,
     artifacts,
     input_attachments,
     interactions,
@@ -25,6 +28,14 @@ from octop.infra.projects import (
     tasks,
 )
 from octop.infra.projects.approval_models import ApprovalPolicyUpdate, TaskApprovalPolicy
+from octop.infra.projects.artifact_library_models import (
+    ArtifactLibraryQuery,
+    LibraryArchive,
+    LibraryKind,
+    LibraryScope,
+    TaskArtifactLibraryItem,
+    TaskArtifactLibraryPage,
+)
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import InteractionResponse, TaskControl
 from octop.infra.projects.models import (
@@ -326,6 +337,86 @@ def _task_worker(server: OctopServer) -> ProjectTaskWorker:
 
 
 task_router = APIRouter(prefix="/project-tasks")
+
+
+def _artifact_library_query(
+    scope: LibraryScope = Query(
+        default="all", description="all 包含全部任务；project 指定项目；standalone 仅无项目任务。"
+    ),
+    project_id: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="scope=project 时必填，其他 scope 不可携带。",
+    ),
+    task_id: str | None = Query(
+        default=None, min_length=1, max_length=256, description="可选来源任务 ID，与其他条件求交。"
+    ),
+    kind: LibraryKind = Query(default="all", description="文件浏览分类，默认全部类型。"),
+    archived: LibraryArchive = Query(
+        default="all",
+        description="all 包含归档成果；active 仅任务与项目均未归档；archived 为任一已归档。",
+    ),
+    q: str = Query(
+        default="",
+        max_length=200,
+        description="文件名的字面子串，去首尾空白，ASCII 字母忽略大小写。",
+    ),
+    limit: int = Query(default=50, ge=1, le=100),
+    page_cursor: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description="原筛选下的下一页游标，不可跨账号、筛选或用途复用。",
+    ),
+) -> ArtifactLibraryQuery:
+    try:
+        return ArtifactLibraryQuery(
+            scope=scope,
+            project_id=project_id,
+            task_id=task_id,
+            kind=kind,
+            archived=archived,
+            q=q,
+            limit=limit,
+            page_cursor=page_cursor,
+        )
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**error, "loc": ("query", *error["loc"])} for error in exc.errors()]
+        ) from exc
+
+
+@task_router.get(
+    "/artifacts",
+    response_model=TaskArtifactLibraryPage,
+    summary="按发布时间列出我的任务成果资料",
+    description="跨项目和无项目任务读取本人正式发布的文件元数据，按发布时间倒序、同一时间按成果 ID 倒序分页，默认 50 条、最多 100。支持文件名、项目、任务、类型和归档筛选，默认包含归档及来源轮次失败或取消后的已发布成果。不读取文件内容，不扫描工作目录。游标失效返回 409 PROJECT_SYNC_RESET。",
+)
+async def task_artifact_library(
+    response: Response,
+    query: ArtifactLibraryQuery = Depends(_artifact_library_query),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> TaskArtifactLibraryPage:
+    response.headers["Cache-Control"] = "private, no-store"
+    return await asyncio.to_thread(artifact_library.page, _services(server), user.id, query)
+
+
+@task_router.get(
+    "/artifacts/{artifact_id}",
+    response_model=TaskArtifactLibraryItem,
+    summary="读取任务成果资料及来源",
+    description="按成果 ID 读取本人已发布文件的元数据及当前任务、项目信息。归档后仍可读取，内容通过返回的鉴权 download_url 下载。不加载完整会话或文件字节；不存在或他人成果返回 404。永久删除任务或项目会同时删除成果。",
+)
+async def task_artifact_library_detail(
+    artifact_id: str,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> TaskArtifactLibraryItem:
+    response.headers["Cache-Control"] = "private, no-store"
+    return await asyncio.to_thread(artifact_library.detail, _services(server), user.id, artifact_id)
 
 
 @task_router.get(
