@@ -81,6 +81,12 @@
     "notImplemented": "页面建设中。"
   },
   "apiErrors": {
+    "RESIDENT_REQUEST_CONFLICT": "此请求编号已用于不同的会话内容或操作。",
+    "RESIDENT_TEXT_ONLY": "此会话目前只接受普通文字，暂不支持斜杠指令和工具操作。",
+    "RESIDENT_INTERRUPTED": "本轮对话已中断，已收到的正文已保留，不会自动重新执行。",
+    "RESIDENT_MODEL_UNAVAILABLE": "此会话没有可用模型，请先配置可用的模型服务和模型。",
+    "RESIDENT_WORKER_CONFLICT": "此数据目录中的私人会话已由另一服务进程运行。每个数据目录只能启动一个 Octop 实例。",
+    "RESIDENT_MEMORY_CONFLICT": "这条记忆已存在、已更正或已废弃，请刷新后再操作。",
     "AUTH_FAILED": "认证失败。",
     "TOKEN_EXPIRED": "登录已过期，请重新登录。",
     "SETUP_REQUIRED": "需要完成初始设置。",
@@ -254,7 +260,15 @@
     "TASK_APPROVAL_MODE_UNAVAILABLE": "当前任务审批模式不支持此操作。",
     "TASK_APPROVAL_POLICY_CONFLICT": "任务审批模式已被修改，请刷新后再操作。",
     "TASK_APPROVAL_REVIEW_INVALID": "此调用或执行上下文不能用于自动审查。",
-    "TASK_APPROVAL_REVIEW_CONFLICT": "此调用已有不同的审查上下文，不能复用原审查。"
+    "TASK_APPROVAL_REVIEW_CONFLICT": "此调用已有不同的审查上下文，不能复用原审查。",
+    "RESIDENT_PROFILE_CONFLICT": "专业实例已更新，请刷新后重试。",
+    "RESIDENT_TEMPLATE_CHANGED": "专业模板已变化，请重新查看后采用。",
+    "RESIDENT_TEMPLATE_INVALID": "专业模板无效。",
+    "RESIDENT_PROFILE_ARCHIVED": "专业实例已归档，请恢复后操作。",
+    "RESIDENT_FOLLOWUP_CONFLICT": "跟进事项已更新，请刷新后重试。",
+    "RESIDENT_READ_ANCHOR_INVALID": "已读消息不属于当前会话。",
+    "RESIDENT_MEMORY_EXTRACTION_FAILED": "记忆候选提炼失败，请稍后重试。",
+    "RESIDENT_TOOL_INPUT_INVALID": "智能体工具参数无效。"
   },
   "nav": {
     "chat": "对话",
@@ -1772,7 +1786,11 @@
     "ask_user_question": "向你提问",
     "generate_image": "生成图片",
     "generate_video": "生成视频",
-    "bilibili_search_anime": "搜索番剧"
+    "bilibili_search_anime": "搜索番剧",
+    "resident_read_memory": "读取私人记忆",
+    "resident_read_tasks": "读取委派任务",
+    "resident_create_task": "创建授权任务",
+    "resident_search_knowledge": "检索选定知识库"
   },
   "toolSettings": {
     "title": "工具设置",

@@ -127,6 +127,16 @@ class ThreadMessageRepo:
                 count += 1
         return count
 
+    def contains_message(self, thread_id: str, message_id: str) -> bool:
+        with self._db.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM thread_messages WHERE thread_id=? AND message_id=? LIMIT 1",
+                    (thread_id, message_id),
+                ).fetchone()
+                is not None
+            )
+
     def projection_status(self, thread_id: str) -> str:
         with self._db.connect() as conn:
             row = conn.execute(

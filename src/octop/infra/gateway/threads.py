@@ -7,6 +7,7 @@ from typing import Any
 
 from octop.infra.db.repos.sessions import SessionRepo, SessionRow
 from octop.infra.db.repos.threads import ThreadRepo, ThreadRow
+from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.utils.ulid import new_ulid
 
 
@@ -256,6 +257,8 @@ class ThreadRegistry:
         return [row for row in self.sessions_for_thread(thread_id) if self.is_im_session(row)]
 
     async def rebind(self, *, session_key: str, thread_id: str, agent_id: str) -> None:
+        if self._threads.resident_session(session_key) or self._threads.is_resident(thread_id):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
         row = self._threads.get(thread_id)
         if row is None:
             msg = f"thread {thread_id!r} not found"
@@ -315,6 +318,8 @@ class ThreadRegistry:
             channel_subject_id=channel_subject_id,
             channel_chat_type=channel_chat_type,
         )
+        if self._threads.resident_session(session_key):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
         meta = dict(channel_metadata or {})
         meta.setdefault("channel_type", channel_type)
         meta.setdefault("user_id", user_id)
@@ -345,6 +350,8 @@ class ThreadRegistry:
             return tid
 
     async def reset_by_session_key(self, session_key: str) -> str:
+        if self._threads.resident_session(session_key):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
         session = self._sessions.get(session_key)
         if session is None:
             msg = f"session {session_key!r} not found"
@@ -393,6 +400,12 @@ class ThreadRegistry:
         pending_plan_path: str | None | object = ...,
         hitl_policy: str | None | object = ...,
     ) -> None:
+        if self._threads.is_resident(thread_id):
+            from octop.infra.agents.resident_identity import resident_execution_allowed
+
+            thread = self._threads.get(thread_id)
+            if thread is None or not resident_execution_allowed(thread.user_id, thread_id):
+                raise OctopError.localized(ErrorCode.FORBIDDEN)
         self._threads.update_composer(
             thread_id,
             model_ref=model_ref,
@@ -471,6 +484,8 @@ class ThreadRegistry:
         )
 
     def delete_thread(self, thread_id: str) -> None:
+        if self._threads.is_resident(thread_id):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
         self._threads.delete(thread_id)
         self._sessions.delete_for_thread(thread_id)
 

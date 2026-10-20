@@ -172,6 +172,107 @@ class HistoryArchive:
                     value=wire,
                 )
 
+    def append_external_message(
+        self, agent_id: str, thread_id: str, message_id: str, wire: dict[str, Any]
+    ) -> None:
+        """Archive one external result under a durable identity, without a model call.
+
+        The caller serializes this with the thread's normal graph execution.
+        A retry after an archive write keeps the same document and sequence.
+        """
+        document_id = f"external:{message_id}"
+        # A restart may change the archive format. The original logical result
+        # keeps its first durable storage location across that transition.
+        with self._turn_lock:
+            with self.store.db.connect() as conn:
+                archived = conn.execute(
+                    "SELECT thread_id FROM documents WHERE id=?", (document_id,)
+                ).fetchone()
+            if archived is not None:
+                if archived["thread_id"] != thread_id:
+                    raise ValueError("External result belongs to another thread")
+                return
+            if self.messages.contains_message(thread_id, message_id):
+                return
+        if not self.enabled:
+            from langchain_core.messages import messages_from_dict  # noqa: PLC0415
+
+            from octop.infra.history.projection import message_inputs  # noqa: PLC0415
+
+            turn = self.begin(agent_id, thread_id)
+            try:
+                self.messages.append_legacy_interval(
+                    thread_id, message_inputs(messages_from_dict([wire]))
+                )
+            finally:
+                if turn is not None:
+                    self.finish(turn["id"], "completed")
+            return
+
+        turn_id = document_id
+        with self._turn_lock:
+            segments = self.store.segments(thread_id)
+            if segments and segments[0]["agent_id"] != agent_id:
+                raise ValueError("History belongs to another agent")
+            previous = self.store.turn(thread_id, unfinished=True)
+            if previous and (previous["id"] in self._owned_turns or previous["status"] == "paused"):
+                raise ValueError("Finish the active history turn before appending a result")
+            message_head = self.messages.head(thread_id)
+            event_head = self.event_head(thread_id)
+            with self.store.transaction() as conn:
+                if conn.execute("SELECT 1 FROM documents WHERE id=?", (document_id,)).fetchone():
+                    return
+                if previous is not None:
+                    conn.execute(
+                        "UPDATE turns SET status='interrupted',finished_at=? WHERE id=?",
+                        (time.time(), previous["id"]),
+                    )
+                current = conn.execute(
+                    "SELECT * FROM segments WHERE thread_id=? ORDER BY id DESC LIMIT 1",
+                    (thread_id,),
+                ).fetchone()
+                if current is None:
+                    conn.execute(
+                        "INSERT INTO segments(thread_id,agent_id,format,legacy_start,legacy_end,trajectory_start,trajectory_end) "
+                        "VALUES(?,?,'legacy',0,?,0,?)",
+                        (thread_id, agent_id, message_head, event_head),
+                    )
+                if current is None or current["format"] != "v2":
+                    if current is not None:
+                        conn.execute(
+                            "UPDATE segments SET legacy_end=?,trajectory_end=? WHERE id=?",
+                            (message_head, event_head, current["id"]),
+                        )
+                    inserted = conn.execute(
+                        "INSERT INTO segments(thread_id,agent_id,format,legacy_start,trajectory_start) "
+                        "VALUES(?,?,'v2',?,?)",
+                        (thread_id, agent_id, message_head, event_head),
+                    )
+                    segment_id = int(inserted.lastrowid or 0)
+                else:
+                    segment_id = int(current["id"])
+                timestamp = time.time()
+                conn.execute(
+                    "INSERT INTO turns(id,segment_id,status,started_at,finished_at) "
+                    "VALUES(?,?,'completed',?,?)",
+                    (turn_id, segment_id, timestamp, timestamp),
+                )
+                seq = int(
+                    conn.execute(
+                        "SELECT COALESCE(MAX(seq),0)+1 FROM documents WHERE thread_id=? AND kind='message'",
+                        (thread_id,),
+                    ).fetchone()[0]
+                )
+                self.store.put_document(
+                    conn,
+                    doc_id=document_id,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    kind="message",
+                    seq=seq,
+                    value=wire,
+                )
+
     def remove_thread(self, thread_id: str) -> None:
         """Explicit thread deletion only; never called by retention or backfill."""
         with self.store.transaction() as conn:

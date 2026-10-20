@@ -1932,10 +1932,112 @@ def _ensure_artifact_suffix_categories_schema(db: DatabasePool, path: Path) -> N
                 conn.execute(stmt)
 
 
+def _ensure_resident_profiles_schema(db: DatabasePool, path: Path) -> None:
+    source = path.read_text(encoding="utf-8")
+    header, resources = source.split("-- Additional resident resources\n", 1)
+    if db.dialect == "sqlite":
+        with db.connect() as conn:
+            schema = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='resident_conversations'"
+            ).fetchone()
+            rebuild = schema is not None and re.search(
+                r"CHECK\s*\(\s*role\s*=", str(schema["sql"]), re.IGNORECASE
+            )
+            if rebuild:
+                conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    for statement in _split_pg_sql(header):
+                        if not statement.startswith(
+                            ("PRAGMA ", "BEGIN ", "COMMIT", "ALTER TABLE resident_requests ")
+                        ):
+                            conn.execute(statement)
+                    for statement in _split_pg_sql(resources):
+                        conn.execute(statement)
+                    for table in (
+                        "resident_requests",
+                        "resident_cancel_requests",
+                        "resident_delegations",
+                        "resident_task_reports",
+                        "resident_profiles",
+                        "resident_notifications",
+                        "resident_inbox",
+                        "resident_followups",
+                    ):
+                        if conn.execute(f"PRAGMA foreign_key_check({table})").fetchall():
+                            raise RuntimeError("Resident binding upgrade violated a foreign key")
+                    conn.execute("COMMIT")
+                except BaseException:
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
+                    raise
+                finally:
+                    conn.execute("PRAGMA foreign_keys=ON")
+    for name, definition in (
+        ("read_event_seq", "BIGINT NOT NULL DEFAULT 0"),
+        ("inbox_initialized", "INTEGER NOT NULL DEFAULT 0"),
+        ("memory_capture_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("memory_revision", "BIGINT NOT NULL DEFAULT 1"),
+    ):
+        _ensure_column(db, "resident_conversations", name, definition)
+    with db.transaction() as conn:
+        if db.dialect == "postgresql":
+            conn.execute(
+                "ALTER TABLE resident_conversations DROP CONSTRAINT IF EXISTS resident_conversations_role_check"
+            )
+        for statement in _split_pg_sql(resources):
+            conn.execute(statement)
+    _ensure_column(db, "resident_profiles", "archived", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(db, "resident_requests", "input_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_resident_followup_kind(db, resources)
+
+
+def _ensure_resident_followup_kind(db: DatabasePool, resources: str) -> None:
+    """Expand the current unreleased follow-up constraint without deleting authorizations."""
+    if db.dialect == "postgresql":
+        with db.transaction() as conn:
+            row = conn.execute(
+                "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint "
+                "WHERE conrelid='resident_followups'::regclass AND conname='resident_followups_kind_check'"
+            ).fetchone()
+            if row and "'task'" not in str(row["definition"]):
+                conn.execute(
+                    "ALTER TABLE resident_followups DROP CONSTRAINT resident_followups_kind_check"
+                )
+                conn.execute(
+                    "ALTER TABLE resident_followups ADD CONSTRAINT resident_followups_kind_check "
+                    "CHECK(kind IN ('note','task_watch','task'))"
+                )
+        return
+    with db.connect() as conn:
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='resident_followups'"
+        ).fetchone()
+    if schema is None or "'task'" in str(schema["sql"]):
+        return
+    statements = _split_pg_sql(resources)
+    create = next(
+        stmt
+        for stmt in statements
+        if stmt.startswith("CREATE TABLE IF NOT EXISTS resident_followups (")
+    )
+    columns = ",".join(sorted(_table_columns(db, "resident_followups")))
+    with db.transaction() as conn:
+        conn.execute(create.replace("resident_followups", "resident_followups_v53", 1))
+        conn.execute(
+            f"INSERT INTO resident_followups_v53({columns}) SELECT {columns} FROM resident_followups"
+        )
+        conn.execute("DROP TABLE resident_followups")
+        conn.execute("ALTER TABLE resident_followups_v53 RENAME TO resident_followups")
+        for stmt in statements:
+            if stmt.startswith("CREATE INDEX IF NOT EXISTS idx_resident_followups_"):
+                conn.execute(stmt)
+
+
 def _ensure_independent_projects_schema(db: DatabasePool) -> None:
     """Apply only the independent project/task DDL, preserving historical tables.
 
-    Versions 21–27 belonged to the retired expert-bound model. Keep 28–50
+    Versions 21–27 belonged to the retired expert-bound model. Keep 28–53
     numbered as applied locally; never replay that model or lower its watermark.
     """
     tables = {
@@ -1946,10 +2048,14 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
         37: ("project_task_artifacts",),
         42: ("project_task_attachments",),
         45: ("user_task_approval_policies",),
+        51: ("resident_conversations", "resident_requests", "resident_cancel_requests"),
+        52: ("resident_delegations", "resident_task_reports"),
     }
-    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 50]
+    versions = [(version, path) for version, path in _discover(db.dialect) if 28 <= version <= 53]
     for version, path in versions:
-        if version == 29:
+        if version == 53:
+            _ensure_resident_profiles_schema(db, path)
+        elif version == 29:
             _ensure_column(db, "projects", "client_directory", "TEXT")
         elif version == 31:
             _ensure_column(db, "project_task_turns", "input_tokens", "BIGINT NOT NULL DEFAULT 0")
@@ -2068,6 +2174,14 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
                     if not stmt.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
                         conn.execute(stmt)
+        elif version == 52:
+            _ensure_column(db, "resident_requests", "day_key", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(db, "resident_requests", "timezone", "TEXT NOT NULL DEFAULT ''")
+            with db.transaction() as conn:
+                for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
+                    if not stmt.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
+                        conn.execute(stmt)
+            _ensure_column(db, "resident_task_reports", "message_json", "TEXT NOT NULL DEFAULT ''")
         elif version == 47 or any(not _table_exists(db, table) for table in tables[version]):
             with db.transaction() as conn:
                 for stmt in _split_pg_sql(path.read_text(encoding="utf-8")):
@@ -2085,7 +2199,7 @@ def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
     for version, path in _discover(db.dialect):
-        if 28 <= version <= 50 or version <= _current_version(db):
+        if 28 <= version <= 53 or version <= _current_version(db):
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.

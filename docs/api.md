@@ -1,5 +1,11 @@
 # API Reference
 
+## 私人智能体常驻会话（2026-10-20）
+
+私人 Agent 与稳定 thread 使用六个 REST 接口：`GET/PUT /api/agents/resident-conversation`，以及绑定 thread 下的 `/conversation`、`POST /messages`、`GET /requests/{request_id}`、`POST /cancel`。首期支持普通文字、持久受理、整份快照轮询和定向取消；不创建专家模板、不绑定项目或 Task，未修改 AgentComputer 客户端。字段、幂等、模型选择、恢复边界和验证范围见 [私人智能体服务端接入说明](resident-agent-conversation.md)。
+
+首版闭环增加绑定 thread 下的 `/conversation/history`（按日、分页、搜索和定位）、`/memory`（复用私人 Agent 存储的手工记忆管理）、`/conversation/delegations`（明确委派普通 Task）。结果按具体任务轮次与终态同事务保存，并可靠接入来源会话历史和模型上下文，不自动再触发模型或复制私人记忆。完整字段与重启语义见[历史与基本记忆](resident-history-memory.md)、[任务委派与成果回流](resident-delegation-results.md)。
+
 ## Codex / Claude 数据导入（2026-10-20）
 
 客户端选择并转换的项目、会话与逐项配置统一导入 Octop：`POST /api/projects/import`、`POST /api/project-tasks/import`、`POST /api/projects/import/configurations`。项目保存客户端路径，会话保存为可继续追问的任务；Skill、MCP、插件、行动指南和设置各为独立的 `pendingActivation` 副本。配置列表与详情支持按本人读取，导入不自动安装或激活。完整字段、来源去重、附件上传和增量冲突规则见 [数据导入接入说明](project-data-import.md)。
@@ -1045,3 +1051,5 @@ dashboard mirrors every code under `apiErrors.*` in
 | `STORAGE_BACKEND_UNREACHABLE` | 502 | Remote backend connect / list failed |
 | `CONNECTOR_OAUTH_FAILED` | 400 | OAuth flow could not complete |
 | `INTERNAL_ERROR` | 500 | Unhandled exception (logged with traceback) |
+
+私人智能体完整服务端接口与客户端接入顺序见 [resident-server-capabilities.md](resident-server-capabilities.md)，包含专业实例、模板显式采用、授权跟进与定时任务、通知和共享已读水位、记忆候选及上下文整理。

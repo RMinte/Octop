@@ -24,7 +24,7 @@ from octop.i18n.domains.agents import (
     NO_MODELS_CONFIGURED,
     format_agent_start_error,
 )
-from octop.infra.agents.memory.backend import memory_backend_from_agent_config
+from octop.infra.agents.memory.backend import memory_backend_from_agent_config, open_memory_kwargs
 from octop.infra.agents.memory.slim import MemorySlimCoordinator
 from octop.infra.agents.providers import ProviderStore, sync_providers_to_harness
 from octop.infra.agents.security import SecuritySettingsStore, ToolGuardRulesStore
@@ -818,6 +818,7 @@ class AgentManager:
 
     async def update(self, agent_id: str, **kwargs: Any) -> AgentRow:
         """Update agent config in DB and reload harness agent in the background."""
+        self._assert_resident_configuration_editable(agent_id)
         runtime_updates = {
             key: kwargs.pop(key) for key in AGENT_RUNTIME_CONFIG_KEYS if key in kwargs
         }
@@ -884,6 +885,8 @@ class AgentManager:
 
         if shared and is_team_agent(existing):
             raise OctopError(ErrorCode.TEAM_NOT_SHAREABLE, "teams cannot be shared")
+        if shared:
+            self._assert_resident_configuration_editable(agent_id)
         self._repos.agent_repo.set_shared(agent_id, shared)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
@@ -903,6 +906,7 @@ class AgentManager:
 
     async def delete(self, agent_id: str) -> None:
         """Remove agent from DB, harness runtime, and workspace directory."""
+        self._assert_resident_configuration_editable(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -1086,6 +1090,7 @@ class AgentManager:
         still only live in the dict, copy them onto empty columns so a later overlay
         does not drop mounts.
         """
+        self._assert_resident_configuration_editable(agent_id)
         cfg = self._preserve_internal_layout(agent_id, cfg)
         lifted = extract_profile_from_config(cfg)
         row = self._repos.agent_repo.get(agent_id)
@@ -1223,6 +1228,8 @@ class AgentManager:
         running, or no checkpointer configured for it) — both are normal,
         expected states, not errors.
         """
+        if self._repos.resident_conversation_repo.get_by_thread(thread_id) is not None:
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
         try:
             harness = self.get_agent(agent_id)
         except OctopError:
@@ -1292,6 +1299,7 @@ class AgentManager:
 
     async def stream(self, agent_id: str, request: dict[str, Any]) -> AsyncIterator[Any]:
         """Stream harness chunks (Langfuse tracing handled inside octop-harness)."""
+        self._assert_resident_execution(agent_id, str(request.get("thread_id") or ""))
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
 
@@ -1302,6 +1310,7 @@ class AgentManager:
         ):
             self._apply_pending_bootstrap_graph_refresh(agent_id)
             req = self._prepare_stream_request(agent_id, request)
+            self._assert_resident_execution(agent_id, thread_id_from_request(req) or "")
             with hitl_thread_scope(thread_id_from_request(req)):
                 async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
                     yield chunk
@@ -1309,11 +1318,13 @@ class AgentManager:
 
     async def call(self, agent_id: str, request: dict[str, Any]) -> dict[str, Any]:
         """Non-streaming harness invocation (one-shot agent call)."""
+        self._assert_resident_execution(agent_id, str(request.get("thread_id") or ""))
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
         async with self._track_invocation(agent_id):
             self._apply_pending_bootstrap_graph_refresh(agent_id)
             req = self._prepare_stream_request(agent_id, request)
+            self._assert_resident_execution(agent_id, thread_id_from_request(req) or "")
             with hitl_thread_scope(thread_id_from_request(req)):
                 result = await self._harness_manager.call(agent_id, cast(Any, req))
             self._apply_pending_bootstrap_graph_refresh(agent_id)
@@ -1328,6 +1339,7 @@ class AgentManager:
         decisions: list[dict[str, Any]],
     ) -> AsyncIterator[Any]:
         """Resume a paused HITL interrupt for *thread_id*."""
+        self._assert_resident_execution(agent_id, thread_id)
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
         async with (
@@ -1344,6 +1356,7 @@ class AgentManager:
 
     def cancel_stream(self, agent_id: str, thread_id: str) -> None:
         """Signal octop-harness to stop the active stream for *(agent_id, thread_id)*."""
+        self._assert_resident_execution(agent_id, thread_id)
         if self._harness_manager is not None:
             self._harness_manager.cancel(agent_id, thread_id)
 
@@ -1353,10 +1366,12 @@ class AgentManager:
         return self._harness_manager.get_thread_model(agent_id, thread_id)
 
     def set_thread_model(self, agent_id: str, thread_id: str, model: str) -> None:
+        self._assert_resident_execution(agent_id, thread_id)
         if self._harness_manager is not None:
             self._harness_manager.set_thread_model(agent_id, thread_id, model)
 
     def clear_thread_model(self, agent_id: str, thread_id: str) -> None:
+        self._assert_resident_execution(agent_id, thread_id)
         if self._harness_manager is not None:
             self._harness_manager.clear_thread_model(agent_id, thread_id)
 
@@ -1980,6 +1995,7 @@ class AgentManager:
 
     async def update_config_json(self, agent_id: str, config_json: str) -> AgentRow:
         """Patch ``config_json`` and reload the harness runtime in the background."""
+        self._assert_resident_configuration_editable(agent_id)
         parsed = self._preserve_internal_layout(
             agent_id, parse_config_json(config_json), pin_workspace_dir=True
         )
@@ -2120,6 +2136,7 @@ class AgentManager:
         Unlike :meth:`update_config_json`, this does not schedule a harness rebuild.
         Mounting packages only needs ``skills_dir`` updated so list/enable keep working.
         """
+        self._assert_resident_configuration_editable(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -2187,6 +2204,7 @@ class AgentManager:
 
     def persist_knowledge_base_ids(self, agent_id: str, knowledge_base_ids: list[str]) -> None:
         """Persist composer knowledge-base defaults without reloading harness."""
+        self._assert_resident_configuration_editable(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -2202,6 +2220,7 @@ class AgentManager:
 
     def persist_mcp_servers(self, agent_id: str, mcp_servers: list[str]) -> None:
         """Persist composer connector defaults without reloading harness."""
+        self._assert_resident_configuration_editable(agent_id)
         from octop.infra.agents.teams import is_team_agent
 
         row = self._repos.agent_repo.get(agent_id)
@@ -2616,6 +2635,8 @@ class AgentManager:
         *,
         user_display: str = "User",
     ) -> None:
+        if self._repos.resident_conversation_repo.get_by_agent(row.agent_id) is not None:
+            return
         from octop.infra.agents.teams import is_team_agent  # noqa: PLC0415
 
         team_host = is_team_agent(row)
@@ -3067,6 +3088,34 @@ class AgentManager:
 
     def _build_harness_config(self, row: AgentRow) -> HarnessAgentConfig:
         """Convert an AgentRow into a HarnessAgentConfig."""
+        binding = self._repos.resident_conversation_repo.get_by_agent(row.agent_id)
+        if binding is not None:
+            from octop.infra.agents.resident_identity import resident_harness_config
+            from octop.infra.agents.workspace.dir import resolve_workspace_host_path
+
+            user = self._repos.user_repo.get(row.user_id) if row.user_id is not None else None
+            config = self._agent_config_dict(row)
+            resident_memory_policy = self._repos.resident_memory_policy_repo.get(
+                binding.owner_id, binding.thread_id
+            )
+            _, memory_backend, memory_backend_config = open_memory_kwargs(
+                agent_id=row.agent_id,
+                cfg=config,
+                octop_config=self._config,
+                workspace_dir=resolve_workspace_host_path(str(config["workspace_dir"]), config),
+            )
+            return resident_harness_config(
+                row,
+                thread_id=binding.thread_id,
+                timezone=self._config.default_timezone,
+                locale=user.locale if user else "en",
+                default_model=self.resolve_fallback_model_ref(),
+                memory_capture_enabled=bool(
+                    resident_memory_policy and resident_memory_policy.capture_enabled
+                ),
+                memory_backend=memory_backend,
+                memory_backend_config=memory_backend_config,
+            )
         from octop_harness.middleware.bootstrap import bootstrap_marker_exists  # noqa: PLC0415
 
         from octop.infra.agents.workspace.dir import (  # noqa: PLC0415
@@ -3427,6 +3476,25 @@ class AgentManager:
             applied,
             tool_guard_rules_dir=str(self._tool_guard_rules.rules_dir),
         )
+
+    def _assert_resident_configuration_editable(self, agent_id: str) -> None:
+        if self._repos.resident_conversation_repo.get_by_agent(agent_id) is not None:
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
+
+    def assert_standard_chat_allowed(self, agent_id: str) -> None:
+        """Resident turns must enter through their durable command service."""
+        self._assert_resident_configuration_editable(agent_id)
+
+    def _assert_resident_execution(self, agent_id: str, thread_id: str) -> None:
+        binding = self._repos.resident_conversation_repo.get_by_agent(agent_id)
+        if binding is None:
+            return
+        from octop.infra.agents.resident_identity import resident_execution_allowed
+
+        if thread_id != binding.thread_id or not resident_execution_allowed(
+            binding.owner_id, thread_id
+        ):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
 
     def _install_team_host_dispatch(self) -> None:
         """Team hosts always enqueue inbox work, even on harness 1.0.8 (default sync)."""

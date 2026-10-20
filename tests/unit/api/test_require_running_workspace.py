@@ -18,7 +18,12 @@ def _server(
     registry.get_row.return_value = row
     registry.get_agent.side_effect = get_agent
     registry.workspace_for_agent.return_value = workspace_for_agent
-    return SimpleNamespace(app_runtime=SimpleNamespace(agent_registry=registry))
+    return SimpleNamespace(
+        app_runtime=SimpleNamespace(agent_registry=registry),
+        services=SimpleNamespace(
+            resident_conversation_repo=SimpleNamespace(get_by_agent=lambda _agent_id: None)
+        ),
+    )
 
 
 @pytest.mark.asyncio

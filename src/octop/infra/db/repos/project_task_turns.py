@@ -9,6 +9,7 @@ from typing import Any
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, strict_int
 from octop.infra.db.repos.project_tasks import ProjectTaskRepo
+from octop.infra.db.repos.resident_delegations import ResidentTaskReportRepo
 
 
 @dataclass(frozen=True)
@@ -314,7 +315,7 @@ class ProjectTaskTurnRepo:
         content_revision: int | None = None,
         recovery_json: str | None = None,
     ) -> bool:
-        return bool(
+        changed = bool(
             conn.execute(
                 "UPDATE project_task_turns SET status=CASE WHEN cancel_requested=1 "
                 "THEN 'cancelled' ELSE ? END, reply=?, error_code=?, activity='', updated_at=?, "
@@ -338,6 +339,9 @@ class ProjectTaskTurnRepo:
             ).rowcount
             == 1
         )
+        if changed:
+            ResidentTaskReportRepo.capture_terminal(conn, turn_id, now)
+        return changed
 
     @staticmethod
     def cancel(conn: Any, turn_id: str, now: int) -> None:
@@ -351,6 +355,7 @@ class ProjectTaskTurnRepo:
             "THEN 'cancelled' ELSE status END WHERE turn_id=? AND status IN ('queued', 'running')",
             (now, now, turn_id),
         )
+        ResidentTaskReportRepo.capture_terminal(conn, turn_id, now)
 
     @staticmethod
     def pause(
@@ -419,7 +424,7 @@ class ProjectTaskTurnRepo:
     def resume_wait(
         conn: Any, turn_id: str, now: int, error: str = "", recovery_json: str | None = None
     ) -> bool:
-        return bool(
+        changed = bool(
             conn.execute(
                 "UPDATE project_task_turns SET status=?,error_code=?,updated_at=?, "
                 "recovery_json=COALESCE(?,recovery_json), "
@@ -430,6 +435,9 @@ class ProjectTaskTurnRepo:
             ).rowcount
             == 1
         )
+        if changed and error:
+            ResidentTaskReportRepo.capture_terminal(conn, turn_id, now)
+        return changed
 
     @staticmethod
     def save_checkpoint(
@@ -522,7 +530,7 @@ class ProjectTaskTurnRepo:
 
     @staticmethod
     def interrupt(conn: Any, turn_id: str, before: int, now: int) -> bool:
-        return bool(
+        changed = bool(
             conn.execute(
                 "UPDATE project_task_turns SET status='failed', error_code='TASK_INTERRUPTED', "
                 "activity='', updated_at=?,finished_at=COALESCE(finished_at,?) "
@@ -532,6 +540,9 @@ class ProjectTaskTurnRepo:
             ).rowcount
             == 1
         )
+        if changed:
+            ResidentTaskReportRepo.capture_terminal(conn, turn_id, now)
+        return changed
 
     def record_usage(self, turn_id: str, input_tokens: int, output_tokens: int) -> None:
         """Add known request usage, including a cancelled request's late receipt."""

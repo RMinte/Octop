@@ -295,7 +295,7 @@ def test_v43_migration_adds_null_timing_and_preserves_every_original_turn_column
         after = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
         assert after.pop("started_at") is None and after.pop("finished_at") is None
         assert after == before
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 50
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 53
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

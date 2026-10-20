@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, bool_int, map_rows, now_ts
@@ -150,6 +151,49 @@ def repair_all_legacy_thread_titles(db: DatabasePool) -> int:
 class ThreadRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
+
+    @staticmethod
+    def insert_in_transaction(
+        conn: Any,
+        *,
+        thread_id: str,
+        agent_id: str,
+        user_id: int,
+        channel_type: str,
+        session_key: str,
+        title: str,
+        now: int,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO threads(thread_id,agent_id,user_id,channel_type,session_key,title,last_active,created_at) "
+            "VALUES(?,?,?,?,?,?,0,?)",
+            (thread_id, agent_id, user_id, channel_type, session_key, title, now),
+        )
+        conn.execute(
+            "INSERT INTO thread_history_projection(thread_id,status,updated_at,error) "
+            "VALUES(?,'ready',?,NULL) ON CONFLICT(thread_id) DO NOTHING",
+            (thread_id, now),
+        )
+
+    def is_resident(self, thread_id: str) -> bool:
+        with self._db.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM resident_conversations WHERE thread_id=?", (thread_id,)
+                ).fetchone()
+                is not None
+            )
+
+    def resident_session(self, session_key: str) -> bool:
+        with self._db.connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM resident_conversations r JOIN threads t ON t.thread_id=r.thread_id "
+                    "WHERE t.session_key=?",
+                    (session_key,),
+                ).fetchone()
+                is not None
+            )
 
     def insert(
         self,

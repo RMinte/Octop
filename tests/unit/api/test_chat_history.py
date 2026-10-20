@@ -209,6 +209,7 @@ async def test_list_threads_derives_has_messages_from_db() -> None:
     thread_registry.get_bound_thread_id.return_value = None
 
     server = MagicMock()
+    server.services.resident_conversation_repo.get_by_agent.return_value = None
     agent_row = MagicMock(user_id=1)
     server.app_runtime.agent_registry.get_row.return_value = agent_row
     server.app_runtime.agent_registry.get_agent.side_effect = AssertionError(
@@ -228,6 +229,7 @@ async def test_list_threads_derives_has_messages_from_db() -> None:
 @pytest.mark.asyncio
 async def test_get_thread_history_returns_has_more(monkeypatch: pytest.MonkeyPatch) -> None:
     server = MagicMock()
+    server.services.resident_conversation_repo.get_by_agent.return_value = None
     row = MagicMock(agent_id="agt_1", user_id=1, artifacts=())
     server.app_runtime.gateway.thread_registry.get_thread.return_value = row
 
@@ -258,6 +260,7 @@ async def test_get_legacy_history_enqueues_without_reading_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = MagicMock()
+    server.services.resident_conversation_repo.get_by_agent.return_value = None
     row = MagicMock(agent_id="agt_1", user_id=1, artifacts=())
     server.app_runtime.gateway.thread_registry.get_thread.return_value = row
     server.services.thread_message_repo.projection_status.return_value = "pending"
@@ -282,6 +285,7 @@ async def test_get_legacy_history_enqueues_without_reading_checkpoint(
 @pytest.mark.asyncio
 async def test_history_migration_status_is_scoped_to_effective_user() -> None:
     server = MagicMock()
+    server.services.resident_conversation_repo.get_by_agent.return_value = None
     server.services.thread_message_repo.migration_summary.return_value = ThreadProjectionSummary(
         pending=2, queued=1, running=1, failed=3
     )
@@ -316,6 +320,7 @@ async def test_history_migration_status_is_scoped_to_effective_user() -> None:
 @pytest.mark.asyncio
 async def test_start_history_migration_queues_bounded_candidates() -> None:
     server = MagicMock()
+    server.services.resident_conversation_repo.get_by_agent.return_value = None
     queue = server.app_runtime.gateway.history_backfill
     queue.available_slots = 2
     queue.active_jobs = 0
@@ -349,6 +354,7 @@ async def test_start_history_migration_queues_bounded_candidates() -> None:
 @pytest.mark.asyncio
 async def test_history_migration_waits_while_agent_is_active() -> None:
     server = MagicMock()
+    server.services.resident_conversation_repo.get_by_agent.return_value = None
     server.app_runtime.agent_registry.is_agent_active.return_value = True
     server.services.thread_message_repo.migration_summary.return_value = ThreadProjectionSummary(
         pending=1
@@ -382,6 +388,7 @@ async def test_history_migration_waits_while_agent_is_active() -> None:
 @pytest.mark.asyncio
 async def test_backfill_requeues_thread_when_agent_became_busy() -> None:
     server = MagicMock()
+    server.services.resident_conversation_repo.get_by_agent.return_value = None
     registry = server.app_runtime.agent_registry
     registry.try_begin_history_backfill.return_value = False
 

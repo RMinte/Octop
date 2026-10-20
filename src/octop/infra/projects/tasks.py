@@ -703,135 +703,97 @@ def send(
     retry_of_turn_id: str | None = None,
 ) -> TaskDetail:
     with services.db.transaction() as conn:
-        tasks, turns = services.project_task_repo, services.project_task_turn_repo
-        if not tasks.lock_owner(conn, owner_id):
-            raise OctopError.localized(ErrorCode.FORBIDDEN)
-        task = (
-            tasks.get_in_transaction(conn, task_id, owner_id)
-            if task_id
-            else tasks.by_request(conn, owner_id, body.request_id)
+        task_id, _ = send_in_transaction(
+            services,
+            conn,
+            owner_id,
+            body,
+            task_id=task_id,
+            project_id=project_id,
+            retry_of_turn_id=retry_of_turn_id,
         )
-        if task_id and task is None:
+    return detail(services, owner_id, task_id)
+
+
+def send_in_transaction(
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    body: TaskMessage | TaskRetry,
+    *,
+    task_id: str | None = None,
+    project_id: str | None = None,
+    retry_of_turn_id: str | None = None,
+) -> tuple[str, str]:
+    """Admit one task turn inside the caller's transaction; never start execution."""
+    tasks, turns = services.project_task_repo, services.project_task_turn_repo
+    if not tasks.lock_owner(conn, owner_id):
+        raise OctopError.localized(ErrorCode.FORBIDDEN)
+    task = (
+        tasks.get_in_transaction(conn, task_id, owner_id)
+        if task_id
+        else tasks.by_request(conn, owner_id, body.request_id)
+    )
+    if task_id and task is None:
+        raise OctopError.localized(ErrorCode.NOT_FOUND)
+    if retry_of_turn_id is not None:
+        original = turns.get_in_transaction(conn, retry_of_turn_id)
+        if original is None or original.task_id != task_id:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
-        if retry_of_turn_id is not None:
-            original = turns.get_in_transaction(conn, retry_of_turn_id)
-            if original is None or original.task_id != task_id:
-                raise OctopError.localized(ErrorCode.NOT_FOUND)
-            body = TaskMessage(
-                request_id=body.request_id,
-                prompt=original.prompt,
-                attachment_ids=json.loads(original.configuration_json).get("attachment_ids", []),
-                options=body.options,
-            )
-        assert isinstance(body, TaskMessage)
-        if task:
-            if not task_id and task.project_id != project_id:
-                raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
-            previous = turns.by_request(conn, task.task_id, body.request_id)
-            if previous:
-                _same_prompt(previous, body, retry_of_turn_id)
-                task_id = task.task_id
-            else:
-                if task.archived:
-                    raise OctopError.localized(ErrorCode.TASK_ARCHIVED)
-                if task.active_turn_id is not None:
-                    raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
-                if retry_of_turn_id is not None:
-                    latest = turns.page(conn, task.task_id, 1)
-                    if (
-                        not latest
-                        or latest[0].turn_id != retry_of_turn_id
-                        or latest[0].status not in {"failed", "cancelled"}
-                    ):
-                        raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
-                configuration, model_ref = _configuration(
-                    services, owner_id, task.project_id, body.options
-                )
-                configuration = json.dumps(
-                    {
-                        **json.loads(configuration),
-                        "web_search_enabled": task.web_search_enabled,
-                        "approval_policy_at_start": approval_policy.in_transaction(
-                            conn, services, owner_id
-                        ).model_dump(mode="json"),
-                    }
-                )
-                if retry_of_turn_id is not None:
-                    configuration = json.dumps(
-                        {**json.loads(configuration), "retry_of_turn_id": retry_of_turn_id}
-                    )
-                turn_id, now = "turn_" + new_ulid(), now_ms()
-                configuration = _input_configuration(
-                    services, conn, owner_id, task.task_id, body, configuration, model_ref
-                )
-                if not tasks.activate(conn, task.task_id, turn_id, now):
-                    raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
-                turns.insert(
-                    conn,
-                    ProjectTaskTurnRow(
-                        turn_id,
-                        task.task_id,
-                        body.request_id,
-                        body.prompt,
-                        "",
-                        "queued",
-                        "",
-                        "",
-                        configuration,
-                        model_ref,
-                        "",
-                        False,
-                        now,
-                        now,
-                    ),
-                )
-                task_id = task.task_id
+        body = TaskMessage(
+            request_id=body.request_id,
+            prompt=original.prompt,
+            attachment_ids=json.loads(original.configuration_json).get("attachment_ids", []),
+            options=body.options,
+        )
+    assert isinstance(body, TaskMessage)
+    if task:
+        if not task_id and task.project_id != project_id:
+            raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
+        previous = turns.by_request(conn, task.task_id, body.request_id)
+        if previous:
+            _same_prompt(previous, body, retry_of_turn_id)
+            task_id, turn_id = task.task_id, previous.turn_id
         else:
-            configuration, model_ref = _configuration(services, owner_id, project_id, body.options)
-            task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
-            web_search_enabled = (
-                body.web_search_enabled if isinstance(body, ProjectTaskCreate) else True
+            if task.archived:
+                raise OctopError.localized(ErrorCode.TASK_ARCHIVED)
+            if task.active_turn_id is not None:
+                raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
+            if retry_of_turn_id is not None:
+                latest = turns.page(conn, task.task_id, 1)
+                if (
+                    not latest
+                    or latest[0].turn_id != retry_of_turn_id
+                    or latest[0].status not in {"failed", "cancelled"}
+                ):
+                    raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
+            configuration, model_ref = _configuration(
+                services, owner_id, task.project_id, body.options
             )
-            start_policy = approval_policy.in_transaction(conn, services, owner_id)
             configuration = json.dumps(
                 {
                     **json.loads(configuration),
-                    "web_search_enabled": web_search_enabled,
-                    "approval_policy_at_start": start_policy.model_dump(mode="json"),
+                    "web_search_enabled": task.web_search_enabled,
+                    "approval_policy_at_start": approval_policy.in_transaction(
+                        conn, services, owner_id
+                    ).model_dump(mode="json"),
                 }
             )
-            initial_title = body.prompt
-            if not initial_title:
-                user = services.user_repo.get(owner_id)
-                initial_title = tr(
-                    "projects.attachment_task_title",
-                    normalize_locale(user.locale if user else "zh"),
+            if retry_of_turn_id is not None:
+                configuration = json.dumps(
+                    {**json.loads(configuration), "retry_of_turn_id": retry_of_turn_id}
                 )
-            tasks.insert(
-                conn,
-                ProjectTaskRow(
-                    task_id,
-                    owner_id,
-                    project_id,
-                    provisional_title(initial_title),
-                    body.request_id,
-                    turn_id,
-                    now,
-                    now,
-                    approval_mode=start_policy.mode,
-                    approval_revision=start_policy.revision,
-                    approval_updated_at=int(start_policy.updated_at.timestamp() * 1000),
-                    web_search_enabled=web_search_enabled,
-                ),
-            )
+            turn_id, now = "turn_" + new_ulid(), now_ms()
             configuration = _input_configuration(
-                services, conn, owner_id, task_id, body, configuration, model_ref
+                services, conn, owner_id, task.task_id, body, configuration, model_ref
             )
+            if not tasks.activate(conn, task.task_id, turn_id, now):
+                raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
             turns.insert(
                 conn,
                 ProjectTaskTurnRow(
                     turn_id,
-                    task_id,
+                    task.task_id,
                     body.request_id,
                     body.prompt,
                     "",
@@ -846,10 +808,71 @@ def send(
                     now,
                 ),
             )
-            if body.prompt:
-                services.project_task_title_repo.enqueue(conn, task_id)
+            task_id = task.task_id
+    else:
+        configuration, model_ref = _configuration(services, owner_id, project_id, body.options)
+        task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
+        web_search_enabled = (
+            body.web_search_enabled if isinstance(body, ProjectTaskCreate) else True
+        )
+        start_policy = approval_policy.in_transaction(conn, services, owner_id)
+        configuration = json.dumps(
+            {
+                **json.loads(configuration),
+                "web_search_enabled": web_search_enabled,
+                "approval_policy_at_start": start_policy.model_dump(mode="json"),
+            }
+        )
+        initial_title = body.prompt
+        if not initial_title:
+            user = services.user_repo.get(owner_id)
+            initial_title = tr(
+                "projects.attachment_task_title",
+                normalize_locale(user.locale if user else "zh"),
+            )
+        tasks.insert(
+            conn,
+            ProjectTaskRow(
+                task_id,
+                owner_id,
+                project_id,
+                provisional_title(initial_title),
+                body.request_id,
+                turn_id,
+                now,
+                now,
+                approval_mode=start_policy.mode,
+                approval_revision=start_policy.revision,
+                approval_updated_at=int(start_policy.updated_at.timestamp() * 1000),
+                web_search_enabled=web_search_enabled,
+            ),
+        )
+        configuration = _input_configuration(
+            services, conn, owner_id, task_id, body, configuration, model_ref
+        )
+        turns.insert(
+            conn,
+            ProjectTaskTurnRow(
+                turn_id,
+                task_id,
+                body.request_id,
+                body.prompt,
+                "",
+                "queued",
+                "",
+                "",
+                configuration,
+                model_ref,
+                "",
+                False,
+                now,
+                now,
+            ),
+        )
+        if body.prompt:
+            services.project_task_title_repo.enqueue(conn, task_id)
     assert task_id is not None
-    return detail(services, owner_id, task_id)
+    return task_id, turn_id
 
 
 def cancel(services: SharedServices, owner_id: int, task_id: str, turn_id: str) -> TaskDetail:

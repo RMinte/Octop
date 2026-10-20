@@ -19,6 +19,7 @@ from octop.infra.agentcomputer.bootstrap import DaemonBootstrap, settle_task
 from octop.infra.agents.experts.catalog import ExpertCatalog, default_library_root
 from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.plugins.manager import PluginManager
+from octop.infra.agents.resident_conversation import ResidentConversationRuntime
 from octop.infra.agents.subagents.catalog import SubagentCatalog, default_package_root
 from octop.infra.cron.manager import CronManager
 from octop.infra.db.factory import open_database, should_defer_control_plane_db
@@ -223,6 +224,7 @@ class AppRuntime:
     trajectory_service: TrajectoryService | None = None
     history_archive: Any | None = None
     bridge_manager: Any | None = None
+    resident_conversations: ResidentConversationRuntime | None = None
 
     def replace_services(self, services: SharedServices, config: OctopConfig) -> None:
         """Retarget all runtime singletons onto a new SharedServices / config.
@@ -231,6 +233,8 @@ class AppRuntime:
         """
         if self.history_archive is not None:
             raise ValueError("Restart the server to rebind a database with versioned history")
+        if self.resident_conversations is not None:
+            self.resident_conversations.replace_services(services)
         self.user_manager.replace_services(services)
         self.agent_registry.replace_persistence(services.repos, config)
         self.gateway.replace_repos(services.repos)
@@ -612,6 +616,11 @@ class OctopServer:
             token_signer=_sign_user_token,
         )
 
+        resident_conversations = ResidentConversationRuntime(
+            services, registry, gateway, history_archive=history_archive
+        )
+        cleanup.push_async_callback(resident_conversations.close)
+        await resident_conversations.start()
         self.app_runtime = AppRuntime(
             agent_registry=registry,
             gateway=gateway,
@@ -621,6 +630,7 @@ class OctopServer:
             trajectory_service=trajectory_service,
             history_archive=history_archive,
             bridge_manager=bridge_mgr,
+            resident_conversations=resident_conversations,
         )
         from octop.infra.knowledge.jobs import resume_pending_index_jobs  # noqa: PLC0415
 
@@ -700,6 +710,8 @@ class OctopServer:
             await agently_auth.close()
             if self.app_runtime is not None:
                 rt = self.app_runtime
+                if rt.resident_conversations is not None:
+                    await rt.resident_conversations.close()
                 await rt.proactive_scheduler.shutdown()
                 await rt.cron_manager.shutdown()
                 await rt.gateway.shutdown()

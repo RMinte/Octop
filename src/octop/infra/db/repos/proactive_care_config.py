@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 
@@ -32,6 +33,15 @@ class ProactiveCareConfigRepo:
 
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
+
+    @staticmethod
+    def disable_in_transaction(conn: Any, agent_id: str, now: int) -> None:
+        conn.execute(
+            "INSERT INTO proactive_care_config(agent_id,enabled,active_hours_start,active_hours_end,"
+            "min_interval_hours,max_interval_hours,updated_at) VALUES(?,0,'09:00','22:00',5,24,?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET enabled=0,updated_at=excluded.updated_at",
+            (agent_id, now),
+        )
 
     def get(self, agent_id: str) -> ProactiveCareConfig:
         """Read the agent's proactive care configuration, returning defaults if not configured.

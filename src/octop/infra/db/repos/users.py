@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import json
 from dataclasses import dataclass, field
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, bool_int, insert_returning_id, map_rows, now_ts
@@ -94,6 +95,15 @@ class UserRow:
 
 
 class UserRepo:
+    def lock_identity_owner(self, conn: Any, user_id: int) -> bool:
+        suffix = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+        return (
+            conn.execute(
+                "SELECT id FROM users WHERE id=? AND disabled=0" + suffix, (user_id,)
+            ).fetchone()
+            is not None
+        )
+
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
 

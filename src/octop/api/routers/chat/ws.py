@@ -63,6 +63,7 @@ async def dashboard_chat_ws(
 
     try:
         assert_agent_access(server, agent_id, user)
+        server.app_runtime.agent_registry.assert_standard_chat_allowed(agent_id)
     except OctopError as exc:
         from octop.infra.errors import ErrorCode  # noqa: PLC0415
 

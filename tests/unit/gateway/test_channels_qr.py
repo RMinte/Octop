@@ -24,6 +24,7 @@ def mock_server_and_user():
     runtime.app_runtime.agent_registry = registry
     runtime.app_runtime.gateway = MagicMock()
     runtime.services = MagicMock()
+    runtime.services.resident_conversation_repo.get_by_agent.return_value = None
     runtime.services.channel_repo.list_by_agent.return_value = []
 
     return runtime, user

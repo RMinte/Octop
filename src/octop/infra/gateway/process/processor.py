@@ -1329,6 +1329,12 @@ class GlobalProcessor:
         )
 
         message_kwargs: dict[str, Any] = {}
+        resident_message_id = meta.get("_resident_user_message_id")
+        if isinstance(resident_message_id, str):
+            from octop.infra.agents.resident_identity import resident_execution_allowed
+
+            if resident_execution_allowed(user_id, thread_id):
+                message_kwargs["resident_request_id"] = meta.get("_resident_request_id")
         composer = meta.get(COMPOSER_CTX_KEY)
         if isinstance(composer, dict) and composer:
             message_kwargs[COMPOSER_CTX_KEY] = composer
@@ -1386,6 +1392,8 @@ class GlobalProcessor:
             message_kwargs=message_kwargs or None,
             reasoning_overrides=reasoning_overrides,
         )
+        if message_kwargs.get("resident_request_id") and request["messages"]:
+            request["messages"][0].id = resident_message_id
         self.teams.stamp_host_runtime(request, agent_id)
         self._attach_turn_knowledge_config(
             request,

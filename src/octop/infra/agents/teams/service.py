@@ -195,7 +195,12 @@ class TeamService:
                 continue
             seen.add(member_id)
             row = self._repos.agent_repo.get(member_id)
-            if row is None or is_team_agent(row) or not _user_may_use_member(row, user):
+            if (
+                row is None
+                or is_team_agent(row)
+                or not _user_may_use_member(row, user)
+                or self._repos.resident_conversation_repo.get_by_agent(member_id) is not None
+            ):
                 invalid.append(member_id)
                 continue
             out.append(member_id)

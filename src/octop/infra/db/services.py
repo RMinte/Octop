@@ -30,6 +30,15 @@ from octop.infra.db.repos.project_tasks import ProjectTaskRepo
 from octop.infra.db.repos.projects import ProjectRepo
 from octop.infra.db.repos.providers import ProviderRepo
 from octop.infra.db.repos.published_experts import PublishedExpertRepo
+from octop.infra.db.repos.resident_conversations import ResidentConversationRepo
+from octop.infra.db.repos.resident_delegations import ResidentDelegationRepo, ResidentTaskReportRepo
+from octop.infra.db.repos.resident_followups import ResidentFollowupRepo
+from octop.infra.db.repos.resident_history import ResidentHistoryRepo
+from octop.infra.db.repos.resident_inbox import ResidentInboxRepo
+from octop.infra.db.repos.resident_memory_policy import ResidentMemoryPolicyRepo
+from octop.infra.db.repos.resident_notifications import ResidentNotificationRepo
+from octop.infra.db.repos.resident_profiles import ResidentProfileRepo
+from octop.infra.db.repos.resident_requests import ResidentRequestRepo
 from octop.infra.db.repos.secrets import SecretRepo
 from octop.infra.db.repos.sessions import SessionRepo
 from octop.infra.db.repos.settings import SettingsRepo
@@ -66,6 +75,16 @@ class RepoBundle:
     user_policy_repo: UserPolicyRepo
     invite_repo: InviteRepo
     agent_repo: AgentRepo
+    resident_conversation_repo: ResidentConversationRepo
+    resident_request_repo: ResidentRequestRepo
+    resident_history_repo: ResidentHistoryRepo
+    resident_delegation_repo: ResidentDelegationRepo
+    resident_task_report_repo: ResidentTaskReportRepo
+    resident_profile_repo: ResidentProfileRepo
+    resident_followup_repo: ResidentFollowupRepo
+    resident_notification_repo: ResidentNotificationRepo
+    resident_inbox_repo: ResidentInboxRepo
+    resident_memory_policy_repo: ResidentMemoryPolicyRepo
     provider_repo: ProviderRepo
     channel_repo: ChannelRepo
     cron_repo: CronJobRepo
@@ -108,6 +127,16 @@ class RepoBundle:
             user_policy_repo=UserPolicyRepo(db),
             invite_repo=InviteRepo(db),
             agent_repo=AgentRepo(db),
+            resident_conversation_repo=ResidentConversationRepo(db),
+            resident_request_repo=ResidentRequestRepo(db),
+            resident_history_repo=ResidentHistoryRepo(db),
+            resident_delegation_repo=ResidentDelegationRepo(db),
+            resident_task_report_repo=ResidentTaskReportRepo(db),
+            resident_profile_repo=ResidentProfileRepo(db),
+            resident_followup_repo=ResidentFollowupRepo(db),
+            resident_notification_repo=ResidentNotificationRepo(db),
+            resident_inbox_repo=ResidentInboxRepo(db),
+            resident_memory_policy_repo=ResidentMemoryPolicyRepo(db),
             provider_repo=ProviderRepo(db),
             channel_repo=ChannelRepo(db),
             cron_repo=CronJobRepo(db),
@@ -205,6 +234,46 @@ class SharedServices:
     @property
     def agent_repo(self) -> AgentRepo:
         return self.repos.agent_repo
+
+    @property
+    def resident_conversation_repo(self) -> ResidentConversationRepo:
+        return self.repos.resident_conversation_repo
+
+    @property
+    def resident_request_repo(self) -> ResidentRequestRepo:
+        return self.repos.resident_request_repo
+
+    @property
+    def resident_history_repo(self) -> ResidentHistoryRepo:
+        return self.repos.resident_history_repo
+
+    @property
+    def resident_delegation_repo(self) -> ResidentDelegationRepo:
+        return self.repos.resident_delegation_repo
+
+    @property
+    def resident_task_report_repo(self) -> ResidentTaskReportRepo:
+        return self.repos.resident_task_report_repo
+
+    @property
+    def resident_profile_repo(self) -> ResidentProfileRepo:
+        return self.repos.resident_profile_repo
+
+    @property
+    def resident_followup_repo(self) -> ResidentFollowupRepo:
+        return self.repos.resident_followup_repo
+
+    @property
+    def resident_notification_repo(self) -> ResidentNotificationRepo:
+        return self.repos.resident_notification_repo
+
+    @property
+    def resident_inbox_repo(self) -> ResidentInboxRepo:
+        return self.repos.resident_inbox_repo
+
+    @property
+    def resident_memory_policy_repo(self) -> ResidentMemoryPolicyRepo:
+        return self.repos.resident_memory_policy_repo
 
     @property
     def provider_repo(self) -> ProviderRepo:

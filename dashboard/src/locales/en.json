@@ -81,6 +81,12 @@
     "notImplemented": "This page is under construction."
   },
   "apiErrors": {
+    "RESIDENT_REQUEST_CONFLICT": "This request ID was already used for different conversation input.",
+    "RESIDENT_TEXT_ONLY": "This conversation currently accepts plain text only; slash commands and tools are unavailable.",
+    "RESIDENT_INTERRUPTED": "The conversation turn was interrupted. Its saved reply is preserved; it will not be replayed automatically.",
+    "RESIDENT_MODEL_UNAVAILABLE": "No usable model is configured for this conversation. Configure an available provider and model first.",
+    "RESIDENT_WORKER_CONFLICT": "Another service process already owns resident conversations in this data directory. Run one Octop instance per data directory.",
+    "RESIDENT_MEMORY_CONFLICT": "This memory already exists, was corrected or was deprecated. Refresh before trying again.",
     "AUTH_FAILED": "Authentication failed.",
     "TOKEN_EXPIRED": "Session expired. Please sign in again.",
     "SETUP_REQUIRED": "Initial setup is required.",
@@ -254,7 +260,15 @@
     "TASK_APPROVAL_MODE_UNAVAILABLE": "This operation is not supported in the current task approval mode.",
     "TASK_APPROVAL_POLICY_CONFLICT": "The task approval mode has changed. Refresh before updating.",
     "TASK_APPROVAL_REVIEW_INVALID": "This call or execution context is not eligible for automatic review.",
-    "TASK_APPROVAL_REVIEW_CONFLICT": "This call is already bound to a different review context."
+    "TASK_APPROVAL_REVIEW_CONFLICT": "This call is already bound to a different review context.",
+    "RESIDENT_PROFILE_CONFLICT": "The professional instance changed. Refresh and retry.",
+    "RESIDENT_TEMPLATE_CHANGED": "The professional template changed. Review it before adopting.",
+    "RESIDENT_TEMPLATE_INVALID": "The professional template is invalid.",
+    "RESIDENT_PROFILE_ARCHIVED": "The professional instance is archived. Restore it before proceeding.",
+    "RESIDENT_FOLLOWUP_CONFLICT": "The follow-up changed. Refresh and retry.",
+    "RESIDENT_READ_ANCHOR_INVALID": "The read anchor does not belong to this conversation.",
+    "RESIDENT_MEMORY_EXTRACTION_FAILED": "Memory candidate extraction failed. Retry later.",
+    "RESIDENT_TOOL_INPUT_INVALID": "Invalid private assistant tool input."
   },
   "nav": {
     "chat": "Conversation",
@@ -1772,7 +1786,11 @@
     "ask_user_question": "Ask the user",
     "generate_image": "Generate image",
     "generate_video": "Generate video",
-    "bilibili_search_anime": "Search Bilibili anime"
+    "bilibili_search_anime": "Search Bilibili anime",
+    "resident_read_memory": "Read private memory",
+    "resident_read_tasks": "Read delegated tasks",
+    "resident_create_task": "Create authorized task",
+    "resident_search_knowledge": "Search selected knowledge bases"
   },
   "toolSettings": {
     "title": "Tool settings",

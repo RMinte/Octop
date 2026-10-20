@@ -48,6 +48,10 @@ def require_agent_row(
     row = server.app_runtime.agent_registry.get_row(agent_id)
     if row is None:
         raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
+    if server.services.resident_conversation_repo.get_by_agent(agent_id) is not None and (
+        row.user_id != user.id or (as_user is not None and as_user != user.id)
+    ):
+        raise OctopError.localized(ErrorCode.NOT_FOUND)
     if as_user is not None and as_user != user.id:
         if not user.is_admin:
             raise OctopError(ErrorCode.FORBIDDEN, "as_user requires admin")

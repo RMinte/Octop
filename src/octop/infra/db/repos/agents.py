@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import UNSET, DbRow, bool_int, map_rows, now_ts, optional_updates
@@ -94,6 +95,44 @@ class AgentRow:
 class AgentRepo:
     def __init__(self, db: DatabasePool) -> None:
         self._db = db
+
+    @staticmethod
+    def insert_identity_in_transaction(
+        conn: Any,
+        *,
+        agent_id: str,
+        user_id: int,
+        name: str,
+        system_prompt: str,
+        config_json: str,
+        now: int,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO agents(agent_id,user_id,name,system_prompt,config_json,enabled,"
+            "kind,created_at,updated_at) VALUES(?,?,?,?,?,1,'expert',?,?)",
+            (agent_id, user_id, name, system_prompt, config_json, now, now),
+        )
+
+    @staticmethod
+    def name_exists_in_transaction(conn: Any, user_id: int, name: str) -> bool:
+        return (
+            conn.execute(
+                "SELECT 1 FROM agents WHERE user_id=? AND name=?", (user_id, name)
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def update_identity_prompt_in_transaction(
+        conn: Any, *, agent_id: str, user_id: int, system_prompt: str, now: int
+    ) -> bool:
+        return bool(
+            conn.execute(
+                "UPDATE agents SET system_prompt=?,updated_at=? "
+                "WHERE agent_id=? AND user_id=? AND is_shared=0 AND kind='expert'",
+                (system_prompt, now, agent_id, user_id),
+            ).rowcount
+        )
 
     def create(
         self,
