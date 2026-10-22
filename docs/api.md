@@ -1036,14 +1036,18 @@ endpoint (public, mounted directly in `api/app.py`).
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | `GET`    | `/usage/summary` | user | 当前用户的 token 用量；管理员可用 `as_user` 查看指定用户 |
+| `GET`    | `/usage/calls` | user | 当前用户新采集的独立模型调用流水，支持精确筛选与游标分页 |
 | `GET`    | `/admin/usage/summary` | admin | 全部用户的 token 用量；可用 `user_id` 缩小范围 |
+| `GET`    | `/admin/usage/calls` | admin | 全部或指定 `user_id` 的新模型调用流水 |
 | `GET`    | `/usage/export.xlsx` | user | 导出相同用户、时间和资源筛选范围的用量明细与分组 |
 | `GET`    | `/admin/usage/export.xlsx` | admin | 导出全局或指定用户的用量明细与分组 |
 | `GET`    | `/admin/overview` | admin | `{user_count, agent_count, ...}` |
 | `GET`    | `/admin/audit-log` | admin | recent audit rows |
 | `GET`    | `/admin/metrics` | admin | `{messages_total, stream_errors_total, cron_runs_total, cron_errors_total, agent_active, ...}` |
 
-用量汇总支持 `granularity=total|by_day|by_agent|by_model|by_project|by_task`，默认 `by_day`；所有用量接口支持 `window` 时间范围，以及 `agent_id`、`project_id`、`task_id` 精确筛选。`by_project`、`by_task` 仅统计独立任务，`by_agent` 仅统计 Agent 计量记录，其余维度合并两类来源。Agent 记录包含已记录的专家会话和成功的私人管家、常驻专业实例会话；后两类目前同样使用 `source=chat`，不能单独区分。项目与任务分组以公共 ID 为 `key`、当前项目名或任务标题为 `label`，同名资源分别计量；未关联项目的任务在项目分组中使用空 `key`、空 `label`，客户端显示「未关联项目」。
+用量汇总支持 `granularity=total|by_day|by_agent|by_model|by_project|by_task`，默认 `by_day`；汇总及 Excel 用量接口支持 `window` 时间范围，以及 `agent_id`、`project_id`、`task_id` 精确筛选。`by_project`、`by_task` 仅统计独立任务，`by_agent` 仅统计 Agent 计量记录，其余维度合并两类来源。Agent 记录包含已记录的专家会话和成功的私人管家、常驻专业实例会话；后两类目前同样使用 `source=chat`，不能单独区分。项目与任务分组以公共 ID 为 `key`、当前项目名或任务标题为 `label`，同名资源分别计量；未关联项目的任务在项目分组中使用空 `key`、空 `label`，客户端显示「未关联项目」。
+
+新增调用流水独立于原汇总：`GET /api/usage/calls` 仅本人，`GET /api/admin/usage/calls` 仅管理员并可按 `user_id` 筛选；两者接受 `provider/model_ref/source/purpose/status/agent_id/thread_id/project_id/task_id/turn_id/submission_id` 精确筛选，以及 `limit`（1–100）、`before_id` 分页。响应的 `items` 保存实际模型和来源、用途、状态、毫秒时间、可为空的逐字段 Token 及 `presence`；`next_before_id` 为 null 表示没有更旧页。计量单位为 `logical_model_invocation`，SDK 内部 HTTP 重试不拆分，历史不伪造回补，不接入旧汇总、配额、费用或页面，不能将两套用量相加。`source` 仅为产品接入来源 `box/third_party`：显式 `BoxProviderConfig` 或 Provider `kind=box` 为 `box`，其他所有 Provider（含用户自配、自托管、Ollama 和兼容接口）为 `third_party`；不读取 `metadata.execution_source`，不按 URL 或模型名判断，也不承诺物理部署位置。完整字段、取消与恢复、OpenAI 流式默认 0 的处理及接入覆盖见[模型调用流水](model-call-ledger.md)。
 
 任务用量读取已有的轮次、标题生成、自动审核记录，包含已记录的上下文压缩与进展说明消耗；标题和审核增加 token 合计，但不增加会话轮次。保留的归档项目仍参与统计。轮次含旁路累计消耗时，模型按该轮 `model_ref` 归属。任务按轮次/审核记录的创建时间归属，标题按任务首轮创建时间归属，不能作为逐次模型请求账单使用。删除专家或 Task 会减少历史统计；已删除记录与没有输入/输出记录的历史对话无法从本接口恢复用量，也不能据此判断所有失败、取消或后台调用均已完整采集。
 

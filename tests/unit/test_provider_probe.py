@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from octop.infra.agents.providers.probe import build_probe_chat_model as _build_chat_model
 from octop.infra.agents.providers.probe import probe_provider_row
@@ -22,8 +23,8 @@ def test_build_chat_model_includes_provider_id_and_model_name() -> None:
         get_models=lambda: [{"id": "MiniMax-M2.7", "name": "MiniMax-M2.7"}],
     )
 
-    with patch("octop_harness.llm.factory.build_chat_model") as mock_build:
-        mock_build.return_value = object()
+    with patch("octop.infra.agents.providers.box.build_chat_model") as mock_build:
+        mock_build.return_value = FakeListChatModel(responses=["ok"])
         _build_chat_model(row, model_id="MiniMax-M2.7")
 
     provider, model = mock_build.call_args[0]

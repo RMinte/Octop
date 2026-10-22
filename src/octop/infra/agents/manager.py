@@ -84,6 +84,11 @@ from octop.infra.skills.workspace_catalog import (
     list_workspace_skill_summaries,
     repair_workspace_skill_manifests,
 )
+from octop.infra.usage.model_calls import (
+    current_model_call_scope,
+    model_call_scope,
+    override_model_call_scope,
+)
 from octop.infra.utils.locale import Locale
 from octop.infra.utils.ulid import new_short_id
 
@@ -1304,6 +1309,42 @@ class AgentManager:
         finally:
             self._end_invocation(agent_id)
 
+    def _model_call_identity(self, agent_id: str, thread_id: str) -> tuple[int | None, str]:
+        agent = self._repos.agent_repo.get(agent_id)
+        owner_id = agent.user_id if agent is not None else None
+        thread = self._repos.thread_repo.get(thread_id) if thread_id else None
+        if thread is not None and thread.agent_id == agent_id:
+            owner_id = thread.user_id
+        resident = (
+            self._repos.resident_conversation_repo.get_by_thread(thread_id) if thread_id else None
+        )
+        purpose = (
+            "resident"
+            if resident is not None
+            and resident.agent_id == agent_id
+            and resident.owner_id == owner_id
+            else "chat"
+        )
+        return owner_id, purpose
+
+    @asynccontextmanager
+    async def _model_call_context(
+        self, agent_id: str, thread_id: str, *, inherit: bool = True
+    ) -> AsyncIterator[None]:
+        if inherit and current_model_call_scope() is not None:
+            with override_model_call_scope(agent_id=agent_id):
+                yield
+            return
+        owner_id, purpose = await asyncio.to_thread(self._model_call_identity, agent_id, thread_id)
+        with model_call_scope(
+            self._repos,
+            user_id=owner_id,
+            purpose=purpose,
+            agent_id=agent_id,
+            thread_id=thread_id,
+        ):
+            yield
+
     async def stream(self, agent_id: str, request: dict[str, Any]) -> AsyncIterator[Any]:
         """Stream harness chunks (Langfuse tracing handled inside octop-harness)."""
         self._assert_resident_execution(agent_id, str(request.get("thread_id") or ""))
@@ -1318,9 +1359,10 @@ class AgentManager:
             self._apply_pending_bootstrap_graph_refresh(agent_id)
             req = self._prepare_stream_request(agent_id, request)
             self._assert_resident_execution(agent_id, thread_id_from_request(req) or "")
-            with hitl_thread_scope(thread_id_from_request(req)):
-                async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
-                    yield chunk
+            async with self._model_call_context(agent_id, thread_id_from_request(req) or ""):
+                with hitl_thread_scope(thread_id_from_request(req)):
+                    async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
+                        yield chunk
             self._apply_pending_bootstrap_graph_refresh(agent_id)
 
     async def call(self, agent_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -1332,8 +1374,9 @@ class AgentManager:
             self._apply_pending_bootstrap_graph_refresh(agent_id)
             req = self._prepare_stream_request(agent_id, request)
             self._assert_resident_execution(agent_id, thread_id_from_request(req) or "")
-            with hitl_thread_scope(thread_id_from_request(req)):
-                result = await self._harness_manager.call(agent_id, cast(Any, req))
+            async with self._model_call_context(agent_id, thread_id_from_request(req) or ""):
+                with hitl_thread_scope(thread_id_from_request(req)):
+                    result = await self._harness_manager.call(agent_id, cast(Any, req))
             self._apply_pending_bootstrap_graph_refresh(agent_id)
         if not isinstance(result, dict):
             return {"result": result}
@@ -1354,11 +1397,12 @@ class AgentManager:
             self._track_invocation(agent_id),
         ):
             self._apply_pending_bootstrap_graph_refresh(agent_id)
-            with hitl_thread_scope(thread_id):
-                async for chunk in self._harness_manager.resume_hitl(
-                    agent_id, thread_id, decisions
-                ):
-                    yield chunk
+            async with self._model_call_context(agent_id, thread_id):
+                with hitl_thread_scope(thread_id):
+                    async for chunk in self._harness_manager.resume_hitl(
+                        agent_id, thread_id, decisions
+                    ):
+                        yield chunk
             self._apply_pending_bootstrap_graph_refresh(agent_id)
 
     def cancel_stream(self, agent_id: str, thread_id: str) -> None:
@@ -3516,16 +3560,45 @@ class AgentManager:
         installer = getattr(room, "install_host_dispatch", None)
         if callable(installer):
             installer(team)
+        else:
+            wire_host_dispatch(
+                team,
+                is_team=lambda agent_id: is_team_agent(self.get_row(agent_id)),
+                stream_peer=getattr(room, "stream_peer_to_room", None)
+                or getattr(proc, "stream_team_peer_to_room", None),
+                stream_host=getattr(room, "stream_host_followup_to_room", None),
+                take_prompt=getattr(room, "take_peer_prompt", None)
+                or getattr(proc, "take_team_peer_prompt", None),
+            )
+        self._install_peer_call_scope(team)
+
+    def _install_peer_call_scope(self, team: Any) -> None:
+        original = getattr(team, "_call_agent", None)
+        if original is None or getattr(original, "_octop_model_call_scope", False):
             return
-        wire_host_dispatch(
-            team,
-            is_team=lambda agent_id: is_team_agent(self.get_row(agent_id)),
-            stream_peer=getattr(room, "stream_peer_to_room", None)
-            or getattr(proc, "stream_team_peer_to_room", None),
-            stream_host=getattr(room, "stream_host_followup_to_room", None),
-            take_prompt=getattr(room, "take_peer_prompt", None)
-            or getattr(proc, "take_team_peer_prompt", None),
-        )
+
+        async def call_agent(agent_id: str, request: Any) -> Any:
+            source = (
+                request.get("source")
+                if isinstance(request, dict)
+                else getattr(request, "source", None)
+            )
+            raw_thread = (
+                request.get("thread_id")
+                if isinstance(request, dict)
+                else getattr(request, "thread_id", None)
+            )
+            thread_id = raw_thread.strip() if isinstance(raw_thread, str) else ""
+            # The long-lived inbox worker may carry the submitter's old ContextVar.
+            async with self._model_call_context(agent_id, thread_id, inherit=source != "inbox"):
+                with override_model_call_scope(purpose="peer", agent_id=agent_id):
+                    return await original(agent_id, request)
+
+        cast(Any, call_agent)._octop_model_call_scope = True
+        team._call_agent = call_agent
+        inbox = getattr(team, "inbox", None)
+        if inbox is not None:
+            inbox._call_agent = call_agent
 
     def _agently_write_interrupts(self, user_id: int | None) -> dict[str, Any]:
         from octop.infra.connectors.gateway.adapters.agently_cli import write_interrupt_on

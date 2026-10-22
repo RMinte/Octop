@@ -17,6 +17,7 @@ from octop.infra.db.repos.cron import CronJobRepo
 from octop.infra.db.repos.external_imports import ExternalImportRepo
 from octop.infra.db.repos.invites import InviteRepo
 from octop.infra.db.repos.knowledge import KnowledgeRepo
+from octop.infra.db.repos.model_calls import ModelCallRepo
 from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
 from octop.infra.db.repos.project_sync import ProjectSyncRepo
 from octop.infra.db.repos.project_task_artifacts import ProjectTaskArtifactRepo
@@ -95,6 +96,7 @@ class RepoBundle:
     secret_repo: SecretRepo
     audit_repo: AuditRepo
     usage_repo: UsageRepo
+    model_call_repo: ModelCallRepo
     settings_repo: SettingsRepo
     storage_backend_repo: BackendRepo
     bridge_connection_repo: BridgeConnectionRepo
@@ -147,6 +149,7 @@ class RepoBundle:
             secret_repo=SecretRepo(db),
             audit_repo=AuditRepo(db),
             usage_repo=UsageRepo(db),
+            model_call_repo=ModelCallRepo(db),
             settings_repo=SettingsRepo(db),
             storage_backend_repo=BackendRepo(db),
             bridge_connection_repo=BridgeConnectionRepo(db),
@@ -314,6 +317,10 @@ class SharedServices:
     @property
     def usage_repo(self) -> UsageRepo:
         return self.repos.usage_repo
+
+    @property
+    def model_call_repo(self) -> ModelCallRepo:
+        return self.repos.model_call_repo
 
     @property
     def settings_repo(self) -> SettingsRepo:

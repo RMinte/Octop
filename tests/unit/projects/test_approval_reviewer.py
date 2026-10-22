@@ -69,6 +69,7 @@ def isolated_model(monkeypatch):
             get=MagicMock(return_value=SimpleNamespace(locale="zh", disabled=0))
         ),
         provider_repo=object(),
+        project_task_repo=SimpleNamespace(get=MagicMock(return_value=None)),
     )
     store = MagicMock()
     store.is_model_ref_usable.return_value = True

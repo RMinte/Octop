@@ -157,7 +157,14 @@ async def test_resume_hitl_binds_thread_scope() -> None:
 
     manager = AgentManager.__new__(AgentManager)
     manager._repos = SimpleNamespace(
-        resident_conversation_repo=SimpleNamespace(get_by_agent=lambda _agent_id: None)
+        agent_repo=SimpleNamespace(get=lambda _agent_id: SimpleNamespace(user_id=7)),
+        thread_repo=SimpleNamespace(
+            get=lambda _thread_id: SimpleNamespace(agent_id="agt", user_id=7)
+        ),
+        resident_conversation_repo=SimpleNamespace(
+            get_by_agent=lambda _agent_id: None,
+            get_by_thread=lambda _thread_id: None,
+        ),
     )
     manager._harness_manager = SimpleNamespace(resume_hitl=fake_resume)
     manager._history_backfills = {}

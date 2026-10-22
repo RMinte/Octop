@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from octop.infra.agents.providers.opencode_session import (
     OPENCODE_SESSION_HEADER,
@@ -120,8 +121,8 @@ def _probe_row(**overrides: Any) -> SimpleNamespace:
 
 
 def test_probe_chat_model_injects_throwaway_session_header() -> None:
-    with patch("octop_harness.llm.factory.build_chat_model") as mock_build:
-        mock_build.return_value = object()
+    with patch("octop.infra.agents.providers.box.build_chat_model") as mock_build:
+        mock_build.return_value = FakeListChatModel(responses=["ok"])
         build_probe_chat_model(_probe_row(), model_id="glm-5.2")
 
     provider = mock_build.call_args[0][0]
@@ -131,8 +132,8 @@ def test_probe_chat_model_injects_throwaway_session_header() -> None:
 
 def test_probe_chat_model_keeps_user_session_header() -> None:
     row = _probe_row(extra_json=json.dumps({"headers": {OPENCODE_SESSION_HEADER: "mine"}}))
-    with patch("octop_harness.llm.factory.build_chat_model") as mock_build:
-        mock_build.return_value = object()
+    with patch("octop.infra.agents.providers.box.build_chat_model") as mock_build:
+        mock_build.return_value = FakeListChatModel(responses=["ok"])
         build_probe_chat_model(row, model_id="glm-5.2")
 
     provider = mock_build.call_args[0][0]
@@ -141,8 +142,8 @@ def test_probe_chat_model_keeps_user_session_header() -> None:
 
 def test_probe_injects_for_custom_provider_on_go_url() -> None:
     row = _probe_row(name="my-relay")
-    with patch("octop_harness.llm.factory.build_chat_model") as mock_build:
-        mock_build.return_value = object()
+    with patch("octop.infra.agents.providers.box.build_chat_model") as mock_build:
+        mock_build.return_value = FakeListChatModel(responses=["ok"])
         build_probe_chat_model(row, model_id="glm-5.2")
 
     provider = mock_build.call_args[0][0]

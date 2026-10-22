@@ -16,6 +16,7 @@ from octop.infra.gateway.process.usage_record import UsageTracker, record_turn_u
 from octop.infra.gateway.threads import ThreadRegistry
 from octop.infra.history.projection import TurnHistoryTracker, message_inputs
 from octop.infra.knowledge.default_open import stamp_turn_knowledge_config
+from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.utils.llm_text import strip_thinking
 from octop.infra.utils.locale import resolve_user_locale
 from octop.infra.utils.ulid import new_ulid
@@ -142,7 +143,16 @@ class CronDeliveryService:
         try:
             from octop.infra.connectors.gateway.adapters.agently_cli import write_scope
 
-            with write_scope(allowed=False):
+            with (
+                write_scope(allowed=False),
+                model_call_scope(
+                    self._repos,
+                    user_id=session.user_id,
+                    purpose="cron",
+                    agent_id=command.agent_id,
+                    thread_id=session.thread_id,
+                ),
+            ):
                 async for chunk in self._agent_manager.stream(command.agent_id, request):
                     tracker.observe(chunk)
                     usage.observe(chunk)

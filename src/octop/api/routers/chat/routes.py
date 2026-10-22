@@ -33,6 +33,7 @@ from octop.infra.gateway.hitl.coordinator import (
 )
 from octop.infra.gateway.hitl.format import normalize_hitl_request
 from octop.infra.gateway.hitl.store import HitlPendingRecord
+from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.utils.llm_text import ainvoke_text
 from octop.infra.utils.locale import resolve_request_locale
 
@@ -257,19 +258,22 @@ async def polish_prompt(
     model_ref = (body.default_model or "").strip() or harness.config.pick_default_model_ref()
     llm = harness.model_factory.get(model_ref)
     try:
-        polished = await ainvoke_text(
-            llm,
-            [
-                SystemMessage(content=_POLISH_SYSTEM_PROMPT),
-                HumanMessage(
-                    content=(
-                        "Rewrite the following draft prompt. Do not answer it.\n\n"
-                        f"---\n{draft}\n---"
+        with model_call_scope(
+            server.services, user_id=user.id, purpose="prompt_polish", agent_id=agent_id
+        ):
+            polished = await ainvoke_text(
+                llm,
+                [
+                    SystemMessage(content=_POLISH_SYSTEM_PROMPT),
+                    HumanMessage(
+                        content=(
+                            "Rewrite the following draft prompt. Do not answer it.\n\n"
+                            f"---\n{draft}\n---"
+                        ),
                     ),
-                ),
-            ],
-            timeout=30.0,
-        )
+                ],
+                timeout=30.0,
+            )
     except TimeoutError:
         raise OctopError(ErrorCode.INTERNAL_ERROR, "polish request timed out") from None
     except Exception:

@@ -18,6 +18,7 @@ from octop.infra.db.repos.project_task_reviews import TaskReviewRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.tasks import now_ms
+from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.locale import normalize_locale
 from octop.infra.utils.ulid import new_ulid
@@ -92,19 +93,28 @@ class TaskApprovalReviewer:
         if not await asyncio.to_thread(store.is_model_ref_usable, job.model_ref):
             return ApprovalReviewResult()
         providers = await asyncio.to_thread(store.build_harness_configs)
+        task = await asyncio.to_thread(services.project_task_repo.get, job.task_id, job.owner_id)
         factory = ChatModelFactory(providers)
         try:
             model = await asyncio.to_thread(factory.get_chat_model, job.model_ref)
             limit = getattr(model, "_harness_max_output_tokens", 0) or 8_192
-            result = await model.ainvoke(
-                [
-                    SystemMessage(
-                        tr("projects.approval_review_prompt", normalize_locale(user.locale))
-                    ),
-                    HumanMessage(job.proposal_json),
-                ],
-                max_tokens=min(limit, 8_192),
-            )
+            with model_call_scope(
+                services,
+                user_id=job.owner_id,
+                purpose="approval_review",
+                task_id=job.task_id,
+                turn_id=job.turn_id,
+                project_id=task.project_id if task else None,
+            ):
+                result = await model.ainvoke(
+                    [
+                        SystemMessage(
+                            tr("projects.approval_review_prompt", normalize_locale(user.locale))
+                        ),
+                        HumanMessage(job.proposal_json),
+                    ],
+                    max_tokens=min(limit, 8_192),
+                )
             usage = result.usage_metadata
             input_tokens = usage["input_tokens"] if usage else 0
             output_tokens = usage["output_tokens"] if usage else 0

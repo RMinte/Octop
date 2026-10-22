@@ -34,7 +34,11 @@ async def test_title_request_has_no_history_tools_or_project_context(monkeypatch
         get=MagicMock(return_value=SimpleNamespace(locale="zh", disabled=0))
     )
     services = SimpleNamespace(
-        user_policy_repo=object(), usage_repo=object(), user_repo=user_repo, provider_repo=object()
+        user_policy_repo=object(),
+        usage_repo=object(),
+        user_repo=user_repo,
+        provider_repo=object(),
+        project_task_repo=SimpleNamespace(get=MagicMock(return_value=None)),
     )
     store = MagicMock()
     store.is_model_ref_usable.return_value = True

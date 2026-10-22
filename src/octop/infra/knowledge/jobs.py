@@ -13,6 +13,7 @@ from octop.infra.knowledge.index import KnowledgeIndex
 from octop.infra.knowledge.ocr import optional_ocr_extractor
 from octop.infra.knowledge.params import get_advanced_settings
 from octop.infra.knowledge.parse import parse_document
+from octop.infra.usage.model_calls import model_call_scope
 
 INDEX_CONCURRENCY = 2
 _index_semaphore: asyncio.Semaphore | None = None
@@ -44,7 +45,8 @@ def process_document(services: Any, kb_id: str, doc_id: str) -> None:
     repo.update_document(doc_id, status="processing", error_message="")
     try:
         path = document_path(kb_id, doc_id, document.filename)
-        text = parse_document(path, ocr=optional_ocr_extractor(services))
+        with model_call_scope(services, user_id=base.owner_user_id, purpose="knowledge_ocr"):
+            text = parse_document(path, ocr=optional_ocr_extractor(services))
         knobs = get_advanced_settings(services.settings_repo.get)
         chunks = chunk_text(text, size=knobs["chunk_size"], overlap=knobs["chunk_overlap"])
         if not (text or "").strip() or not chunks:

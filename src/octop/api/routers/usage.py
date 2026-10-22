@@ -4,8 +4,10 @@
   GET /api/usage/summary?as_user=N   → admin scope; another user's roll-up
   GET /api/usage/summary?agent_id=X  → scope to one agent (must be visible)
   GET /api/usage/export.xlsx         → Excel detail for the same scope
+  GET /api/usage/calls               → caller's independent invocation receipts
   GET /api/admin/usage/summary       → global roll-up (admin only)
   GET /api/admin/usage/export.xlsx   → Excel detail (admin only)
+  GET /api/admin/usage/calls         → global invocation receipts (admin only)
 
 Query params:
   window      = today | yesterday | last_7d | last_30d | all
@@ -29,9 +31,52 @@ from octop.api.common.usage_xlsx import build_usage_xlsx
 from octop.api.deps import current_user, get_server
 from octop.i18n import tr
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.usage.query import ModelCallFilters, ModelCallPage, list_model_calls
 from octop.infra.utils.locale import normalize_locale, resolve_request_locale
 
 router = APIRouter()
+
+
+@router.get(
+    "/usage/calls",
+    response_model=ModelCallPage,
+    summary="查看我的模型调用流水",
+    description="按实际模型、来源、用途和状态查询新采集的逻辑调用。Token 未返回时为 null；不计入原有汇总，不回填历史，也不拆分 SDK 内部 HTTP 重试。",
+)
+async def user_model_calls(
+    filters: ModelCallFilters = Depends(),
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> ModelCallPage:
+    return await list_model_calls(
+        server.services,
+        user_id=int(user.id),
+        filters=filters,
+        timezone=_server_timezone(server),
+    )
+
+
+@router.get(
+    "/admin/usage/calls",
+    response_model=ModelCallPage,
+    summary="查看全部模型调用流水",
+    description="仅管理员可用。可通过 user_id 限定用户；省略时查询全部新采集的逻辑调用。Token 为 null 表示未采集。",
+)
+async def admin_model_calls(
+    user_id: int | None = Query(default=None, gt=0),
+    filters: ModelCallFilters = Depends(),
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> ModelCallPage:
+    if not user.is_admin:
+        raise OctopError.localized(ErrorCode.FORBIDDEN)
+    return await list_model_calls(
+        server.services,
+        user_id=user_id,
+        filters=filters,
+        timezone=_server_timezone(server),
+    )
+
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

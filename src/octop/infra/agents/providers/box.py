@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from langchain_core.language_models import BaseChatModel
 from octop_harness import HarnessAgent
 from octop_harness.config import ModelConfig, ProviderConfig
 from octop_harness.llm.factory import ChatModelFactory, build_chat_model
+from octop_harness.request import ChatRequest
 from openai import omit
 
 
@@ -54,18 +57,43 @@ def _configure_box_model(model: BaseChatModel) -> BaseChatModel:
 def build_box_chat_model(provider: ProviderConfig, model: ModelConfig) -> BaseChatModel:
     """Keep harness tool/modality/token handling and adapt explicitly marked boxes."""
     instance = build_chat_model(provider, model)
-    return _configure_box_model(instance) if isinstance(provider, BoxProviderConfig) else instance
+    return _observe_model(instance, provider, model)
+
+
+def _observe_model(
+    instance: BaseChatModel, provider: ProviderConfig, model: ModelConfig
+) -> BaseChatModel:
+    from octop.infra.usage.model_calls import attach_model_observer
+
+    if isinstance(provider, BoxProviderConfig):
+        instance = _configure_box_model(instance)
+    return attach_model_observer(instance, provider, model)
 
 
 class OctopChatModelFactory(ChatModelFactory):
     def _build(self, provider: ProviderConfig, model: ModelConfig) -> BaseChatModel:
         instance = super()._build(provider, model)
-        return (
-            _configure_box_model(instance) if isinstance(provider, BoxProviderConfig) else instance
-        )
+        return _observe_model(instance, provider, model)
 
 
 class OctopHarnessAgent(HarnessAgent):
+    async def call(
+        self,
+        request: ChatRequest | str | dict[str, Any],
+        *,
+        protocol: str | None = None,
+    ) -> dict[str, Any]:
+        from octop.infra.usage.model_calls import (
+            current_model_call_scope,
+            override_model_call_scope,
+        )
+
+        scope = current_model_call_scope()
+        if scope is not None and self._agent_id != scope.agent_id:
+            with override_model_call_scope(purpose="subagent", agent_id=self._agent_id):
+                return await super().call(request, protocol=protocol)
+        return await super().call(request, protocol=protocol)
+
     def _init_model_factory(self, injected: ChatModelFactory | None) -> ChatModelFactory:
         if injected is None and self._config.providers:
             return OctopChatModelFactory(self._config.providers, agent_config=self._config)

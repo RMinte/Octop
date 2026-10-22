@@ -18,6 +18,7 @@ from octop.infra.agents.providers.box import OctopChatModelFactory as ChatModelF
 from octop.infra.agents.providers.reasoning import reasoning_request_parameters
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.services import SharedServices
+from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.llm_text import strip_thinking
 
@@ -374,12 +375,18 @@ class TaskProgressAgent:
         locale: str,
         *,
         record_usage: Callable[[int, int], Awaitable[None]] | None = None,
+        task_id: str | None = None,
+        turn_id: str | None = None,
+        submission_id: str | None = None,
     ) -> None:
         self.services = services
         self.owner_id = owner_id
         self.model_ref = model_ref
         self.locale = locale
         self.record_usage = record_usage
+        self.task_id = task_id
+        self.turn_id = turn_id
+        self.submission_id = submission_id
 
     async def generate(self, snapshot: ProgressSnapshot) -> str | None:
         if isinstance(snapshot.facts.get("test_counts"), dict):
@@ -409,6 +416,11 @@ class TaskProgressAgent:
             return None
         capability = await asyncio.to_thread(store.get_model_reasoning_capability, self.model_ref)
         providers = await asyncio.to_thread(store.build_harness_configs)
+        task = (
+            await asyncio.to_thread(services.project_task_repo.get, self.task_id, self.owner_id)
+            if self.task_id
+            else None
+        )
         factory = ChatModelFactory(providers)
         try:
             model = await asyncio.to_thread(factory.get_chat_model, self.model_ref)
@@ -418,13 +430,22 @@ class TaskProgressAgent:
                 updates["extra_body"] = {**(getattr(model, "extra_body", None) or {}), **extra}
             configured = model.model_copy(update=updates)
             limit = getattr(model, "_harness_max_output_tokens", 0) or _OUTPUT_BUDGET
-            result = await configured.ainvoke(
-                [
-                    SystemMessage(tr("projects.progress_narration_prompt", self.locale)),
-                    HumanMessage(json.dumps(snapshot.facts, ensure_ascii=False)),
-                ],
-                max_tokens=min(limit, _OUTPUT_BUDGET),
-            )
+            with model_call_scope(
+                services,
+                user_id=self.owner_id,
+                purpose="progress_narration",
+                task_id=self.task_id,
+                turn_id=self.turn_id,
+                submission_id=self.submission_id,
+                project_id=task.project_id if task else None,
+            ):
+                result = await configured.ainvoke(
+                    [
+                        SystemMessage(tr("projects.progress_narration_prompt", self.locale)),
+                        HumanMessage(json.dumps(snapshot.facts, ensure_ascii=False)),
+                    ],
+                    max_tokens=min(limit, _OUTPUT_BUDGET),
+                )
             usage = result.usage_metadata
             if usage is not None and self.record_usage is not None:
                 await self.record_usage(usage["input_tokens"], usage["output_tokens"])

@@ -13,6 +13,7 @@ from pydantic import Field
 from octop.infra.agents.resident_conversation import ResidentConversationRuntime, ResidentModel
 from octop.infra.agents.resident_identity import resident_execution_scope
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.usage.model_calls import model_call_scope
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,16 @@ async def _compact(
     ):
         raise OctopError.localized(ErrorCode.RESIDENT_MODEL_UNAVAILABLE)
     agent = await _agent(runtime, agent_id)
-    with resident_execution_scope(owner_id, thread_id):
+    with (
+        resident_execution_scope(owner_id, thread_id),
+        model_call_scope(
+            runtime.services,
+            user_id=owner_id,
+            purpose="compaction",
+            agent_id=agent_id,
+            thread_id=thread_id,
+        ),
+    ):
         result = cast(CompactResult, await agent.acompact_conversation(thread_id, model=model))
     reason = (
         result.reason

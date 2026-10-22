@@ -25,6 +25,7 @@ from octop.infra.knowledge.ocr import (
 )
 from octop.infra.knowledge.parse import parse_document
 from octop.infra.knowledge.relpath import normalize_kb_path, path_basename, path_parent
+from octop.infra.usage.model_calls import model_call_scope
 
 MAX_DOCS_PER_KB = 100
 MAX_BASES_PER_OWNER = 20
@@ -187,7 +188,8 @@ class KnowledgeService:
         if document.is_dir:
             raise LookupError("knowledge document not found")
         path = document_path(kb_id, doc_id, document.filename)
-        text = parse_document(path, ocr=optional_ocr_extractor(self._services))
+        with model_call_scope(self._services, user_id=actor_user_id, purpose="knowledge_ocr"):
+            text = parse_document(path, ocr=optional_ocr_extractor(self._services))
         if len(text) > _MAX_PREVIEW_CHARS:
             text = text[:_MAX_PREVIEW_CHARS]
         return {

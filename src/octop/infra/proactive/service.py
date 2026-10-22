@@ -12,6 +12,7 @@ Procedural flow (bypasses the LangGraph ReAct loop):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from octop.i18n.loader import tr as i18n_tr
 from octop.infra.proactive.picker import EpisodePicker
+from octop.infra.usage.model_calls import override_model_call_scope
 from octop.infra.utils.llm_text import ainvoke_text
 from octop.infra.utils.locale import normalize_locale
 
@@ -233,7 +235,10 @@ class ProactiveCareService:
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=f"User's recent life events:\n\n{episode_context}"),
             ]
-            care_text = await ainvoke_text(llm, messages, timeout=30.0)
+            session = await asyncio.to_thread(self._gateway.require_session, agent_id, session_key)
+            async with self._agent_manager._model_call_context(agent_id, session.thread_id):
+                with override_model_call_scope(purpose="proactive"):
+                    care_text = await ainvoke_text(llm, messages, timeout=30.0)
             # Truncate to the max length
             if len(care_text) > _MAX_CARE_TEXT_LEN:
                 care_text = care_text[:_MAX_CARE_TEXT_LEN]

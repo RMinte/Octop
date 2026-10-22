@@ -24,6 +24,7 @@ from octop.infra.agents.experts.skillhub_market import (
 )
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.history.trajectory.settings import apply_enable_trajectory
+from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.utils.locale import resolve_user_locale
 
 logger = logging.getLogger(__name__)
@@ -183,13 +184,20 @@ async def _enrich_agent_welcome_async(
             return
         llm, model_ref = resolved
         expert_dir = server.paths.expert_market_dir / item.expert_id
-        payload = await build_skillhub_agent_manifest_bytes(
-            llm=llm,
-            item=item,
-            expert_dir=expert_dir,
-            model_ref=model_ref,
-            timeout=_SKILLHUB_MANIFEST_GENERATION_TIMEOUT_SECONDS,
-        )
+        row = await asyncio.to_thread(server.services.agent_repo.get, agent_id)
+        with model_call_scope(
+            server.services,
+            user_id=row.user_id if row else None,
+            purpose="expert_manifest",
+            agent_id=agent_id,
+        ):
+            payload = await build_skillhub_agent_manifest_bytes(
+                llm=llm,
+                item=item,
+                expert_dir=expert_dir,
+                model_ref=model_ref,
+                timeout=_SKILLHUB_MANIFEST_GENERATION_TIMEOUT_SECONDS,
+            )
         assert server.app_runtime is not None
         registry = server.app_runtime.agent_registry
         workspace = registry.workspace_for_agent(agent_id)

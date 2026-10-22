@@ -24,6 +24,7 @@ from octop.infra.projects.checkpoint_saver import TaskCheckpointSaver
 from octop.infra.projects.context import close_pending_tools, model_context, task_backend
 from octop.infra.projects.stream import TASK_PROTOCOL
 from octop.infra.projects.usage import compact_usage, latest_usage, save_usage, stamp_usage
+from octop.infra.usage.model_calls import override_model_call_scope
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.locale import normalize_locale
 
@@ -117,14 +118,15 @@ async def run_compaction(
             )
             summarizer = agent._summarization_mw
             assert summarizer is not None
-            result = await force_compact_thread(
-                graph=_CompactionGraph(agent.graph),
-                backend=summarizer._backend,
-                model=summary_model.with_config(callbacks=[usage]),
-                thread_id=turn.turn_id,
-                model_ref=turn.model_ref,
-                summarization_middleware=summarizer,
-            )
+            with override_model_call_scope(purpose="compaction"):
+                result = await force_compact_thread(
+                    graph=_CompactionGraph(agent.graph),
+                    backend=summarizer._backend,
+                    model=summary_model.with_config(callbacks=[usage]),
+                    thread_id=turn.turn_id,
+                    model_ref=turn.model_ref,
+                    summarization_middleware=summarizer,
+                )
             if result.ok:
                 snapshot = compact_usage(snapshot, result.removed_tokens)
                 path = result.display_path or display_offload_path(result.file_path)

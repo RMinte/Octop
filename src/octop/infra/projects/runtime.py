@@ -12,7 +12,7 @@ import contextlib
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast
@@ -104,6 +104,7 @@ from octop.infra.projects.usage import message_usage, save_usage
 from octop.infra.skills.install import prepare_skillhub_package
 from octop.infra.skills.skill_package_store import SkillPackageStore
 from octop.infra.skills.skillhub_market import download_skillhub_package_files
+from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.locale import normalize_locale
 from octop.infra.utils.ulid import new_ulid
@@ -186,8 +187,27 @@ def _save_progress(
 
 async def run_turn(
     services: SharedServices, owner_id: int, turn: ProjectTaskTurnRow, history: list[Any]
-) -> AsyncIterator[dict[str, Any]]:
+) -> AsyncGenerator[dict[str, Any], None]:
     """Yield only public text/tool-progress events; credentials stay in-process."""
+    task = await asyncio.to_thread(services.project_task_repo.get, turn.task_id, owner_id)
+    with model_call_scope(
+        services,
+        user_id=owner_id,
+        purpose="main",
+        agent_id=turn.task_id,
+        project_id=task.project_id if task else None,
+        task_id=turn.task_id,
+        turn_id=turn.turn_id,
+        submission_id=turn.request_id,
+    ):
+        async with contextlib.aclosing(_run_turn(services, owner_id, turn, history)) as events:
+            async for event in events:
+                yield event
+
+
+async def _run_turn(
+    services: SharedServices, owner_id: int, turn: ProjectTaskTurnRow, history: list[Any]
+) -> AsyncGenerator[dict[str, Any], None]:
     raw = json.loads(turn.configuration_json)
     if is_compaction(turn.prompt, raw.get("attachment_ids", [])):
         async for event in run_compaction(services, owner_id, turn, history, factory=HarnessAgent):
@@ -1267,6 +1287,7 @@ class ProjectTaskWorker:
         pause: dict[str, Any] | None = None
         interrupted: TaskInterruption | None = None
         failure: TaskRecovery | None = None
+        events: AsyncGenerator[dict[str, Any], None] | None = None
         locale = normalize_locale(None)
         output_lock = asyncio.Lock()
         narrator: TaskProgressNarrator | None = None
@@ -1509,6 +1530,9 @@ class ProjectTaskWorker:
                     turn.model_ref,
                     locale,
                     record_usage=record_narration_usage,
+                    task_id=turn.task_id,
+                    turn_id=turn.turn_id,
+                    submission_id=turn.request_id,
                 )
                 narrator = TaskProgressNarrator(progress_agent.generate, publish_narration)
                 narrator.start()
@@ -1574,7 +1598,8 @@ class ProjectTaskWorker:
                         {"role": "assistant", "content": reply_text},
                     ]
                 )
-            async for event in run_turn(self.services, task, turn, history):
+            events = run_turn(self.services, task, turn, history)
+            async for event in events:
                 if event["type"] in {"token", "pause"}:
                     await stop_narration()
                 async with output_lock:
@@ -1690,6 +1715,12 @@ class ProjectTaskWorker:
             status, error = "failed", "TASK_EXECUTION_FAILED"
             failure = diagnostic("runtime", exc, can_resume=False, reason_code=error)
         finally:
+            if events is not None:
+                try:
+                    await events.aclose()
+                except Exception as exc:
+                    logger.warning("Project task stream close failed (%s)", type(exc).__name__)
+                    status, error = "failed", "TASK_EXECUTION_FAILED"
             await stop_narration()
             _plan_persistence.reset(sink_token)
             _progress_persistence.reset(progress_sink_token)

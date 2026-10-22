@@ -18,6 +18,7 @@ from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.tasks import TaskDetail, detail, now_ms
 from octop.infra.projects.title_policy import normalized_title
+from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.llm_text import llm_text_content
 from octop.infra.utils.locale import normalize_locale
@@ -85,18 +86,26 @@ class TaskTitleAgent:
         if not await asyncio.to_thread(store.is_model_ref_usable, job.model_ref):
             return TitleResult()
         providers = await asyncio.to_thread(store.build_harness_configs)
+        task = await asyncio.to_thread(services.project_task_repo.get, job.task_id, job.owner_id)
         factory = ChatModelFactory(providers)
         try:
             model = await asyncio.to_thread(factory.get_chat_model, job.model_ref)
             # Reasoning models include hidden reasoning in their output budget.
             limit = getattr(model, "_harness_max_output_tokens", 0) or 8_192
-            result = await model.ainvoke(
-                [
-                    SystemMessage(tr("projects.title_prompt", normalize_locale(user.locale))),
-                    HumanMessage(job.prompt[:4_000]),
-                ],
-                max_tokens=min(limit, 8_192),
-            )
+            with model_call_scope(
+                services,
+                user_id=job.owner_id,
+                purpose="title",
+                task_id=job.task_id,
+                project_id=task.project_id if task else None,
+            ):
+                result = await model.ainvoke(
+                    [
+                        SystemMessage(tr("projects.title_prompt", normalize_locale(user.locale))),
+                        HumanMessage(job.prompt[:4_000]),
+                    ],
+                    max_tokens=min(limit, 8_192),
+                )
             usage: UsageMetadata | None = result.usage_metadata
             return TitleResult(
                 None if result.tool_calls else normalized_title(llm_text_content(result)),
