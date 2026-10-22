@@ -6644,6 +6644,23 @@
     "clientDirectoryPlaceholder": "e.g. /Users/name/Projects/demo or C:\\Projects\\demo",
     "noClientDirectory": "No client working directory linked",
     "tasks": {
+      "fileChanges": {
+        "title": "File changes",
+        "summary": "Edited {{count}} files",
+        "review": "Review",
+        "reviewTitle": "Review file changes",
+        "readOnly": "Read-only diff",
+        "showMore": "Show {{count}} more files",
+        "showLess": "Collapse file list",
+        "additions": "{{count}} lines added",
+        "deletions": "{{count}} lines deleted",
+        "unknownAdditions": "Added line count was not recorded",
+        "unknownDeletions": "Deleted line count was not recorded",
+        "unknownCounts": "Some line counts were not recorded",
+        "missingDiff": "Some operations have no complete file snapshot, so their diffs are unavailable.",
+        "noDiff": "No diff is available.",
+        "diffLabel": "Diff for {{path}}"
+      },
       "listScope": "Task list scope",
       "activeList": "Active",
       "archivedList": "Archived",

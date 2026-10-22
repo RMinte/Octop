@@ -572,6 +572,7 @@ async def run_turn(
     )
     team.register(turn.task_id, agent)
     publisher.workspace = agent.workspace
+    execution.workspace = agent.workspace
     usage: dict[str, dict[str, Any]] = {}
     reply_text = turn.reply
     completed = False
@@ -1619,6 +1620,7 @@ class ProjectTaskWorker:
                             event["call_id"],
                             failed=event["failed"],
                             output=event.get("output"),
+                            file_changes=event.get("file_changes"),
                             finished_at=event.get("finished_at"),
                             duration_ms=event.get("duration_ms"),
                         )
@@ -1660,6 +1662,7 @@ class ProjectTaskWorker:
                             event["call_id"],
                             failed=event["failed"],
                             output=event["output"],
+                            file_changes=event.get("file_changes"),
                             from_receipt=True,
                         )
                         if await save_output():

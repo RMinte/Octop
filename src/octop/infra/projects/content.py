@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import Field, StrictBool
 
+from octop.infra.projects.file_changes import TaskFileChange
 from octop.infra.projects.models import ProjectModel
 from octop.infra.projects.progress import TaskPlan
 
@@ -45,6 +46,9 @@ class TaskContentBlock(ProjectModel):
     )
     output: Any | None = Field(
         default=None, description="工具返回的公开 content，保留其原始 JSON 结构。"
+    )
+    file_changes: list[TaskFileChange] = Field(
+        default_factory=list, description="实际成功文件工具的执行前后差异收据；旧记录为空。"
     )
     started_at: datetime | None = Field(
         default=None, description="服务端实际开始执行工具的 UTC 时间；未知为空。"
@@ -225,6 +229,7 @@ class TaskContent:
         *,
         failed: bool = False,
         output: Any = None,
+        file_changes: list[TaskFileChange] | list[dict[str, Any]] | None = None,
         finished_at: datetime | str | None = None,
         duration_ms: float | None = None,
         from_receipt: bool = False,
@@ -238,6 +243,10 @@ class TaskContent:
             # not erase the duration or output already observed by the executor.
             if output is not None:
                 block.output = output
+            if file_changes is not None and not failed:
+                block.file_changes = [
+                    TaskFileChange.model_validate(change) for change in file_changes
+                ]
             if finished_at is not None:
                 block.finished_at = TaskContentBlock.model_validate(
                     {**block.model_dump(), "finished_at": finished_at}

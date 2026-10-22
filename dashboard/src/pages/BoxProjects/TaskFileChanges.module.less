@@ -1,0 +1,152 @@
+.card {
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid var(--fn-border-color, rgba(127, 127, 127, 0.18));
+  border-radius: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border-bottom: 1px solid var(--fn-border-color, rgba(127, 127, 127, 0.18));
+}
+
+.icon {
+  flex-shrink: 0;
+  color: var(--fn-text-secondary);
+}
+
+.summary {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.counts {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.additions {
+  color: var(--ant-color-success, #16a085);
+}
+
+.deletions {
+  color: var(--ant-color-error, #e05252);
+}
+
+.files {
+  list-style: none;
+  margin: 0;
+  padding: 10px 16px;
+}
+
+.file {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--fn-sidebar-item-active-bg, rgba(127, 127, 127, 0.08));
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--ant-color-primary, #1677ff);
+    outline-offset: 3px;
+  }
+}
+
+.path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.expand {
+  margin: 0 8px 10px;
+}
+
+.review {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.filePicker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+
+  > button {
+    height: auto;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+.reviewHeading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.diff {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--fn-border-color, rgba(127, 127, 127, 0.18));
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre;
+
+  [data-kind="added"] {
+    color: var(--ant-color-success, #16a085);
+    background: rgba(22, 160, 133, 0.08);
+  }
+
+  [data-kind="removed"] {
+    color: var(--ant-color-error, #e05252);
+    background: rgba(224, 82, 82, 0.08);
+  }
+
+  [data-kind="hunk"],
+  [data-kind="meta"] {
+    color: var(--fn-text-secondary);
+  }
+}
+
+@media (max-width: 480px) {
+  .header {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .files {
+    padding: 8px 12px;
+  }
+
+  .file,
+  .reviewHeading {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}

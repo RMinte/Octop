@@ -489,6 +489,29 @@ describe("步骤面板详情", () => {
 });
 
 describe("过程区执行详情与旧记录", () => {
+  it("在正式回复后显示文件变更，且不受过程展示开关影响", () => {
+    render(
+      <TaskTurnContent
+        turn={{
+          ...turn,
+          plan: null,
+          status: "completed",
+          reply: "文件已更新。",
+          file_changes: [
+            { path: "src/example.ts", additions: 3, deletions: 1, diff: null },
+          ],
+        }}
+        settings={settings(false, false)}
+      />,
+    );
+    const reply = screen.getByText("文件已更新。");
+    const card = screen.getByRole("region", { name: "文件变更" });
+    expect(card).toHaveTextContent("已编辑 1 个文件");
+    expect(
+      reply.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("公开进展与工具保持事件顺序，完整参数和实际输出只在工具详情中", async () => {
     render(<TaskTurnContent turn={{ ...plannedTurn, plan: null }} />);
     const process = screen.getByRole("region", { name: "动作链路" });

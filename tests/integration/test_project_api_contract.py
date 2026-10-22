@@ -49,6 +49,10 @@ async def test_project_task_contract_is_documented_without_dedicated_protocol(en
         "approval_policy_at_start",
     } <= set(turn["required"])
     assert turn["properties"]["content_blocks"]["items"]["$ref"].endswith("/TaskContentBlock")
+    assert turn["properties"]["file_changes"]["items"]["$ref"].endswith("/TaskFileChange")
+    assert {"path", "additions", "deletions", "diff"} <= set(
+        schema["components"]["schemas"]["TaskFileChange"]["properties"]
+    )
     assert {"type": "null"} in turn["properties"]["recovery"]["anyOf"]
     assert {
         "can_resume",

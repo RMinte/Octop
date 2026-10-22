@@ -20,6 +20,7 @@ import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { DEFAULT_TASK_PRESENTATION_SETTINGS } from "../../hooks/useTaskPresentationSettings";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import { parseKnowledgeCitations } from "../../utils/parseKnowledgeCitations";
+import TaskFileChanges from "./TaskFileChanges";
 import TaskKnowledgeCitations from "./TaskKnowledgeCitations";
 import styles from "./index.module.less";
 
@@ -504,6 +505,7 @@ export default function TaskTurnContent({
         />
       )}
       <TaskKnowledgeCitations citations={citations} />
+      <TaskFileChanges key={turn.turn_id} changes={turn.file_changes ?? []} />
     </>
   );
 }

@@ -31,6 +31,7 @@ from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.context import is_compaction
 from octop.infra.projects.conversation_import_models import ImportedTurnHistory, ImportSource
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
+from octop.infra.projects.file_changes import TaskFileChange
 from octop.infra.projects.image_tools import READ_TASK_IMAGE
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction, public_status
@@ -289,6 +290,10 @@ class TaskTurn(ProjectModel):
     content_blocks: list[TaskContentBlock] = Field(
         description="按发生顺序排列的完整内容块快照；历史未记录分段时为空，不推测原始顺序。"
     )
+    file_changes: list[TaskFileChange] = Field(
+        default_factory=list,
+        description="从本轮已保存的成功工具内容块派生的文件差异；同路径多次修改分别保留，旧记录为空。",
+    )
     content_revision: int = Field(description="本轮内容块版本；只有内容块或块状态变化才递增。")
     plan: TaskPlan | None = Field(
         description="本轮最新的执行计划；未创建时为 null，独立于项目长期目标。"
@@ -426,6 +431,12 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         reply=t.reply,
         reasoning=t.reasoning,
         content_blocks=blocks,
+        file_changes=[
+            change
+            for block in blocks
+            if block.type == "tool" and block.status == "completed"
+            for change in block.file_changes
+        ],
         content_revision=t.content_revision,
         plan=plan,
         plan_revision=plan.revision if plan else 0,

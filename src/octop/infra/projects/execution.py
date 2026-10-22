@@ -22,9 +22,19 @@ from pydantic import BaseModel
 
 from octop.i18n import tr
 from octop.infra.projects.artifacts import SERVER_ARTIFACT_TOOLS
+from octop.infra.projects.file_changes import (
+    FILE_CHANGES_METADATA,
+    change_path,
+    changes,
+    recorded_file_changes,
+    snapshot,
+)
 
 if TYPE_CHECKING:
+    from octop_harness.backends.workspace import BackendWorkspace
+
     from octop.infra.projects.artifacts import TaskArtifactPublisher
+    from octop.infra.projects.receipts import TaskReceipts
 
 STEP_METADATA = "task_step_id"
 BRIEF_METADATA = "brief"
@@ -149,6 +159,8 @@ class TaskExecution(AgentMiddleware[Any, Any]):
         self.action_timeline_enabled = action_timeline_enabled
         self.artifact_publisher = artifact_publisher
         self.client_directory = client_directory
+        self.workspace: BackendWorkspace | None = None
+        self._file_locks: dict[str, asyncio.Lock] = {}
         self._wrote_files = False
         self._missing_delivery = False
         self._started: dict[str, _StartedTool] = {}
@@ -357,12 +369,22 @@ class TaskExecution(AgentMiddleware[Any, Any]):
                 "failed": failed,
                 # Artifacts and additional_kwargs can contain private provider context.
                 "output": deepcopy(message.content) if message is not None else None,
+                "file_changes": [
+                    change.model_dump(mode="json")
+                    for change in (recorded_file_changes(message) or [])
+                ]
+                if message is not None
+                else [],
             }
         )
         self._started.pop(call_id, None)
 
     async def run(
-        self, request: ToolCallRequest, handler: ToolHandler
+        self,
+        request: ToolCallRequest,
+        handler: ToolHandler,
+        *,
+        receipts: TaskReceipts | None = None,
     ) -> ToolMessage | Command[Any]:
         call = request.tool_call
         root = self._is_root()
@@ -407,8 +429,36 @@ class TaskExecution(AgentMiddleware[Any, Any]):
                 }
             )
         actual = request.override(tool_call=strip_step_metadata(call, request.tool))
+
+        async def capture(authorized: ToolCallRequest) -> ToolMessage | Command[Any]:
+            path = change_path(call["name"], authorized.tool_call["args"])
+            if path is None:
+                return await handler(authorized)
+            # ToolNode dispatches batches concurrently. Keep observations of the
+            # same file around exactly one authorized operation at a time.
+            async with self._file_locks.setdefault(path, asyncio.Lock()):
+                before = await snapshot(self.workspace, path)
+                result = await handler(authorized)
+                message = _tool_message(result, call_id)
+                if message is not None and message.status != "error":
+                    file_changes = await changes(self.workspace, before)
+                    artifact = dict(message.artifact) if isinstance(message.artifact, dict) else {}
+                    if message.artifact is not None and not isinstance(message.artifact, dict):
+                        artifact["tool_artifact"] = message.artifact
+                    artifact[FILE_CHANGES_METADATA] = [
+                        change.model_dump(mode="json") for change in file_changes
+                    ]
+                    # ToolMessage artifacts are persisted with the receipt and
+                    # are excluded from model input by LangChain adapters.
+                    message.artifact = artifact
+                return result
+
         try:
-            result = await handler(actual)
+            result = (
+                await receipts.run(actual, capture)
+                if receipts is not None
+                else await capture(actual)
+            )
         except GraphBubbleUp:
             # Interruptions are durable waits, not failed or completed tool executions.
             raise

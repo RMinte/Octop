@@ -6644,6 +6644,23 @@
     "clientDirectoryPlaceholder": "例如 /Users/name/Projects/demo 或 C:\\Projects\\demo",
     "noClientDirectory": "尚未关联客户端工作目录",
     "tasks": {
+      "fileChanges": {
+        "title": "文件变更",
+        "summary": "已编辑 {{count}} 个文件",
+        "review": "审核",
+        "reviewTitle": "审核文件变更",
+        "readOnly": "只读差异",
+        "showMore": "再显示 {{count}} 个文件",
+        "showLess": "收起文件列表",
+        "additions": "新增 {{count}} 行",
+        "deletions": "删除 {{count}} 行",
+        "unknownAdditions": "新增行数未记录",
+        "unknownDeletions": "删除行数未记录",
+        "unknownCounts": "部分行数未记录",
+        "missingDiff": "部分操作未记录完整文件快照，无法展示全部差异。",
+        "noDiff": "暂无可展示的差异。",
+        "diffLabel": "「{{path}}」的差异"
+      },
       "listScope": "任务列表范围",
       "activeList": "未归档",
       "archivedList": "已归档",

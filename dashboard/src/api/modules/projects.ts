@@ -272,6 +272,12 @@ export interface TaskRecovery {
   resource_id: string | null;
   status_code: number | null;
 }
+export interface TaskFileChange {
+  path: string;
+  additions: number | null;
+  deletions: number | null;
+  diff: string | null;
+}
 export interface TaskTurn {
   sequence: number;
   turn_id: string;
@@ -289,6 +295,7 @@ export interface TaskTurn {
   recovery?: TaskRecovery | null;
   activity: string;
   artifacts: TaskArtifact[];
+  file_changes?: TaskFileChange[];
   model_ref: string;
   input_tokens?: number;
   output_tokens?: number;

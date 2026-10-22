@@ -21,6 +21,7 @@ from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import approval_policy, interactions
 from octop.infra.projects.execution import TaskExecution
+from octop.infra.projects.file_changes import recorded_file_changes
 from octop.infra.projects.interaction_models import ApprovalPayload, AskQuestions
 from octop.infra.projects.planning import PLANNING
 from octop.infra.projects.receipts import TaskReceipts
@@ -168,6 +169,10 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                         "call_id": str(request.tool_call["id"]),
                         "failed": previous.status == "error",
                         "output": previous.content,
+                        "file_changes": [
+                            change.model_dump(mode="json")
+                            for change in (recorded_file_changes(previous) or [])
+                        ],
                     }
                 )
                 return previous
@@ -232,11 +237,7 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                 status="error",
             )
         if self.execution is not None:
-
-            async def invoke(actual: ToolCallRequest) -> ToolMessage | Command[Any]:
-                return (
-                    await self.receipts.run(actual, handler) if tracked else await handler(actual)
-                )
-
-            return await self.execution.run(request, invoke)
+            return await self.execution.run(
+                request, handler, receipts=self.receipts if tracked else None
+            )
         return await handler(request)
