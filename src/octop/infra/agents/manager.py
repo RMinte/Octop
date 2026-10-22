@@ -1054,11 +1054,15 @@ class AgentManager:
         return self._backend_workspace_for_row(row)
 
     def list_agents(self, user_id: int) -> list[AgentRow]:
-        return self._repos.agent_repo.list_by_user(user_id, include_disabled=False)
+        return self._repos.agent_repo.list_by_user(
+            user_id, include_disabled=False, exclude_resident=True
+        )
 
-    def list_rows(self) -> list[AgentRow]:
-        """Return all enabled agent rows (all users), sorted by creation time."""
-        return self._repos.agent_repo.list_all(include_disabled=False)
+    def list_rows(self, *, include_resident: bool = False) -> list[AgentRow]:
+        """Return enabled agent rows; include private stewards only for system operations."""
+        return self._repos.agent_repo.list_all(
+            include_disabled=False, exclude_resident=not include_resident
+        )
 
     def resolve_user_agent(self, user_id: int, query: str) -> AgentRow | None:
         """Match an agent owned by *user_id* by id suffix, full id, or name."""

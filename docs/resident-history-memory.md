@@ -1,6 +1,6 @@
 # 私人智能体：历史与基本记忆接口
 
-本说明补充 [私人智能体常驻会话](resident-agent-conversation.md)，对应服务端首版闭环。本轮不修改 AgentComputer。所有接口使用现有 Bearer 身份认证，只允许当前用户自己的 resident Agent 和绑定 thread；管理员也不能通过这些接口读取其他用户的私人数据。成功响应均带 `Cache-Control: no-store`。
+本说明补充 [私人智能体常驻会话](resident-agent-conversation.md)，对应服务端首版闭环。统一生活工作管家沿用同一私人记忆和会话，专业委派不会拆分管家记忆。本轮不修改 AgentComputer。所有接口使用现有 Bearer 身份认证，只允许当前用户自己的 resident Agent 和绑定 thread；管理员也不能通过这些接口读取其他用户的私人数据。成功响应均带 `Cache-Control: no-store`。
 
 下文的 `{base}` 为 `/api/agents/{agent_id}/threads/{thread_id}`。历史只读请求、记忆查看和手工管理不启动模型。无绑定、Agent/thread 不匹配或其他用户资源返回 `404 NOT_FOUND`。
 
@@ -104,7 +104,7 @@ GET {base}/conversation/history/items/turn%3ATURN_ID?before=20&after=20
 
 后续每轮 resident 对话仅临时提供最新 20 条有效事实，JSON 总长度最多 8192 字节；它们作为本轮背景数据使用，不永久追加到聊天检查点。更正和废弃影响之后发起的轮次，不撤回已经开始的模型请求，也不删除既有历史。超出窗口和预算的有效事实仍保留在记忆库中，可继续管理，但不保证每轮全部召回。
 
-本期保留手工沉淀，自动捕获和自动推断关闭。普通聊天正文和任务回报不会自动变成私人事实；私人记忆不会自动复制到委派任务。废弃是逻辑移除并停止召回，审计记录和既有对话仍保留，不是物理擦除。
+默认保留手工沉淀，原始采集关闭；用户可通过独立 policy 显式开启采集，再提炼并确认候选，详见[记忆与上下文](resident-server-capabilities.md#记忆与上下文)。普通聊天正文和任务回报不会自动变成私人事实；私人记忆不会自动复制到委派任务。废弃是逻辑移除并停止召回，审计记录和既有对话仍保留，不是物理擦除。
 
 ## 定向验证
 

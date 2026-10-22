@@ -1,6 +1,6 @@
 # 私人智能体主动跟进接口
 
-此能力适用于默认私人助手和每个独立的专业实例。每个关注事项固定关联当前登录用户、实例 `agent_id` 和原会话 `thread_id`，通知进入这个会话的持久历史。服务端没有自动创建的关注事项；用户显式创建授权后才开始跟进。
+此能力由统一生活工作管家承接。每个关注事项固定关联当前登录用户、管家 `agent_id` 和原会话 `thread_id`，生活提醒、工作进度和委派成果都进入同一会话的持久历史。服务端没有自动创建的关注事项；用户显式创建授权后才开始跟进。
 
 `note` 按用户指定的时间发送原样保存的提醒正文；`task_watch` 观察用户明确选定的本人 Task，无变化时保持安静，状态变化时通知，任务完成、失败、取消或删除后发送最终状态并停止。已经完成的任务可显式创建关注，现有终态结果会通知一次。这两种授权只产生会话通知。`task` 则需要用户额外明确授予创建 Task 的能力，按指定时间受理完整任务，再沿用普通 Task 的权限、审批和执行流程。
 
@@ -10,7 +10,7 @@
 /api/agents/{agent_id}/threads/{thread_id}/conversation/followups
 ```
 
-接口均需普通 Bearer 用户认证，返回 `Cache-Control: no-store`。跨用户、跨实例或跨会话访问返回 `404`。专业实例归档后保留历史读取，已有跟进会取消；恢复实例不会恢复旧授权。
+接口均需普通 Bearer 用户认证，返回 `Cache-Control: no-store`。跨用户、Agent/thread 不匹配或跨会话访问返回 `404`。跟进授权与具体事项绑定，不因专业工作委派而扩大。
 
 | 方法与后缀 | 用途 | 成功响应 |
 | --- | --- | --- |
@@ -87,7 +87,7 @@
 }
 ```
 
-`source_turn_id` 必须是这个私人会话中的本人轮次。`project_id` 为用户明确选定的本人项目，或者显式传 `null` 创建无项目 Task，不推断项目。`message` 使用完整 `TaskMessage`，包括用户选择的模型、能力、设备与客户端工具；省略的选项沿用普通 Task 的当前项目配置规则。实例本身不会获得这些行动工具。
+`source_turn_id` 必须是这个私人会话中的本人轮次。`project_id` 为用户明确选定的本人项目，或者显式传 `null` 创建无项目 Task，不推断项目。`message` 使用完整 `TaskMessage`，包括用户选择的模型、能力、设备与客户端工具；省略的选项沿用普通 Task 的当前项目配置规则。管家本身不会获得这些行动工具。
 
 每个到期时刻使用由 `followup_id`、`authorization_version` 和该次计划时间生成的稳定派发标识，替换消息模板中的 `request_id`。因此同一到期事件在断线、重启或重复轮询时只受理一个 Task；不同周期明确创建独立 Task。任务、首轮、原会话委派记录、受理通知与调度游标一并提交。其完成、失败或取消结果复用既有成果回流机制，返回原会话。
 
@@ -135,6 +135,6 @@
 
 前台关闭或网络断开不终止已明确授权的跟进。通知通过统一持久投递进入历史与后续对话上下文，并形成会话未读事件；前台重连读取历史和未读即可。写入历史或上下文中途失败时，服务端保留通知状态并幂等补投。客户端 APNs、系统推送、邮件和 IM 投递不属于这些授权。
 
-通知收据也可独立读取：`GET /conversation/notifications?limit=50&page_cursor=...` 和 `GET /conversation/notifications/{notification_id}`，前面仍带相同实例、会话前缀。列表包含已投递和当前授权版本的待投记录；已取消或旧授权的待投记录立即隐藏。单条收据保留 `discarded` 审计状态，客户端不应把它显示为新通知。通知返回稳定 `message_id`、`followup_id`、`authorization_version`、`kind`、正文、结构化 `payload`、时间与投递状态。
+通知收据也可独立读取：`GET /conversation/notifications?limit=50&page_cursor=...` 和 `GET /conversation/notifications/{notification_id}`，前面仍带相同管家、会话前缀。列表包含已投递和当前授权版本的待投记录；已取消或旧授权的待投记录立即隐藏。单条收据保留 `discarded` 审计状态，客户端不应把它显示为新通知。通知返回稳定 `message_id`、`followup_id`、`authorization_version`、`kind`、正文、结构化 `payload`、时间与投递状态。
 
 SQLite 与 PostgreSQL 共用迁移和 API 语义。服务端按现有 resident 单进程工作者边界执行；此接口没有引入额外队列服务。

@@ -183,13 +183,16 @@ class LdapAuthService:
                 self._services.audit_repo.write(
                     actor=user.username, action="auth.ldap_login", target=user.username
                 )
+                await self._user_manager.ensure_resident(user.id)
                 return user
             if not config.auto_provision:
                 raise OctopError(
                     ErrorCode.LDAP_USER_NOT_PROVISIONED,
                     "this directory account has no Octop account yet",
                 )
-            return self._provision(row, config, identity)
+            user = self._provision(row, config, identity)
+            await self._user_manager.ensure_resident(user.id)
+            return user
 
     def _assert_group_allowed(self, config: LdapConfig, identity: LdapIdentity) -> None:
         """Refuse directory accounts outside the configured allow-list."""

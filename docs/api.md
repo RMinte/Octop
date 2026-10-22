@@ -2,9 +2,13 @@
 
 ## 私人智能体常驻会话（2026-10-20）
 
-私人 Agent 与稳定 thread 使用六个 REST 接口：`GET/PUT /api/agents/resident-conversation`，以及绑定 thread 下的 `/conversation`、`POST /messages`、`GET /requests/{request_id}`、`POST /cancel`。首期支持普通文字、持久受理、整份快照轮询和定向取消；不创建专家模板、不绑定项目或 Task，未修改 AgentComputer 客户端。字段、幂等、模型选择、恢复边界和验证范围见 [私人智能体服务端接入说明](resident-agent-conversation.md)。
+每个用户的统一生活工作管家沿用唯一私人 Agent 与稳定 thread，使用六个 REST 接口：`GET/PUT /api/agents/resident-conversation`，以及绑定 thread 下的 `/conversation`、`POST /messages`、`GET /requests/{request_id}`、`POST /cancel`。首期支持普通文字、持久受理、整份快照轮询和定向取消；专业工作通过普通 Task 委派，成果回到同一管家会话，不创建或切换不同专业助手，也不把项目或 Task 绑定到专家，未修改 AgentComputer 客户端。字段、幂等、模型选择、恢复边界和验证范围见 [私人智能体服务端接入说明](resident-agent-conversation.md)。
 
-首版闭环增加绑定 thread 下的 `/conversation/history`（按日、分页、搜索和定位）、`/memory`（复用私人 Agent 存储的手工记忆管理）、`/conversation/delegations`（明确委派普通 Task）。结果按具体任务轮次与终态同事务保存，并可靠接入来源会话历史和模型上下文，不自动再触发模型或复制私人记忆。完整字段与重启语义见[历史与基本记忆](resident-history-memory.md)、[任务委派与成果回流](resident-delegation-results.md)。
+管家由服务端自动准备，无需用户创建或配置，也无需客户端先调用 PUT。`UserManager` 启动为已有启用用户补齐唯一绑定，新用户创建、邀请注册、SSO/LDAP 接入、用户启用及成功登录时均幂等准备，不调用模型或增加执行授权。客户端使用只读 `GET /api/agents/resident-conversation` 获取绑定并检查状态；自动准备失败仍返回 `failed`，不保证每次读取均为 `ready`。`PUT` 保留为显式重试或修复用途；修复后服务启动、成功登录或显式重试均复用原身份及历史。
+
+新 primary 消息只提交 `request_id/prompt` 即可自然语言委派：模型按实际工作请求自主决定调用 `resident_create_task`，并默认可查询本会话委派任务；闲聊和咨询直接回答，信息不足先追问。无需客户端先创建任务或提供 `task_context`。默认创建无项目普通 Task，使用任务自己的独立工作空间，不附加客户端工具、附件、Skill、MCP、插件、子代理、知识库、长期记忆或团队授权，执行仍遵守普通 Task 的现有权限与审批；工作空间不等于操作系统沙箱。可选 `task_context` 仅用于明确选择项目、设备、附件和执行选项，模型不从历史猜测。每轮至多一个任务槽，网络重试沿用原消息 ID；旧消息恢复保留原权限快照。能力声明为 `task_delegation="natural_language"`、`model_task_delegation="one_per_turn"`。
+
+首版闭环增加绑定 thread 下的 `/conversation/history`（按日、分页、搜索和定位）、`/memory`（复用私人 Agent 存储的手工记忆管理）、`/conversation/delegations`（显式创建或读取管家委派的普通 Task）。结果按具体任务轮次与终态同事务保存，并可靠接入来源会话历史和模型上下文，不自动再触发模型或复制私人记忆。自然语言测试须确认真实 `task_id`、实际终态及历史中的成果回报，不能把“已派发”的口头回复当作成功。完整字段与重启语义见[历史与基本记忆](resident-history-memory.md)、[任务委派与成果回流](resident-delegation-results.md)。
 
 ## Codex / Claude 数据导入（2026-10-20）
 
@@ -1067,4 +1071,4 @@ dashboard mirrors every code under `apiErrors.*` in
 | `CONNECTOR_OAUTH_FAILED` | 400 | OAuth flow could not complete |
 | `INTERNAL_ERROR` | 500 | Unhandled exception (logged with traceback) |
 
-私人智能体完整服务端接口与客户端接入顺序见 [resident-server-capabilities.md](resident-server-capabilities.md)，包含专业实例、模板显式采用、授权跟进与定时任务、通知和共享已读水位、记忆候选及上下文整理。
+私人智能体完整服务端接口与客户端接入顺序见 [resident-server-capabilities.md](resident-server-capabilities.md)，包含统一管家身份、自然语言专业工作委派、可选高级执行范围、成果回流、授权跟进与定时任务、通知和共享已读水位、记忆候选及上下文整理。

@@ -37,7 +37,7 @@ def _runtime(server: OctopServer) -> ResidentConversationRuntime:
 @router.get(
     "/agents/resident-capabilities",
     response_model=ResidentCapabilities,
-    summary="Read implemented private assistant capabilities for client integration",
+    summary="Read implemented life and work steward capabilities for client integration",
     description="Authentication required. Reading capabilities does not create an Agent, a conversation or an authorization.",
 )
 async def capabilities(
@@ -51,7 +51,8 @@ async def capabilities(
 @router.get(
     "/agents/resident-conversation",
     response_model=ResidentBinding,
-    summary="Read the current user's private resident Agent binding",
+    summary="Read the current user's single life and work steward binding",
+    description="The server prepares this binding during user startup and account lifecycle. This read does not create resources; clients do not need an initialization request.",
 )
 async def get_binding(
     response: Response,
@@ -66,8 +67,8 @@ async def get_binding(
 @router.put(
     "/agents/resident-conversation",
     response_model=ResidentBinding,
-    summary="Ensure one stable private Agent and conversation for the current user",
-    description="Idempotent initialization. Never reuses another expert or resets an existing thread.",
+    summary="Retry preparation of the current user's life and work steward",
+    description="Optional idempotent repair; normal startup and user creation prepare the binding automatically. Never reuses another expert or resets an existing thread.",
 )
 async def ensure_binding(
     response: Response,
@@ -76,7 +77,7 @@ async def ensure_binding(
 ) -> ResidentBinding:
     response.headers["Cache-Control"] = "no-store"
     runtime = _runtime(server)
-    await ensure_resident_identity(runtime.services, runtime.registry, user.id)
+    await ensure_resident_identity(runtime.services, user.id)
     return await asyncio.to_thread(binding_view, runtime.services, user.id)
 
 

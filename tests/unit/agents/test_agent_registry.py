@@ -812,6 +812,52 @@ async def test_list_agents_filters_by_user(tmp_path: Path) -> None:
     assert u2_rows[0].name == "for-u2"
 
 
+def test_ordinary_agent_lists_preserve_but_hide_private_stewards(tmp_path: Path) -> None:
+    from octop.infra.agents.resident_identity import reserve_resident_in_transaction
+
+    services = _make_services(tmp_path)
+    registry = _make_registry(services)
+    uid = services.user_repo.create(username="owner", password_hash="x", role="user")
+    other_uid = services.user_repo.create(username="other", password_hash="x", role="user")
+    services.agent_repo.create(agent_id="expert", user_id=uid, name="Expert")
+    services.agent_repo.create(agent_id="other-expert", user_id=other_uid, name="Other")
+    services.agent_repo.create(agent_id="disabled", user_id=uid, name="Disabled")
+    services.agent_repo.set_enabled("disabled", False)
+    with services.db.transaction() as conn:
+        reserve_resident_in_transaction(
+            services,
+            conn,
+            owner_id=uid,
+            agent_id="steward",
+            thread_id="steward-thread",
+            name="Steward",
+            system_prompt="Manage life and work",
+            now=0,
+        )
+
+    assert [row.agent_id for row in registry.list_agents(uid)] == ["expert"]
+    assert {row.agent_id for row in registry.list_rows()} == {"expert", "other-expert"}
+    assert {row.agent_id for row in registry.list_rows(include_resident=True)} == {
+        "expert",
+        "other-expert",
+        "steward",
+    }
+    assert {row.agent_id for row in services.agent_repo.list_by_user(uid)} == {
+        "expert",
+        "disabled",
+        "steward",
+    }
+    assert {row.agent_id for row in services.agent_repo.list_all()} == {
+        "expert",
+        "other-expert",
+        "disabled",
+        "steward",
+    }
+    assert registry.get_row("steward") is not None
+    assert services.thread_repo.get("steward-thread") is not None
+    assert services.resident_conversation_repo.get(uid).agent_id == "steward"
+
+
 @pytest.mark.asyncio
 async def test_resolve_user_agent_by_name_and_suffix(tmp_path: Path) -> None:
     """resolve_user_agent matches full id, suffix, and name."""

@@ -12,6 +12,7 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage, SystemMessage, convert_to_messages
 
+from octop.i18n import tr
 from octop.infra.agents.resident_identity import ResidentTextOnlyMiddleware
 from octop.infra.projects import runtime as task_runtime
 from octop.infra.projects.tasks import now_ms
@@ -90,7 +91,13 @@ async def tools_http(env_with_provider, monkeypatch):
         names = [tool["function"]["name"] for tool in prepared.tools]
         previous = await self.aget_history(binding.thread_id, limit=1000)
         incoming = convert_to_messages(request["messages"])
-        current = {"request": request, "tools": names, "previous": previous, "incoming": incoming}
+        current = {
+            "request": request,
+            "tools": names,
+            "system_prompt": prepared.system_message.content,
+            "previous": previous,
+            "incoming": incoming,
+        }
         observed.append(current)
         action = actions.popleft() if actions else None
         messages = await action(guard, current) if action else []
@@ -143,7 +150,69 @@ async def _send(env, **fields):
     return await _settled(env.client, env.auth, env.base, accepted["request_id"]), body
 
 
-async def test_http_read_tools_default_closed_and_explicitly_enabled_for_one_turn(tools_http):
+async def _delivered(env):
+    async with asyncio.timeout(10):
+        while True:
+            linked = _json(
+                await env.client.get(f"{env.base}/conversation/delegations", headers=env.auth)
+            )["items"]
+            if (
+                linked
+                and linked[0]["reports"]
+                and linked[0]["reports"][0]["delivery_status"] == "delivered"
+            ):
+                return linked
+            await asyncio.sleep(0.01)
+
+
+async def test_existing_steward_uses_current_policy_and_recovery_keeps_accepted_snapshot(
+    tools_http,
+):
+    env = tools_http
+    services = env.server.services
+    runtime = env.server.app_runtime.resident_conversations
+    agent_id = env.binding["agent_id"]
+    owner_id = services.agent_repo.get(agent_id).user_id
+    services.user_repo.set_locale(owner_id, "zh")
+    services.agent_repo.update_config(agent_id, system_prompt="Previously stored private policy")
+    original = services.agent_repo.get(agent_id)
+    await runtime.close()
+    body = {"request_id": _key(), "prompt": "Help organize my work and life."}
+    try:
+        accepted = _json(
+            await env.client.post(f"{env.base}/messages", headers=env.auth, json=body), 202
+        )
+        assert accepted["status"] == "queued"
+        saved = services.resident_request_repo.get(owner_id, body["request_id"])
+        frozen = json.loads(saved.configuration_json)
+        assert frozen["system_prompt"] == tr("agents.resident.system_prompt", "zh")
+        assert services.agent_repo.get(agent_id) == original
+        # A settings change before a queued turn is recovered must not rewrite its policy.
+        services.user_repo.set_locale(owner_id, "en")
+        await runtime.start()
+        await _settled(env.client, env.auth, env.base, body["request_id"])
+        assert env.observed[-1]["system_prompt"].startswith(frozen["system_prompt"])
+        assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        await _send(env)
+        assert env.observed[-1]["system_prompt"].startswith(
+            tr("agents.resident.system_prompt", "en")
+        )
+        invocations = len(env.observed)
+        replay = _json(
+            await env.client.post(f"{env.base}/messages", headers=env.auth, json=body), 202
+        )
+        assert replay["turn_id"] == accepted["turn_id"]
+        replayed = services.resident_request_repo.get(owner_id, body["request_id"])
+        assert replayed.configuration_json == saved.configuration_json
+        assert len(env.observed) == invocations
+        binding = _json(await env.client.get("/api/agents/resident-conversation", headers=env.auth))
+        assert binding["agent_id"] == agent_id
+        assert binding["thread_id"] == env.binding["thread_id"]
+    finally:
+        await runtime.start()
+
+
+async def test_http_default_dispatch_tools_and_explicit_private_memory_are_per_turn(tools_http):
     env = tools_http
     memory = _json(
         await env.client.post(
@@ -168,9 +237,10 @@ async def test_http_read_tools_default_closed_and_explicitly_enabled_for_one_tur
     )
 
     async def default(guard, current):
-        assert current["tools"] == []
-        assert current["request"]["conversation_mode"] == "ask"
+        assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        assert current["request"]["conversation_mode"] == "craft"
         return [
+            await _call(guard, "resident_read_tasks"),
             await _call(guard, "resident_read_memory"),
             await _call(guard, "execute", {"command": "Forbidden"}),
         ]
@@ -178,14 +248,20 @@ async def test_http_read_tools_default_closed_and_explicitly_enabled_for_one_tur
     env.actions.append(default)
     first, _ = await _send(env)
     assert first["authorization"]["read_tools"] is False
-    assert all(_content(result)["error_code"] == "FORBIDDEN" for result in env.results[-1])
+    tasks, *denied = env.results[-1]
+    assert tasks.status == "success" and _content(tasks)["items"] == []
+    assert all(_content(result)["error_code"] == "FORBIDDEN" for result in denied)
 
     async def explicit(guard, current):
-        assert set(current["tools"]) == {"resident_read_memory", "resident_read_tasks"}
+        assert set(current["tools"]) == {
+            "resident_create_task",
+            "resident_read_memory",
+            "resident_read_tasks",
+        }
         assert current["request"]["conversation_mode"] == "craft"
         return [
             await _call(guard, "resident_read_memory"),
-            await _call(guard, "resident_create_task", {"brief": "Unauthorized work"}),
+            await _call(guard, "execute", {"command": "Forbidden"}),
             await _call(guard, "resident_read_memory", {"owner_id": 999}),
         ]
 
@@ -218,7 +294,7 @@ async def test_http_task_context_freezes_options_and_one_task_returns_to_origina
     env = tools_http
 
     async def delegate(guard, current):
-        assert current["tools"] == ["resident_create_task"]
+        assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
         assert current["request"]["configurable"]["conversation_mode"] == "craft"
         return [
             await _call(guard, "resident_create_task", {"brief": "Write the authorized draft"}),
@@ -266,18 +342,7 @@ async def test_http_task_context_freezes_options_and_one_task_returns_to_origina
     assert (
         await env.client.post(f"{env.base}/messages", headers=env.auth, json=changed)
     ).status_code == 409
-    async with asyncio.timeout(10):
-        while True:
-            linked = _json(
-                await env.client.get(f"{env.base}/conversation/delegations", headers=env.auth)
-            )["items"]
-            if (
-                linked
-                and linked[0]["reports"]
-                and linked[0]["reports"][0]["delivery_status"] == "delivered"
-            ):
-                break
-            await asyncio.sleep(0.01)
+    linked = await _delivered(env)
     assert len(linked) == len(env.task_calls) == 1
     assert linked[0]["source_turn_id"] == turn["turn_id"]
     actual = env.task_calls[0]
@@ -289,6 +354,140 @@ async def test_http_task_context_freezes_options_and_one_task_returns_to_origina
     assert options["memory_enabled"] is False and options["team_enabled"] is False
     await _send(env, prompt="Explain the completed task result.")
     assert "Result from the real Task worker." in str(env.observed[-1]["previous"])
+
+
+async def test_http_plain_language_delegation_has_host_defaults_and_returns_to_same_chat(
+    tools_http,
+):
+    env = tools_http
+    prompt = "请把下周工作和生活安排交给任务处理，完成后回到这里告诉我。"
+
+    async def delegate(guard, current):
+        assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        assert current["request"]["conversation_mode"] == "craft"
+        return [
+            await _call(guard, "resident_create_task", {"brief": "制定五个工作日的安排"}),
+            await _call(guard, "resident_create_task", {"brief": "制定五个工作日的安排"}),
+            await _call(guard, "resident_create_task", {"brief": "额外创建另一项任务"}),
+        ]
+
+    env.actions.append(delegate)
+    turn, body = await _send(env, prompt=prompt)
+    assert set(body) == {"request_id", "prompt"}
+    created, replay, conflict = env.results[-1]
+    assert created.status == replay.status == "success"
+    assert _content(replay)["task_id"] == _content(created)["task_id"]
+    assert _content(conflict)["error_code"] == "RESIDENT_REQUEST_CONFLICT"
+    owner_id = env.server.services.agent_repo.get(env.binding["agent_id"]).user_id
+    accepted = env.server.services.resident_request_repo.get(owner_id, body["request_id"])
+    frozen = json.loads(accepted.configuration_json)
+    context = frozen["resident_task_context"]
+    assert context["project_id"] is None
+    assert context["message"]["prompt"] == prompt
+    assert context["message"]["attachment_ids"] == []
+    defaults = context["message"]["options"]
+    assert defaults["model_ref"] == frozen["model_ref"]
+    for key in (
+        "skills",
+        "mcp_servers",
+        "plugins",
+        "subagents",
+        "knowledge_base_ids",
+        "client_tools",
+    ):
+        assert defaults[key] == []
+    assert defaults["memory_enabled"] is defaults["team_enabled"] is False
+    assert defaults.get("client_id") is None
+    assert json.loads(accepted.input_json) == {}
+
+    retried = _json(await env.client.post(f"{env.base}/messages", headers=env.auth, json=body), 202)
+    assert retried["turn_id"] == turn["turn_id"]
+    assert (
+        env.server.services.resident_request_repo.get(
+            owner_id, body["request_id"]
+        ).configuration_json
+        == accepted.configuration_json
+    )
+    linked = await _delivered(env)
+    assert len(linked) == len(env.task_calls) == 1
+    assert linked[0]["task_id"] == _content(created)["task_id"]
+    assert linked[0]["source_turn_id"] == turn["turn_id"]
+    actual = env.task_calls[0]
+    task = env.server.services.project_task_repo.get(actual.task_id, owner_id)
+    assert task.project_id is None
+    assert actual.model_ref == frozen["model_ref"]
+    assert prompt in actual.prompt and "制定五个工作日的安排" in actual.prompt
+    options = json.loads(actual.configuration_json)
+    for key in ("skills", "mcp_servers", "plugins", "subagents", "knowledge_base_ids"):
+        assert options[key] == []
+    assert options["memory_enabled"] is options["team_enabled"] is False
+    assert options["execution_options"]["client_tools"] == []
+    assert options["execution_options"].get("client_id") is None
+    history = _json(await env.client.get(f"{env.base}/conversation/history", headers=env.auth))
+    assert any(item["kind"] == "task_report" for item in history["items"])
+    await _send(env, prompt="根据刚才的任务结果，缩减成三个重点。")
+    assert "Result from the real Task worker." in str(env.observed[-1]["previous"])
+    assert len(env.task_calls) == 1
+
+
+async def test_http_plain_small_talk_never_precreates_a_task(tools_http):
+    env = tools_http
+    await _send(env, prompt="你好，今天心情怎么样？")
+    assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
+    assert not env.task_calls
+    assert (
+        _json(await env.client.get(f"{env.base}/conversation/delegations", headers=env.auth))[
+            "items"
+        ]
+        == []
+    )
+
+
+async def test_http_accepted_legacy_turn_does_not_gain_new_default_dispatch(tools_http):
+    env = tools_http
+    services = env.server.services
+    runtime = env.server.app_runtime.resident_conversations
+    owner_id = services.agent_repo.get(env.binding["agent_id"]).user_id
+    body = {"request_id": _key(), "prompt": "Previously accepted ordinary text."}
+    await runtime.close()
+    try:
+        configuration = runtime._configuration(owner_id, env.binding["agent_id"])
+        configuration.pop("resident_task_context", None)
+        configuration["resident_input"] = {}
+        saved, created = services.resident_request_repo.create(
+            owner_id,
+            env.binding["thread_id"],
+            body["request_id"],
+            _key(),
+            body["prompt"],
+            now_ms(),
+            configuration_json=json.dumps(configuration),
+        )
+        assert created
+
+        async def old_turn(guard, current):
+            assert current["tools"] == []
+            assert current["request"]["conversation_mode"] == "ask"
+            return [await _call(guard, "resident_create_task", {"brief": "Never authorized"})]
+
+        env.actions.append(old_turn)
+        await runtime.start()
+        turn = await _settled(env.client, env.auth, env.base, body["request_id"])
+        assert turn["turn_id"] == saved.turn_id
+        assert _content(env.results[-1][0])["error_code"] == "FORBIDDEN"
+        replay = _json(
+            await env.client.post(f"{env.base}/messages", headers=env.auth, json=body), 202
+        )
+        assert replay["turn_id"] == saved.turn_id
+        assert (
+            services.resident_request_repo.get(owner_id, body["request_id"]).configuration_json
+            == saved.configuration_json
+        )
+        assert not env.task_calls
+        await _send(env, prompt="New ordinary text.")
+        assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
+    finally:
+        await runtime.start()
 
 
 @pytest.mark.parametrize("stop", ["cancel", "lease"])
@@ -315,10 +514,6 @@ async def test_http_cancel_or_lost_lease_refuses_further_delegation_in_old_scope
     body = {
         "request_id": _key(),
         "prompt": "Wait for my decision.",
-        "task_context": {
-            "project_id": None,
-            "message": {"request_id": _key(), "prompt": "Authorized draft"},
-        },
     }
     turn = _json(await env.client.post(f"{env.base}/messages", headers=env.auth, json=body), 202)
     try:
@@ -377,7 +572,11 @@ async def test_http_selected_knowledge_is_per_turn_and_revocation_does_not_break
     searched, release = asyncio.Event(), asyncio.Event()
 
     async def search(guard, current):
-        assert current["tools"] == ["resident_search_knowledge"]
+        assert set(current["tools"]) == {
+            "resident_create_task",
+            "resident_read_tasks",
+            "resident_search_knowledge",
+        }
         first = await _call(guard, "resident_search_knowledge", {"query": "Selected evidence"})
         searched.set()
         await release.wait()
@@ -413,7 +612,7 @@ async def test_http_selected_knowledge_is_per_turn_and_revocation_does_not_break
     )
     assert denied.status_code == 404
     await _send(env)
-    assert env.observed[-1]["tools"] == []
+    assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
     assert (await env.client.get(f"{env.base}/conversation", headers=other)).status_code == 404
 
 
@@ -422,8 +621,13 @@ async def test_http_capability_discovery_is_passive_authenticated_and_typed(tool
     before = env.server.services.agent_repo.list_all()
     assert (await env.client.get("/api/agents/resident-capabilities")).status_code == 401
     advertised = _json(await env.client.get("/api/agents/resident-capabilities", headers=env.auth))
+    assert advertised["identity_initialization"] == "server_managed"
+    assert advertised["assistant_role"] == "life_work_steward"
+    assert advertised["professional_work"] == "delegated_tasks"
+    assert "profiles" not in advertised and "explicit_template_adoption" not in advertised
     assert advertised["turn_read_tools"] and advertised["selected_knowledge_search"]
-    assert advertised["model_task_delegation"] == "one_per_explicit_turn_context"
+    assert advertised["task_delegation"] == "natural_language"
+    assert advertised["model_task_delegation"] == "one_per_turn"
     assert env.server.services.agent_repo.list_all() == before
     schema = _json(await env.client.get("/api/openapi.json", headers=env.auth))
     operation = schema["paths"]["/api/agents/resident-capabilities"]["get"]

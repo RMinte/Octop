@@ -82,15 +82,15 @@ def _assert_turn_contract(turn: dict[str, Any]) -> None:
     assert "error_code" in turn and "error_message" in turn
 
 
-async def test_resident_binding_read_is_passive_and_parallel_initialization_is_unique(
+async def test_server_prepares_binding_before_client_read_and_repair_is_idempotent(
     env_with_provider,
 ):
     client, server, auth = env_with_provider
     before = server.services.agent_repo.list_all()
     initial = await client.get("/api/agents/resident-conversation", headers=auth)
     assert initial.status_code == 200, initial.text
-    assert initial.json()["status"] != "ready"
-    assert initial.json().get("agent_id") is None
+    assert initial.json()["status"] == "ready"
+    assert initial.json()["agent_id"]
     assert server.services.agent_repo.list_all() == before
 
     first, second = await asyncio.gather(_binding(client, auth), _binding(client, auth))
@@ -100,7 +100,9 @@ async def test_resident_binding_read_is_passive_and_parallel_initialization_is_u
     )
     assert first["timezone"] == server.config.default_timezone
     assert first["name"]
-    assert len(server.services.agent_repo.list_all()) == len(before) + 1
+    assert len(server.services.agent_repo.list_all()) == len(before)
+    assert first["agent_id"] == initial.json()["agent_id"]
+    assert first["thread_id"] == initial.json()["thread_id"]
     agent = server.services.agent_repo.get(first["agent_id"])
     assert agent is not None and not agent.is_shared
     thread = server.app_runtime.gateway.thread_registry.get_thread(first["thread_id"])
@@ -110,6 +112,61 @@ async def test_resident_binding_read_is_passive_and_parallel_initialization_is_u
     refreshed = await client.get("/api/agents/resident-conversation", headers=auth)
     assert refreshed.json()["thread_id"] == first["thread_id"]
     assert refreshed.headers["cache-control"] == "no-store"
+
+
+async def test_new_user_can_send_using_get_binding_without_initialization_request(
+    env_with_provider, monkeypatch
+):
+    client, server, auth = env_with_provider
+    other_auth = await create_user(client, auth, username="automatic-steward-owner")
+    response = await client.get("/api/agents/resident-conversation", headers=other_auth)
+    assert response.status_code == 200
+    binding = response.json()
+    assert binding["status"] == "ready"
+    owner = server.services.agent_repo.get(binding["agent_id"]).user_id
+    assert server.services.resident_conversation_repo.get(owner).thread_id == binding["thread_id"]
+
+    async def stream(message):
+        yield {"type": "token", "content": "Ready to help."}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    request_id = _request_id()
+    base = _base(binding)
+    sent = await client.post(
+        f"{base}/messages",
+        headers=other_auth,
+        json={"request_id": request_id, "prompt": "Help me plan my day."},
+    )
+    assert sent.status_code == 202
+    completed = await _turn(client, other_auth, base, request_id, "completed")
+    assert completed["reply"] == "Ready to help."
+
+
+async def test_server_start_prepares_existing_users_without_replacing_ready_identity(
+    tmp_octop_home,
+):
+    async with octop_client(tmp_octop_home) as (client, server):
+        await bootstrap_admin(client, tmp_octop_home)
+        auth = await auth_header(client)
+        original = (await client.get("/api/agents/resident-conversation", headers=auth)).json()
+        legacy_owner = server.services.user_repo.create(
+            username="offline-existing-owner", password_hash="unused", role="user"
+        )
+        disabled_owner = server.services.user_repo.create(
+            username="disabled-offline-owner", password_hash="unused", role="user"
+        )
+        server.services.user_repo.set_disabled(disabled_owner, True)
+        assert server.services.resident_conversation_repo.get(legacy_owner) is None
+    async with octop_client(tmp_octop_home) as (client, server):
+        prepared = server.services.resident_conversation_repo.get(legacy_owner)
+        assert prepared is not None and prepared.status == "ready"
+        assert server.services.resident_conversation_repo.get(disabled_owner) is None
+        auth = await auth_header(client)
+        current = (await client.get("/api/agents/resident-conversation", headers=auth)).json()
+        assert current["agent_id"] == original["agent_id"]
+        assert current["thread_id"] == original["thread_id"]
+        assert current["status"] == "ready"
 
 
 async def test_resident_message_acceptance_is_idempotent_and_does_not_accept_changed_prompt(

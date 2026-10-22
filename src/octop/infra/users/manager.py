@@ -112,6 +112,13 @@ class UserManager:
                     permissions=list(row.permissions),
                 )
                 self._users[row.username] = user
+                await self.ensure_resident(user.id)
+
+    async def ensure_resident(self, user_id: int) -> None:
+        """Prepare the user's stable steward without starting a model runtime."""
+        from octop.infra.agents.resident_identity import ensure_resident_identity
+
+        await ensure_resident_identity(self._services, user_id)
 
     async def shutdown_all(self) -> None:
         async with self._lock:
@@ -183,6 +190,7 @@ class UserManager:
             )
             self._users[username] = user
             self._services.audit_repo.write(actor=username, action="user.create", target=username)
+            await self.ensure_resident(user.id)
             return user
 
     def register_cached_user(self, user: User) -> None:
@@ -202,7 +210,7 @@ class UserManager:
         from octop.infra.users.invites import InviteService
 
         async with self._lock:
-            return InviteService(self._services).redeem(
+            user = InviteService(self._services).redeem(
                 code=code,
                 username=username,
                 password=password,
@@ -211,6 +219,8 @@ class UserManager:
                 email=email,
                 register_user=self.register_cached_user,
             )
+            await self.ensure_resident(user.id)
+            return user
 
     def get(self, username: str) -> User | None:
         return self._users.get(username)
@@ -302,6 +312,7 @@ class UserManager:
                         self._services.audit_repo.write(
                             actor=username, action="user.sso_create", target=username
                         )
+                        await self.ensure_resident(user.id)
                         return user
 
             assert row is not None  # The retry loop either returns, raises, or finds this identity.
@@ -326,7 +337,9 @@ class UserManager:
                     permissions=list(row.permissions),
                 )
                 self._users[row.username] = user
+                await self.ensure_resident(user.id)
                 return user
+            await self.ensure_resident(cached_user.id)
             return cached_user
 
     async def bind_sso_identity(
@@ -383,6 +396,7 @@ class UserManager:
                     permissions=list(row.permissions),
                 )
                 self._users[row.username] = cached
+            await self.ensure_resident(cached.id)
             return cached
 
     async def unbind_sso_identity(self, *, user_id: int, kind: str) -> User:
@@ -505,6 +519,7 @@ class UserManager:
             )
             self._users[row.username] = user
         self._services.audit_repo.write(actor=row.username, action="auth.login")
+        await self.ensure_resident(user.id)
         return user
 
     async def change_password(self, username: str, old: str, new: str) -> None:
@@ -751,6 +766,7 @@ class UserManager:
         )
         async with self._lock:
             self._users[username] = user
+            await self.ensure_resident(user.id)
         self._services.audit_repo.write(actor=ACTOR_ADMIN, action="user.enable", target=username)
 
     async def unlock_login(self, username: str) -> None:

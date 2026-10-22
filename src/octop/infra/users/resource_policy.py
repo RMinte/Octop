@@ -198,7 +198,7 @@ def assert_agent_quota_available(policy_repo: Any, agent_repo: Any, user_id: int
     limit = max_agents_of(policy_repo.get(user_id, POLICY_MAX_AGENTS))
     if limit is None:
         return
-    owned = int(agent_repo.count_by_user(user_id, kind="expert"))
+    owned = int(agent_repo.count_by_user(user_id, kind="expert", exclude_resident=True))
     if owned >= limit:
         raise OctopError(
             ErrorCode.AGENT_QUOTA_EXCEEDED,

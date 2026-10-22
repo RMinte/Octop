@@ -8,7 +8,6 @@ import json
 import pytest
 
 from octop.config import OctopConfig
-from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.resident_identity import ensure_resident_identity
 from octop.infra.db import migrate
 from octop.infra.db.pool import SqlitePool
@@ -34,8 +33,7 @@ def delegated(tmp_path):
     migrate.run_migrations(db)
     services = build_shared_services(db=db, paths=paths, config=OctopConfig())
     services.user_repo.create(username="owner", password_hash="x", role="user")
-    manager = AgentManager(repos=services.repos, paths=paths)
-    binding = asyncio.run(ensure_resident_identity(services, manager, 1))
+    binding = asyncio.run(ensure_resident_identity(services, 1))
     with db.transaction() as conn:
         services.project_task_repo.insert(
             conn, ProjectTaskRow("task", 1, None, "Task", "task-request", "first", NOW, NOW)

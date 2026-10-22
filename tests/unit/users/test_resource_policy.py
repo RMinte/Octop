@@ -9,6 +9,8 @@ import pytest
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.repos.agents import AgentRepo
+from octop.infra.db.repos.resident_conversations import ResidentConversationRepo
+from octop.infra.db.repos.threads import ThreadRepo
 from octop.infra.db.repos.usage import UsageRepo
 from octop.infra.db.repos.user_policies import UserPolicyRepo
 from octop.infra.db.repos.users import UserRepo
@@ -137,6 +139,34 @@ def test_assert_agent_quota_available(db: SqlitePool) -> None:
 
     policies.set(uid, POLICY_MAX_AGENTS, "2")
     assert_agent_quota_available(policies, agents, uid)
+
+
+def test_private_steward_does_not_consume_expert_quota(db: SqlitePool) -> None:
+    uid = UserRepo(db).create(username="steward-owner", password_hash="h", role="user")
+    agents = AgentRepo(db)
+    policies = UserPolicyRepo(db)
+    policies.set(uid, POLICY_MAX_AGENTS, "1")
+    agents.create(agent_id="steward", user_id=uid, name="Steward", kind="expert")
+    ThreadRepo(db).insert(
+        thread_id="steward-thread",
+        agent_id="steward",
+        user_id=uid,
+        channel_type="resident",
+        session_key="steward:resident:dm",
+    )
+    with db.transaction() as conn:
+        assert ResidentConversationRepo.reserve_in_transaction(
+            conn, uid, "steward", "steward-thread", 0
+        )
+
+    assert_agent_quota_available(policies, agents, uid)
+    agents.create(agent_id="ordinary-expert", user_id=uid, name="Expert", kind="expert")
+    with pytest.raises(OctopError) as exc:
+        assert_agent_quota_available(policies, agents, uid)
+    assert exc.value.code is ErrorCode.AGENT_QUOTA_EXCEEDED
+    assert exc.value.details == {"used": 1, "quota": 1}
+    assert agents.count_by_user(uid, kind="expert") == 2
+    assert ResidentConversationRepo(db).get(uid) is not None
 
 
 def test_user_policy_repo_named_rows(db: SqlitePool, tmp_path: Path) -> None:

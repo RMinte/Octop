@@ -1,4 +1,4 @@
-"""Private resident identity and the text-only runtime boundary."""
+"""Private resident identity and its host-tool runtime boundary."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from octop.infra.utils.locale import normalize_locale
 from octop.infra.utils.ulid import new_ulid
 
 if TYPE_CHECKING:
-    from octop.infra.agents.manager import AgentManager
     from octop.infra.db.repos.agents import AgentRow
 
 _EXECUTION_SCOPE: ContextVar[tuple[int, str] | None] = ContextVar(
@@ -34,7 +33,7 @@ _PROMPT_CONTEXT: ContextVar[str | None] = ContextVar("resident_prompt_context", 
 
 @contextmanager
 def resident_prompt_scope(text: str | None) -> Iterator[None]:
-    """Freeze the professional template prompt at durable message acceptance."""
+    """Use the identity policy frozen at durable message acceptance."""
     token = _PROMPT_CONTEXT.set(text)
     try:
         yield
@@ -65,7 +64,7 @@ def resident_execution_allowed(owner_id: int, thread_id: str) -> bool:
 
 
 class ResidentTextOnlyMiddleware(AgentMiddleware[Any, Any]):
-    """Remove every tool from requests and refuse even unsolicited tool calls."""
+    """Limit the model to resident host tools; execution belongs to delegated Tasks."""
 
     def __init__(self, locale: str, owner_id: int, thread_id: str) -> None:
         self.locale = locale
@@ -280,7 +279,7 @@ def _reserve(services: SharedServices, owner_id: int) -> ResidentConversationRow
 
 
 async def ensure_resident_identity(
-    services: SharedServices, agent_manager: AgentManager, owner_id: int
+    services: SharedServices, owner_id: int
 ) -> ResidentConversationRow:
     binding = await asyncio.to_thread(_reserve, services, owner_id)
     return await initialize_resident_binding(services, binding)

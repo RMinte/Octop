@@ -15,7 +15,6 @@ from pydantic import ValidationError
 
 from octop.config import OctopConfig
 from octop.infra.agents import resident_followups as followups
-from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.resident_identity import ensure_resident_identity
 from octop.infra.agents.resident_notifications import (
     ResidentNotificationDelivery,
@@ -47,8 +46,7 @@ def followed(tmp_path, monkeypatch):
     services.user_repo.create(username="owner", password_hash="x", role="user")
     services.user_repo.create(username="other", password_hash="x", role="user")
     services.secret_repo.get_or_create("jwt", lambda: b"test-followup-cursor-key")
-    manager = AgentManager(repos=services.repos, paths=paths)
-    binding = asyncio.run(ensure_resident_identity(services, manager, 1))
+    binding = asyncio.run(ensure_resident_identity(services, 1))
     yield services, binding
     db.close()
 

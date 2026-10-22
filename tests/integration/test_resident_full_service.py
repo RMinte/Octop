@@ -1,4 +1,4 @@
-"""Cross-feature acceptance for private professional instances and follow-ups."""
+"""Cross-feature acceptance for one private life/work steward and delegated work."""
 
 from __future__ import annotations
 
@@ -17,6 +17,12 @@ from octop_memory.types import Candidate
 
 from octop.infra.agents.experts.catalog import ExpertCatalog
 from octop.infra.agents.resident_memory import _memory
+from octop.infra.agents.resident_profiles import (
+    ResidentProfileArchive,
+    ResidentProfileCreate,
+    archive_profile,
+    create_profile,
+)
 from tests.support.auth import create_user
 from tests.support.fakes import FakeHarnessAgent
 
@@ -106,128 +112,135 @@ async def full_service(env_with_provider, monkeypatch, tmp_path):
     return client, server, auth, primary, requests, template, catalog
 
 
-async def _profile(client, auth, name):
-    body = {
-        "request_id": _key(),
-        "name": name,
-        "template_kind": "builtin",
-        "template_id": "audit-writer",
-    }
-    return _json(
-        await client.post("/api/agents/resident-profiles", headers=auth, json=body), 201
-    ), body
+async def _steward(client, auth):
+    return _json(await client.put("/api/agents/resident-conversation", headers=auth, json={}))
 
 
-async def test_professional_instances_have_real_private_history_and_memory(full_service):
-    client, server, auth, primary, requests, _template, _catalog = full_service
-    writer, body = await _profile(client, auth, "My writer")
-    coach, _ = await _profile(client, auth, "My writing coach")
-    identities = {(item["agent_id"], item["thread_id"]) for item in (primary, writer, coach)}
-    assert len(identities) == 3
-    assert writer["tools_enabled"] is False
-    replay = _json(await client.post("/api/agents/resident-profiles", headers=auth, json=body), 201)
-    assert replay["profile_id"] == writer["profile_id"]
-    changed = await client.post(
-        "/api/agents/resident-profiles", headers=auth, json={**body, "name": "Changed"}
+async def _legacy_profile(server, primary, catalog, name):
+    """Seed retained pre-steward data without exposing retired product endpoints."""
+    owner_id = server.services.agent_repo.get(primary["agent_id"]).user_id
+    profile = await create_profile(
+        server.services,
+        catalog,
+        owner_id,
+        ResidentProfileCreate(
+            request_id=_key(), name=name, template_kind="builtin", template_id="audit-writer"
+        ),
     )
-    assert changed.status_code == 409
-    first = await _send(client, auth, writer, "Writer-specific discussion")
-    await _send(client, auth, coach, "Coach-specific discussion")
-    await _send(client, auth, writer, "Continue my writing discussion")
-    assert requests[-1][0] == writer["thread_id"]
-    assert "Writer-specific discussion" in str(requests[-1][1])
-    assert "Coach-specific discussion" not in str(requests[-1][1])
+    return profile.model_dump(mode="json")
+
+
+async def test_single_steward_keeps_identity_history_and_memory_across_work_and_life(full_service):
+    client, server, auth, primary, requests, _template, _catalog = full_service
+    stranger = await create_user(client, auth, username="full-service-stranger")
+    other = await _steward(client, stranger)
+    assert (primary["agent_id"], primary["thread_id"]) != (other["agent_id"], other["thread_id"])
+    first = await _send(client, auth, primary, "Help organize my work this week.")
+    await _send(client, stranger, other, "Another user's private discussion")
+    await _send(client, auth, primary, "Also plan dinner around that work schedule.")
+    assert requests[-1][0] == primary["thread_id"]
+    assert "Help organize my work this week." in str(requests[-1][1])
+    assert "Another user's private discussion" not in str(requests[-1][1])
     memory = _json(
         await client.post(
-            f"{_base(writer)}/memory",
+            f"{_base(primary)}/memory",
             headers=auth,
-            json={"assertion": "My writing uses short sentences.", "kind": "Preference"},
+            json={"assertion": "I prefer short actionable plans.", "kind": "Preference"},
         ),
         201,
     )
-    assert (await client.get(f"{_base(coach)}/memory", headers=auth)).json()["items"] == []
-    assert (await client.get(f"{_base(primary)}/memory", headers=auth)).json()["items"] == []
-    writer_history = _json(await client.get(f"{_base(writer)}/conversation/history", headers=auth))
+    for initialized in await asyncio.gather(*[_steward(client, auth) for _ in range(3)]):
+        assert (initialized["agent_id"], initialized["thread_id"]) == (
+            primary["agent_id"],
+            primary["thread_id"],
+        )
+    history = _json(await client.get(f"{_base(primary)}/conversation/history", headers=auth))
     assert any(
         item.get("turn", {}).get("turn_id") == first["turn_id"]
-        for item in writer_history["items"]
+        for item in history["items"]
         if item.get("turn")
     )
-    assert memory["atom_id"]
-    stranger = await create_user(client, auth, username="full-service-stranger")
     assert (
-        await client.get(f"/api/agents/resident-profiles/{writer['profile_id']}", headers=stranger)
-    ).status_code == 404
-    assert (await client.get(f"{_base(writer)}/memory", headers=stranger)).status_code == 404
-    assert (await client.get(f"{_base(writer)}/conversation", headers=stranger)).status_code == 404
-    current_primary = _json(await client.get("/api/agents/resident-conversation", headers=auth))
-    assert current_primary["thread_id"] == primary["thread_id"]
-    assert not server.services.agent_repo.get(writer["agent_id"]).is_shared
+        _json(await client.get(f"{_base(primary)}/memory", headers=auth))["items"][0]["atom_id"]
+        == memory["atom_id"]
+    )
+    assert (await client.get(f"{_base(other)}/memory", headers=stranger)).json()["items"] == []
+    assert (await client.get(f"{_base(primary)}/memory", headers=stranger)).status_code == 404
+    assert (await client.get(f"{_base(primary)}/conversation", headers=stranger)).status_code == 404
+    current = _json(await client.get("/api/agents/resident-conversation", headers=auth))
+    assert (current["agent_id"], current["thread_id"]) == (
+        primary["agent_id"],
+        primary["thread_id"],
+    )
+    assert not server.services.agent_repo.get(primary["agent_id"]).is_shared
 
 
-async def test_template_diff_and_adoption_never_replace_private_history_or_memory(full_service):
-    client, server, auth, _primary, _requests, template, catalog = full_service
-    profile, _ = await _profile(client, auth, "Writer with private facts")
-    source = await _send(client, auth, profile, "Keep this private discussion.")
+async def test_professional_creation_and_template_apis_are_withdrawn_without_losing_old_data(
+    full_service,
+):
+    client, server, auth, primary, _requests, template, catalog = full_service
+    profile = await _legacy_profile(server, primary, catalog, "Retained historical writer")
+    source = await _send(client, auth, profile, "Keep this historical private discussion.")
     memory = _json(
         await client.post(
-            f"{_base(profile)}/memory", headers=auth, json={"assertion": "I write for engineers."}
+            f"{_base(profile)}/memory", headers=auth, json={"assertion": "Retain my prior facts."}
         ),
         201,
     )
     original = server.services.agent_repo.get(profile["agent_id"])
-    original_config = original.config_json
-    (template / "SOUL.md").write_text(
-        "Write with clear evidence and short paragraphs.", encoding="utf-8"
-    )
+    owner = original.user_id
+    original_profile = server.services.resident_profile_repo.get(owner, profile["profile_id"])
+    (template / "SOUL.md").write_text("This template change must not be adopted.", encoding="utf-8")
     catalog.refresh()
+    schema = _json(await client.get("/api/openapi.json", headers=auth))
+    assert not any(path.startswith("/api/agents/resident-profiles") for path in schema["paths"])
     url = f"/api/agents/resident-profiles/{profile['profile_id']}"
-    diff = _json(await client.get(f"{url}/template-diff", headers=auth))
-    assert diff["has_changes"] and diff["current_version"] != diff["available_version"]
-    assert diff["changes"]
-    assert server.services.agent_repo.get(profile["agent_id"]).config_json == original_config
-    assert (
-        server.services.agent_repo.get(profile["agent_id"]).system_prompt == original.system_prompt
-    )
-    stale = await client.post(
-        f"{url}/adopt-template",
-        headers=auth,
-        json={
-            "expected_revision": profile["revision"] + 1,
-            "template_version": diff["available_version"],
-        },
-    )
-    assert stale.status_code == 409
-    adopted = _json(
+    attempts = [
+        await client.get("/api/agents/resident-profiles", headers=auth),
+        await client.post(
+            "/api/agents/resident-profiles",
+            headers=auth,
+            json={
+                "request_id": _key(),
+                "name": "Must not create another assistant",
+                "template_kind": "builtin",
+                "template_id": "audit-writer",
+            },
+        ),
+        await client.get(f"{url}/template-diff", headers=auth),
         await client.post(
             f"{url}/adopt-template",
             headers=auth,
-            json={
-                "expected_revision": profile["revision"],
-                "template_version": diff["available_version"],
-            },
-        )
+            json={"expected_revision": profile["revision"], "template_version": "a" * 64},
+        ),
+    ]
+    assert all(response.status_code in {404, 405} for response in attempts)
+    assert len(server.services.resident_profile_repo.list_by_owner(owner)) == 1
+    assert (
+        server.services.resident_profile_repo.get(owner, profile["profile_id"]) == original_profile
     )
-    assert adopted["revision"] > profile["revision"]
-    assert (adopted["agent_id"], adopted["thread_id"]) == (
-        profile["agent_id"],
-        profile["thread_id"],
-    )
-    assert adopted["template_version"] == diff["available_version"]
-    assert _json(await client.get(f"{url}/template-diff", headers=auth))["has_changes"] is False
+    retained = server.services.agent_repo.get(profile["agent_id"])
+    assert retained.system_prompt == original.system_prompt
+    assert retained.config_json == original.config_json
     history = _json(await client.get(f"{_base(profile)}/conversation", headers=auth))
     assert history["turns"][0]["turn_id"] == source["turn_id"]
     assert (
         _json(await client.get(f"{_base(profile)}/memory", headers=auth))["items"][0]["atom_id"]
         == memory["atom_id"]
     )
+    assert (await _steward(client, auth))["agent_id"] == primary["agent_id"]
+    capabilities = _json(await client.get("/api/agents/resident-capabilities", headers=auth))
+    assert capabilities["assistant_role"] == "life_work_steward"
+    assert capabilities["professional_work"] == "delegated_tasks"
+    assert "profiles" not in capabilities and "explicit_template_adoption" not in capabilities
 
 
-async def test_memory_policy_requires_explicit_choice_and_evidence_is_profile_scoped(full_service):
+async def test_memory_policy_requires_explicit_choice_and_evidence_is_owner_scoped(full_service):
     client, _server, auth, primary, _requests, _template, _catalog = full_service
-    writer, _ = await _profile(client, auth, "Memory writer")
-    source = await _send(client, auth, writer, "My text should be concise.")
-    url = f"{_base(writer)}/memory"
+    other_auth = await create_user(client, auth, username="memory-evidence-stranger")
+    other = await _steward(client, other_auth)
+    source = await _send(client, auth, primary, "My text should be concise.")
+    url = f"{_base(primary)}/memory"
     policy = _json(await client.get(f"{url}/policy", headers=auth))
     assert policy == {"capture_enabled": False, "revision": 1, "mode": "disabled"}
     enabled = _json(
@@ -245,7 +258,9 @@ async def test_memory_policy_requires_explicit_choice_and_evidence_is_profile_sc
     )
     assert stale.status_code == 409
     assert (
-        _json(await client.get(f"{_base(primary)}/memory/policy", headers=auth))["capture_enabled"]
+        _json(await client.get(f"{_base(other)}/memory/policy", headers=other_auth))[
+            "capture_enabled"
+        ]
         is False
     )
     memory = _json(
@@ -264,17 +279,17 @@ async def test_memory_policy_requires_explicit_choice_and_evidence_is_profile_sc
     assert evidence["items"][0]["source_turn_id"] == source["turn_id"]
     assert evidence["items"][0]["history_item_id"] == f"turn:{source['turn_id']}"
     invalid = await client.post(
-        f"{_base(primary)}/memory",
-        headers=auth,
-        json={"assertion": "Copy from other profile", "source_turn_id": source["turn_id"]},
+        f"{_base(other)}/memory",
+        headers=other_auth,
+        json={"assertion": "Copy from another user", "source_turn_id": source["turn_id"]},
     )
     assert invalid.status_code == 404
     assert (
-        await client.get(f"{_base(primary)}/memory/{memory['atom_id']}/sources", headers=auth)
+        await client.get(f"{_base(other)}/memory/{memory['atom_id']}/sources", headers=other_auth)
     ).status_code == 404
     candidates = _json(await client.get(f"{url}/candidates", headers=auth))
     assert candidates["items"][0]["status"] == "promoted"
-    assert (await client.get(f"{_base(primary)}/memory/candidates", headers=auth)).json()[
+    assert (await client.get(f"{_base(other)}/memory/candidates", headers=other_auth)).json()[
         "items"
     ] == []
 
@@ -382,11 +397,12 @@ async def test_read_watermark_is_monotonic_and_keeps_messages_arriving_concurren
     )
     assert old_device["last_read_message_id"] == second["assistant_message_id"]
     assert old_device["unread_count"] == 0
-    writer, _ = await _profile(client, auth, "Other inbox")
+    other_auth = await create_user(client, auth, username="inbox-stranger")
+    other = await _steward(client, other_auth)
     assert (
         await client.post(
-            f"{_base(writer)}/conversation/read",
-            headers=auth,
+            f"{_base(other)}/conversation/read",
+            headers=other_auth,
             json={"message_id": second["assistant_message_id"]},
         )
     ).status_code == 409
@@ -537,9 +553,12 @@ async def test_followup_edits_and_cancellation_discard_old_pending_delivery(full
     assert all(item["kind"] != "notification" for item in history["items"])
 
 
-async def test_archiving_a_professional_preserves_reads_and_stops_new_private_work(full_service):
-    client, _server, auth, _primary, _requests, _template, _catalog = full_service
-    profile, _ = await _profile(client, auth, "Archiveable writer")
+async def test_archiving_retained_profile_data_preserves_reads_and_stops_new_private_work(
+    full_service,
+):
+    client, server, auth, primary, _requests, _template, catalog = full_service
+    profile = await _legacy_profile(server, primary, catalog, "Retained archiveable writer")
+    owner = server.services.agent_repo.get(profile["agent_id"]).user_id
     base = _base(profile)
     source = await _send(client, auth, profile, "Keep my private history")
     memory = _json(
@@ -551,12 +570,12 @@ async def test_archiving_a_professional_preserves_reads_and_stops_new_private_wo
     note = _json(
         await client.post(f"{base}/conversation/followups", headers=auth, json=_note_body()), 201
     )
-    url = f"/api/agents/resident-profiles/{profile['profile_id']}/archive"
-    archived = _json(
-        await client.patch(
-            url, headers=auth, json={"archived": True, "expected_revision": profile["revision"]}
-        )
-    )
+    archived = archive_profile(
+        server.services,
+        owner,
+        profile["profile_id"],
+        ResidentProfileArchive(archived=True, expected_revision=profile["revision"]),
+    ).model_dump(mode="json")
     assert archived["archived"] is True
     history = _json(await client.get(f"{base}/conversation", headers=auth))
     assert history["turns"][0]["turn_id"] == source["turn_id"]
@@ -580,11 +599,12 @@ async def test_archiving_a_professional_preserves_reads_and_stops_new_private_wo
         await client.get(f"{base}/conversation/followups/{note['followup_id']}", headers=auth)
     )
     assert stopped["status"] == "cancelled"
-    restored = _json(
-        await client.patch(
-            url, headers=auth, json={"archived": False, "expected_revision": archived["revision"]}
-        )
-    )
+    restored = archive_profile(
+        server.services,
+        owner,
+        profile["profile_id"],
+        ResidentProfileArchive(archived=False, expected_revision=archived["revision"]),
+    ).model_dump(mode="json")
     assert restored["archived"] is False
     assert (
         _json(
@@ -708,8 +728,8 @@ async def test_full_service_routes_are_documented_typed_and_owner_scoped(full_se
     schema = _json(await client.get("/api/openapi.json", headers=auth))
     template_base = "/api/agents/{agent_id}/threads/{thread_id}"
     operations = [
-        ("/api/agents/resident-profiles", "post", "201"),
-        ("/api/agents/resident-profiles/{profile_id}/template-diff", "get", "200"),
+        ("/api/agents/resident-conversation", "put", "200"),
+        ("/api/agents/resident-capabilities", "get", "200"),
         (f"{template_base}/memory/policy", "put", "200"),
         (f"{template_base}/memory/candidates:extract", "post", "200"),
         (f"{template_base}/conversation/followups", "post", "201"),
@@ -747,8 +767,12 @@ async def test_scheduled_task_uses_normal_admission_and_survives_later_followup_
     from octop.infra.agents.resident_followups import poll_followups
     from octop.infra.projects import runtime as task_runtime
 
-    client, server, auth, _primary, _requests, _template, _catalog = full_service
-    profile, _ = await _profile(client, auth, "Scheduled professional")
+    client, server, auth, primary, _requests, _template, catalog = full_service
+    profile = (
+        await _legacy_profile(server, primary, catalog, "Retained scheduled assistant")
+        if stop == "archive"
+        else primary
+    )
     base = _base(profile)
     source = await _send(
         client, auth, profile, "Create a regular task for this explicitly authorized work."
@@ -804,12 +828,12 @@ async def test_scheduled_task_uses_normal_admission_and_survives_later_followup_
                 )
             )
         else:
-            _json(
-                await client.patch(
-                    f"/api/agents/resident-profiles/{profile['profile_id']}/archive",
-                    headers=auth,
-                    json={"archived": True, "expected_revision": profile["revision"]},
-                )
+            owner = server.services.agent_repo.get(profile["agent_id"]).user_id
+            archive_profile(
+                server.services,
+                owner,
+                profile["profile_id"],
+                ResidentProfileArchive(archived=True, expected_revision=profile["revision"]),
             )
         assert await asyncio.to_thread(poll_followups, server.services, due + 60000) == 0
         active = _json(await client.get(f"/api/project-tasks/{task_id}", headers=auth))

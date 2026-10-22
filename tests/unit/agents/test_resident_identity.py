@@ -47,15 +47,15 @@ def manager(services):
 async def test_initialization_is_stable_concurrent_and_private(services, manager):
     services.agent_repo.create(agent_id="old", user_id=1, name=tr("agents.resident.name", "zh"))
     first, second = await asyncio.gather(
-        ensure_resident_identity(services, manager, 1),
-        ensure_resident_identity(services, manager, 1),
+        ensure_resident_identity(services, 1),
+        ensure_resident_identity(services, 1),
     )
     assert first.agent_id == second.agent_id != "old"
     assert first.thread_id == second.thread_id
     assert first.status == second.status == "ready"
     # Recreating the service/manager does not replace the durable identity.
     restarted = build_shared_services(db=services.db, paths=services.paths, config=services.config)
-    again = await ensure_resident_identity(restarted, manager, 1)
+    again = await ensure_resident_identity(restarted, 1)
     assert again == services.resident_conversation_repo.get(1)
     assert again.agent_id == first.agent_id
     assert len(services.agent_repo.list_by_user(1)) == 2
@@ -69,7 +69,7 @@ async def test_initialization_is_stable_concurrent_and_private(services, manager
     thread = services.thread_repo.get(first.thread_id)
     assert thread.user_id == 1 and thread.agent_id == first.agent_id
     assert thread.session_key == f"{first.agent_id}:resident:1:dm"
-    other = await ensure_resident_identity(services, manager, 2)
+    other = await ensure_resident_identity(services, 2)
     assert other.agent_id != first.agent_id and other.thread_id != first.thread_id
 
 
@@ -81,11 +81,11 @@ async def test_failed_initialization_reuses_intent_and_original_ids(services, ma
         raise OSError("workspace unavailable")
 
     monkeypatch.setattr(PathLayout, "ensure_agent_workspace", unavailable)
-    failed = await ensure_resident_identity(services, manager, 1)
+    failed = await ensure_resident_identity(services, 1)
     assert failed.status == "failed"
     assert failed.error_code == ErrorCode.AGENT_FAILED.value
     monkeypatch.setattr(PathLayout, "ensure_agent_workspace", original)
-    ready = await ensure_resident_identity(services, manager, 1)
+    ready = await ensure_resident_identity(services, 1)
     assert ready.status == "ready"
     assert ready.agent_id == failed.agent_id and ready.thread_id == failed.thread_id
     assert len(services.agent_repo.list_by_user(1)) == 1
@@ -95,7 +95,7 @@ async def test_failed_initialization_reuses_intent_and_original_ids(services, ma
 async def test_existing_private_identity_cannot_be_shared_reconfigured_or_deleted(
     services, manager
 ):
-    binding = await ensure_resident_identity(services, manager, 1)
+    binding = await ensure_resident_identity(services, 1)
     operations = [
         manager.set_shared(binding.agent_id, True),
         manager.update(binding.agent_id, kind="team"),
@@ -115,7 +115,7 @@ async def test_existing_private_identity_cannot_be_shared_reconfigured_or_delete
 
 @pytest.mark.asyncio
 async def test_resident_thread_rejects_ordinary_reset_rebind_and_delete(services, manager):
-    binding = await ensure_resident_identity(services, manager, 1)
+    binding = await ensure_resident_identity(services, 1)
     registry = ThreadRegistry(session_repo=services.session_repo, thread_repo=services.thread_repo)
     key = services.thread_repo.get(binding.thread_id).session_key
     with pytest.raises(OctopError):
@@ -150,7 +150,7 @@ async def test_resident_thread_rejects_ordinary_reset_rebind_and_delete(services
 
 @pytest.mark.asyncio
 async def test_scope_is_required_for_each_invocation_and_cancel(services, manager):
-    binding = await ensure_resident_identity(services, manager, 1)
+    binding = await ensure_resident_identity(services, 1)
     for owner, thread in [(None, None), (2, binding.thread_id), (1, "different-thread")]:
         if owner is None:
             with pytest.raises(OctopError):
@@ -174,7 +174,7 @@ async def test_scope_is_required_for_each_invocation_and_cancel(services, manage
 
 @pytest.mark.asyncio
 async def test_runtime_has_no_capture_bootstrap_or_tool_execution(services, manager):
-    binding = await ensure_resident_identity(services, manager, 1)
+    binding = await ensure_resident_identity(services, 1)
     config = manager._build_harness_config(services.agent_repo.get(binding.agent_id))
     assert not config.memory_enabled and not config.memory_capture_enabled
     assert not config.memory_recall_inject_enabled and not config.memory_jsonl_enabled

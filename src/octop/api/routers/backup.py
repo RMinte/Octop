@@ -70,7 +70,7 @@ class CreateBackupBody(BaseModel):
 
 def _agent_rows(server: Any) -> list[Any]:
     assert server.app_runtime is not None
-    return cast(list[Any], server.app_runtime.agent_registry.list_rows())
+    return cast(list[Any], server.app_runtime.agent_registry.list_rows(include_resident=True))
 
 
 def _auto_settings_payload(server: Any) -> dict[str, Any]:

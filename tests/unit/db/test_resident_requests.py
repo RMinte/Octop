@@ -9,7 +9,6 @@ import shutil
 import pytest
 
 from octop.config import OctopConfig
-from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.resident_identity import ensure_resident_identity
 from octop.infra.db import migrate
 from octop.infra.db.pool import SqlitePool
@@ -27,9 +26,8 @@ def services(tmp_path):
     services = build_shared_services(db=db, paths=paths, config=OctopConfig())
     services.user_repo.create(username="owner", password_hash="x", role="user")
     services.user_repo.create(username="other", password_hash="x", role="user")
-    manager = AgentManager(repos=services.repos, paths=paths)
-    asyncio.run(ensure_resident_identity(services, manager, 1))
-    asyncio.run(ensure_resident_identity(services, manager, 2))
+    asyncio.run(ensure_resident_identity(services, 1))
+    asyncio.run(ensure_resident_identity(services, 2))
     yield services
     db.close()
 

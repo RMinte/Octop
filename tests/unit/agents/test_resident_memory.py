@@ -12,7 +12,6 @@ from octop_memory.core import Memory
 from octop_memory.types import Candidate
 
 from octop.config import OctopConfig
-from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.memory.backend import open_memory_kwargs
 from octop.infra.agents.resident_identity import ensure_resident_identity
 from octop.infra.agents.resident_memory import (
@@ -43,8 +42,7 @@ def private_memory(tmp_path):
     run_migrations(db)
     services = build_shared_services(db=db, paths=paths, config=OctopConfig())
     services.user_repo.create(username="owner", password_hash="x", role="user")
-    manager = AgentManager(repos=services.repos, paths=paths)
-    binding = asyncio.run(ensure_resident_identity(services, manager, 1))
+    binding = asyncio.run(ensure_resident_identity(services, 1))
     yield services, binding
     db.close()
 

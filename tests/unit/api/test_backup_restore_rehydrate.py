@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import tarfile
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from octop.api.routers import backup as backup_router
-from octop.infra.backup.auto import BACKUP_LOCK
+from octop.config import BackupConfig, OctopConfig
+from octop.infra.agents.manager import AgentManager
+from octop.infra.agents.resident_identity import ensure_resident_identity
+from octop.infra.backup.auto import BACKUP_LOCK, persist_backup_config, run_auto_backup
 from octop.infra.backup.store import BackupFileInfo
+from octop.infra.db.migrate import run_migrations
+from octop.infra.db.pool import SqlitePool
+from octop.infra.db.services import build_shared_services
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.utils.paths import PathLayout
 
 
 @pytest.mark.asyncio
@@ -218,3 +228,54 @@ async def test_backup_status_reports_idle_and_busy() -> None:
     async with hold_backup_lock("create"):
         busy = await backup_router.get_backup_status(_=None)
         assert busy == {"busy": True, "operation": "create"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backup_kind", ["manual", "auto"])
+async def test_system_backups_include_private_steward_workspace_and_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backup_kind: str
+) -> None:
+    paths = PathLayout(tmp_path / ".octop")
+    monkeypatch.setenv("OCTOP_HOME", str(paths.root))
+    paths.ensure_root()
+    pool = SqlitePool(paths.db)
+    run_migrations(pool)
+    services = build_shared_services(db=pool, paths=paths, config=OctopConfig())
+    try:
+        owner_id = services.user_repo.create(username="owner", password_hash="hash", role="admin")
+        binding = await ensure_resident_identity(services, owner_id)
+        registry = AgentManager(repos=services.repos, paths=paths)
+        assert registry.list_rows() == []
+        workspace = paths.agent_workspace(binding.agent_id)
+        (workspace / "SOUL.md").write_text("steward identity", encoding="utf-8")
+        checkpoint = workspace / ".octop" / "sessions" / "checkpoints.sqlite"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"persisted steward checkpoint")
+        server = SimpleNamespace(
+            paths=paths,
+            services=services,
+            app_runtime=SimpleNamespace(agent_registry=registry),
+        )
+
+        if backup_kind == "manual":
+            result = await backup_router.create_backup(
+                body=backup_router.CreateBackupBody(include_chats=True),
+                _=None,
+                server=server,
+            )
+            archive_name = result["item"]["name"]
+        else:
+            persist_backup_config(paths.config, BackupConfig(auto_enabled=True, include_chats=True))
+            entry = await run_auto_backup(server)
+            assert entry is not None
+            archive_name = entry.name
+
+        with tarfile.open(paths.backups_dir / archive_name, mode="r:gz") as archive:
+            prefix = f"workspaces/{binding.agent_id}"
+            identity = archive.extractfile(f"{prefix}/SOUL.md")
+            saved_checkpoint = archive.extractfile(f"{prefix}/.octop/sessions/checkpoints.sqlite")
+            assert identity is not None and identity.read() == b"steward identity"
+            assert saved_checkpoint is not None
+            assert saved_checkpoint.read() == b"persisted steward checkpoint"
+    finally:
+        pool.close()

@@ -198,10 +198,21 @@ class AgentRepo:
             r = conn.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
         return AgentRow.from_row(r) if r else None
 
-    def list_by_user(self, user_id: int, *, include_disabled: bool = True) -> list[AgentRow]:
+    def list_by_user(
+        self,
+        user_id: int,
+        *,
+        include_disabled: bool = True,
+        exclude_resident: bool = False,
+    ) -> list[AgentRow]:
         sql = "SELECT * FROM agents WHERE user_id = ?"
         if not include_disabled:
             sql += " AND enabled = 1"
+        if exclude_resident:
+            sql += (
+                " AND NOT EXISTS (SELECT 1 FROM resident_conversations r"
+                " WHERE r.agent_id = agents.agent_id)"
+            )
         sql += " ORDER BY created_at ASC, id ASC"
         with self._db.connect() as conn:
             rows = conn.execute(sql, (user_id,)).fetchall()
@@ -213,6 +224,7 @@ class AgentRepo:
         *,
         kind: str | None = None,
         include_disabled: bool = True,
+        exclude_resident: bool = False,
     ) -> int:
         sql = "SELECT COUNT(*) AS c FROM agents WHERE user_id = ?"
         params: list[object] = [user_id]
@@ -221,14 +233,29 @@ class AgentRepo:
             params.append(kind)
         if not include_disabled:
             sql += " AND enabled = 1"
+        if exclude_resident:
+            sql += (
+                " AND NOT EXISTS (SELECT 1 FROM resident_conversations r"
+                " WHERE r.agent_id = agents.agent_id)"
+            )
         with self._db.connect() as conn:
             row = conn.execute(sql, params).fetchone()
         return int(row["c"]) if row is not None else 0
 
-    def list_all(self, *, include_disabled: bool = True) -> list[AgentRow]:
+    def list_all(
+        self, *, include_disabled: bool = True, exclude_resident: bool = False
+    ) -> list[AgentRow]:
         sql = "SELECT * FROM agents"
+        conditions: list[str] = []
         if not include_disabled:
-            sql += " WHERE enabled = 1"
+            conditions.append("enabled = 1")
+        if exclude_resident:
+            conditions.append(
+                "NOT EXISTS (SELECT 1 FROM resident_conversations r"
+                " WHERE r.agent_id = agents.agent_id)"
+            )
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY created_at ASC, id ASC"
         with self._db.connect() as conn:
             rows = conn.execute(sql).fetchall()

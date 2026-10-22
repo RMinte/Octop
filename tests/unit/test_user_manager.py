@@ -12,8 +12,10 @@ from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import build_shared_services
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.users.identity import Role
+from octop.infra.users.identity import Role, User
+from octop.infra.users.invites import InviteService
 from octop.infra.users.manager import UserManager
+from octop.infra.users.password import hash_password
 from octop.infra.utils.paths import PathLayout
 
 
@@ -43,6 +45,10 @@ async def test_create_user_writes_db(manager: UserManager):
     assert user.username == "alice"
     assert user.role == Role.ADMIN
     assert manager.get("alice") is not None
+    binding = manager._services.resident_conversation_repo.get(user.id)
+    assert binding is not None and binding.status == "ready"
+    assert manager._services.agent_repo.get(binding.agent_id).user_id == user.id
+    assert manager._services.thread_repo.get(binding.thread_id).user_id == user.id
 
 
 async def test_duplicate_username_rejected(manager: UserManager):
@@ -57,6 +63,32 @@ async def test_authenticate_success(manager: UserManager):
     user = await manager.authenticate("a", "TestPass12")
     assert user is not None
     assert user.username == "a"
+
+
+async def test_authenticate_prepares_existing_user_without_client_initialization(
+    manager: UserManager,
+):
+    user_id = manager._services.user_repo.create(
+        username="existing", password_hash=hash_password("TestPass12"), role="user"
+    )
+    assert manager._services.resident_conversation_repo.get(user_id) is None
+
+    user = await manager.authenticate("existing", "TestPass12")
+    assert user is not None and user.id == user_id
+    binding = manager._services.resident_conversation_repo.get(user_id)
+    assert binding is not None and binding.status == "ready"
+
+    await manager.authenticate("existing", "TestPass12")
+    assert manager._services.resident_conversation_repo.get(user_id) == binding
+    assert len(manager._services.agent_repo.list_by_user(user_id)) == 1
+
+
+async def test_authenticate_failure_does_not_prepare_resident(manager: UserManager):
+    user_id = manager._services.user_repo.create(
+        username="existing", password_hash=hash_password("TestPass12"), role="user"
+    )
+    assert await manager.authenticate("existing", "incorrect") is None
+    assert manager._services.resident_conversation_repo.get(user_id) is None
 
 
 async def test_authenticate_by_email(manager: UserManager):
@@ -150,6 +182,8 @@ async def test_sso_create_then_updates_same_subject(manager: UserManager):
     assert row.display_name == "Alice"
     assert row.sso_provider_id == provider_id
     assert row.sso_subject == "sub-1"
+    binding = manager._services.resident_conversation_repo.get(user.id)
+    assert binding is not None and binding.status == "ready"
 
     updated = await manager.resolve_or_create_sso_user(
         provider_id=provider_id,
@@ -161,6 +195,46 @@ async def test_sso_create_then_updates_same_subject(manager: UserManager):
     row = manager.get_row(user.id)
     assert row.display_name == "Alice"
     assert row.email == "alice-2@example.com"
+    assert manager._services.resident_conversation_repo.get(user.id) == binding
+
+
+@pytest.mark.parametrize("cached", [False, True])
+async def test_sso_login_prepares_existing_user(manager: UserManager, cached: bool):
+    provider_id = _insert_sso_provider(manager)
+    user_id = manager._services.user_repo.create(
+        username="existing-sso",
+        password_hash=None,
+        role="user",
+        sso_provider_id=provider_id,
+        sso_subject="existing-subject",
+    )
+    if cached:
+        manager.register_cached_user(
+            User(id=user_id, username="existing-sso", role="user", display_name=None)
+        )
+    assert manager._services.resident_conversation_repo.get(user_id) is None
+
+    user = await manager.resolve_or_create_sso_user(
+        provider_id=provider_id, subject="existing-subject", claims={}
+    )
+    assert user.id == user_id
+    binding = manager._services.resident_conversation_repo.get(user_id)
+    assert binding is not None and binding.status == "ready"
+
+
+async def test_invite_redemption_prepares_resident_before_returning(manager: UserManager):
+    inviter = await manager.create(username="admin", password="TestPass12", role=Role.ADMIN)
+    invite = InviteService(manager._services).create(
+        created_by=inviter.id, actor_username=inviter.username
+    )
+
+    user = await manager.create_from_invite(
+        code=invite.code, username="invited", password="TestPass12"
+    )
+    binding = manager._services.resident_conversation_repo.get(user.id)
+    assert binding is not None and binding.status == "ready"
+    assert manager._services.invite_repo.get(invite.id).used_by_user_id == user.id
+    assert manager.get(user.username) is user
 
 
 async def test_sso_create_recovers_when_another_worker_wins_identity_race(
@@ -280,6 +354,21 @@ async def test_bind_sso_identity_links_current_user_and_rejects_taken_identity(
     assert bound.display_name == "Alice"
     identities = manager.list_sso_identities(local.id)
     assert [(item.kind, item.subject) for item in identities] == [("feishu", "union-alice")]
+
+
+async def test_bind_sso_identity_prepares_existing_user(manager: UserManager):
+    provider_id = _insert_sso_provider(manager)
+    user_id = manager._services.user_repo.create(
+        username="existing", password_hash=hash_password("TestPass12"), role="user"
+    )
+    assert manager._services.resident_conversation_repo.get(user_id) is None
+
+    user = await manager.bind_sso_identity(
+        user_id=user_id, provider_id=provider_id, subject="existing-subject", claims={}
+    )
+    assert user.id == user_id
+    binding = manager._services.resident_conversation_repo.get(user_id)
+    assert binding is not None and binding.status == "ready"
 
 
 async def test_bind_multiple_sso_identities_on_same_user(manager: UserManager):
@@ -425,6 +514,25 @@ async def test_enable_restores_memory(manager: UserManager):
     assert manager.get("a") is not None
 
 
+async def test_enable_prepares_existing_user_and_preserves_the_same_resident(
+    manager: UserManager,
+):
+    user_id = manager._services.user_repo.create(
+        username="disabled", password_hash=None, role="user"
+    )
+    manager._services.user_repo.set_disabled(user_id, True)
+    assert manager._services.resident_conversation_repo.get(user_id) is None
+
+    await manager.enable("disabled")
+    binding = manager._services.resident_conversation_repo.get(user_id)
+    assert binding is not None and binding.status == "ready"
+
+    await manager.disable("disabled")
+    await manager.enable("disabled")
+    assert manager._services.resident_conversation_repo.get(user_id) == binding
+    assert len(manager._services.agent_repo.list_by_user(user_id)) == 1
+
+
 async def test_remove_deletes_db_and_dir(manager: UserManager, tmp_path: Path):
     await manager.create(username="a", password="TestPass12", role=Role.USER)
     await manager.remove("a")
@@ -451,6 +559,48 @@ async def test_boot_loads_existing_users(tmp_path: Path):
     manager = UserManager(services)
     await manager.boot()
     assert manager.get("legacy") is not None
+
+
+async def test_boot_prepares_only_enabled_users_and_reuses_their_residents(
+    manager: UserManager,
+):
+    services = manager._services
+    owner_id = services.user_repo.create(username="enabled", password_hash=None, role="user")
+    disabled_id = services.user_repo.create(username="disabled", password_hash=None, role="user")
+    services.user_repo.set_disabled(disabled_id, True)
+
+    await manager.boot()
+    binding = services.resident_conversation_repo.get(owner_id)
+    assert binding is not None and binding.status == "ready"
+    assert services.resident_conversation_repo.get(disabled_id) is None
+    assert manager.get("disabled") is None
+
+    await manager.shutdown_all()
+    await manager.boot()
+    assert services.resident_conversation_repo.get(owner_id) == binding
+    assert len(services.agent_repo.list_by_user(owner_id)) == 1
+
+
+async def test_workspace_failure_is_durable_and_later_login_reuses_identity(
+    manager: UserManager, monkeypatch: pytest.MonkeyPatch
+):
+    original = PathLayout.ensure_agent_workspace
+
+    def unavailable(*args: object) -> None:
+        raise OSError("workspace unavailable")
+
+    monkeypatch.setattr(PathLayout, "ensure_agent_workspace", unavailable)
+    user = await manager.create(username="alice", password="TestPass12", role=Role.USER)
+    failed = manager._services.resident_conversation_repo.get(user.id)
+    assert failed is not None and failed.status == "failed"
+    assert failed.error_code == ErrorCode.AGENT_FAILED.value
+
+    monkeypatch.setattr(PathLayout, "ensure_agent_workspace", original)
+    assert await manager.authenticate("alice", "TestPass12") is user
+    ready = manager._services.resident_conversation_repo.get(user.id)
+    assert ready is not None and ready.status == "ready"
+    assert (ready.agent_id, ready.thread_id) == (failed.agent_id, failed.thread_id)
+    assert len(manager._services.agent_repo.list_by_user(user.id)) == 1
 
 
 async def test_boot_loads_users(tmp_path: Path):

@@ -27,7 +27,7 @@ from pydantic import (
 from octop.i18n import error_message, tr
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.models import Reference
-from octop.infra.projects.tasks import TaskMessage
+from octop.infra.projects.tasks import TaskExecutionOptions, TaskMessage
 
 if TYPE_CHECKING:
     from octop.infra.db.services import SharedServices
@@ -44,7 +44,32 @@ class ResidentTaskContext(_Model):
         description="The user's explicitly selected project, or explicit null."
     )
     message: TaskMessage = Field(
-        description="User-selected task instructions, attachments and execution options. Never populated by the assistant model."
+        description="Task instructions, attachments and execution options fixed by the host or explicitly selected by the user. Never populated by the assistant model."
+    )
+
+
+def default_task_context(
+    request_id: str, prompt: str, model_ref: str | None
+) -> ResidentTaskContext:
+    """Freeze ordinary task scope for a new steward turn without inheriting resources."""
+    return ResidentTaskContext(
+        project_id=None,
+        message=TaskMessage(
+            request_id="resident_intent_" + hashlib.sha256(request_id.encode()).hexdigest(),
+            prompt=prompt,
+            attachment_ids=[],
+            options=TaskExecutionOptions(
+                model_ref=model_ref,
+                skills=[],
+                mcp_servers=[],
+                plugins=[],
+                subagents=[],
+                knowledge_base_ids=[],
+                memory_enabled=False,
+                team_enabled=False,
+                client_tools=[],
+            ),
+        ),
     )
 
 
@@ -150,10 +175,9 @@ def resident_tool_definitions(
     tools: list[BaseTool | dict[str, Any]] = []
     specifications: list[tuple[str, str, type[BaseModel]]] = []
     if context.read_tools:
-        specifications += [
-            ("resident_read_memory", "tool_memory_description", ReadMemoryInput),
-            ("resident_read_tasks", "tool_tasks_description", ReadTasksInput),
-        ]
+        specifications.append(("resident_read_memory", "tool_memory_description", ReadMemoryInput))
+    if context.read_tools or context.task_context is not None:
+        specifications.append(("resident_read_tasks", "tool_tasks_description", ReadTasksInput))
     if context.task_context is not None:
         specifications.append(("resident_create_task", "tool_create_description", CreateTaskInput))
     if context.knowledge_base_ids:
@@ -355,7 +379,9 @@ def execute_resident_tool(
         arguments = tool_call.get("args") or {}
         if name == "resident_read_memory" and context.read_tools:
             result = _read_memory(context, ReadMemoryInput.model_validate(arguments))
-        elif name == "resident_read_tasks" and context.read_tools:
+        elif name == "resident_read_tasks" and (
+            context.read_tools or context.task_context is not None
+        ):
             result = _read_tasks(context, ReadTasksInput.model_validate(arguments))
         elif name == "resident_create_task" and context.task_context is not None:
             result = _create_task(context, CreateTaskInput.model_validate(arguments))

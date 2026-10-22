@@ -346,6 +346,22 @@ class UserRepo:
 
     def delete(self, user_id: int) -> None:
         with self._db.transaction() as conn:
+            suffix = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+            conn.execute("SELECT id FROM users WHERE id = ?" + suffix, (user_id,)).fetchone()
+            # Resident rows deliberately retain their parent identities during normal use.
+            # Remove this aggregate only as part of an explicit account deletion.
+            for table in (
+                "resident_cancel_requests",
+                "resident_task_reports",
+                "resident_notifications",
+                "resident_inbox",
+                "resident_followups",
+                "resident_delegations",
+                "resident_profiles",
+                "resident_requests",
+                "resident_conversations",
+            ):
+                conn.execute(f"DELETE FROM {table} WHERE owner_id = ?", (user_id,))
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
     def count(self) -> int:

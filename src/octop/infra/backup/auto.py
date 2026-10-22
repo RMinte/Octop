@@ -199,7 +199,9 @@ async def run_auto_backup(server: OctopServer) -> BackupFileInfo | None:
         retention = config.backup.retention_count
         try:
             if server.app_runtime is not None:
-                agent_rows = cast(list[Any], server.app_runtime.agent_registry.list_rows())
+                agent_rows = cast(
+                    list[Any], server.app_runtime.agent_registry.list_rows(include_resident=True)
+                )
             else:
                 agent_rows = cast(list[Any], server.services.agent_repo.list_all())
             entry, deleted = await asyncio.to_thread(

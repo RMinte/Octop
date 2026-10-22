@@ -1,24 +1,26 @@
 # 私人智能体常驻会话：服务端接入说明
 
-本说明对应 2026 年 10 月 20 日的服务端文字会话首期实现。客户端可通过六个已认证的 REST 接口建立私人身份、发送文字、查询受理结果、读取最近会话快照和停止指定轮次。本轮没有修改 AgentComputer 客户端。
+本说明对应 2026 年 10 月 21 日的服务端文字会话实现。服务端自动准备用户的唯一管家，客户端读取绑定后即可发送文字、查询受理结果、读取最近会话快照和停止指定轮次；无需用户创建或配置管家，也无需客户端先调用初始化接口。本轮没有修改 AgentComputer 客户端。
 
-完整能力汇总见[服务端能力与接入顺序](resident-server-capabilities.md)。专业实例与授权主动跟进现已追加；下述默认身份仍唯一，专业实例使用各自独立的 Agent/thread。
+完整能力汇总见[服务端能力与接入顺序](resident-server-capabilities.md)。用户通过唯一 `primary` 身份与生活工作管家持续交流，专业工作通过普通 Task 委派，结果回到同一会话；授权主动跟进使用独立接口。
 
-首版闭环现已追加[历史与基本记忆接口](resident-history-memory.md)和[任务委派与成果回流](resident-delegation-results.md)。下列六个接口继续保留原职责；统一历史使用新增 `/conversation/history`，显式委派和记忆管理使用各自新增入口。
+首版闭环现已追加[历史与基本记忆接口](resident-history-memory.md)和[任务委派与成果回流](resident-delegation-results.md)。下列六个接口继续保留原职责；新 primary 消息默认支持自然语言任务委派，统一历史使用新增 `/conversation/history`，显式委派与记忆管理仍保留各自入口。
 
 ## 领域关系与本期范围
 
 | 对象 | 职责与关系 |
 | --- | --- |
-| 智能体 | 用户自己的长期助手实例，持有独立 Agent 身份与常驻会话绑定；每个用户只有一个 `primary` 绑定，另可创建彼此隔离的专业实例。 |
-| 专家模板 | 可复用的专业身份与方法。模板和实际 Agent 实例不是同一个对象；本期初始化不创建或发布专家模板。 |
+| 智能体 | 用户自己的统一生活工作管家，持有稳定 Agent 身份与常驻会话；每个用户只有一个 `primary` 绑定。 |
+| 专家 | 提供专业方法的既有能力，独立于管家身份。管家不通过专家模板创建不同助手，委派也不把项目或 Task 绑定到专家。 |
 | 会话 | 由 `thread_id` 标识，归属于该用户和私人 Agent；跨页面、跨项目、重连和重启沿用原绑定。 |
 | 项目 | 独立保存工作目录、行动指南及能力引用，不因私人智能体初始化而创建或修改。 |
-| 任务 | 独立的 `project_tasks` 多轮工作记录。私人会话本身不是 Task；显式委派通过独立关联记录创建普通 Task，并把其结果回到来源 thread。 |
+| 任务 | 独立的 `project_tasks` 多轮工作记录。私人会话本身不是 Task；管家按工作请求调用专用工具，或通过显式委派接口创建普通 Task，独立关联记录把结果回到来源 thread。 |
 
-私人实例复用现有 `agents`，内部 `kind="expert"` 用于沿用现有实例类型约束；这不代表发布了专家，不创建 `published_experts`，也不把项目或 Task 绑定到专家。初始化创建专用私人实例，不从用户已有专家中挑选第一个或最近使用者。
+私人实例复用现有 `agents`，内部 `kind="expert"` 用于沿用现有实例类型约束；这不代表发布了专家，不创建 `published_experts`，也不把项目或 Task 绑定到专家。初始化只创建唯一管家，不从用户已有专家中挑选第一个或最近使用者，也不创建专业助手集合。
 
-对话正文支持普通文字；专用实例默认关闭执行工具、Skill、MCP、对话附件、斜杠指令、子代理、团队、自动长期事实沉淀和随机关怀。可选的本轮宿主只读工具和单任务委派授权见能力汇总；只在自然语言中提出工具要求不会授予额外能力。当前可通过独立接口管理手工记忆并有界召回，明确委派的工作由普通 Task 执行。模型会话上下文和检查点用于追问，与长期记忆分别管理。既有普通专家和 Task 的能力不因这些限制而关闭。
+对话正文支持普通文字。新 primary 消息默认提供 `resident_create_task` 和本会话委派任务查询工具；用户说出工作需求即可由模型按语义判断是否派发，闲聊和咨询直接回答，信息不足先追问。无需客户端先提交 `task_context`；省略时固定为无项目普通 Task，使用任务自己的独立工作空间，不附加客户端工具、附件、Skill、MCP、插件、子代理、知识库、长期记忆或团队授权。实际执行继续遵守普通 Task 的权限与审批规则，独立工作空间不等于操作系统沙箱。
+
+管家会话不直接开放 shell、文件、MCP 或电脑操作工具，仍关闭对话附件、斜杠指令、自动长期事实沉淀和随机关怀。额外私人记忆查询、知识库选择和可选 `task_context` 的项目、设备、附件范围见能力汇总，不从历史提及或默认配置继承。当前可通过独立接口管理手工记忆并有界召回。模型会话上下文和检查点用于追问，与长期记忆分别管理。既有普通专家和 Task 的能力不因这些限制而关闭。
 
 ## 认证、身份与时间
 
@@ -35,15 +37,17 @@
 | 方法 | 路径 | 成功响应 |
 | --- | --- | --- |
 | GET | `/api/agents/resident-conversation` | `200 ResidentBinding`，只读取绑定。 |
-| PUT | `/api/agents/resident-conversation` | `200 ResidentBinding`，幂等初始化。 |
+| PUT | `/api/agents/resident-conversation` | `200 ResidentBinding`，显式幂等重试或修复，不是客户端首次使用的前置步骤。 |
 | GET | `/api/agents/{agent_id}/threads/{thread_id}/conversation?limit=50` | `200 ResidentSnapshot`，最近轮次的完整快照。 |
 | POST | `/api/agents/{agent_id}/threads/{thread_id}/messages` | `202 ResidentTurn`，持久受理或返回原请求当前状态。 |
 | GET | `/api/agents/{agent_id}/threads/{thread_id}/requests/{request_id}` | `200 ResidentTurn`，查询原发送请求。 |
 | POST | `/api/agents/{agent_id}/threads/{thread_id}/cancel` | `200 ResidentTurn`，记录对指定轮次的取消意图。 |
 
-### 读取与建立绑定
+### 服务端自动准备与读取绑定
 
-`GET` 没有副作用。尚未建立绑定时仍返回 200：
+管家身份由服务端用户生命周期自动准备：`UserManager` 启动时为已有启用用户补齐唯一 `primary` 绑定；新用户创建、邀请注册、SSO/LDAP 接入，以及用户启用或成功登录时，均幂等准备同一身份。重复准备沿用原 Agent/thread，不清空历史，不创建第二位管家。这一步不调用模型或执行任务，也不授予记忆采集、主动跟进或额外执行资源权限；自然语言委派仅在后续新消息受理时冻结为该轮能力。
+
+客户端正常接入只需调用 `GET /api/agents/resident-conversation`，取得 `ready` 绑定后进入原会话。`GET` 始终只读，不因读取而创建资源。自动准备可能失败，不能将 GET 的 HTTP 200 等同于绑定一定可用；客户端仍应检查 `status` 与 `error_code`。尚未建立绑定时，读取仍返回 200：
 
 ```json
 {
@@ -56,21 +60,21 @@
 }
 ```
 
-`PUT` 无需请求体，也不要求 `Idempotency-Key`。它按当前用户的 `primary` 身份幂等初始化；并发首次调用只能建立一个绑定。重复调用返回同一组 Agent/thread ID，不重置会话。初始化失败后再次调用使用原身份继续初始化，不自动创建另一个实例。
+`PUT` 保留为显式运维重试或修复入口，无需请求体，也不要求 `Idempotency-Key`，客户端首次使用不依赖它。它按当前用户的 `primary` 身份幂等准备；并发调用只能建立一个绑定。重复调用返回同一组 Agent/thread ID，不重置会话。初始化异常会保留 `failed` 状态及错误码；修复原因后，服务重新启动、用户成功登录或显式调用 PUT 均复用原身份继续准备，不自动创建另一个实例。
 
 ```http
 PUT /api/agents/resident-conversation
 Authorization: Bearer <access_token>
 ```
 
-成功示例中的名称和 ID 仅供说明，以服务端实际返回为准：
+正常自动准备后，GET 返回以下结构；名称和 ID 仅供说明，以服务端实际返回为准：
 
 ```json
 {
   "status": "ready",
   "agent_id": "01RESIDENTAGENTEXAMPLE",
   "thread_id": "thr_01RESIDENTTHREADAMPLE",
-  "name": "私人助手",
+  "name": "生活工作管家",
   "timezone": "Asia/Shanghai",
   "error_code": null
 }
@@ -80,7 +84,7 @@ Authorization: Bearer <access_token>
 
 ### 发送文字与查询原请求
 
-请求体为 `ResidentMessage`，必填以下两个字段。另支持可选的 `read_tools`、`knowledge_base_ids` 和 `task_context`，详细授权规则见[服务端能力汇总](resident-server-capabilities.md#按轮授权的助手工具)。
+请求体为 `ResidentMessage`，必填以下两个字段。只传它们即可普通交流，并由模型按工作需求自主判断是否委派普通 Task；默认可查询本会话委派任务。另支持可选的 `read_tools`、`knowledge_base_ids` 和 `task_context`，用于额外记忆查询、知识库与高级执行范围选择，不是默认委派的前置条件，详细规则见[服务端能力汇总](resident-server-capabilities.md#按轮授权的助手工具)。
 
 | 字段 | 类型 | 规则 |
 | --- | --- | --- |
@@ -126,7 +130,7 @@ Content-Type: application/json
 
 服务端先保存受理记录，再返回 202。新请求的响应可能已经是 `queued` 或 `running`；原请求重传还可能返回其已有终态。202 表示请求已受理或找到了原受理记录，不保证模型已成功回答。
 
-`ResidentTurn.authorization` 还会回显原发送请求中明确选择的能力，默认为未授权。发送幂等按同一 owner 的 `request_id` 处理：同一 thread、相同 `prompt` 重传返回原轮次当前状态，不增加用户消息、不重复执行。相同 ID 换 thread、文字或授权选择返回 `409 RESIDENT_REQUEST_CONFLICT`。`prompt` 保留原值，空白差异也属于输入变化；不得重试时擅自改写文字。已结束的原请求重传也不会重跑；确实需要新的对话轮次时使用新 `request_id`。
+`ResidentTurn.authorization` 回显原发送请求中的额外显式选择；自然语言委派和本会话任务查询以受理时冻结的能力配置为准，不要求额外字段为 true。升级前已受理的旧请求保留原能力，不因恢复或重传而升级。发送幂等按同一 owner 的 `request_id` 处理：同一 thread、相同 `prompt` 重传返回原轮次当前状态，不增加用户消息、不重复执行或创建任务。相同 ID 换 thread、文字或授权选择返回 `409 RESIDENT_REQUEST_CONFLICT`。`prompt` 保留原值，空白差异也属于输入变化；不得重试时擅自改写文字。已结束的原请求重传也不会重跑；确实需要新的对话轮次时使用新 `request_id`。
 
 同一常驻 thread 最多有一个 `queued/running` 轮次。活动轮未结束时，另一个新的发送请求返回 `409 AGENT_BUSY`；相同发送请求的幂等重传不受此限制。
 
@@ -231,7 +235,7 @@ HTTP 业务错误沿用标准 envelope，例如：
 | 租约失效或停服中断 | 轮次 `interrupted`，`RESIDENT_INTERRUPTED`。 |
 | 未知内部异常或未识别的流错误码 | 安全映射为 `INTERNAL_ERROR`，不返回原始异常和凭据。 |
 
-轮次错误位于 `ResidentTurn.error_code/error_message`，不表示轮询 HTTP 本身失败。例如原轮次已经 failed，其查询仍正常返回 HTTP 200。私人对话不直接执行工具审批、附件上传或客户端本机操作；这些工作使用明确委派后的普通 Task。手工长期记忆通过独立接口管理，自动采集和主动跟进仍未开放。
+轮次错误位于 `ResidentTurn.error_code/error_message`，不表示轮询 HTTP 本身失败。例如原轮次已经 failed，其查询仍正常返回 HTTP 200。私人对话不直接执行工具审批、附件上传或客户端本机操作；实际工作进入普通 Task，附加资源须由用户明确选择。长期记忆通过独立接口管理，原始采集需显式开启，候选需用户确认；主动跟进同样需要独立明确授权，详见能力汇总。
 
 ## 验证与未验收范围
 
@@ -247,4 +251,4 @@ uv run pytest tests/unit/agents/test_resident_identity.py tests/unit/db/test_res
 uv run pytest tests/integration/test_resident_runtime_recovery.py tests/unit/agents/test_resident_worker_lock.py -q
 ```
 
-本轮未验证真实 Provider/模型调用、PostgreSQL 实库或 AgentComputer 客户端接线。SQLite/PostgreSQL 提供成对迁移，但 SQL 成对存在不等于 PostgreSQL 实库已经通过。历史、基本手工记忆、显式委派和可靠回报的新增验证见本页顶部两份接入说明；自动采集、模型自主委派工具、主动服务和客户端接线仍留待后续阶段。
+自动化验证使用受控模型，不能替代真实模型对自然语言工作请求的判断验收。尚未进行 PostgreSQL 实库或 AgentComputer 客户端接线验收；SQLite/PostgreSQL 提供成对迁移，但 SQL 成对存在不等于 PostgreSQL 实库已经通过。历史、基本手工记忆、自然语言及显式委派和可靠回报的验证见本页顶部两份接入说明；默认委派工具、额外按轮选择、原始采集与候选、主动跟进见能力汇总。客户端接线仍待后续实施。

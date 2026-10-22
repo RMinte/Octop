@@ -126,6 +126,7 @@ async def test_task_multi_turn_idempotency_and_latest_project_configuration(task
 
 async def test_standalone_tasks_and_owner_isolation(task_env):
     client, server, auth, calls = task_env
+    alice = await create_user(client, auth, username="alice")
     before = server.services.agent_repo.list_all()
     task = (
         await client.post(
@@ -139,7 +140,6 @@ async def test_standalone_tasks_and_owner_isolation(task_env):
     assert [
         t["task_id"] for t in (await client.get("/api/project-tasks", headers=auth)).json()["items"]
     ] == [task["task_id"]]
-    alice = await create_user(client, auth, username="alice")
     base = f"/api/project-tasks/{task['task_id']}"
     assert (await client.get("/api/project-tasks", headers=alice)).json()["items"] == []
     assert (await client.get(base, headers=alice)).status_code == 404

@@ -83,8 +83,7 @@ def _body(request_id="new-writer", name="My writer"):
 @pytest.mark.asyncio
 async def test_professional_concurrent_creation_is_idempotent_and_preserves_primary(profile_env):
     services, catalog, _ = profile_env
-    manager = AgentManager(repos=services.repos, paths=services.paths)
-    primary = await ensure_resident_identity(services, manager, 1)
+    primary = await ensure_resident_identity(services, 1)
     primary_snapshot = services.resident_profile_repo.configuration_snapshot(1, primary.agent_id)
     assert primary_snapshot["profile_id"] is None and primary_snapshot["profile_revision"] is None
     assert primary_snapshot["template_version"] is None
@@ -115,8 +114,7 @@ async def test_failed_profile_initialization_retries_original_binding_only(
     profile_env, monkeypatch
 ):
     services, catalog, _ = profile_env
-    manager = AgentManager(repos=services.repos, paths=services.paths)
-    primary = await ensure_resident_identity(services, manager, 1)
+    primary = await ensure_resident_identity(services, 1)
     original = PathLayout.ensure_agent_workspace
 
     def unavailable(*args):

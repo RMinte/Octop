@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from octop_gateway.models import ChannelSubject, InboundMessage, TextContent
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from octop.i18n import error_message
+from octop.i18n import error_message, tr
 from octop.infra.agents.manager import AgentManager
 from octop.infra.agents.resident_identity import (
     get_resident_identity,
@@ -25,7 +25,12 @@ from octop.infra.agents.resident_identity import (
     resident_prompt_scope,
 )
 from octop.infra.agents.resident_reporting import ResidentReportDelivery
-from octop.infra.agents.resident_tools import ResidentToolInput, resident_tools_scope
+from octop.infra.agents.resident_tools import (
+    ResidentTaskContext,
+    ResidentToolInput,
+    default_task_context,
+    resident_tools_scope,
+)
 from octop.infra.agents.resident_worker_lock import ResidentWorkerLock
 from octop.infra.db.repos.resident_conversations import ResidentConversationRow
 from octop.infra.db.repos.resident_delegations import ResidentTaskReportRow
@@ -92,22 +97,21 @@ class ResidentBinding(ResidentModel):
 class ResidentCapabilities(ResidentModel):
     api_version: Literal[1] = 1
     identity: Literal["private_agent_and_thread"] = "private_agent_and_thread"
+    identity_initialization: Literal["server_managed"] = "server_managed"
+    assistant_role: Literal["life_work_steward"] = "life_work_steward"
+    professional_work: Literal["delegated_tasks"] = "delegated_tasks"
     conversation_transport: Literal["rest_polling"] = "rest_polling"
     message_types: list[Literal["text"]] = ["text"]
-    profiles: bool = True
-    explicit_template_adoption: bool = True
     history_days_search_location: bool = True
     memory_management: bool = True
     memory_capture: Literal["explicit_opt_in_raw_events"] = "explicit_opt_in_raw_events"
     memory_candidates: Literal["explicit_extract_and_user_approval"] = (
         "explicit_extract_and_user_approval"
     )
-    task_delegation: Literal["explicit_user_context"] = "explicit_user_context"
+    task_delegation: Literal["natural_language"] = "natural_language"
     turn_read_tools: bool = True
     selected_knowledge_search: bool = True
-    model_task_delegation: Literal["one_per_explicit_turn_context"] = (
-        "one_per_explicit_turn_context"
-    )
+    model_task_delegation: Literal["one_per_turn"] = "one_per_turn"
     followup_kinds: list[Literal["note", "task_watch", "task"]] = ["note", "task_watch", "task"]
     notification_target: Literal["conversation"] = "conversation"
     shared_read_watermark: bool = True
@@ -125,7 +129,7 @@ RequestId = Annotated[
 class ResidentMessage(ResidentToolInput):
     request_id: RequestId = Field(description="Stable send identity; reuse after a lost response.")
     prompt: Annotated[str, StringConstraints(min_length=1, max_length=32768)] = Field(
-        description="Plain user text. Direct chat attachments and slash commands are unavailable. Select optional host capabilities separately."
+        description="Plain user text; the steward may delegate requested work to a task. Optional task_context selects additional execution scope. Direct chat attachments and slash commands are unavailable."
     )
 
 
@@ -150,7 +154,7 @@ class ResidentTurn(ResidentModel):
     error_message: str | None
     authorization: ResidentToolInput = Field(
         default_factory=ResidentToolInput,
-        description="Host capabilities explicitly selected for this original send; retries cannot add permissions.",
+        description="Additional host capabilities explicitly selected for this original send. Default task delegation is server-managed; retries cannot change the frozen scope.",
     )
 
 
@@ -161,6 +165,15 @@ class ResidentSnapshot(ResidentModel):
     active_turn_id: str | None
     has_earlier: bool
     turns: list[ResidentTurn]
+
+
+def _task_context(row: ResidentRequestRow) -> ResidentTaskContext | None:
+    configuration = json.loads(row.configuration_json)
+    if "resident_task_context" in configuration:
+        return ResidentTaskContext.model_validate(configuration["resident_task_context"])
+    # Admitted turns keep their original scope, including turns queued before
+    # natural-language delegation was introduced.
+    return ResidentToolInput.model_validate_json(row.input_json).task_context
 
 
 def turn_view(row: ResidentRequestRow, locale: str) -> ResidentTurn:
@@ -331,7 +344,7 @@ class ResidentConversationRuntime:
     async def send(
         self, owner_id: int, agent_id: str, thread_id: str, body: ResidentMessage
     ) -> ResidentRequestRow:
-        await asyncio.to_thread(self._require, owner_id, agent_id, thread_id)
+        binding = await asyncio.to_thread(self._require, owner_id, agent_id, thread_id)
         if not body.prompt.strip() or body.prompt.lstrip().startswith("/"):
             raise OctopError.localized(ErrorCode.RESIDENT_TEXT_ONLY)
         # Freeze only explicit turn selections. Replays return the original receipt
@@ -364,6 +377,11 @@ class ResidentConversationRuntime:
             )
         configuration = await asyncio.to_thread(self._configuration, owner_id, agent_id)
         configuration["resident_input"] = json.loads(input_json)
+        if binding.role == "primary":
+            task_context = body.task_context or default_task_context(
+                body.request_id, body.prompt, configuration["model_ref"]
+            )
+            configuration["resident_task_context"] = task_context.model_dump(mode="json")
         accepted_at = now_ms()
         timezone = self.services.config.default_timezone
         try:
@@ -402,6 +420,13 @@ class ResidentConversationRuntime:
             model = preferred
         model = model or self.registry.resolve_fallback_model_ref()
         snapshot = self.services.resident_profile_repo.configuration_snapshot(owner_id, agent_id)
+        binding = self.services.resident_conversation_repo.get_by_agent(agent_id)
+        if binding is not None and binding.role == "primary":
+            # Freeze the current steward policy for new turns without rewriting the
+            # private identity, historical snapshots or already admitted recovery work.
+            snapshot["system_prompt"] = tr(
+                "agents.resident.system_prompt", user.locale if user else "en"
+            )
         return {"model_ref": model, **snapshot}
 
     async def cancel(
@@ -656,7 +681,7 @@ class ResidentConversationRuntime:
                     thread_id=queued.thread_id,
                     turn_id=queued.turn_id,
                     read_tools=authorization.read_tools,
-                    task_context=authorization.task_context,
+                    task_context=_task_context(queued),
                     knowledge_base_ids=authorization.knowledge_base_ids,
                 ),
             ):
@@ -750,9 +775,7 @@ class ResidentConversationRuntime:
         session_key = f"{binding.agent_id}:dashboard:{row.owner_id}:resident"
         authorization = ResidentToolInput.model_validate_json(row.input_json)
         has_host_tools = bool(
-            authorization.read_tools
-            or authorization.task_context
-            or authorization.knowledge_base_ids
+            authorization.read_tools or _task_context(row) or authorization.knowledge_base_ids
         )
         return InboundMessage(
             channel_id=WS_CHANNEL_ID,
