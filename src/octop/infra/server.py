@@ -212,6 +212,77 @@ def _attach_log_handler(target: logging.Logger, handler: TimedRotatingFileHandle
         target.addHandler(handler)
 
 
+class _UvicornLogFilter(logging.Filter):
+    """Keep protocol diagnostics without logging query secrets or WebSocket frames."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # websockets logs headers and complete frame payloads at DEBUG; Uvicorn's
+        # TRACE middleware also logs the scope (including query_string).
+        if record.levelno < logging.INFO:
+            return False
+        # These framework messages interpolate arbitrary ASGI return values or
+        # an exception's text; neither is safe connection diagnostic data.
+        if record.msg == "ASGI callable should return None, but returned '%s'.":
+            record.msg = "ASGI callable returned a non-None result"
+            record.args = ()
+        elif record.msg == "skipped broadcast: failed to write message: %s":
+            record.msg = "skipped broadcast: failed to write message"
+            record.args = ()
+        args = record.args
+        if isinstance(args, tuple):
+            path_index: int | None = None
+            if record.name == "uvicorn.access" and len(args) == 5:
+                path_index = 2
+            elif str(record.msg).startswith('%s - "WebSocket %s"') and len(args) >= 2:
+                path_index = 1
+            if path_index is not None:
+                path = args[path_index]
+                if isinstance(path, str):
+                    safe_args = list(args)
+                    safe_args[path_index] = path.partition("?")[0]
+                    record.args = tuple(safe_args)
+        if record.exc_info is not None and record.exc_info[0] is not None:
+            exception_type = record.exc_info[0].__name__
+            frames = []
+            tb = record.exc_info[2]
+            while tb is not None:
+                code = tb.tb_frame.f_code
+                frames.append(f"{Path(code.co_filename).name}:{tb.tb_lineno}:{code.co_name}")
+                tb = tb.tb_next
+            record.msg = (
+                f"{record.getMessage().rstrip()} exception_type={exception_type} "
+                f"stack={','.join(frames) or '-'}"
+            )
+            record.args = ()
+        # Traceback formatting includes exception text and source lines. Clear
+        # cached copies too; the safe type/locations above are sufficient here.
+        record.exc_info = None
+        record.exc_text = None
+        record.stack_info = None
+        return True
+
+
+def _configure_uvicorn_logging() -> None:
+    """Route framework logs through root once, keeping a safe console output."""
+    root = logging.getLogger()
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"):
+        target = logging.getLogger(name)
+        target.handlers.clear()
+        target.propagate = True
+        target.disabled = False
+        if not any(isinstance(f, _UvicornLogFilter) for f in target.filters):
+            target.addFilter(_UvicornLogFilter())
+    # ``log_config=None`` preserves Octop's file handler, so supply the console
+    # handler that Uvicorn's default dictConfig would otherwise create.
+    if not any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in root.handlers
+    ):
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        logging.getLogger("uvicorn").addHandler(console)
+
+
 @dataclass
 class AppRuntime:
     """Live singletons — constructed after boot."""
@@ -760,9 +831,7 @@ class OctopServer:
 
         root = logging.getLogger()
         _attach_log_handler(root, handler)
-        # Persist framework (uvicorn) request/error logs into the same file too.
-        for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
-            _attach_log_handler(logging.getLogger(name), handler)
+        _configure_uvicorn_logging()
 
         level = os.environ.get("OCTOP_LOG_LEVEL", "info").upper()
         root.setLevel(getattr(logging, level, logging.INFO))

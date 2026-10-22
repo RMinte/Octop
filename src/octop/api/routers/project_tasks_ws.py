@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import time
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import Field, StringConstraints, TypeAdapter, ValidationError
 
+from octop.api.common.task_websocket_logging import Scope, TaskWebSocketLog
 from octop.api.deps import extract_raw_token, maybe_sliding_renew_token, resolve_user_from_token
 from octop.api.routers.projects import _services, _task_worker
 from octop.infra.errors import ErrorCode, OctopError
@@ -35,7 +35,6 @@ from octop.infra.projects.interaction_models import InteractionResponse, TaskCon
 from octop.infra.projects.models import ProjectModel, Reference
 from octop.infra.utils.locale import resolve_locale, resolve_request_locale
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/project-tasks")
 _AUTH_CHECK_SECONDS = 10.0
 _UPDATE_SECONDS = 0.5
@@ -173,41 +172,98 @@ _command_id: TypeAdapter[tasks.RequestID] = TypeAdapter(tasks.RequestID)
 @router.websocket("/ws")
 async def task_websocket(websocket: WebSocket) -> None:
     """Task commands and resumable state pushes, independent of worker lifetime."""
+    diagnostics = TaskWebSocketLog(websocket.headers)
+    diagnostics.record("connection_received")
+    try:
+        await _task_websocket(websocket, diagnostics)
+    except (WebSocketDisconnect, OSError) as exc:
+        diagnostics.disconnected(exc, stage="connection" if diagnostics.accepted else "accept")
+    except asyncio.CancelledError:
+        if diagnostics.close_source == "unknown":
+            diagnostics.close_source = "cancelled"
+        raise
+    except Exception as exc:
+        diagnostics.record("unexpected_error", stage="connection", exception=exc)
+        if diagnostics.accepted:
+            try:
+                diagnostics.record("close_requested", close_code=1011)
+                await websocket.close(code=1011)
+                diagnostics.record("close_sent", close_code=1011)
+            except (WebSocketDisconnect, OSError) as close_exc:
+                diagnostics.disconnected(close_exc, stage="close")
+            except Exception as close_exc:
+                diagnostics.record("unexpected_error", stage="close", exception=close_exc)
+    finally:
+        diagnostics.record("connection_closed")
+
+
+async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -> None:
     server = websocket.app.state.octop_server
     # A close before accept becomes HTTP 403, losing the service failure reason.
-    await websocket.accept()
+    await websocket.accept(headers=diagnostics.response_headers)
+    diagnostics.accepted = True
+    diagnostics.record("connection_accepted")
     locale = resolve_request_locale(websocket)
     closing = False
     # Commands, pushes and terminal errors share the same send ordering.
     lock = asyncio.Lock()
 
-    async def error(exc: OctopError, **identity: str) -> None:
+    async def error(
+        exc: OctopError,
+        *,
+        stage: str,
+        scope: Scope = "connection",
+        command_type: str | None = None,
+        **identity: str,
+    ) -> None:
+        diagnostics.record(
+            "error",
+            stage=stage,
+            scope=scope,
+            status=exc.status,
+            error_code=exc.code.value,
+            command_type=command_type,
+        )
         await websocket.send_json(
             {"type": "error", **identity, "status": exc.status, **exc.to_envelope(locale=locale)}
         )
 
-    async def close_with_error(exc: OctopError) -> None:
+    async def close_with_error(exc: OctopError, *, stage: str) -> None:
         nonlocal closing
-        async with lock:
-            if closing:
-                return
-            closing = True
-            await error(exc)
-            code = 1011
-            if exc.status == 503:
-                code = 1013
-            elif exc.status in {401, 403} and exc.code in {
-                ErrorCode.AUTH_FAILED,
-                ErrorCode.TOKEN_EXPIRED,
-                ErrorCode.USER_DISABLED,
-            }:
-                code = 4401
-            await websocket.close(code=code, reason=exc.code.value)
+        try:
+            async with lock:
+                if closing:
+                    return
+                closing = True
+                await error(exc, stage=stage)
+                code = 1011
+                if exc.status == 503:
+                    code = 1013
+                elif exc.status in {401, 403} and exc.code in {
+                    ErrorCode.AUTH_FAILED,
+                    ErrorCode.TOKEN_EXPIRED,
+                    ErrorCode.USER_DISABLED,
+                }:
+                    code = 4401
+                diagnostics.record("close_requested", stage=stage, close_code=code)
+                await websocket.close(code=code, reason=exc.code.value)
+                diagnostics.record("close_sent", stage=stage, close_code=code)
+        except (WebSocketDisconnect, OSError) as close_exc:
+            diagnostics.disconnected(close_exc, stage="close")
+
+    async def unexpected_error(exc: Exception, *, stage: str) -> None:
+        diagnostics.record("unexpected_error", stage=stage, exception=exc)
+        try:
+            await close_with_error(OctopError.localized(ErrorCode.INTERNAL_ERROR), stage=stage)
+        except (WebSocketDisconnect, OSError) as close_exc:
+            diagnostics.disconnected(close_exc, stage="close")
+        except Exception as close_exc:
+            diagnostics.record("unexpected_error", stage="close", exception=close_exc)
 
     try:
         services = _services(server)
     except OctopError as exc:
-        await close_with_error(exc)
+        await close_with_error(exc, stage="service_check")
         return
     token = extract_raw_token(authorization=websocket.headers.get("authorization"))
     subscriptions: dict[str, str] = {}
@@ -215,20 +271,29 @@ async def task_websocket(websocket: WebSocket) -> None:
     delivered_calls: dict[str, ClientToolCall] = {}
     pump: asyncio.Task[None] | None = None
 
-    async def authenticate() -> None:
+    async def authenticate(stage: str) -> None:
         nonlocal token
         assert token is not None
-        current = await asyncio.to_thread(resolve_user_from_token, server, token)
-        if current.id != user.id:
-            raise OctopError.localized(ErrorCode.AUTH_FAILED)
-        renewed = await asyncio.to_thread(maybe_sliding_renew_token, server, token, current)
+        diagnostics.auth_check_count += 1
+        try:
+            current = await asyncio.to_thread(resolve_user_from_token, server, token)
+            if current.id != user.id:
+                raise OctopError.localized(ErrorCode.AUTH_FAILED)
+            renewed = await asyncio.to_thread(maybe_sliding_renew_token, server, token, current)
+        except OctopError as exc:
+            diagnostics.record(
+                "authentication_failed", stage=stage, status=exc.status, error_code=exc.code.value
+            )
+            raise
         if renewed:
             token = renewed
             await websocket.send_json({"type": "session", "access_token": renewed})
+            diagnostics.record("session_renewed", stage=stage)
 
     async def push_updates() -> None:
         checked = time.monotonic()
         delivered_policy = None
+        stage = "idle"
         try:
             while True:
                 await asyncio.sleep(_UPDATE_SECONDS)
@@ -236,9 +301,11 @@ async def task_websocket(websocket: WebSocket) -> None:
                     if closing:
                         return
                     if time.monotonic() - checked >= _AUTH_CHECK_SECONDS:
-                        await authenticate()
+                        stage = "authentication_idle"
+                        await authenticate(stage)
                         await websocket.send_json({"type": "heartbeat"})
                         checked = time.monotonic()
+                    stage = "approval_policy"
                     policy = await asyncio.to_thread(approval_policy.current, services, user.id)
                     if policy != delivered_policy:
                         await websocket.send_json(
@@ -246,13 +313,14 @@ async def task_websocket(websocket: WebSocket) -> None:
                         )
                         delivered_policy = policy
                     for task_id, cursor in list(subscriptions.items()):
+                        stage = "subscription_updates"
                         try:
                             updates = await asyncio.to_thread(
                                 tasks.updates, services, user.id, task_id, cursor
                             )
                         except OctopError as exc:
                             subscriptions.pop(task_id, None)
-                            await error(exc, task_id=task_id)
+                            await error(exc, stage=stage, scope="subscription", task_id=task_id)
                             continue
                         for update in updates:
                             await websocket.send_json(
@@ -260,6 +328,7 @@ async def task_websocket(websocket: WebSocket) -> None:
                             )
                             subscriptions[task_id] = update.cursor
                     if client_id is not None:
+                        stage = "client_tools"
                         calls = await asyncio.to_thread(
                             client_tools.open_calls, services, user.id, client_id
                         )
@@ -292,14 +361,15 @@ async def task_websocket(websocket: WebSocket) -> None:
                             else:
                                 delivered_calls.pop(call.call_id, None)
         except OctopError as exc:
-            await close_with_error(exc)
-        except (WebSocketDisconnect, OSError):
-            pass
-        except Exception:
-            logger.exception("Task WebSocket subscription failed")
-            with contextlib.suppress(Exception):
-                await close_with_error(OctopError.localized(ErrorCode.INTERNAL_ERROR))
+            await close_with_error(exc, stage=stage)
+        except (WebSocketDisconnect, OSError) as exc:
+            diagnostics.disconnected(exc, stage=stage)
+        except Exception as exc:
+            await unexpected_error(exc, stage=stage)
 
+    stage = "authentication_initial"
+    diagnostics.auth_check_count += 1
+    diagnostics.record("authentication_started", stage=stage)
     try:
         if token is None:
             try:
@@ -311,18 +381,26 @@ async def task_websocket(websocket: WebSocket) -> None:
                 raise OctopError.localized(ErrorCode.AUTH_FAILED) from None
         user = await asyncio.to_thread(resolve_user_from_token, server, token)
         locale = resolve_locale(user_locale=user.locale, explicit=locale)
+        diagnostics.record("authentication_succeeded", stage=stage)
+        stage = "ready"
         await websocket.send_json({"type": "ready", "protocol_version": 3})
+        diagnostics.record("ready")
         pump = asyncio.create_task(push_updates())
         while True:
+            stage = "receive"
             raw = await websocket.receive_text()
             async with lock:
                 if closing:
                     return
                 if len(raw.encode("utf-8")) > _MAX_FRAME_BYTES:
                     closing = True
+                    diagnostics.record("close_requested", stage="frame_size", close_code=1009)
                     await websocket.close(code=1009)
+                    diagnostics.record("close_sent", stage="frame_size", close_code=1009)
                     return
-                await authenticate()
+                stage = "authentication_command"
+                await authenticate(stage)
+                stage = "command"
                 try:
                     frame = _command.validate_json(raw)
                 except ValidationError:
@@ -334,8 +412,14 @@ async def task_websocket(websocket: WebSocket) -> None:
                             identity["id"] = _command_id.validate_python(payload.get("id"))
                     except (ValueError, ValidationError):
                         pass
-                    await error(OctopError.localized(ErrorCode.TASK_FRAME_INVALID), **identity)
+                    await error(
+                        OctopError.localized(ErrorCode.TASK_FRAME_INVALID),
+                        stage=stage,
+                        scope="command",
+                        **identity,
+                    )
                     continue
+                diagnostics.command_count += 1
                 try:
                     result: Any = None
                     if isinstance(frame, AttachFrame):
@@ -461,16 +545,21 @@ async def task_websocket(websocket: WebSocket) -> None:
                         result = detail.model_dump(mode="json")
                     await websocket.send_json({"type": "result", "id": frame.id, "data": result})
                 except OctopError as exc:
-                    await error(exc, id=frame.id)
+                    await error(
+                        exc, stage=stage, scope="command", command_type=frame.type, id=frame.id
+                    )
     except OctopError as exc:
-        await close_with_error(exc)
-    except (WebSocketDisconnect, OSError):
-        pass
-    except Exception:
-        logger.exception("Task WebSocket command failed")
-        with contextlib.suppress(Exception):
-            await close_with_error(OctopError.localized(ErrorCode.INTERNAL_ERROR))
+        if stage == "authentication_initial":
+            diagnostics.record(
+                "authentication_failed", stage=stage, status=exc.status, error_code=exc.code.value
+            )
+        await close_with_error(exc, stage=stage)
+    except (WebSocketDisconnect, OSError) as exc:
+        diagnostics.disconnected(exc, stage=stage)
+    except Exception as exc:
+        await unexpected_error(exc, stage=stage)
     finally:
+        diagnostics.subscription_count = len(subscriptions)
         if pump is not None:
             pump.cancel()
             with contextlib.suppress(asyncio.CancelledError):
