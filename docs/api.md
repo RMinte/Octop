@@ -1043,11 +1043,69 @@ endpoint (public, mounted directly in `api/app.py`).
 | `GET`    | `/admin/audit-log` | admin | recent audit rows |
 | `GET`    | `/admin/metrics` | admin | `{messages_total, stream_errors_total, cron_runs_total, cron_errors_total, agent_active, ...}` |
 
-用量汇总支持 `granularity=total|by_day|by_agent|by_model|by_project|by_task`，默认 `by_day`；所有用量接口支持 `window` 时间范围，以及 `agent_id`、`project_id`、`task_id` 精确筛选。`by_project`、`by_task` 仅统计独立任务，`by_agent` 仅统计专家会话，其余维度合并两类来源。项目与任务分组以公共 ID 为 `key`、当前项目名或任务标题为 `label`，同名资源分别计量；未关联项目的任务在项目分组中使用空 `key`、空 `label`，客户端显示「未关联项目」。
+用量汇总支持 `granularity=total|by_day|by_agent|by_model|by_project|by_task`，默认 `by_day`；所有用量接口支持 `window` 时间范围，以及 `agent_id`、`project_id`、`task_id` 精确筛选。`by_project`、`by_task` 仅统计独立任务，`by_agent` 仅统计 Agent 计量记录，其余维度合并两类来源。Agent 记录包含已记录的专家会话和成功的私人管家、常驻专业实例会话；后两类目前同样使用 `source=chat`，不能单独区分。项目与任务分组以公共 ID 为 `key`、当前项目名或任务标题为 `label`，同名资源分别计量；未关联项目的任务在项目分组中使用空 `key`、空 `label`，客户端显示「未关联项目」。
 
-任务用量读取已有的轮次、标题生成、自动审核记录，包含已记录的上下文压缩与进展说明消耗；标题和审核增加 token 合计，但不增加会话轮次。保留的归档项目仍参与统计。任务的计量记录只有累计输入/输出，因此缓存、推理、模型调用次数字段中的 `0` 表示尚无细分数据；缓存命中率仅按专家会话中已有细分记录的输入计算。轮次含旁路累计消耗时，模型按该轮 `model_ref` 归属。时间范围采用服务端时区；任务按轮次/审核记录的创建时间归属，标题按任务首轮创建时间归属，不能作为逐次模型请求账单使用。已删除记录与没有输入/输出记录的历史对话无法从本接口恢复用量。
+任务用量读取已有的轮次、标题生成、自动审核记录，包含已记录的上下文压缩与进展说明消耗；标题和审核增加 token 合计，但不增加会话轮次。保留的归档项目仍参与统计。轮次含旁路累计消耗时，模型按该轮 `model_ref` 归属。任务按轮次/审核记录的创建时间归属，标题按任务首轮创建时间归属，不能作为逐次模型请求账单使用。删除专家或 Task 会减少历史统计；已删除记录与没有输入/输出记录的历史对话无法从本接口恢复用量，也不能据此判断所有失败、取消或后台调用均已完整采集。
 
-分组最多返回 100 个桶：日期取最近 100 天，其余按 token 合计取前 100 组；响应顶层合计始终覆盖筛选范围的全部记录。Excel 包含明细、按天、按专家、按模型、按项目、按任务六张工作表；明细追加项目 ID、项目名称、任务 ID、任务标题。明细最多导出最近 50,000 条计量记录，分组沿用上述 100 桶限制。
+汇总响应保留原有数值字段，新增以下可用性说明；客户端须结合说明显示数据，不能把未采集的数值 `0` 当作实际零消耗：
+
+| 元数据 | 语义 |
+|--------|------|
+| `capabilities` | `execution_location`、`cost`、`savings`、`budget` 均为 `false`。本轮不提供本地/云端分类、费用、节省或金额预算；客户端显示「未支持」或隐藏对应内容，不以金额 `0` 代替。 |
+| `coverage` | 顶层及每个 bucket 各有一份逐字段状态，`scope=recorded_usage_only`，仅描述筛选范围内已保留的计量记录，不保证所有请求均已记录。 |
+| `timezone` | 实际用于计算日期范围和按天分组的查询时区，来自服务端时区配置。`last_7d`、`last_30d` 为滚动 7/30 天；自然月使用 `month:YYYY-MM`，指定日期范围使用 `range:YYYY-MM-DD:YYYY-MM-DD`。 |
+| `generated_at` | 响应生成时间，Unix 秒；不是冻结的数据快照时点，不同请求或导出可能看到新增记录。 |
+| `cache_hit_basis` | 缓存命中率依据：`source_scope=agent_records`，`input_tokens` 为 Agent 计量记录中的输入分母，`cache_read_tokens` 为其中已记录的缓存读取量；不包含仅有输入/输出合计的 Task 记录。 |
+| `bucket_limit`、`buckets_truncated` | 桶上限固定为 `100`；后者仅在实际分组超过上限时为 `true`。日期取最近 100 天，其余按 token 合计取前 100 组。顶层合计覆盖筛选范围的全部已保留记录；暂不提供桶分页或未展示分组合计。 |
+
+`coverage` 的字段状态如下；空结果以是否存在计量记录判断，不能以 `turns=0` 判断，因为标题和审核可有用量而没有轮次。
+
+| 字段 | 有计量记录时的状态 | 空结果时 |
+|------|--------------------|----------|
+| `input_tokens`、`output_tokens`、`total_tokens`、`turns` | `recorded`：已记录的合计，不代表历史调用全量 | `no_data` |
+| `uncached_input_tokens`、`cache_read_tokens`、`cache_write_tokens`、`reasoning_tokens`、`model_calls` | 含任一 Agent 记录为 `partial`：缺失细项曾被归零，未记录的调用也无法追溯；只有 Task 记录为 `not_collected` | `no_data` |
+| `avg_per_turn`（仅顶层） | 有轮次为 `recorded`；有计量记录但无轮次为 `undefined` | `no_data` |
+| `cache_hit_percent`（仅顶层） | Agent 输入分母大于零为 `partial`；有计量记录但无该分母为 `undefined` | `no_data` |
+
+`not_collected` 表示该来源未保留该细项，`undefined` 表示当前分母不足以计算。任务缓存、推理及调用次数仍保留旧数值 `0`；Agent 相应细项也只能按 `partial` 展示。缓存命中率只覆盖 `cache_hit_basis` 指定的记录，不能解释为所有 Token 的缓存命中率。
+
+以下仅为含 Agent 记录的汇总元数据片段，省略原有用量数值和 `buckets`；每个 bucket 的 `coverage` 使用同样规则，但不含两个顶层派生指标：
+
+```json
+{
+  "capabilities": {
+    "execution_location": false,
+    "cost": false,
+    "savings": false,
+    "budget": false
+  },
+  "coverage": {
+    "scope": "recorded_usage_only",
+    "input_tokens": "recorded",
+    "output_tokens": "recorded",
+    "total_tokens": "recorded",
+    "turns": "recorded",
+    "uncached_input_tokens": "partial",
+    "cache_read_tokens": "partial",
+    "cache_write_tokens": "partial",
+    "reasoning_tokens": "partial",
+    "model_calls": "partial",
+    "avg_per_turn": "recorded",
+    "cache_hit_percent": "partial"
+  },
+  "timezone": "Asia/Shanghai",
+  "generated_at": 1792627200,
+  "cache_hit_basis": {
+    "source_scope": "agent_records",
+    "input_tokens": 12000,
+    "cache_read_tokens": 3000
+  },
+  "bucket_limit": 100,
+  "buckets_truncated": false
+}
+```
+
+Excel 包含明细、按天、按专家、按模型、按项目、按任务六张工作表；明细追加项目 ID、项目名称、任务 ID、任务标题。明细最多导出最近 50,000 条计量记录，分组沿用上述 100 桶限制。本轮导出不新增上述汇总元数据，也未改变原有截断行为。
 
 ## Envs
 

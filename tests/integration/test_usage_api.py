@@ -1100,3 +1100,272 @@ async def test_usage_day_buckets_preserve_day_across_dst_change(env: Any) -> Non
         timezone="America/New_York",
     )
     assert sum(row.total_tokens for row in detail) == 240
+
+
+async def test_summary_marks_unknown_breakdowns_per_scope_and_bucket(env: Any) -> None:
+    """Keep real zero totals distinct from absent or uncollected usage data."""
+    from zoneinfo import ZoneInfo
+
+    c, srv, admin_auth, alice_auth, ctx = env
+    owner = ctx["alice_id"]
+    repo = srv.services.usage_repo
+    counts = ("input_tokens", "output_tokens", "total_tokens", "turns")
+    breakdowns = (
+        "uncached_input_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "model_calls",
+    )
+    empty_coverage = {
+        "scope": "recorded_usage_only",
+        **dict.fromkeys((*counts, *breakdowns, "avg_per_turn", "cache_hit_percent"), "no_data"),
+    }
+    started = int(time.time())
+    response = await c.get(
+        "/api/usage/summary",
+        params={"window": "all", "granularity": "total"},
+        headers=alice_auth,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["coverage"] == empty_coverage
+    assert all(body[field] == 0 for field in (*counts, *breakdowns))
+    assert body["buckets"] == []
+    assert body["bucket_limit"] == 100
+    assert body["buckets_truncated"] is False
+    assert body["timezone"] == ZoneInfo(srv.config.default_timezone).key
+    assert started <= body["generated_at"] <= int(time.time())
+    assert body["capabilities"] == {
+        "execution_location": False,
+        "cost": False,
+        "savings": False,
+        "budget": False,
+    }
+    assert body["cache_hit_basis"] == {
+        "source_scope": "agent_records",
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+    }
+
+    ts = 1_780_000_000
+    repo.record(
+        agent_id="y", user_id=owner, model="agent-zero", input_tokens=0, output_tokens=0, ts=ts
+    )
+    response = await c.get(
+        "/api/usage/summary",
+        params={"window": "all", "granularity": "by_model"},
+        headers=alice_auth,
+    )
+    assert response.status_code == 200
+    zero = response.json()
+    recorded_coverage = {
+        "scope": "recorded_usage_only",
+        **dict.fromkeys(counts, "recorded"),
+        **dict.fromkeys(breakdowns, "partial"),
+    }
+    assert zero["total_tokens"] == 0
+    assert zero["turns"] == 1
+    assert zero["coverage"] == {
+        **recorded_coverage,
+        "avg_per_turn": "recorded",
+        "cache_hit_percent": "undefined",
+    }
+    assert zero["buckets"][0]["coverage"] == recorded_coverage
+
+    repo.record(
+        agent_id="y",
+        user_id=owner,
+        model="task-model",
+        input_tokens=100,
+        uncached_input_tokens=60,
+        cache_read_tokens=40,
+        cache_write_tokens=2,
+        output_tokens=20,
+        reasoning_tokens=5,
+        model_calls=3,
+        ts=ts + 1,
+    )
+    _seed_task_usage(
+        srv,
+        owner_id=owner,
+        task_id="coverage-task",
+        project_id="coverage-project",
+        ts=ts + 2,
+        input_tokens=40,
+        output_tokens=10,
+        auxiliary=True,
+    )
+    response = await c.get(
+        "/api/usage/summary",
+        params={"window": "all", "granularity": "by_model"},
+        headers=alice_auth,
+    )
+    assert response.status_code == 200
+    mixed = response.json()
+    assert mixed["total_tokens"] == 206
+    assert mixed["turns"] == 3
+    assert mixed["model_calls"] == 4
+    assert mixed["coverage"] == {
+        **recorded_coverage,
+        "avg_per_turn": "recorded",
+        "cache_hit_percent": "partial",
+    }
+    assert mixed["cache_hit_percent"] == 40
+    assert mixed["cache_hit_basis"] == {
+        "source_scope": "agent_records",
+        "input_tokens": 100,
+        "cache_read_tokens": 40,
+    }
+    by_model = {bucket["key"]: bucket for bucket in mixed["buckets"]}
+    assert by_model["task-model"]["coverage"] == recorded_coverage
+    assert by_model["task-model"]["total_tokens"] == 184
+    task_coverage = {
+        "scope": "recorded_usage_only",
+        **dict.fromkeys(counts, "recorded"),
+        **dict.fromkeys(breakdowns, "not_collected"),
+    }
+    assert by_model["review-model"]["coverage"] == task_coverage
+    assert by_model["review-model"]["turns"] == 0
+    daily = await c.get(
+        "/api/usage/summary",
+        params={"window": "all", "granularity": "by_day"},
+        headers=alice_auth,
+    )
+    assert daily.status_code == 200
+    assert len(daily.json()["buckets"]) == 1
+    assert daily.json()["buckets"][0]["coverage"] == recorded_coverage
+
+    # Metadata must describe each filtered result, not the user's unfiltered ledger.
+    for params in (
+        {"granularity": "by_task"},
+        {"granularity": "total", "task_id": "coverage-task"},
+        {"granularity": "total", "project_id": "coverage-project"},
+    ):
+        response = await c.get(
+            "/api/usage/summary", params={"window": "all", **params}, headers=alice_auth
+        )
+        assert response.status_code == 200
+        task = response.json()
+        assert task["total_tokens"] == 86
+        assert task["coverage"] == {
+            **task_coverage,
+            "avg_per_turn": "recorded",
+            "cache_hit_percent": "undefined",
+        }
+        assert task["cache_hit_basis"]["input_tokens"] == 0
+        assert all(bucket["coverage"] == task_coverage for bucket in task["buckets"])
+
+    for path, auth, params in (
+        ("/api/usage/summary", alice_auth, {"agent_id": "agt-a"}),
+        ("/api/usage/summary", alice_auth, {"window": "day:2000-01-01"}),
+        ("/api/admin/usage/summary", admin_auth, {"user_id": 1}),
+    ):
+        response = await c.get(
+            path, params={"window": "all", "granularity": "total", **params}, headers=auth
+        )
+        assert response.status_code == 200
+        assert response.json()["coverage"] == empty_coverage
+        assert response.json()["cache_hit_basis"]["input_tokens"] == 0
+
+    # Auxiliary jobs contribute usage without creating a conversational turn.
+    _seed_task_usage(
+        srv,
+        owner_id=owner,
+        task_id="auxiliary-only",
+        project_id=None,
+        ts=ts,
+        input_tokens=0,
+        output_tokens=0,
+        auxiliary=True,
+    )
+    response = await c.get(
+        "/api/usage/summary",
+        params={"window": "all", "granularity": "total", "task_id": "auxiliary-only"},
+        headers=alice_auth,
+    )
+    assert response.status_code == 200
+    auxiliary = response.json()
+    assert auxiliary["total_tokens"] == 36
+    assert auxiliary["turns"] == auxiliary["avg_per_turn"] == 0
+    assert auxiliary["coverage"] == {
+        **task_coverage,
+        "avg_per_turn": "undefined",
+        "cache_hit_percent": "undefined",
+    }
+
+    # The response model must preserve metadata and describe it in generated docs.
+    openapi = c._octop_app.openapi()
+    definitions = openapi["components"]["schemas"]
+    for path in ("/api/usage/summary", "/api/admin/usage/summary"):
+        operation = openapi["paths"][path]["get"]
+        assert operation["summary"]
+        assert operation["description"]
+        schema_ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        properties = definitions[schema_ref.rsplit("/", 1)[-1]]["properties"]
+        assert properties["timezone"]["type"] == "string"
+        assert properties["generated_at"]["type"] == "integer"
+        assert properties["buckets_truncated"]["type"] == "boolean"
+        for field in ("coverage", "capabilities", "cache_hit_basis"):
+            nested = properties[field]
+            if "$ref" in nested:
+                nested = definitions[nested["$ref"].rsplit("/", 1)[-1]]
+            assert nested["type"] == "object"
+            assert nested["properties"]
+
+
+async def test_summary_bucket_truncation_and_resolved_timezone(env: Any) -> None:
+    """A full page is complete until another date or model bucket exists."""
+    c, srv, _admin_auth, alice_auth, ctx = env
+    repo = srv.services.usage_repo
+    ts = 1_700_000_000
+    for index in range(100):
+        repo.record(
+            agent_id="y",
+            user_id=ctx["alice_id"],
+            model=f"model-{index:03d}",
+            input_tokens=1,
+            output_tokens=0,
+            ts=ts + index * 86_400,
+        )
+    for granularity in ("by_day", "by_model"):
+        response = await c.get(
+            "/api/usage/summary",
+            params={"window": "all", "granularity": granularity},
+            headers=alice_auth,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["buckets"]) == body["bucket_limit"] == 100
+        assert body["buckets_truncated"] is False
+        assert (
+            body["total_tokens"] == sum(bucket["total_tokens"] for bucket in body["buckets"]) == 100
+        )
+
+    repo.record(
+        agent_id="y",
+        user_id=ctx["alice_id"],
+        model="model-100",
+        input_tokens=1,
+        output_tokens=0,
+        ts=ts + 100 * 86_400,
+    )
+    for granularity in ("by_day", "by_model"):
+        response = await c.get(
+            "/api/usage/summary",
+            params={"window": "all", "granularity": granularity},
+            headers=alice_auth,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["buckets"]) == 100
+        assert body["buckets_truncated"] is True
+        assert body["total_tokens"] == 101
+        assert sum(bucket["total_tokens"] for bucket in body["buckets"]) == 100
+
+    fallback = repo.summary(
+        user_id=ctx["alice_id"], window="all", granularity="by_day", timezone="Invalid/Timezone"
+    )
+    utc = repo.summary(user_id=ctx["alice_id"], window="all", granularity="by_day", timezone="UTC")
+    assert fallback["timezone"] == "UTC"
+    assert fallback["buckets"] == utc["buckets"]

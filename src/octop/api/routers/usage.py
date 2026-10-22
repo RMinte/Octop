@@ -41,6 +41,54 @@ _RANGE_WINDOW_RE = re.compile(r"^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$"
 
 
 UsageGranularity = Literal["total", "by_day", "by_agent", "by_model", "by_project", "by_task"]
+UsageAvailability = Literal["recorded", "partial", "not_collected", "no_data", "undefined"]
+
+
+class UsageCoverage(BaseModel):
+    """Field availability within retained records, not all actual model requests."""
+
+    scope: Literal["recorded_usage_only"] = Field(
+        description="Only retained usage is included; missing calls and deleted history are excluded."
+    )
+    input_tokens: UsageAvailability
+    uncached_input_tokens: UsageAvailability
+    cache_read_tokens: UsageAvailability
+    cache_write_tokens: UsageAvailability
+    output_tokens: UsageAvailability
+    reasoning_tokens: UsageAvailability
+    total_tokens: UsageAvailability
+    model_calls: UsageAvailability
+    turns: UsageAvailability
+
+
+class UsageSummaryCoverage(UsageCoverage):
+    avg_per_turn: UsageAvailability = Field(
+        description="undefined means records exist but no conversation turns provide a denominator."
+    )
+    cache_hit_percent: UsageAvailability = Field(
+        description="partial uses recorded agent inputs only; undefined means no valid denominator."
+    )
+
+
+class UsageCapabilities(BaseModel):
+    execution_location: bool = Field(
+        default=False, description="Whether local/cloud/unknown usage classification is available."
+    )
+    cost: bool = Field(default=False, description="Whether monetary usage costs are available.")
+    savings: bool = Field(
+        default=False, description="Whether baseline cost comparisons are available."
+    )
+    budget: bool = Field(
+        default=False, description="Whether monetary budgets and their enforcement are available."
+    )
+
+
+class UsageCacheHitBasis(BaseModel):
+    source_scope: Literal["agent_records"] = Field(
+        description="Retained agent records, including resident conversations; excludes task journals."
+    )
+    input_tokens: int = Field(description="Recorded agent input tokens used as the denominator.")
+    cache_read_tokens: int = Field(description="Recorded cache reads used as the numerator.")
 
 
 class UsageCounts(BaseModel):
@@ -55,7 +103,7 @@ class UsageCounts(BaseModel):
         description="Recorded model calls; task journals do not retain this count."
     )
     turns: int = Field(
-        description="Expert usage records and task turns with usage; excludes title/review jobs."
+        description="Agent usage records and task turns with usage; excludes title/review jobs."
     )
 
 
@@ -64,6 +112,9 @@ class UsageBucket(UsageCounts):
         description="Date, public resource ID or model reference. Empty project ID means no project."
     )
     label: str = Field(description="Project name, task title or the bucket key.")
+    coverage: UsageCoverage = Field(
+        description="Availability for this bucket's own retained records."
+    )
 
 
 class UsageSummary(UsageCounts):
@@ -71,8 +122,26 @@ class UsageSummary(UsageCounts):
     granularity: str
     range_start: int
     range_end: int
+    timezone: str = Field(
+        description="Actual server timezone used for query boundaries and day buckets."
+    )
+    generated_at: int = Field(
+        description="Response generation time in Unix seconds; not a frozen accounting snapshot."
+    )
     avg_per_turn: int
     cache_hit_percent: int
+    coverage: UsageSummaryCoverage = Field(
+        description="Read before displaying numeric values; missing data may retain legacy zero values."
+    )
+    capabilities: UsageCapabilities = Field(
+        default_factory=UsageCapabilities,
+        description="Unsupported capabilities have no measured values; do not display them as zero.",
+    )
+    cache_hit_basis: UsageCacheHitBasis
+    bucket_limit: int = Field(description="Maximum number of returned buckets.")
+    buckets_truncated: bool = Field(
+        description="More buckets exist; top-level totals still cover all retained records in scope."
+    )
     buckets: list[UsageBucket]
 
 

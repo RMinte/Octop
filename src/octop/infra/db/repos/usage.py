@@ -21,6 +21,7 @@ _DAY_WINDOW_RE = re.compile(r"^day:(\d{4}-\d{2}-\d{2})$")
 _MONTH_WINDOW_RE = re.compile(r"^month:(\d{4}-\d{2})$")
 _RANGE_WINDOW_RE = re.compile(r"^range:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$")
 DETAIL_EXPORT_LIMIT = 50_000
+BUCKET_LIMIT = 100
 
 # Task journals store millisecond timestamps and only input/output totals.
 # Keep unknown breakdowns at zero rather than inferring calls or cache usage.
@@ -72,6 +73,33 @@ _TOKEN_FIELDS = (
     "model_calls",
 )
 _SUM_SQL = ", ".join(f"COALESCE(SUM({field}), 0) AS {field}" for field in _TOKEN_FIELDS)
+_COVERAGE_FIELDS = ("usage_records", "agent_records", "cache_input_tokens")
+_COVERAGE_SQL = """
+    COUNT(*) AS usage_records,
+    COALESCE(SUM(CASE WHEN task_id = '' THEN 1 ELSE 0 END), 0) AS agent_records,
+    COALESCE(SUM(CASE WHEN task_id = '' THEN input_tokens ELSE 0 END), 0)
+        AS cache_input_tokens
+"""
+
+
+def _usage_coverage(row: Any) -> dict[str, str]:
+    """Describe retained records, without treating missing breakdowns as known zero."""
+    has_records = int(row["usage_records"]) > 0
+    coverage = dict.fromkeys((*_TOKEN_FIELDS, "turns"), "recorded" if has_records else "no_data")
+    # Even agent records cannot distinguish an unreported provider field from
+    # zero. Calls without usage are also absent from the retained call count.
+    breakdown = (
+        "partial" if int(row["agent_records"]) else "not_collected" if has_records else "no_data"
+    )
+    for field in (
+        "uncached_input_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "model_calls",
+    ):
+        coverage[field] = breakdown
+    return {"scope": "recorded_usage_only", **coverage}
 
 
 @dataclass(frozen=True)
@@ -260,7 +288,7 @@ class UsageRepo:
         buckets: dict[str, dict[str, Any]] = {}
         rows = conn.execute(
             f"""
-            SELECT ts, {_SUM_SQL}, COALESCE(SUM(usage_turns), 0) AS turns
+            SELECT ts, {_SUM_SQL}, COALESCE(SUM(usage_turns), 0) AS turns, {_COVERAGE_SQL}
             FROM ({_USAGE_SQL}) AS usage WHERE {where_sql}
             GROUP BY ts ORDER BY ts DESC
             """,
@@ -269,15 +297,19 @@ class UsageRepo:
         for row in rows:
             day = datetime.fromtimestamp(row["ts"], tz=zone).date().isoformat()
             if day not in buckets:
-                if len(buckets) == 100:
+                if len(buckets) == BUCKET_LIMIT + 1:
                     break
                 buckets[day] = {
                     "key": day,
                     "label": day,
-                    **dict.fromkeys((*_TOKEN_FIELDS, "turns"), 0),
+                    **dict.fromkeys((*_TOKEN_FIELDS, "turns", *_COVERAGE_FIELDS), 0),
                 }
-            for field in (*_TOKEN_FIELDS, "turns"):
+            for field in (*_TOKEN_FIELDS, "turns", *_COVERAGE_FIELDS):
                 buckets[day][field] += int(row[field])
+        for bucket in buckets.values():
+            bucket["coverage"] = _usage_coverage(bucket)
+            for field in _COVERAGE_FIELDS:
+                del bucket[field]
         return list(buckets.values())
 
     def _scope_filter(
@@ -322,6 +354,7 @@ class UsageRepo:
         Task/project views include task consumption only; the agent view includes
         expert sessions only. Title and review costs contribute tokens, not turns.
         """
+        timezone = _zoneinfo(timezone).key
         where_sql, params, start, end = self._scope_filter(
             user_id=user_id,
             agent_id=agent_id,
@@ -339,9 +372,7 @@ class UsageRepo:
         with self._db.connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT {sum_sql},
-                    COALESCE(SUM(CASE WHEN task_id = '' THEN input_tokens ELSE 0 END), 0)
-                        AS cache_input_tokens
+                SELECT {sum_sql}, {_COVERAGE_SQL}
                 FROM ({_USAGE_SQL}) AS usage WHERE {where_sql}
                 """,
                 params,
@@ -365,11 +396,12 @@ class UsageRepo:
                 }.get(granularity, bucket_expr)
                 bucket_rows = conn.execute(
                     f"""
-                    SELECT {bucket_expr} AS bucket, {label_expr} AS label, {sum_sql}
+                    SELECT {bucket_expr} AS bucket, {label_expr} AS label,
+                        {sum_sql}, {_COVERAGE_SQL}
                     FROM ({_USAGE_SQL}) AS usage WHERE {where_sql}
                     GROUP BY {bucket_expr}
                     ORDER BY total_tokens DESC, bucket
-                    LIMIT 100
+                    LIMIT {BUCKET_LIMIT + 1}
                     """,
                     params,
                 ).fetchall()
@@ -378,6 +410,7 @@ class UsageRepo:
                         "key": r["bucket"],
                         "label": r["label"],
                         **{field: int(r[field]) for field in (*_TOKEN_FIELDS, "turns")},
+                        "coverage": _usage_coverage(r),
                     }
                     for r in bucket_rows
                 ]
@@ -388,15 +421,32 @@ class UsageRepo:
             if cache_input_tokens
             else 0
         )
+        coverage = _usage_coverage(row)
+        coverage["avg_per_turn"] = (
+            "recorded" if totals["turns"] else "undefined" if row["usage_records"] else "no_data"
+        )
+        coverage["cache_hit_percent"] = (
+            "partial" if cache_input_tokens else "undefined" if row["usage_records"] else "no_data"
+        )
         return {
             "window": window,
             "granularity": granularity,
             "range_start": start,
             "range_end": end,
+            "timezone": timezone,
+            "generated_at": now_ts(),
             **totals,
             "avg_per_turn": avg,
             "cache_hit_percent": cache_hit_percent,
-            "buckets": buckets,
+            "coverage": coverage,
+            "cache_hit_basis": {
+                "source_scope": "agent_records",
+                "input_tokens": cache_input_tokens,
+                "cache_read_tokens": totals["cache_read_tokens"],
+            },
+            "bucket_limit": BUCKET_LIMIT,
+            "buckets_truncated": len(buckets) > BUCKET_LIMIT,
+            "buckets": buckets[:BUCKET_LIMIT],
         }
 
     def list_detail(
