@@ -1,0 +1,191 @@
+{
+  "type": "turn",
+  "data": {
+    "task": {
+      "import_source": null,
+      "external_session_id": null,
+      "task_id": "task_example",
+      "project_id": null,
+      "title": "修改标题和图片",
+      "archived": false,
+      "web_search_enabled": true,
+      "status": "running",
+      "active_turn_id": "turn_example",
+      "list_revision": 2,
+      "approval_policy": {
+        "mode": "ask_for_approval",
+        "revision": 1,
+        "updated_at": "2026-10-17T04:00:00Z"
+      },
+      "created_at": "2026-10-22T02:00:00Z",
+      "updated_at": "2026-10-22T02:00:03Z"
+    },
+    "turn": {
+      "imported_history": null,
+      "sequence": 1,
+      "turn_id": "turn_example",
+      "request_id": "message_example_001",
+      "prompt": "修改标题并删除旧图片",
+      "attachments": [],
+      "reply": "",
+      "reasoning": "",
+      "content_blocks": [
+        {
+          "block_id": "turn_example:1",
+          "type": "tool",
+          "text": "",
+          "status": "completed",
+          "tool_call_id": "file_change_example_1",
+          "tool_name": "edit_file",
+          "tool_label": null,
+          "brief": null,
+          "introduction": null,
+          "plan": null,
+          "plan_id": null,
+          "step_id": null,
+          "arguments": {
+            "file_path": "/src/app.ts",
+            "old_string": "old",
+            "new_string": "new"
+          },
+          "output": "Successfully replaced 1 instance(s)",
+          "file_changes": [
+            {
+              "path": "src/app.ts",
+              "additions": 1,
+              "deletions": 1,
+              "diff": "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-const title = 'old';\n+const title = 'new';\n"
+            }
+          ],
+          "started_at": "2026-10-22T02:00:00.000Z",
+          "finished_at": "2026-10-22T02:00:00.012Z",
+          "duration_ms": 12.0
+        },
+        {
+          "block_id": "turn_example:2",
+          "type": "tool",
+          "text": "",
+          "status": "completed",
+          "tool_call_id": "file_change_example_2",
+          "tool_name": "edit_file",
+          "tool_label": null,
+          "brief": null,
+          "introduction": null,
+          "plan": null,
+          "plan_id": null,
+          "step_id": null,
+          "arguments": {
+            "file_path": "/src/app.ts",
+            "old_string": "new",
+            "new_string": "final"
+          },
+          "output": "Successfully replaced 1 instance(s)",
+          "file_changes": [
+            {
+              "path": "src/app.ts",
+              "additions": 1,
+              "deletions": 1,
+              "diff": "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-const title = 'new';\n+const title = 'final';\n"
+            }
+          ],
+          "started_at": "2026-10-22T02:00:01.000Z",
+          "finished_at": "2026-10-22T02:00:01.012Z",
+          "duration_ms": 12.0
+        },
+        {
+          "block_id": "turn_example:3",
+          "type": "tool",
+          "text": "",
+          "status": "completed",
+          "tool_call_id": "file_change_example_3",
+          "tool_name": "delete",
+          "tool_label": null,
+          "brief": null,
+          "introduction": null,
+          "plan": null,
+          "plan_id": null,
+          "step_id": null,
+          "arguments": {
+            "file_path": "/assets/logo.png"
+          },
+          "output": "Deleted file",
+          "file_changes": [
+            {
+              "path": "assets/logo.png",
+              "additions": null,
+              "deletions": null,
+              "diff": null
+            }
+          ],
+          "started_at": "2026-10-22T02:00:02.000Z",
+          "finished_at": "2026-10-22T02:00:02.012Z",
+          "duration_ms": 12.0
+        }
+      ],
+      "file_changes": [
+        {
+          "path": "src/app.ts",
+          "additions": 1,
+          "deletions": 1,
+          "diff": "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-const title = 'old';\n+const title = 'new';\n"
+        },
+        {
+          "path": "src/app.ts",
+          "additions": 1,
+          "deletions": 1,
+          "diff": "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-const title = 'new';\n+const title = 'final';\n"
+        },
+        {
+          "path": "assets/logo.png",
+          "additions": null,
+          "deletions": null,
+          "diff": null
+        }
+      ],
+      "content_revision": 7,
+      "plan": null,
+      "plan_revision": 0,
+      "interactions": [],
+      "interaction_revision": 0,
+      "pause_requested": false,
+      "status": "running",
+      "error_code": "",
+      "recovery": null,
+      "activity": "",
+      "artifacts": [],
+      "model_ref": "provider/model",
+      "web_search_enabled": true,
+      "approval_policy_at_start": {
+        "mode": "ask_for_approval",
+        "revision": 1,
+        "updated_at": "2026-10-17T04:00:00Z"
+      },
+      "options": {
+        "action_timeline_enabled": true,
+        "reasoning_mode": null,
+        "reasoning_effort": null,
+        "model_ref": "provider/model",
+        "skills": [],
+        "mcp_servers": [],
+        "knowledge_base_ids": null,
+        "plugins": [],
+        "subagents": [],
+        "memory_enabled": true,
+        "team_enabled": false,
+        "client_id": null,
+        "client_tools": null
+      },
+      "cancel_requested": false,
+      "retry_of_turn_id": null,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "project_revision": null,
+      "created_at": "2026-10-22T02:00:00Z",
+      "updated_at": "2026-10-22T02:00:03Z",
+      "started_at": "2026-10-22T02:00:00Z",
+      "finished_at": null,
+      "processing_duration_ms": null
+    },
+    "cursor": "opaque_example_cursor"
+  }
+}

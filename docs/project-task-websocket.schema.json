@@ -1615,6 +1615,238 @@
       "title": "ApprovalReview",
       "type": "object"
     },
+    "ImportActivity": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "仅可见进展和工具历史，不接收私有推理。",
+          "enum": [
+            "commentary",
+            "tool"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 1048576,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "maxLength": 1048576,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
+        },
+        "succeeded": {
+          "default": true,
+          "title": "Succeeded",
+          "type": "boolean"
+        },
+        "timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timestamp"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "maximum": 31536000000,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ImportActivity",
+      "type": "object"
+    },
+    "ImportFileChange": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "来源展示路径；不读取或写入该路径。",
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "old_content": {
+          "anyOf": [
+            {
+              "maxLength": 1048576,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Old Content"
+        },
+        "new_content": {
+          "anyOf": [
+            {
+              "maxLength": 1048576,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "New Content"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ImportFileChange",
+      "type": "object"
+    },
+    "ImportedTurnHistory": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": [
+            "codex",
+            "claude"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "external_turn_id": {
+          "title": "External Turn Id",
+          "type": "string"
+        },
+        "user_timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "User Timestamp"
+        },
+        "assistant_timestamp": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Assistant Timestamp"
+        },
+        "activities": {
+          "items": {
+            "$ref": "#/$defs/ImportActivity"
+          },
+          "title": "Activities",
+          "type": "array"
+        },
+        "file_changes": {
+          "items": {
+            "$ref": "#/$defs/ImportFileChange"
+          },
+          "title": "File Changes",
+          "type": "array"
+        },
+        "assistant_attachments": {
+          "items": {
+            "$ref": "#/$defs/TaskInputAttachment"
+          },
+          "title": "Assistant Attachments",
+          "type": "array"
+        },
+        "missing_user_attachments": {
+          "items": {
+            "$ref": "#/$defs/MissingImportAttachment"
+          },
+          "title": "Missing User Attachments",
+          "type": "array"
+        },
+        "missing_assistant_attachments": {
+          "items": {
+            "$ref": "#/$defs/MissingImportAttachment"
+          },
+          "title": "Missing Assistant Attachments",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source",
+        "external_turn_id",
+        "user_timestamp",
+        "assistant_timestamp",
+        "activities",
+        "file_changes"
+      ],
+      "title": "ImportedTurnHistory",
+      "type": "object"
+    },
     "InteractionResolution": {
       "additionalProperties": false,
       "properties": {
@@ -1660,6 +1892,35 @@
         "source"
       ],
       "title": "InteractionResolution",
+      "type": "object"
+    },
+    "MissingImportAttachment": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "media_type": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Media Type"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "MissingImportAttachment",
       "type": "object"
     },
     "QuestionOption": {
@@ -2006,6 +2267,14 @@
           "description": "工具返回的公开 content，保留其原始 JSON 结构。",
           "title": "Output"
         },
+        "file_changes": {
+          "description": "实际成功文件工具的执行前后差异收据；旧记录为空。",
+          "items": {
+            "$ref": "#/$defs/TaskFileChange"
+          },
+          "title": "File Changes",
+          "type": "array"
+        },
         "started_at": {
           "anyOf": [
             {
@@ -2055,6 +2324,62 @@
         "status"
       ],
       "title": "TaskContentBlock",
+      "type": "object"
+    },
+    "TaskFileChange": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "工作区相对展示路径；仅记录实际成功的文件工具调用。",
+          "title": "Path",
+          "type": "string"
+        },
+        "additions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "真实文本差异的新增行数；未知为空。",
+          "title": "Additions"
+        },
+        "deletions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "真实文本差异的删除行数；未知为空。",
+          "title": "Deletions"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "执行前后文本生成的统一差异；无法读取或过大时为空。",
+          "title": "Diff"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "TaskFileChange",
       "type": "object"
     },
     "TaskInputAttachment": {
@@ -2500,6 +2825,18 @@
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
+        "imported_history": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportedTurnHistory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "外部来源的可见历史副本；不构成 Octop 工具执行、授权或文件修改回执。"
+        },
         "sequence": {
           "description": "轮次稳定排序序号，可能不连续；资源标识仍使用 turn_id。",
           "title": "Sequence",
@@ -2540,6 +2877,14 @@
             "$ref": "#/$defs/TaskContentBlock"
           },
           "title": "Content Blocks",
+          "type": "array"
+        },
+        "file_changes": {
+          "description": "从本轮已保存的成功工具内容块派生的文件差异；同路径多次修改分别保留，旧记录为空。",
+          "items": {
+            "$ref": "#/$defs/TaskFileChange"
+          },
+          "title": "File Changes",
           "type": "array"
         },
         "content_revision": {
@@ -2770,6 +3115,36 @@
     "TaskDetail": {
       "additionalProperties": false,
       "properties": {
+        "import_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "codex",
+                "claude"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "任务导入来源；原生任务为 null。",
+          "title": "Import Source"
+        },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "来源会话 ID，仅本人可见。",
+          "title": "External Session Id"
+        },
         "task_id": {
           "title": "Task Id",
           "type": "string"
@@ -2898,6 +3273,36 @@
     "TaskSummary": {
       "additionalProperties": false,
       "properties": {
+        "import_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "codex",
+                "claude"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "任务导入来源；原生任务为 null。",
+          "title": "Import Source"
+        },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "来源会话 ID，仅本人可见。",
+          "title": "External Session Id"
+        },
         "task_id": {
           "title": "Task Id",
           "type": "string"

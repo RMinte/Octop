@@ -1,6 +1,8 @@
 # 任务 WebSocket 客户端接入指南
 
-协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 19 日。
+协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 22 日。
+
+2026 年 10 月 22 日补充任务文件变更：`TaskTurn.file_changes` 和工具内容块的 `file_changes` 随现有完整快照返回，沿用 `content_revision`，不新增公开事件或审核接口。客户端字段、合并规则、只读差异及未覆盖范围见 [APP 文件变更接入指南](agentcomputer-task-file-changes.md)。
 
 本次保持协议版本 3，新增轮次/摘要状态 `interrupted`、可空的 `TaskTurn.recovery` 和审批续接关联 `supersedes_interaction_id`。客户端必须识别新状态与恢复字段，不能将中断当作完成或把恢复映射成 `task.retry`；AgentComputer Swift/UI 恢复入口本次未接线。
 
@@ -16,6 +18,7 @@
 - [审批、提问及暂停恢复](project-task-interactions.md)：v3 已实现契约及语义。
 - [AgentComputer 交接文档](agentcomputer-task-interactions.md)：客户端接线说明，本次未修改客户端。
 - [APP 任务计划与动作链路接入指南](agentcomputer-task-planning-and-progress.md)：新块解码、Swift DTO、状态合并、缓存及原生界面接线位置。
+- [APP 任务文件变更接入指南](agentcomputer-task-file-changes.md)：文件数、增删行数、完整快照合并和只读差异审核。
 - 网页参考实现：[连接管理](../dashboard/src/api/modules/projectTaskSocket.ts)、[命令封装](../dashboard/src/api/modules/projects.ts)、[状态合并和恢复](../dashboard/src/pages/BoxProjects/useTaskConversation.ts)。
 
 目录：[最短流程](#1-最短接入流程) · [连接与鉴权](#2-连接与鉴权) · [标识约定](#3-标识与公共约定) · [客户端命令](#4-客户端命令) · [服务端事件](#5-服务端事件与完整示例) · [数据合并](#6-数据模型与状态合并) · [本轮设置](#7-本轮模型与资源) · [APP 思考接入](#app-思考内容接入) · [断线恢复](#8-断线恢复与多任务复用) · [错误与关闭](#9-错误与关闭) · [Swift 示例](#10-原生客户端最小连接示例) · [联调检查](#11-客户端联调检查) · [客户端工具](#12-客户端工具完整接入协议)。
@@ -527,6 +530,7 @@ REST 同样使用 `POST /api/project-tasks/{task_id}/messages`。沿用原有鉴
 | plan_id / step_id | 生成/执行当时固定的计划和步骤关联；未知或旧数据为 null |
 | arguments | 工具实际参数对象；不混入宿主步骤元数据；未知为 null |
 | output | 实际 ToolMessage.content 的 JSON 值，保留结构；未返回或未知为 null |
+| file_changes | 成功文件工具保存的差异数组；卡片使用顶层 TaskTurn.file_changes，避免重复累计 |
 | started_at / finished_at | 服务端实际开始调度和观察结束的 UTC datetime；未知为 null |
 | duration_ms | 执行器记录的非负毫秒耗时；未知为 null |
 
