@@ -317,6 +317,53 @@ async function enqueue(text: string) {
 }
 
 describe("项目任务消息队列", () => {
+  it("排队保留当前模型且每条队列消息固定各自选择", async () => {
+    api.resources.mockResolvedValue({
+      skills: [],
+      mcp_servers: [],
+      plugins: [],
+      subagents: [],
+      directory_roots: [],
+      approval: {
+        allowed_modes: [],
+        reviewer_ready: true,
+        execution_profile: "host_process",
+      },
+      default_model_ref: "glm/glm",
+      models: [
+        {
+          model_ref: "glm/glm",
+          name: "GLM",
+          provider_kind: "openai",
+          supports_images: false,
+        },
+        {
+          model_ref: "box/RM-01 VLM",
+          name: "RM-01 VLM",
+          provider_kind: "box",
+          supports_images: false,
+        },
+      ],
+    });
+    await mount();
+    const selector = screen.getByRole("combobox", { name: "本轮模型" });
+    await userEvent.click(selector);
+    await userEvent.click(await screen.findByText("GLM · glm/glm"));
+    await enqueue("远端追问");
+    expect(selector.closest(".ant-select")).toHaveTextContent("GLM · glm/glm");
+    await userEvent.click(selector);
+    await userEvent.click(await screen.findByText("RM-01 VLM · box/RM-01 VLM"));
+    await enqueue("盒子追问");
+    expect(selector.closest(".ant-select")).toHaveTextContent("RM-01 VLM");
+    await publish("task_a", "completed");
+    await waitFor(() => expect(api.send).toHaveBeenCalledTimes(1));
+    expect(api.send.mock.calls[0][1].options).toEqual({ model_ref: "glm/glm" });
+    await publish("task_a", "completed");
+    await waitFor(() => expect(api.send).toHaveBeenCalledTimes(2));
+    expect(api.send.mock.calls[1][1].options).toEqual({
+      model_ref: "box/RM-01 VLM",
+    });
+  });
   it("执行中可通过按钮和 Enter 排队，清空草稿且不立即发送", async () => {
     await mount();
     expect(screen.getByRole("button", { name: "排队" })).toBeDisabled();

@@ -902,7 +902,10 @@
             }
           ],
           "default": null,
-          "description": "本轮模型；省略或 null 使用当前默认模型。",
+          "description": "本轮模型引用，原样使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传；省略或 null 使用发送时的服务端默认模型，不继承上一轮选择。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
+          "examples": [
+            "Box/RM-01 VLM"
+          ],
           "title": "Model Ref"
         },
         "skills": {

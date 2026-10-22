@@ -22,6 +22,7 @@ KIND_TO_PROTOCOL: dict[str, str] = {
     "ollama": "openai",
     "azure": "openai",
     "gemini": "openai",
+    "box": "openai",
 }
 
 
@@ -109,11 +110,11 @@ class ProviderStore:
         self._provider_repo = provider_repo
 
     def iter_usable_rows(self) -> Iterator[Any]:
-        """Yield enabled DB providers that have credentials and at least one enabled model."""
+        """Yield configured providers with at least one enabled chat model."""
         for row in self._provider_repo.list_all():
             if not row.enabled:
                 continue
-            if not row.base_url or not row.api_key:
+            if not row.base_url or (row.kind != "box" and not row.api_key):
                 continue
             models = row.get_models()
             if not models:
@@ -125,7 +126,7 @@ class ProviderStore:
                 yield row
 
     def has_usable_providers(self) -> bool:
-        """True when at least one enabled provider has credentials and a model."""
+        """True when at least one configured provider has a chat model."""
         return next(self.iter_usable_rows(), None) is not None
 
     def build_harness_configs(self) -> list[ProviderConfig]:
@@ -148,18 +149,31 @@ class ProviderStore:
                         headers = {str(k): str(v) for k, v in extra["headers"].items()}
                 except Exception:
                     pass
-            out.append(
-                ProviderConfig(
-                    id=row.name,
-                    base_url=row.base_url,
-                    api_key=row.api_key,
-                    protocol=protocol,  # type: ignore[arg-type]
-                    name=row.name,
-                    models=models,
-                    headers=headers,
-                    session_header=session_header_for_provider(row.name, row.base_url),
+            if row.kind == "box":
+                from octop.infra.agents.providers.box import build_box_provider_config
+
+                out.append(
+                    build_box_provider_config(
+                        id=row.name,
+                        base_url=row.base_url,
+                        name=row.name,
+                        models=models,
+                        headers=headers,
+                    )
                 )
-            )
+            else:
+                out.append(
+                    ProviderConfig(
+                        id=row.name,
+                        base_url=row.base_url,
+                        api_key=row.api_key,
+                        protocol=protocol,  # type: ignore[arg-type]
+                        name=row.name,
+                        models=models,
+                        headers=headers,
+                        session_header=session_header_for_provider(row.name, row.base_url),
+                    )
+                )
         return out
 
     @staticmethod
@@ -169,6 +183,8 @@ class ProviderStore:
         explicit = data.get("input")
         inputs = list(explicit) if isinstance(explicit, list) else ["text"]
         data["input"] = _infer_model_input_modalities(model_id, inputs)
+        if not data.get("max_output_tokens") and data.get("max_tokens"):
+            data["max_output_tokens"] = data["max_tokens"]
         # ModelConfig keeps total context, prompt cap, and output cap distinct,
         # while still accepting legacy rows that only contain one context key.
         return ModelConfig.from_dict(data)
@@ -238,7 +254,12 @@ class ProviderStore:
         if not provider_name or not model_id:
             return False
         row = self._provider_repo.get_by_name(provider_name)
-        if row is None or not row.enabled or not row.api_key or not row.base_url:
+        if (
+            row is None
+            or not row.enabled
+            or not row.base_url
+            or (row.kind != "box" and not row.api_key)
+        ):
             return False
         for model in row.get_models():
             if model.get("id") != model_id:

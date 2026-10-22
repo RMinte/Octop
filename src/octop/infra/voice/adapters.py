@@ -22,8 +22,14 @@ from octop.i18n.domains.voice import (
 )
 from octop.infra.db.repos.voice_providers import VoiceProviderRow
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.utils.box_models import validate_box_base_url
 from octop.infra.utils.ssrf_guard import validate_https_url_resolved
 from octop.infra.utils.tencent_sign import tc3_headers
+from octop.infra.voice.presets import (
+    BOX_STT_BASE_URL,
+    BOX_TTS_BASE_URL,
+    DEFAULT_BOX_VOICE_INSTRUCTIONS,
+)
 
 _ui_locale: ContextVar[str | None] = ContextVar("voice_ui_locale", default=None)
 
@@ -89,6 +95,59 @@ async def synthesize_browser(_text: str) -> AsyncIterator[bytes]:
 async def _guard_voice_base_url(base_url: str) -> None:
     """Reject SSRF: the voice provider base_url must be a public https host."""
     await validate_https_url_resolved(f"{base_url}/v1/audio")
+
+
+async def transcribe_box(
+    row: VoiceProviderRow, audio: bytes, *, mime: str, language: str
+) -> STTResult:
+    if row.capability != "stt":
+        raise OctopError.localized(ErrorCode.VOICE_CAPABILITY_MISMATCH, _ui_locale.get() or "en")
+    base_url = validate_box_base_url(row.base_url or BOX_STT_BASE_URL)
+    extra = row.get_extra()
+    model = str(extra.get("model") or "qwen3-asr")
+    ext = "webm" if "webm" in mime else "wav"
+    data = {"model": model}
+    if language:
+        data["language"] = language.split("-")[0]
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{base_url}/audio/transcriptions",
+            files={"file": (f"audio.{ext}", audio, mime or "audio/webm")},
+            data=data,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+    return STTResult(text=str(body.get("text") or "").strip())
+
+
+async def synthesize_box(
+    row: VoiceProviderRow,
+    text: str,
+    *,
+    voice_id: str | None,
+    speed: float,
+) -> AsyncIterator[bytes]:
+    if row.capability != "tts":
+        raise OctopError.localized(ErrorCode.VOICE_CAPABILITY_MISMATCH, _ui_locale.get() or "en")
+    base_url = validate_box_base_url(row.base_url or BOX_TTS_BASE_URL)
+    extra = row.get_extra()
+    # VoiceDesign controls the voice through instructions, not voice/speed fields.
+    payload = {
+        "model": str(extra.get("model") or "qwen3-tts"),
+        "input": text,
+        "task_type": "VoiceDesign",
+        "instructions": str(extra.get("instructions") or "").strip()
+        or DEFAULT_BOX_VOICE_INSTRUCTIONS,
+        "response_format": "mp3",
+    }
+    async with (
+        httpx.AsyncClient(timeout=120.0) as client,
+        client.stream("POST", f"{base_url}/audio/speech", json=payload) as resp,
+    ):
+        resp.raise_for_status()
+        async for chunk in resp.aiter_bytes():
+            if chunk:
+                yield chunk
 
 
 async def transcribe_openai(
@@ -502,14 +561,16 @@ async def test_stt(
         return {"ok": True, "mode": "browser"}
     if row is None:
         return {"ok": False, "error": voice_not_configured(locale)}
-    if kind not in {"openai", "tencent", "mimo"}:
+    if kind not in {"openai", "tencent", "mimo", "box"}:
         # edge is TTS-only and unknown kinds have no adapter: keep offline pass.
         return {"ok": True, "mode": kind}
     missing = _missing_credentials(row, kind, locale=locale)
     if missing:
         return {"ok": False, "error": missing}
     transcribe = (
-        transcribe_mimo
+        transcribe_box
+        if kind == "box"
+        else transcribe_mimo
         if kind == "mimo"
         else transcribe_openai
         if kind == "openai"
@@ -555,7 +616,9 @@ async def test_tts(
     if missing:
         return {"ok": False, "error": missing}
     synth = (
-        synthesize_mimo
+        synthesize_box
+        if kind == "box"
+        else synthesize_mimo
         if kind == "mimo"
         else synthesize_openai
         if kind == "openai"

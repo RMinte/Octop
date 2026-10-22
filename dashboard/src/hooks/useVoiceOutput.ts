@@ -56,12 +56,15 @@ export function useVoiceOutput() {
    * WAV — the caller then falls back to the buffered blob path.
    */
   const speakMimoStream = useCallback(
-    async (plain: string, gen: number) => {
+    async (plain: string, gen: number, provider: string) => {
       const player = new WavStreamPlayer();
       streamPlayerRef.current = player;
       try {
         if (!player.ensureContext()) return false;
-        const { contentType, body } = await voiceApi.synthesizeStream(plain);
+        const { contentType, body } = await voiceApi.synthesizeStream(
+          plain,
+          provider,
+        );
         if (
           !contentType.includes("audio/wav") &&
           !contentType.includes("audio/wave")
@@ -116,13 +119,11 @@ export function useVoiceOutput() {
   );
 
   const speakWithServer = useCallback(
-    async (plain: string, gen: number, provider?: string) => {
+    async (plain: string, gen: number, provider: string) => {
       // MiMo streams a live WAV — play it chunk-by-chunk for low latency.
       // Other providers stream MP3, which needs the buffered blob path.
-      const active = cachedActiveVoice();
-      const ttsProvider = provider ?? active?.tts;
-      if (ttsProvider === "mimo-tts" || ttsProvider === "mimo") {
-        if (await speakMimoStream(plain, gen)) return;
+      if (provider === "mimo-tts" || provider === "mimo") {
+        if (await speakMimoStream(plain, gen, provider)) return;
       }
 
       try {
@@ -195,7 +196,7 @@ export function useVoiceOutput() {
 
       // Mobile: browser speechSynthesis + async Edge fallback break the tap
       // gesture chain on iOS/Android — use Edge TTS directly.
-      if (isMobileUserAgent()) {
+      if (isMobileUserAgent() && tts === "browser") {
         stopBrowserSpeech();
         void speakWithServer(plain, gen, "edge");
         return;
@@ -207,7 +208,7 @@ export function useVoiceOutput() {
       }
 
       stopBrowserSpeech();
-      void speakWithServer(plain, gen);
+      void speakWithServer(plain, gen, tts);
     },
     [speakWithBrowser, speakWithServer],
   );
@@ -232,8 +233,8 @@ export function useVoiceOutput() {
       primeMobileAudio();
 
       const cached = cachedActiveVoice();
-      if (cached || isMobileUserAgent()) {
-        beginPlayback(messageId, plain, gen, cached?.tts ?? "browser");
+      if (cached) {
+        beginPlayback(messageId, plain, gen, cached.tts);
         return;
       }
 

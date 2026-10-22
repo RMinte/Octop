@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from octop_harness import HarnessAgent, HarnessAgentConfig, HarnessAgentManager
+from octop_harness import HarnessAgent, HarnessAgentConfig
 from octop_harness.registry import AgentEntry
 from octop_harness.security.models import SecurityPolicy
 
@@ -27,6 +27,9 @@ from octop.i18n.domains.agents import (
 from octop.infra.agents.memory.backend import memory_backend_from_agent_config, open_memory_kwargs
 from octop.infra.agents.memory.slim import MemorySlimCoordinator
 from octop.infra.agents.providers import ProviderStore, sync_providers_to_harness
+from octop.infra.agents.providers.harness_factory import (
+    OctopHarnessAgentManager as HarnessAgentManager,
+)
 from octop.infra.agents.security import SecuritySettingsStore, ToolGuardRulesStore
 from octop.infra.agents.security.hitl_session import (
     HitlSessionPolicyStore,

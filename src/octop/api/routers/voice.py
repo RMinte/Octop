@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from octop.api.deps import current_user, get_server, require_permission
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.utils.locale import resolve_request_locale
-from octop.infra.voice.manager import VoiceManager
+from octop.infra.voice.manager import VoiceManager, validate_voice_configuration
 from octop.infra.voice.presets import load_voice_presets
 
 router = APIRouter()
@@ -167,6 +167,7 @@ async def admin_create_voice_provider(
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
     repo = server.services.voice_provider_repo
+    validate_voice_configuration(kind=body.kind, capability=body.capability, base_url=body.base_url)
     if repo.get_by_name(body.name):
         raise OctopError(
             ErrorCode.PROVIDER_NAME_TAKEN, f"voice provider {body.name!r} already exists"
@@ -196,6 +197,11 @@ async def admin_patch_voice_provider(
     row = repo.get(provider_id)
     if row is None:
         raise OctopError(ErrorCode.NOT_FOUND, "voice provider not found")
+    validate_voice_configuration(
+        kind=body.kind if body.kind is not None else row.kind,
+        capability=body.capability if body.capability is not None else row.capability,
+        base_url=body.base_url if body.base_url is not None else row.base_url,
+    )
     repo.update(
         provider_id,
         kind=body.kind,

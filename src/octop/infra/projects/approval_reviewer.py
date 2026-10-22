@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from octop_harness.llm.factory import ChatModelFactory
 
 from octop.i18n import tr
+from octop.infra.agents.providers.box import OctopChatModelFactory as ChatModelFactory
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.repos.project_task_reviews import TaskReviewRow
 from octop.infra.db.services import SharedServices

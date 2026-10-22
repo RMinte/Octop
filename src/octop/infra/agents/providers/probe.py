@@ -13,6 +13,7 @@ import httpx
 
 from octop.infra.agents.providers import KIND_TO_PROTOCOL
 from octop.infra.agents.providers.opencode_session import ensure_opencode_session_header
+from octop.infra.utils.box_models import validate_box_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,10 @@ def provider_headers(row: Any) -> dict[str, str]:
     if not isinstance(extra, dict):
         return {}
     headers = extra.get("headers")
-    return dict(headers) if isinstance(headers, dict) else {}
+    result = dict(headers) if isinstance(headers, dict) else {}
+    if getattr(row, "kind", None) == "box":
+        result = {key: value for key, value in result.items() if key.lower() != "authorization"}
+    return result
 
 
 def _is_codex_base_url(base_url: str | None) -> bool:
@@ -52,6 +56,21 @@ def build_probe_chat_model(row: Any, *, model_id: str | None = None) -> Any:
     entry = next((m for m in models if m.get("id") == mid), None)
     display_name = (entry or {}).get("name") or mid
     model = ModelConfig(id=mid, name=display_name)
+
+    if row.kind == "box":
+        from octop.infra.agents.providers.box import (
+            build_box_chat_model,
+            build_box_provider_config,
+        )
+
+        provider = build_box_provider_config(
+            id=row.name,
+            name=row.name,
+            base_url=validate_box_base_url(row.base_url or ""),
+            models=[model],
+            headers=headers,
+        )
+        return build_box_chat_model(provider, model)
 
     if _is_codex_base_url(base_url):
         from langchain_openai import ChatOpenAI
@@ -163,8 +182,14 @@ async def _probe_embedding_endpoint(
 ) -> dict[str, Any]:
     """POST OpenAI-compatible ``{base}/embeddings`` and time the round-trip."""
     started = time.perf_counter()
-    url = _embeddings_url(getattr(row, "base_url", None))
-    headers: dict[str, str] = {"Authorization": f"Bearer {getattr(row, 'api_key', None) or ''}"}
+    base_url = getattr(row, "base_url", None)
+    is_box = getattr(row, "kind", None) == "box"
+    if is_box:
+        base_url = validate_box_base_url(base_url or "")
+    url = _embeddings_url(base_url)
+    headers: dict[str, str] = (
+        {} if is_box else {"Authorization": f"Bearer {getattr(row, 'api_key', None) or ''}"}
+    )
     extra = ensure_opencode_session_header(
         getattr(row, "name", None),
         provider_headers(row),
@@ -272,13 +297,20 @@ async def fetch_openai_compatible_models(
     extra_headers: dict[str, str] | None = None,
     locale: str = "en",
     provider_name: str | None = None,
+    provider_kind: str = "openai",
 ) -> dict[str, Any]:
     """List models via OpenAI-compatible ``GET {base}/models``."""
+    if provider_kind == "box":
+        base_url = validate_box_base_url(base_url or "")
     url = _models_list_url(base_url)
-    headers: dict[str, str] = {"Authorization": f"Bearer {api_key}"}
+    headers: dict[str, str] = (
+        {} if provider_kind == "box" else {"Authorization": f"Bearer {api_key}"}
+    )
     extra_headers = ensure_opencode_session_header(provider_name, extra_headers, base_url=base_url)
     if extra_headers:
         headers.update(extra_headers)
+    if provider_kind == "box":
+        headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
     try:
         async with httpx.AsyncClient(timeout=_FETCH_MODELS_TIMEOUT_S) as client:
             response = await client.get(url, headers=headers)
@@ -315,7 +347,7 @@ async def fetch_openai_compatible_models(
             "error": "response is not OpenAI-compatible (expected {data: [{id, …}]})",
         }
 
-    models: list[dict[str, str]] = []
+    models: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in data:
         if not isinstance(item, dict):
@@ -327,6 +359,15 @@ async def fetch_openai_compatible_models(
         if mid in seen:
             continue
         seen.add(mid)
-        models.append({"id": mid, "name": mid})
+        model_entry: dict[str, Any] = {"id": mid, "name": mid}
+        if provider_kind == "box":
+            if mid.lower().startswith("qwen3-asr"):
+                model_entry["task"] = "asr"
+            elif mid.lower().startswith("qwen3-tts"):
+                model_entry["task"] = "tts"
+            context = item.get("max_model_len")
+            if isinstance(context, int) and context > 0:
+                model_entry["context_window"] = context
+        models.append(model_entry)
     models.sort(key=lambda m: m["id"])
     return {"ok": True, "models": models}

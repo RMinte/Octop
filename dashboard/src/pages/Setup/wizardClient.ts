@@ -29,6 +29,8 @@ export interface WizardProviderModel {
   input: string[];
   thinking: null;
   reasoning?: boolean;
+  context_window?: number;
+  max_tokens?: number;
 }
 
 export interface ProviderDraft {

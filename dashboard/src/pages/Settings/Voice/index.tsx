@@ -41,6 +41,9 @@ export function VoiceSettingsPanel() {
     "payg",
   );
   const [mimoVoiceId, setMimoVoiceId] = useState("冰糖");
+  const [boxBaseUrl, setBoxBaseUrl] = useState("");
+  const [boxModel, setBoxModel] = useState("");
+  const [boxInstructions, setBoxInstructions] = useState("");
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
 
@@ -98,11 +101,14 @@ export function VoiceSettingsPanel() {
     const existing = findConfigured(preset);
     setConfigure({ preset, existing });
     setApiKey(existing?.api_key ?? "");
-    const extra = existing?.extra ?? {};
+    const extra = { ...preset.extra, ...existing?.extra };
     setSecretId(String(extra.secret_id ?? ""));
     setSecretKey(String(extra.secret_key ?? ""));
     setMimoEndpoint(extra.endpoint_type === "tokenplan" ? "tokenplan" : "payg");
     setMimoVoiceId(String(extra.voice_id ?? "冰糖"));
+    setBoxBaseUrl(existing?.base_url ?? preset.base_url ?? "");
+    setBoxModel(String(extra.model ?? ""));
+    setBoxInstructions(String(extra.instructions ?? ""));
   };
 
   const buildProviderPayload = (): VoiceProviderInput | null => {
@@ -110,7 +116,17 @@ export function VoiceSettingsPanel() {
     const { preset } = configure;
     let extra: Record<string, unknown>;
     let baseUrl: string | null = null;
-    if (preset.kind === "tencent") {
+    if (preset.kind === "box") {
+      baseUrl = boxBaseUrl.trim() || preset.base_url || null;
+      extra = {
+        ...preset.extra,
+        ...configure.existing?.extra,
+        model: boxModel.trim() || preset.extra?.model,
+        ...(preset.capability === "tts"
+          ? { instructions: boxInstructions.trim() }
+          : {}),
+      };
+    } else if (preset.kind === "tencent") {
       extra = {
         secret_id: secretId,
         secret_key: secretKey,
@@ -136,7 +152,9 @@ export function VoiceSettingsPanel() {
       capability: preset.capability,
       base_url: baseUrl,
       api_key:
-        preset.kind === "tencent"
+        preset.kind === "box"
+          ? null
+          : preset.kind === "tencent"
           ? secretId && secretKey
             ? `${secretId}:${secretKey}`
             : null
@@ -224,7 +242,9 @@ export function VoiceSettingsPanel() {
     const configured = findConfigured(preset);
     const isActive = active[kind] === preset.id;
     const needsSetup =
-      preset.requires_key && !configured && preset.kind !== "browser";
+      (preset.requires_key || preset.kind === "box") &&
+      !configured &&
+      preset.kind !== "browser";
     const logo = voiceLogoForKind(preset.kind);
 
     const cardClass = [
@@ -266,7 +286,9 @@ export function VoiceSettingsPanel() {
             <div className={styles.nameRow}>
               <span className={styles.name}>{preset.name}</span>
             </div>
-            <div className={styles.kind}>{preset.kind}</div>
+            <div className={styles.kind}>
+              {preset.kind === "box" ? t("models.boxNoAuth") : preset.kind}
+            </div>
           </div>
           <div className={styles.badges}>
             {isActive && (
@@ -321,7 +343,7 @@ export function VoiceSettingsPanel() {
               >
                 {isActive ? t("voice.current") : t("voice.setActive")}
               </Button>
-              {preset.requires_key && configured ? (
+              {(preset.requires_key || preset.kind === "box") && configured ? (
                 <Button
                   size="small"
                   icon={<Settings2 size={14} />}
@@ -402,6 +424,44 @@ export function VoiceSettingsPanel() {
         }
       >
         <Form layout="vertical">
+          {configure?.preset.kind === "box" && (
+            <>
+              <div className={styles.drawerHint}>{t("voice.boxHint")}</div>
+              <Form.Item
+                label={t("voice.boxEndpoint")}
+                htmlFor="box-voice-endpoint"
+              >
+                <Input
+                  id="box-voice-endpoint"
+                  value={boxBaseUrl}
+                  placeholder={configure.preset.base_url}
+                  onChange={(e) => setBoxBaseUrl(e.target.value)}
+                />
+              </Form.Item>
+              <Form.Item label={t("models.model")} htmlFor="box-voice-model">
+                <Input
+                  id="box-voice-model"
+                  value={boxModel}
+                  placeholder={String(configure.preset.extra?.model ?? "")}
+                  onChange={(e) => setBoxModel(e.target.value)}
+                />
+              </Form.Item>
+              {configure.preset.capability === "tts" && (
+                <Form.Item
+                  label={t("voice.boxInstructions")}
+                  htmlFor="box-voice-instructions"
+                  extra={t("voice.boxInstructionsHint")}
+                >
+                  <Input.TextArea
+                    id="box-voice-instructions"
+                    rows={3}
+                    value={boxInstructions}
+                    onChange={(e) => setBoxInstructions(e.target.value)}
+                  />
+                </Form.Item>
+              )}
+            </>
+          )}
           {configure?.preset.kind === "tencent" && (
             <>
               <div className={styles.drawerHint}>{t("voice.tencentHint")}</div>

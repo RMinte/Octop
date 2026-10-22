@@ -162,6 +162,10 @@ def is_chat_eligible_model(
     """True when *model* may appear in chat pickers and auto-route candidates."""
     if not model.get("enabled", True):
         return False
+    if str(model.get("task") or "").lower() in {"asr", "stt", "tts", "rerank"}:
+        return False
+    if str(model.get("id") or "").lower().startswith(("qwen3-asr", "qwen3-tts")):
+        return False
     if is_embedding_model(model, provider_name=provider_name, provider_api_key=provider_api_key):
         return False
     return bool(str(model.get("id") or "").strip())

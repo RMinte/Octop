@@ -50,10 +50,13 @@ export function ProviderCard({
   const isOllama = isOllamaProviderRow(provider);
   const isOnnx = isOnnxProviderRow(provider);
   const isLocalRuntime = isOllama || isOnnx;
+  const isBox = provider.kind === "box";
 
   const hasApiKey = !!provider.api_key && provider.api_key.length > 0;
-  const statusReady = hasApiKey;
-  const statusLabel = hasApiKey
+  const statusReady = isBox || hasApiKey;
+  const statusLabel = isBox
+    ? t("models.boxNoAuth")
+    : hasApiKey
     ? t("models.authorized")
     : t("models.unauthorized");
 
@@ -269,7 +272,11 @@ export function ProviderCard({
             </div>
             <div className={styles.infoRow}>
               <span className={styles.infoLabel}>API Key:</span>
-              {maskedKey ? (
+              {isBox ? (
+                <span className={styles.infoValue}>
+                  {t("models.boxNoAuth")}
+                </span>
+              ) : maskedKey ? (
                 <span className={styles.infoValue}>{maskedKey}</span>
               ) : (
                 <span className={styles.infoEmpty}>{t("models.notSet")}</span>
@@ -333,7 +340,7 @@ export function ProviderCard({
             </span>
           </div>
           <div className={styles.cardActionsRight}>
-            {hasApiKey && !isOnnx && (
+            {(hasApiKey || isBox) && !isOnnx && (
               <Tooltip title={t("models.test")}>
                 <Button
                   type="text"

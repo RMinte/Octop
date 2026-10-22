@@ -132,7 +132,9 @@ export function PresetProviderCard({
         <div className={styles.cardActions}>
           <div className={styles.cardActionsLeft}>
             <Tag color="default" style={{ fontSize: 11 }}>
-              {preset.protocol}
+              {preset.protocol === "box"
+                ? t("models.boxNoAuth")
+                : preset.protocol}
             </Tag>
           </div>
           <div className={styles.cardActionsRight}>

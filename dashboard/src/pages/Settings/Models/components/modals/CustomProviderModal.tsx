@@ -2,7 +2,7 @@
  * CustomProviderModal — create a new custom provider (right-side drawer).
  */
 import { useEffect, useMemo, useState } from "react";
-import { Button, Divider, Drawer, Form, Input, Select } from "antd";
+import { Button, Divider, Drawer, Form, Input, Select, Typography } from "antd";
 import { message } from "@/utils/antdMessage";
 
 import { Download, Zap } from "lucide-react";
@@ -10,7 +10,11 @@ import { useTranslation } from "react-i18next";
 import { request } from "../../../../../api/request";
 import type { ProviderModel, ProviderRow } from "../../useProviders";
 import { isEmbeddingModel } from "../../useProviders";
-import { fetchProviderModels, testProviderDraft } from "../../providerApi";
+import {
+  fetchProviderModels,
+  testProviderDraft,
+  toImportedProviderModel,
+} from "../../providerApi";
 import { ModelListEditor } from "./ModelListEditor";
 import styles from "../../index.module.less";
 
@@ -24,6 +28,7 @@ interface CustomProviderModalProps {
 
 const KINDS = [
   { value: "openai", labelKey: "kindOpenaiCompat" as const },
+  { value: "box", labelKey: "boxProvider" as const },
   { value: "anthropic", labelKey: "anthropic" as const },
   { value: "bedrock", labelKey: "bedrock" as const },
 ];
@@ -49,8 +54,9 @@ export function CustomProviderModal({
   const kind = Form.useWatch("kind", form) as string | undefined;
   const baseUrl = Form.useWatch("base_url", form) as string | undefined;
   const apiKey = Form.useWatch("api_key", form) as string | undefined;
+  const isBox = kind === "box";
   const [models, setModels] = useState<ProviderModel[]>([]);
-  const canTest = !!apiKey?.trim();
+  const canTest = isBox || !!apiKey?.trim();
 
   const draftProvider = useMemo<ProviderRow>(
     () => ({
@@ -82,13 +88,13 @@ export function CustomProviderModal({
       "base_url",
     ]);
     const key = (values.api_key as string | undefined)?.trim();
-    if (!key) {
+    if (values.kind !== "box" && !key) {
       return { ok: false, error: t("models.pleaseEnterApiKey") };
     }
     return testProviderDraft({
       name: (values.name || "draft").trim(),
       kind: values.kind,
-      api_key: key,
+      api_key: values.kind === "box" ? undefined : key,
       base_url: values.base_url?.trim() || null,
       model_id: modelId,
       embedding: isEmbeddingModel(models.find((m) => m.id === modelId)),
@@ -98,19 +104,19 @@ export function CustomProviderModal({
   const handleFetchModels = async () => {
     try {
       const values = await form.validateFields(["kind", "api_key", "base_url"]);
-      if ((values.kind as string) !== "openai") {
+      if (values.kind !== "openai" && values.kind !== "box") {
         message.warning(t("models.fetchModelsUnsupportedKind"));
         return;
       }
       const apiKey = (values.api_key as string | undefined)?.trim();
-      if (!apiKey) {
+      if (values.kind !== "box" && !apiKey) {
         message.warning(t("models.pleaseEnterApiKey"));
         return;
       }
       setFetchingModels(true);
       const result = await fetchProviderModels({
-        kind: "openai",
-        api_key: apiKey,
+        kind: values.kind,
+        api_key: values.kind === "box" ? undefined : apiKey,
         base_url: (values.base_url as string | undefined)?.trim() || null,
       });
       if (!result.ok) {
@@ -121,13 +127,9 @@ export function CustomProviderModal({
         );
         return;
       }
-      const remote: ProviderModel[] = (result.models ?? []).map((m) => ({
-        id: m.id,
-        name: m.name || m.id,
-        enabled: false,
-        input: ["text"],
-        thinking: null,
-      }));
+      const remote = (result.models ?? []).map((m) =>
+        toImportedProviderModel(m, values.kind),
+      );
       let addedCount = 0;
       setModels((prev) => {
         const existing = new Set(prev.map((m) => m.id));
@@ -168,6 +170,7 @@ export function CustomProviderModal({
         if (m.max_tokens != null) entry.max_tokens = m.max_tokens;
         if (m.context_window != null) entry.context_window = m.context_window;
         if (m.reasoning) entry.reasoning = true;
+        if (m.task) entry.task = m.task;
         if (isEmbeddingModel(m)) {
           entry.embedding = true;
           entry.task = "embedding";
@@ -181,7 +184,9 @@ export function CustomProviderModal({
           name: (values.name as string).trim(),
           kind: values.kind as string,
           base_url: (values.base_url as string | undefined)?.trim() || null,
-          api_key: (values.api_key as string | undefined)?.trim() || null,
+          api_key: isBox
+            ? null
+            : (values.api_key as string | undefined)?.trim() || null,
           models: modelEntries.length > 0 ? modelEntries : [],
           note: (values.note as string | undefined)?.trim() || null,
         }),
@@ -247,6 +252,8 @@ export function CustomProviderModal({
               label:
                 k.value === "openai"
                   ? t("models.kindOpenaiCompat")
+                  : k.value === "box"
+                  ? t("models.boxProvider")
                   : k.value === "anthropic"
                   ? "Anthropic"
                   : "AWS Bedrock",
@@ -257,16 +264,26 @@ export function CustomProviderModal({
         <Form.Item
           name="base_url"
           label="Base URL"
-          extra={t("models.baseUrlExtra")}
+          extra={t(isBox ? "models.boxEndpointHint" : "models.baseUrlExtra")}
         >
-          <Input placeholder="https://api.openai.com/v1" />
+          <Input
+            placeholder={
+              isBox ? "http://127.0.0.1:58000/v1" : "https://api.openai.com/v1"
+            }
+          />
         </Form.Item>
 
-        <Form.Item name="api_key" label="API Key">
-          <Input.Password placeholder="sk-..." visibilityToggle />
-        </Form.Item>
+        {isBox ? (
+          <Typography.Paragraph type="secondary">
+            {t("models.boxNoAuth")}
+          </Typography.Paragraph>
+        ) : (
+          <Form.Item name="api_key" label="API Key">
+            <Input.Password placeholder="sk-..." visibilityToggle />
+          </Form.Item>
+        )}
 
-        {kind === "openai" && (
+        {(kind === "openai" || isBox) && (
           <Form.Item style={{ marginBottom: 12 }}>
             <Button
               icon={<Download size={14} />}
@@ -327,7 +344,7 @@ export function CustomProviderModal({
         >
           {t("models.testConnection")}
         </Button>
-        {kind === "openai" && (
+        {(kind === "openai" || isBox) && (
           <Button
             size="small"
             icon={<Download size={12} />}

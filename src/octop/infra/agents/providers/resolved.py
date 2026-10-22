@@ -9,14 +9,14 @@ from octop.infra.agents.providers.reasoning import reasoning_capability
 
 
 def list_resolved_models(providers: list[Any]) -> list[dict[str, Any]]:
-    """Return chat-eligible enabled models for providers with credentials.
+    """Return chat-eligible enabled models for configured providers.
 
     Embedding-only models (``embedding: true`` / ``task: embedding`` / ONNX
     local) are excluded so they never appear in chat pickers or auto-route.
     """
     resolved: list[dict[str, Any]] = []
     for provider in providers:
-        if not provider.enabled or not provider.api_key:
+        if not provider.enabled or (provider.kind != "box" and not provider.api_key):
             continue
         provider_name = str(getattr(provider, "name", "") or "")
         provider_api_key = str(getattr(provider, "api_key", "") or "") or None

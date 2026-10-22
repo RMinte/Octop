@@ -12,21 +12,29 @@ export function cachedActiveVoice(): ActiveVoice | null {
 export async function fetchActiveVoice(force = false): Promise<ActiveVoice> {
   if (!force && cachedActive) return cachedActive;
   if (!force && inflight) return inflight;
-  inflight = voiceApi.getActive().then((active) => {
-    cachedActive = active;
-    inflight = null;
-    return active;
-  });
-  return inflight;
+  const request: Promise<ActiveVoice> = voiceApi
+    .getActive()
+    .then((active) => {
+      if (inflight === request) cachedActive = active;
+      return active;
+    })
+    .finally(() => {
+      if (inflight === request) inflight = null;
+    });
+  inflight = request;
+  return request;
 }
 
 export function invalidateVoiceConfigCache() {
   cachedActive = null;
+  inflight = null;
 }
 
 /** Pre-fetch the active voice config so `cachedActiveVoice()` returns it. */
 export function prefetchVoiceConfig(): void {
-  void fetchActiveVoice();
+  void fetchActiveVoice().catch(() => {
+    // A failed preload is retried when the user starts a voice action.
+  });
 }
 
 export function useVoiceConfig() {

@@ -1,4 +1,5 @@
 import { request } from "../../../api/request";
+import type { ProviderModel } from "./useProviders";
 
 export interface TestProviderDraftParams {
   name: string;
@@ -44,6 +45,28 @@ export interface FetchProviderModelsParams {
 export interface FetchedProviderModel {
   id: string;
   name: string;
+  context_window?: number;
+  max_tokens?: number;
+  input?: string[];
+  task?: string;
+  embedding?: boolean;
+}
+
+export function toImportedProviderModel(
+  model: FetchedProviderModel,
+  kind: string,
+): ProviderModel {
+  return {
+    ...model,
+    name: model.name || model.id,
+    enabled: false,
+    input: model.input?.length
+      ? model.input
+      : kind === "box" && model.id.toLowerCase() === "rm-01 vlm"
+      ? ["text", "image"]
+      : ["text"],
+    thinking: null,
+  };
 }
 
 export interface FetchProviderModelsResult {

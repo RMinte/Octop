@@ -46,7 +46,7 @@
 
 ### 原生客户端使用请求头
 
-在升级请求中添加 `Authorization: Bearer <access token>`。服务端验证后直接返回 ready，客户端不要再发送 authenticate。
+在升级请求中添加 `Authorization: Bearer <access token>`。这里使用 Octop 登录返回的用户令牌，不是模型服务商的 API Key。服务端验证后直接返回 ready，客户端不要再发送 authenticate；下文 HTTP 资源发现请求也使用同一个 Octop Bearer 令牌。
 
 ### 浏览器使用首帧
 
@@ -107,7 +107,7 @@ heartbeat 不需要回复。下文的 ping 命令用于主动检查请求与回�
 ### 创建任务 task.create
 
 ```json
-{"type":"task.create","id":"command-create-001","data":{"project_id":null,"request_id":"message-first-001","prompt":"请概括下一步工作"}}
+{"type":"task.create","id":"command-create-001","data":{"project_id":null,"request_id":"message-first-001","prompt":"请概括下一步工作","options":{"model_ref":"Box/RM-01 VLM"}}}
 ```
 
 project_id 为 null 或省略时创建无项目任务；指定项目时必须属于当前用户。prompt 去除首尾空白后最多 32768 个 Unicode 码点，还受帧字节限制；可省略或为空，但此时必须带非空 attachment_ids。附件先通过 HTTP 上传，每轮 attachment_ids 最多九个不重复 ID，图片与其他文件合计计数，规则见[第 15 节](#15-输入附件)。options 可省略，规则见第 7 节。
@@ -119,7 +119,7 @@ data 顶层可传 `web_search_enabled:true/false`，默认 true，用户显式�
 ### 继续对话 task.message
 
 ```json
-{"type":"task.message","id":"command-message-002","task_id":"task_example","data":{"request_id":"message-second-002","prompt":"继续细化第二步"}}
+{"type":"task.message","id":"command-message-002","task_id":"task_example","data":{"request_id":"message-second-002","prompt":"继续细化第二步","options":{"model_ref":"remote/chat-model"}}}
 ```
 
 成功 result.data 为同一任务的 TaskDetail，新增一个轮次。每轮采用当时项目配置与本轮 options，不修改项目。有活动轮次时返回 TASK_BUSY；归档任务须先通过 REST 恢复。
@@ -397,6 +397,22 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 
 ## 7 本轮模型与资源
 
+客户端通过已存在的 HTTP `GET /api/project-tasks/resources` 获取候选模型，携带 `Authorization: Bearer <Octop access_token>`，无需新增 WebSocket 模型列表命令。资源响应的模型字段示意如下，其余资源字段省略：
+
+```json
+{
+  "models": [
+    {"model_ref":"Box/RM-01 VLM","name":"RM-01 VLM","provider_kind":"box","supports_images":true,"reasoning_config":null},
+    {"model_ref":"remote/chat-model","name":"Chat model","provider_kind":"openai","supports_images":false,"reasoning_config":null}
+  ],
+  "default_model_ref": "remote/chat-model"
+}
+```
+
+模型引用只是示意，使用服务端实际返回值。客户端用 `name` 展示、用 `provider_kind=box` 将盒子单独分组；其他连接类型可为远端或其他自部署服务。提交时必须使用完整 `model_ref`，不能只传来源 `box`、展示名或模型 ID。`models` 只含可用主对话模型，不含 ASR/TTS；无可用默认模型时 `default_model_ref` 可为 null。此资源接口不返回模型服务地址、API Key 或其他连接凭据，模型由 Octop 服务端调用。
+
+第 4 节的 `task.create` 例子选择盒子，`task.message` 例子选择远端，字段都位于 **`data.options.model_ref`**。模型选择逐轮独立：省略该字段或传 null，每轮重新采用当前默认；不会把首轮模型绑定到 Task，也不隐式沿用上一轮。希望连续追问使用同一模型时，每次命令都显式携带相同 `model_ref`；`options` 本身仍只能省略或传对象，不能传 null。REST 的创建与追问 JSON 示例见[任务请求和返回示例](api.md#任务请求和返回示例)。
+
 创建、追问和重试的 data 都可以包含 options：
 
 ```json
@@ -406,7 +422,7 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 | options 字段 | 省略或 null | 显式值 |
 | --- | --- | --- |
 | action_timeline_enabled | 使用入队时全局默认值，生效值随轮次冻结 | 严格布尔值；控制本轮宿主进展及异步公开进展/动作说明，不改变计划调度、审批或步骤面板显示 |
-| model_ref | 使用发送时的默认可用模型 | 1–512 字符；不可用报错，不静默换模型 |
+| model_ref | 每轮使用入队时的当前默认模型，不继承前轮 | 1–512 字符；不可用返回 status=409 / TASK_MODEL_UNAVAILABLE，不静默换模型 |
 | reasoning_mode | 使用所选模型的默认模式 | auto / enabled / disabled；不支持的模式返回 422 TASK_REASONING_INVALID |
 | reasoning_effort | 使用所选模型的默认强度 | 必须来自该模型 reasoning_config.efforts；不支持的值或关闭思考时指定强度返回 422 TASK_REASONING_INVALID |
 | skills | 继承发送时项目选择，无项目时为空 | 完整替换本轮选择；[] 禁用；最多 64 项，不可重复 |
@@ -421,7 +437,7 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 
 已安装 Skill 使用 `{package_id,slug}`；SkillHub 引用使用 `{source:"skillhub",slug,name,description?}`。MCP 使用当前账号可用的 server_name，不提交凭据或任意连接地址。候选资源来自 `GET /api/project-tasks/resources`。
 
-options 只影响本轮，不写回项目。相同 request_id 的网络重发保持原 options，不在重连时重新计算继承结果。
+options 只影响本轮，不写回项目或全局默认模型。本轮入队后模型固定；`result.data.turns[].model_ref`、后续历史及轮次更新里的 `model_ref` 是实际执行选择，客户端按该轮返回值标注，不能用当前输入框选择替代历史模型。相同 request_id 的网络重发必须保持原 options，包括 model_ref 当时的显式值或省略/null 形态；不要用响应中解析后的 options 填回原请求，也不要在重连时重新计算默认模型。要更换模型执行新一轮，使用新的 request_id。
 
 ### 任务上下文压缩
 

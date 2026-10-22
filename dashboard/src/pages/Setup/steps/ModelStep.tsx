@@ -299,6 +299,8 @@ export default function ModelStep({ onBack, onSkip, onContinue }: Props) {
       name: string;
       input?: string[];
       reasoning?: boolean;
+      context_window?: number | null;
+      max_tokens?: number | null;
     }>,
   ): WizardProviderModel[] =>
     entries.map((m) => {
@@ -310,6 +312,8 @@ export default function ModelStep({ onBack, onSkip, onContinue }: Props) {
         thinking: null,
       };
       if (m.reasoning) model.reasoning = true;
+      if (m.context_window != null) model.context_window = m.context_window;
+      if (m.max_tokens != null) model.max_tokens = m.max_tokens;
       return model;
     });
 
@@ -336,7 +340,7 @@ export default function ModelStep({ onBack, onSkip, onContinue }: Props) {
         field: "name",
       };
     }
-    if (!isOllama && !apiKey) {
+    if (!isOllama && preset.protocol !== "box" && !apiKey) {
       return {
         ok: false,
         message: t("models.pleaseEnterApiKey"),
@@ -357,6 +361,8 @@ export default function ModelStep({ onBack, onSkip, onContinue }: Props) {
             id: m.id,
             name: m.name,
             input: meta.input,
+            context_window: meta.context_window,
+            max_tokens: meta.max_tokens,
             ...(meta.reasoning ? { reasoning: true } : {}),
           };
         }),
@@ -380,7 +386,8 @@ export default function ModelStep({ onBack, onSkip, onContinue }: Props) {
       draft: {
         name,
         type: preset.protocol,
-        api_key: apiKey || (isOllama ? "ollama" : ""),
+        api_key:
+          preset.protocol === "box" ? "" : apiKey || (isOllama ? "ollama" : ""),
         base_url: baseUrl,
         models: modelEntries,
       },
@@ -940,35 +947,58 @@ export default function ModelStep({ onBack, onSkip, onContinue }: Props) {
           </Form.Item>
 
           <Form.Item label={t("models.kindLabel")}>
-            <Tag color="blue">{preset.protocol}</Tag>
+            <Tag color="blue">
+              {preset.protocol === "box"
+                ? t("models.boxNoAuth")
+                : preset.protocol}
+            </Tag>
           </Form.Item>
 
           <div ref={apiKeySectionRef}>
-            <Form.Item
-              name="api_key"
-              label="API Key"
-              rules={
-                isOllama
-                  ? []
-                  : [{ required: true, message: t("models.pleaseEnterApiKey") }]
-              }
-              extra={isOllama ? t("models.apiKeyExtraOptional") : undefined}
-              getValueFromEvent={(e) =>
-                typeof e === "string" ? e : String(e?.target?.value ?? "")
-              }
-            >
-              <Input.Password
-                placeholder={
-                  preset.api_key_prefix
-                    ? `${preset.api_key_prefix}...`
-                    : t("models.apiKeyExtraOptional")
+            {preset.protocol === "box" ? (
+              <Typography.Paragraph type="secondary">
+                {t("models.boxNoAuth")}
+              </Typography.Paragraph>
+            ) : (
+              <Form.Item
+                name="api_key"
+                label="API Key"
+                rules={
+                  isOllama
+                    ? []
+                    : [
+                        {
+                          required: true,
+                          message: t("models.pleaseEnterApiKey"),
+                        },
+                      ]
                 }
-                autoComplete="new-password"
-              />
-            </Form.Item>
+                extra={isOllama ? t("models.apiKeyExtraOptional") : undefined}
+                getValueFromEvent={(e) =>
+                  typeof e === "string" ? e : String(e?.target?.value ?? "")
+                }
+              >
+                <Input.Password
+                  placeholder={
+                    preset.api_key_prefix
+                      ? `${preset.api_key_prefix}...`
+                      : t("models.apiKeyExtraOptional")
+                  }
+                  autoComplete="new-password"
+                />
+              </Form.Item>
+            )}
           </div>
 
-          <Form.Item name="base_url" label="Base URL">
+          <Form.Item
+            name="base_url"
+            label="Base URL"
+            extra={
+              preset.protocol === "box"
+                ? t("models.boxEndpointHint")
+                : undefined
+            }
+          >
             <Input placeholder={preset.base_url} />
           </Form.Item>
 

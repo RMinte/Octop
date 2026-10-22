@@ -67,6 +67,14 @@ bash docker/docker_build.sh
 
 For Compose, put these in `docker/.env`. Values only reach the container if listed under `environment:` in `docker-compose.yml` (Compose interpolates `.env`; it does not auto-export every key). Alternatively write the same keys into the mounted data dir as `~/.octop/env`.
 
+### Connect box models
+
+When Octop and the inference services run on the same box, add a **Box** provider in model settings without an API key. The main model defaults to `http://127.0.0.1:58000/v1` with model `RM-01 VLM`. Configure box speech recognition (58100, `qwen3-asr`) and synthesis (58101, `qwen3-tts`) separately in voice settings. Synthesis uses VoiceDesign with a voice description.
+
+Octop accesses these URLs from its server. Inside a container, `127.0.0.1` refers to the Octop container itself. For another container, use its service name on a shared network; for a service on the host, use a host address reachable from the container. All three URLs are configurable, and box requests omit authentication headers.
+
+Remote providers can coexist with their own keys. Choose the box or a remote model for each turn in **Projects and tasks**, and select speech recognition and synthesis sources independently. Configuring the box does not automatically replace the current remote model or voice selection.
+
 ### Data persistence
 
 - Compose mounts host `~/.octop` → container `/data/.octop`

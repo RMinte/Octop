@@ -224,7 +224,8 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
   "project_id": "proj_example",
   "request_id": "9fca322b-4884-4acd-bdfd-67428aeac735",
   "prompt": "请先概括项目目标，再列出下一步。",
-  "web_search_enabled": true
+  "web_search_enabled": true,
+  "options": {"model_ref": "Box/RM-01 VLM"}
 }
 ```
 
@@ -237,7 +238,8 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 ```json
 {
   "request_id": "a803c45d-c397-4a3f-b1a7-91bd8ca642a2",
-  "prompt": "继续细化第二步。"
+  "prompt": "继续细化第二步。",
+  "options": {"model_ref": "remote/chat-model"}
 }
 ```
 
@@ -269,9 +271,9 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
       "status": "completed",
       "error_code": "",
       "activity": "",
-      "model_ref": "provider/model",
+      "model_ref": "Box/RM-01 VLM",
       "web_search_enabled": true,
-      "options": {"model_ref": "provider/model", "skills": [], "mcp_servers": []},
+      "options": {"model_ref": "Box/RM-01 VLM", "skills": [], "mcp_servers": []},
       "interactions": [],
       "interaction_revision": 0,
       "pause_requested": false,
@@ -325,6 +327,34 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 
 ### 本轮执行选项
 
+客户端先调用 `GET /api/project-tasks/resources` 获取可选主模型，再把用户选择的完整 `model_ref` 放入创建、追问或重试的 `options.model_ref`。REST 请求使用 `Authorization: Bearer <Octop access_token>`，令牌来自现有 Octop 登录；这不是模型服务商的 API Key。POST 请求同时使用 `Content-Type: application/json`。上面的创建示例选择盒子，追问示例选择远端；模型引用均为示意，实际应直接使用资源接口返回值。
+
+资源响应中的模型相关字段示例如下；响应还包含其他项目能力字段：
+
+```json
+{
+  "models": [
+    {
+      "model_ref": "Box/RM-01 VLM",
+      "name": "RM-01 VLM",
+      "provider_kind": "box",
+      "supports_images": true,
+      "reasoning_config": null
+    },
+    {
+      "model_ref": "remote/chat-model",
+      "name": "Chat model",
+      "provider_kind": "openai",
+      "supports_images": false,
+      "reasoning_config": null
+    }
+  ],
+  "default_model_ref": "remote/chat-model"
+}
+```
+
+`models` 仅列出当前可用的主对话模型，ASR/TTS 语音模型不进入此列表；`default_model_ref` 是当前默认选择，无可用模型时可为 null。`name` 用于展示，`provider_kind=box` 用于将盒子模型单独分组；提交时仍传完整 `model_ref`，不能只传 `box`、展示名或去掉提供商前缀的模型 ID。其他连接类型可能是远端或其他自部署服务。此接口不返回模型服务地址、API Key 或其他连接凭据；调用模型由 Octop 服务端完成。
+
 创建、追问和手动重试都接受 options，不写回项目或全局模型配置。例如：
 
 ```json
@@ -339,7 +369,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-model_ref 省略或 null 使用发送时的默认选择；显式指定不可用模型返回 `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。skills、mcp_servers 省略或 null 继承项目配置；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。无项目任务同样可以选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
+`options.model_ref` 省略或为 null 时，每一轮都使用本轮入队时的当前默认选择，不隐式继承上一轮模型；希望连续追问沿用同一模型时，客户端须在每次请求中再次携带同一个完整 `model_ref`。显式指定不可用模型返回 HTTP 409 / `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。入队后模型随本轮固定，`turns[].model_ref` 返回该轮实际模型，客户端应据此展示执行结果，不以输入框当前选择反推历史。skills、mcp_servers 省略或 null 继承项目配置；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。无项目任务同样可以选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
 
 options 也接受 plugins、subagents、memory_enabled、team_enabled。省略或 null 继承发送时的项目值；无项目任务默认 plugins/subagents=[]、memory_enabled=true、team_enabled=false。列表 [] 清空本轮选择，布尔值 false 仅关闭本轮能力。资源接口增加 plugins（plugin_id/name/description/available）和 subagents（slug/name/description）；全局禁用或未成功加载的插件不可选择。turns[].options 返回全部实际选择。保存项目只保存引用，不安装插件、执行工具或创建专家。
 
@@ -351,7 +381,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 未发布数据库 schema 39 增加项目能力配置、任务思考文本和服务端私有上下文存储，SQLite/PostgreSQL 成对提供；保留已有项目、任务及运行数据。已记录 39 的本地库也会幂等补齐思考列，已有轮次默认空字符串，不补造历史思考内容。
 
-`GET /api/project-tasks/resources` 返回可用 models（model_ref/name）、default_model_ref，以及共享 Skill 与本人 MCP 引用，不包含凭据。网页“本轮设置”在成功发送后恢复继承状态；网络失败保留选择和发送标识。同一 request_id 必须重传相同的原选项，项目后来修改不会影响幂等回放。手动重试采用该次请求的 options，未指定时使用当前项目配置，不隐式复制失败轮次的覆盖项。返回的 turns[].options 是该轮实际采用的模型、Skill 和 MCP，project_revision 仍记录发送时项目版本。
+网页输入区常驻模型选择，成功发送、排队或手动重试后保留显式模型供同任务连续追问，其他“本轮设置”恢复继承；普通任务切换恢复跟随默认，新任务创建后的 ID 交接保留刚选的模型。这是前端保留选择的行为，客户端协议仍要求每轮显式携带要沿用的 `options.model_ref`。网络失败保留选择和发送标识。同一 request_id 必须重传相同的原 options（包括当时 model_ref 的显式值或省略/null 形态），不能用响应中解析后的选项替换原请求；项目或默认模型后来修改不会影响幂等回放。手动重试采用该次请求的 options，未指定时使用当前项目配置与默认模型，不隐式复制失败轮次的覆盖项。返回的 turns[].options 是该轮实际采用的模型、Skill 和 MCP，project_revision 仍记录发送时项目版本。WebSocket 的模型提交位置及示例见[本轮模型与资源](project-task-websocket.md#7-本轮模型与资源)。
 
 未发布的数据库 schema 34 包含分页索引和任务状态摘要，状态从活动轮次或最近一轮初始化；本地已记录 schema 34 但缺少状态列的库也会补齐。归档标记及任务、轮次和正文保留。任务列表游标及网页任务缓存版本随状态字段更新，旧游标返回 `PROJECT_SYNC_RESET`，客户端重建第一页；实际部署库升级、PostgreSQL 和真实供应商联调仍需另外验收。
 
@@ -475,7 +505,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 409 / `TASK_REVISION_CONFLICT` | 任务摘要版本已变化 | 刷新后重新编辑 |
 | 409 / `TASK_RETRY_UNAVAILABLE` | 指定轮次不是最后一个失败/取消轮次 | 刷新会话，不重试旧轮次 |
 | 409 / `TASK_REQUEST_CONFLICT` | 消息标识已用于不同内容或作用域 | 核对原发送结果，禁止换内容复用标识 |
-| 409 / `TASK_MODEL_UNAVAILABLE` | 没有可用模型 | 保留草稿，配置模型后重新发送；不会创建空任务 |
+| 409 / `TASK_MODEL_UNAVAILABLE` | 显式模型不可用，或没有可用默认模型 | 保留草稿，刷新可选模型或配置默认模型后重新发送；不会创建空任务或静默换模型 |
 | 409 / `CONTROL_PLANE_BUSY` | 任务 worker 尚不可受理 | 保留发送标识和草稿，待服务恢复后重试 |
 
 创建项目丢失响应时，用原 key 和原内容重试。PATCH 丢失响应后先 GET 核对：原请求可能已成功，重复旧 revision 会返回冲突；不能不经核对就换成最新 revision 覆盖。任务创建/发送丢失响应时，用原 request_id 和原消息重试，不先创建第二个任务。

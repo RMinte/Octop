@@ -20,13 +20,15 @@ from typing import Any, cast
 from langchain_core.messages import AIMessage, ToolMessage, message_to_dict, messages_from_dict
 from langchain_core.messages.tool import ToolCall
 from langchain_core.tools import ToolException
-from octop_harness import HarnessAgent, HarnessAgentConfig
+from octop_harness import HarnessAgent as HarnessAgentBase
+from octop_harness import HarnessAgentConfig
 from octop_harness.mcp import aload_mcp_tools
 from octop_harness.messages import extract_call_response
 from octop_harness.request import ChatRequest
 
 from octop.i18n import tool_display_name, tr
 from octop.infra.agents.middleware.reasoning import CONFIG_KEY, ReasoningRequestMiddleware
+from octop.infra.agents.providers.box import OctopHarnessAgent as HarnessAgent
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.agents.security.policy_store import SecuritySettingsStore
 from octop.infra.connectors.builder import gateway_mcp_server_names, inject_missing_gateway_tools
@@ -580,7 +582,7 @@ async def run_turn(
     graph_started = False
     events: AsyncIterator[dict[str, Any]] | None = None
 
-    async def prepare(agent: HarnessAgent) -> None:
+    async def prepare(agent: HarnessAgentBase) -> None:
         await input_attachments.materialize_files(services, owner_id, turn.task_id, agent.workspace)
         for slug, entries in files:
             for name, data in entries:

@@ -342,6 +342,7 @@ export interface TaskResources extends ProjectResources {
   approval: TaskApprovalCapabilities;
   models: {
     model_ref: string;
+    provider_kind?: string;
     name: string;
     supports_images: boolean;
     reasoning_config?: ReasoningCapability | null;

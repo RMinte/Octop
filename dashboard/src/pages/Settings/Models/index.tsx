@@ -115,7 +115,7 @@ export default function ModelsPage() {
   } = useMemo(
     () =>
       partitionCloudPresets(
-        presets.filter((p) => !isLocalPreset(p)),
+        presets.filter((p) => !isLocalPreset(p) && p.protocol !== "box"),
         providers,
       ),
     [presets, providers],
@@ -124,17 +124,18 @@ export default function ModelsPage() {
     () =>
       groupPresets(
         presets.filter((p) => {
+          if (p.protocol === "box") return canProviders;
           if (!isLocalPreset(p)) return false;
           if (p.id === "onnx") return canOnnx;
           if (p.id === "ollama") return canOllama;
           return canOllama || canOnnx;
         }),
       ),
-    [presets, canOllama, canOnnx],
+    [presets, canProviders, canOllama, canOnnx],
   );
   const showCloudTab = canProviders;
   const showLocalTab =
-    (canOllama || canOnnx) &&
+    (canProviders || canOllama || canOnnx) &&
     (localPresets.grouped.length > 0 || localPresets.ungrouped.length > 0);
   const showPresetSection = showCloudTab || showLocalTab;
 

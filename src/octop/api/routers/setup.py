@@ -17,6 +17,7 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.setup import password_file as _wizard
 from octop.infra.setup.wizard_tokens import RateLimited
 from octop.infra.users.identity import Role
+from octop.infra.utils.box_models import validate_box_base_url
 from octop.infra.utils.locale import normalize_locale, resolve_request_locale
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,8 @@ class ProviderModelDraft(BaseModel):
     input: list[str] = Field(default_factory=list)
     thinking: Any | None = None
     reasoning: bool | None = None
+    context_window: int | None = Field(default=None, gt=0)
+    max_tokens: int | None = Field(default=None, gt=0)
 
 
 class ProviderDraftBody(BaseModel):
@@ -176,10 +179,18 @@ async def _apply_provider_draft(server: Any, draft: ProviderDraftBody) -> None:
     """Persist provider config from the wizard and reload harness providers."""
     api_key = (draft.api_key or "").strip()
     base_url = (draft.base_url or "").strip()
-    if not api_key:
+    if draft.type != "box" and not api_key:
         raise OctopError(ErrorCode.INTERNAL_ERROR, "api_key is required", status=400)
     if not base_url:
         raise OctopError(ErrorCode.INTERNAL_ERROR, "base_url is required", status=400)
+    if draft.type == "box":
+        try:
+            base_url = validate_box_base_url(base_url)
+        except ValueError as exc:
+            raise OctopError.localized(
+                ErrorCode.SLASH_BAD_ARGS, details={"field": "base_url"}
+            ) from exc
+        api_key = ""
 
     def _model_entry(m: ProviderModelDraft) -> dict[str, Any]:
         entry: dict[str, Any] = {
@@ -191,6 +202,10 @@ async def _apply_provider_draft(server: Any, draft: ProviderDraftBody) -> None:
         }
         if m.reasoning:
             entry["reasoning"] = True
+        if m.context_window is not None:
+            entry["context_window"] = m.context_window
+        if m.max_tokens is not None:
+            entry["max_tokens"] = m.max_tokens
         return entry
 
     models = [_model_entry(m) for m in draft.models if m.enabled]
@@ -403,7 +418,7 @@ async def test_provider_draft(
     """Probe LLM connectivity for an unsaved wizard provider draft."""
     _enforce_wizard_token_phase(server)
     _authorize_setup_provider_test(authorization, server)
-    if not body.api_key.strip():
+    if body.type != "box" and not body.api_key.strip():
         return {"ok": False, "error": "api_key is required"}
     row = make_probe_provider_row(
         name=body.name,

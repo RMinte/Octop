@@ -3,7 +3,7 @@
  * Local runtimes (Ollama / ONNX) use LocalServiceCard + ProviderConfigModal instead.
  */
 import { useEffect, useMemo, useState } from "react";
-import { Button, Divider, Drawer, Form, Input } from "antd";
+import { Button, Divider, Drawer, Form, Input, Typography } from "antd";
 import { message } from "@/utils/antdMessage";
 
 import { Download, Zap } from "lucide-react";
@@ -17,7 +17,11 @@ import type {
 } from "../../useProviders";
 import { isEmbeddingModel } from "../../useProviders";
 import { CodexOAuthConnect } from "../CodexOAuthConnect";
-import { fetchProviderModels, testProviderDraft } from "../../providerApi";
+import {
+  fetchProviderModels,
+  testProviderDraft,
+  toImportedProviderModel,
+} from "../../providerApi";
 import { ModelListEditor } from "./ModelListEditor";
 import styles from "../../index.module.less";
 
@@ -48,8 +52,9 @@ export function PresetProviderModal({
   const [draftModels, setDraftModels] = useState<ProviderModel[]>([]);
   const [form] = Form.useForm<PresetForm>();
   const isCodexOAuth = preset.auth_method === "codex_oauth";
+  const isBox = preset.protocol === "box";
   const apiKey = Form.useWatch("api_key", form) as string | undefined;
-  const canTest = !!apiKey?.trim();
+  const canTest = isBox || !!apiKey?.trim();
 
   const draftProvider = useMemo<ProviderRow>(
     () => ({
@@ -100,14 +105,14 @@ export function PresetProviderModal({
     try {
       const values = await form.validateFields(["base_url", "api_key"]);
       const key = values.api_key?.trim();
-      if (!key) {
+      if (!isBox && !key) {
         message.warning(t("models.pleaseEnterApiKey"));
         return;
       }
       setFetchingModels(true);
       const result = await fetchProviderModels({
-        kind: "openai",
-        api_key: key,
+        kind: isBox ? "box" : "openai",
+        api_key: isBox ? undefined : key,
         base_url: values.base_url?.trim() || preset.base_url,
         name: preset.id,
       });
@@ -127,13 +132,7 @@ export function PresetProviderModal({
       const existingIds = new Set(draftModels.map((m) => m.id));
       const missing: ProviderModel[] = fetched
         .filter((m) => !existingIds.has(m.id))
-        .map((m) => ({
-          id: m.id,
-          name: m.name || m.id,
-          enabled: false,
-          input: ["text"],
-          thinking: null,
-        }));
+        .map((m) => toImportedProviderModel(m, preset.protocol));
       if (missing.length === 0) {
         message.info(t("models.fetchModelsNoNew"));
         return;
@@ -155,13 +154,13 @@ export function PresetProviderModal({
   const testDraftModel = async (modelId: string) => {
     const values = await form.validateFields(["name", "base_url", "api_key"]);
     const key = values.api_key?.trim();
-    if (!key) {
+    if (!isBox && !key) {
       return { ok: false, error: t("models.pleaseEnterApiKey") };
     }
     return testProviderDraft({
       name: values.name.trim(),
       kind: preset.protocol,
-      api_key: key,
+      api_key: isBox ? undefined : key,
       base_url: values.base_url?.trim() || preset.base_url,
       model_id: modelId,
       embedding: isEmbeddingModel(draftModels.find((m) => m.id === modelId)),
@@ -179,7 +178,7 @@ export function PresetProviderModal({
         return;
       }
       const key = values.api_key?.trim();
-      if (!key) {
+      if (!isBox && !key) {
         message.warning(t("models.pleaseEnterApiKey"));
         return;
       }
@@ -221,7 +220,7 @@ export function PresetProviderModal({
           name: values.name.trim(),
           kind: preset.protocol,
           base_url: values.base_url?.trim() || null,
-          api_key: values.api_key?.trim() || null,
+          api_key: isBox ? null : values.api_key?.trim() || null,
           models: draftModels,
         }),
       });
@@ -301,26 +300,34 @@ export function PresetProviderModal({
             <Form.Item
               name="base_url"
               label="Base URL"
-              extra={t("models.baseUrlExtra")}
+              extra={t(
+                isBox ? "models.boxEndpointHint" : "models.baseUrlExtra",
+              )}
             >
               <Input placeholder={preset.base_url || "https://..."} />
             </Form.Item>
 
-            <Form.Item
-              name="api_key"
-              label="API Key"
-              rules={[
-                {
-                  required: true,
-                  message: t("models.pleaseEnterApiKey"),
-                },
-              ]}
-            >
-              <Input.Password
-                placeholder={apiKeyPlaceholder}
-                visibilityToggle
-              />
-            </Form.Item>
+            {isBox ? (
+              <Typography.Paragraph type="secondary">
+                {t("models.boxNoAuth")}
+              </Typography.Paragraph>
+            ) : (
+              <Form.Item
+                name="api_key"
+                label="API Key"
+                rules={[
+                  {
+                    required: true,
+                    message: t("models.pleaseEnterApiKey"),
+                  },
+                ]}
+              >
+                <Input.Password
+                  placeholder={apiKeyPlaceholder}
+                  visibilityToggle
+                />
+              </Form.Item>
+            )}
           </Form>
 
           <div style={{ marginBottom: 16 }}>

@@ -9,9 +9,9 @@ from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.messages.ai import UsageMetadata
-from octop_harness.llm.factory import ChatModelFactory
 
 from octop.i18n import tr
+from octop.infra.agents.providers.box import OctopChatModelFactory as ChatModelFactory
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.repos.project_task_titles import TaskTitleJob
 from octop.infra.db.services import SharedServices

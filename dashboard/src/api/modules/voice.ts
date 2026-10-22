@@ -9,6 +9,8 @@ export interface VoicePreset {
   limited_free?: boolean;
   requires_key: boolean;
   description: string;
+  base_url?: string;
+  extra?: Record<string, unknown>;
 }
 
 export interface VoiceProviderRow {

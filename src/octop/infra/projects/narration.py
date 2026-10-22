@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from octop_harness.llm.factory import ChatModelFactory
 
 from octop.i18n import tr
+from octop.infra.agents.providers.box import OctopChatModelFactory as ChatModelFactory
 from octop.infra.agents.providers.reasoning import reasoning_request_parameters
 from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.services import SharedServices

@@ -1550,6 +1550,95 @@ it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目
     ),
   );
   expect(api.update).not.toHaveBeenCalled();
+  await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_a"));
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "继续使用同一模型",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() =>
+    expect(api.send).toHaveBeenCalledWith(
+      "task_a",
+      expect.objectContaining({
+        prompt: "继续使用同一模型",
+        options: { model_ref: "other/model" },
+      }),
+    ),
+  );
+});
+
+it("常驻模型选择用于重试，跟随默认和切换任务不会沿用另一任务的模型", async () => {
+  api.resources.mockResolvedValue({
+    skills: [],
+    mcp_servers: [],
+    plugins: [],
+    subagents: [],
+    directory_roots: [],
+    approval: {
+      allowed_modes: [],
+      reviewer_ready: true,
+      execution_profile: "host_process",
+    },
+    default_model_ref: "glm/glm",
+    models: [
+      {
+        model_ref: "glm/glm",
+        name: "GLM",
+        provider_kind: "openai",
+        supports_images: false,
+      },
+      {
+        model_ref: "box/RM-01 VLM",
+        name: "RM-01 VLM",
+        provider_kind: "box",
+        supports_images: false,
+      },
+    ],
+  });
+  const failed = {
+    ...fixture,
+    status: "failed" as const,
+    turns: [{ ...fixture.turns[0], status: "failed" as const }],
+  };
+  const other = { ...fixture, task_id: "task_b", title: "另一任务" };
+  api.list.mockResolvedValue({
+    items: [failed, other],
+    next_page_cursor: null,
+    sync_cursor: "sync_first",
+  });
+  api.open.mockImplementation(async (id) => (id === "task_b" ? other : failed));
+  api.retry.mockResolvedValue({ ...fixture, list_revision: 2 });
+  api.send.mockResolvedValue({ ...fixture, list_revision: 3 });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const selector = await screen.findByRole("combobox", { name: "本轮模型" });
+  expect(selector).toBeVisible();
+  await user.click(selector);
+  await user.click(await screen.findByText("RM-01 VLM · box/RM-01 VLM"));
+  await user.click(await screen.findByRole("button", { name: "重新尝试" }));
+  await waitFor(() =>
+    expect(api.retry).toHaveBeenCalledWith(
+      "task_a",
+      "turn_a",
+      expect.any(String),
+      expect.objectContaining({ model_ref: "box/RM-01 VLM" }),
+    ),
+  );
+  expect(selector.closest(".ant-select")).toHaveTextContent("RM-01 VLM");
+  await user.click(selector);
+  await user.click(await screen.findByText("跟随默认 · {{model}}"));
+  await user.type(
+    screen.getByRole("textbox", { name: "任务消息" }),
+    "跟随默认继续",
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(api.send).toHaveBeenCalledOnce());
+  expect(api.send.mock.calls[0][1].options?.model_ref).toBeUndefined();
+  await user.click(selector);
+  await user.click(await screen.findByText("RM-01 VLM · box/RM-01 VLM"));
+  await user.click(screen.getByRole("button", { name: /另一任务/ }));
+  await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_b"));
+  expect(selector.closest(".ant-select")).toHaveTextContent("跟随默认");
 });
 
 it("独立展示思考内容并合并实时更新，迟到内容不截断已收到的思考", async () => {

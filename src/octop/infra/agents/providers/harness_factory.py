@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from octop_harness import HarnessAgentManager
 from octop_harness.config import ProviderConfig
 
-if TYPE_CHECKING:
-    from octop_harness import HarnessAgentManager
+from octop.infra.agents.providers.box import OctopChatModelFactory
 
 logger = logging.getLogger(__name__)
+
+
+class OctopHarnessAgentManager(HarnessAgentManager):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if self._shared_factory is not None:
+            self._shared_factory = OctopChatModelFactory(self._shared_factory.provider_configs())
+
+    def add_provider(self, provider: ProviderConfig) -> None:
+        if self._shared_factory is None:
+            self._shared_factory = OctopChatModelFactory([provider])
+        else:
+            super().add_provider(provider)
 
 
 def sync_providers_to_harness(
@@ -44,4 +57,4 @@ def sync_providers_to_harness(
             logger.exception("add_provider %s failed", provider.id)
 
 
-__all__ = ["sync_providers_to_harness"]
+__all__ = ["OctopHarnessAgentManager", "sync_providers_to_harness"]

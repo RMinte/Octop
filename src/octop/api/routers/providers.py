@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from octop.api.deps import current_user, get_server, require_permission
 from octop.infra.agents.providers.codex_apply import (
@@ -37,6 +37,7 @@ from octop.infra.agents.providers.reasoning import reasoning_capability
 from octop.infra.agents.providers.resolved import list_resolved_models as _list_resolved_models
 from octop.infra.agents.providers.store import clear_stale_pins_for_provider
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.utils.box_models import validate_box_base_url
 from octop.infra.utils.locale import resolve_request_locale
 from octop.infra.utils.ulid import new_ulid
 
@@ -47,16 +48,25 @@ router = APIRouter()
 
 class ProviderCreateBody(BaseModel):
     name: str
-    kind: str
-    base_url: str | None = None
-    api_key: str | None = None
+    kind: str = Field(
+        description="Provider type. box connects to appliance models without authentication."
+    )
+    base_url: str | None = Field(
+        default=None, description="Model service base URL reachable from the Octop server."
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="Remote provider credential; ignored and stored empty for box connections.",
+    )
     extra_json: str | None = None
     models: list[dict[str, Any]] | None = None
     note: str | None = None
 
 
 class ProviderPatchBody(BaseModel):
-    kind: str | None = None
+    kind: str | None = Field(
+        default=None, description="Provider type; box uses an unauthenticated appliance connection."
+    )
     base_url: str | None = None
     api_key: str | None = None
     extra_json: str | None = None
@@ -200,6 +210,15 @@ async def list_providers(
 admin_router = APIRouter()
 
 
+def _provider_base_url(kind: str, base_url: str | None) -> str | None:
+    if kind != "box":
+        return base_url
+    try:
+        return validate_box_base_url(base_url or "")
+    except ValueError as exc:
+        raise OctopError.localized(ErrorCode.SLASH_BAD_ARGS, details={"field": "base_url"}) from exc
+
+
 @admin_router.get("")
 async def admin_list_providers(
     _: Any = Depends(require_permission("providers")),
@@ -208,7 +227,7 @@ async def admin_list_providers(
     return [_row_to_dict(r) for r in server.services.provider_repo.list_all()]
 
 
-@admin_router.post("", status_code=201)
+@admin_router.post("", status_code=201, summary="Create a model provider")
 async def admin_create_provider(
     body: ProviderCreateBody,
     _: Any = Depends(require_permission("providers")),
@@ -220,8 +239,8 @@ async def admin_create_provider(
     pid = server.services.provider_repo.create(
         name=body.name,
         kind=body.kind,
-        base_url=body.base_url,
-        api_key=body.api_key,
+        base_url=_provider_base_url(body.kind, body.base_url),
+        api_key="" if body.kind == "box" else body.api_key,
         extra_json=body.extra_json,
         models_json=models_json,
         note=body.note,
@@ -231,7 +250,7 @@ async def admin_create_provider(
     return _row_to_dict(server.services.provider_repo.get(pid))
 
 
-@admin_router.patch("/{provider_id}")
+@admin_router.patch("/{provider_id}", summary="Update a model provider")
 async def admin_patch_provider(
     provider_id: int,
     body: ProviderPatchBody,
@@ -244,11 +263,15 @@ async def admin_patch_provider(
     import json as _json
 
     models_json = _json.dumps(body.models) if body.models is not None else None
+    kind = body.kind if body.kind is not None else row.kind
+    base_url = _provider_base_url(
+        kind, body.base_url if body.base_url is not None else row.base_url
+    )
     server.services.provider_repo.update(
         provider_id,
         kind=body.kind,
-        base_url=body.base_url,
-        api_key=body.api_key,
+        base_url=base_url if kind == "box" else body.base_url,
+        api_key="" if kind == "box" else body.api_key,
         extra_json=body.extra_json,
         models_json=models_json,
         note=body.note,
@@ -305,7 +328,7 @@ async def admin_test_provider_draft(
 ) -> dict[str, Any]:
     """Probe connectivity for a provider draft before it is saved."""
     api_key = (body.api_key or "").strip()
-    if not api_key:
+    if body.kind != "box" and not api_key:
         return {"ok": False, "error": "api_key is required"}
     model_id = body.model_id.strip()
     if not model_id:
@@ -313,8 +336,8 @@ async def admin_test_provider_draft(
     row = make_probe_provider_row(
         name=body.name.strip() or "draft",
         kind=body.kind,
-        api_key=api_key,
-        base_url=(body.base_url or "").strip() or None,
+        api_key="" if body.kind == "box" else api_key,
+        base_url=_provider_base_url(body.kind, (body.base_url or "").strip() or None),
         model_id=model_id,
         extra_json=body.extra_json,
         embedding=body.embedding,
@@ -333,22 +356,23 @@ async def admin_fetch_provider_models(
     request: Request,
     _: Any = Depends(require_permission("providers")),
 ) -> dict[str, Any]:
-    """Fetch remote model ids via OpenAI-compatible ``GET /models`` (openai kind only)."""
-    if body.kind != "openai":
+    """Fetch model ids; box connections use HTTP/HTTPS without authentication."""
+    if body.kind not in {"openai", "box"}:
         return {
             "ok": False,
             "error": "fetch models is only supported for openai-compatible providers",
         }
     api_key = (body.api_key or "").strip()
-    if not api_key:
+    if body.kind != "box" and not api_key:
         return {"ok": False, "error": "api_key is required"}
-    draft = SimpleNamespace(extra_json=body.extra_json)
+    draft = SimpleNamespace(kind=body.kind, extra_json=body.extra_json)
     return await fetch_openai_compatible_models(
-        base_url=(body.base_url or "").strip() or None,
-        api_key=api_key,
+        base_url=_provider_base_url(body.kind, (body.base_url or "").strip() or None),
+        api_key="" if body.kind == "box" else api_key,
         extra_headers=provider_headers(draft) or None,
         locale=resolve_request_locale(request),
         provider_name=(body.name or "").strip() or None,
+        **({"provider_kind": "box"} if body.kind == "box" else {}),
     )
 
 

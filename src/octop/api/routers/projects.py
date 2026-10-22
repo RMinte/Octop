@@ -657,7 +657,7 @@ async def sync_standalone_tasks(
     "/resources",
     response_model=tasks.TaskResources,
     summary="读取本轮可选择的模型和项目能力",
-    description="仅列出可用模型和本人可访问的资源引用，不返回密钥；选择仅影响本轮，不修改项目或全局默认值。",
+    description="已登录客户端读取 models 和 default_model_ref，用 models[].model_ref 填充创建或追问请求的 options.model_ref；provider_kind=box 表示盒子模型。不指定模型时使用发送时的服务端默认模型。普通用户可读，不返回模型密钥或连接地址；选择仅影响本轮，不修改项目或全局默认值。",
 )
 async def task_resources(
     response: Response,

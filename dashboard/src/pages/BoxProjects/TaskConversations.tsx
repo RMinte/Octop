@@ -117,6 +117,11 @@ export default function TaskConversations({
   const images = useTaskImages(`${projectID ?? ""}:${taskID ?? "new"}`);
   const imageInput = useRef<HTMLInputElement>(null);
   const [options, setOptions] = useState<TaskExecutionOptions>({});
+  const createdTaskSelection = useRef<{
+    taskID: string;
+    projectID: string | null;
+    model_ref?: string;
+  } | null>(null);
   const [approvalSaving, setApprovalSaving] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const webSearchSaving = !!taskID && queue.isHeld(taskID);
@@ -232,7 +237,15 @@ export default function TaskConversations({
   useEffect(() => {
     setError("");
     setDraft("");
-    setOptions({});
+    const created = createdTaskSelection.current;
+    setOptions(
+      created?.taskID === taskID &&
+        created.projectID === projectID &&
+        created.model_ref
+        ? { model_ref: created.model_ref }
+        : {},
+    );
+    createdTaskSelection.current = null;
     setWebSearchEnabled(true);
     pending.current = null;
     compactRequest.current = null;
@@ -384,7 +397,9 @@ export default function TaskConversations({
       }
       setDraft("");
       images.clear();
-      setOptions({});
+      setOptions((current) =>
+        current.model_ref ? { model_ref: current.model_ref } : {},
+      );
       pending.current = null;
       setError("");
       return;
@@ -409,9 +424,18 @@ export default function TaskConversations({
       applyWrite(result);
       setDraft("");
       images.clear();
-      setOptions({});
+      setOptions((current) =>
+        current.model_ref ? { model_ref: current.model_ref } : {},
+      );
       pending.current = null;
-      if (!taskID) selectTask(result.task_id);
+      if (!taskID) {
+        createdTaskSelection.current = {
+          taskID: result.task_id,
+          projectID,
+          model_ref: options.model_ref,
+        };
+        selectTask(result.task_id);
+      }
       void refreshList().catch((err) => {
         if (alive.current && selectedProjectID.current === projectID)
           setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
@@ -570,7 +594,9 @@ export default function TaskConversations({
       )
         return;
       applyWrite(result);
-      setOptions({});
+      setOptions((current) =>
+        current.model_ref ? { model_ref: current.model_ref } : {},
+      );
       retryRequest.current = null;
     } catch (err) {
       if (

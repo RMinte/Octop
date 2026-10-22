@@ -243,6 +243,7 @@ export function useVoiceInput(onText: (text: string) => void) {
   const [transcribing, setTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const recordingProviderRef = useRef<string | null>(null);
 
   // Follow dashboard UI locale — not navigator.language (often en-US on
   // machines used with Chinese UI / Chinese speech).
@@ -251,9 +252,12 @@ export function useVoiceInput(onText: (text: string) => void) {
   const stopRecording = useCallback(async () => {
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") {
+      recordingProviderRef.current = null;
       setRecording(false);
       return;
     }
+    const provider = recordingProviderRef.current;
+    recordingProviderRef.current = null;
     await new Promise<void>((resolve) => {
       recorder.onstop = () => resolve();
       recorder.stop();
@@ -269,16 +273,15 @@ export function useVoiceInput(onText: (text: string) => void) {
 
     setTranscribing(true);
     try {
-      const active = await fetchActiveVoice();
       // SpeechRecognition cannot consume a recorded blob. If STT is still
       // "browser", ask the user to configure a server provider (or use the
       // click-to-talk browser path from a cold start).
-      if (active.stt === "browser") {
+      if (!provider || provider === "browser") {
         antMessage.error(t("voice.sttProviderRequired"));
         return;
       }
       const upload = await recordedBlobToWav(blob);
-      const result = await voiceApi.transcribe(upload, language);
+      const result = await voiceApi.transcribe(upload, language, provider);
       const text = result.text?.trim() ?? "";
       if (text) onText(text);
       else antMessage.info(t("voice.sttEmpty"));
@@ -295,10 +298,22 @@ export function useVoiceInput(onText: (text: string) => void) {
   }, [onText, t, language]);
 
   const startRecording = useCallback(async () => {
-    // Read cached config synchronously to stay in the user-gesture stack.
-    const active: ActiveVoice | null = cachedActiveVoice();
+    // Keep a warm-cache click synchronous; resolve a cold cache before choosing.
+    let active: ActiveVoice | null = cachedActiveVoice();
+    if (!active) {
+      setTranscribing(true);
+      try {
+        active = await fetchActiveVoice();
+      } catch {
+        antMessage.error(t("voice.sttFailed"));
+        return;
+      } finally {
+        setTranscribing(false);
+      }
+    }
+    const provider = active.stt;
 
-    if ((active?.stt ?? "browser") === "browser" && browserSttAvailable()) {
+    if (provider === "browser" && browserSttAvailable()) {
       // Browser STT: use the native SpeechRecognition API directly.
       setTranscribing(true);
       try {
@@ -338,9 +353,11 @@ export function useVoiceInput(onText: (text: string) => void) {
         stream.getTracks().forEach((track) => track.stop());
       };
       mediaRecorderRef.current = recorder;
+      recordingProviderRef.current = provider;
       recorder.start();
       setRecording(true);
     } catch {
+      recordingProviderRef.current = null;
       antMessage.error(t("voice.micDenied"));
     }
   }, [onText, t, language]);

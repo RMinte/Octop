@@ -9,8 +9,22 @@ from typing import Any
 from octop.infra.db.repos.settings import SettingsRepo
 from octop.infra.db.repos.voice_providers import VoiceProviderRepo, VoiceProviderRow
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.utils.box_models import validate_box_base_url
 from octop.infra.voice import adapters
-from octop.infra.voice.presets import is_builtin_preset
+from octop.infra.voice.presets import BOX_STT_BASE_URL, BOX_TTS_BASE_URL, is_builtin_preset
+
+
+def validate_voice_configuration(*, kind: str, capability: str, base_url: str | None) -> None:
+    if kind != "box":
+        return
+    if capability not in {"stt", "tts"}:
+        raise OctopError.localized(ErrorCode.VOICE_CAPABILITY_MISMATCH)
+    try:
+        validate_box_base_url(
+            base_url or (BOX_STT_BASE_URL if capability == "stt" else BOX_TTS_BASE_URL)
+        )
+    except ValueError as exc:
+        raise OctopError.localized(ErrorCode.SLASH_BAD_ARGS, details={"field": "base_url"}) from exc
 
 
 @dataclass(frozen=True)
@@ -107,6 +121,10 @@ class VoiceManager:
                 details={"provider": name},
             )
         row = resolved.row
+        if kind == "box" and row is not None:
+            if row.capability != "stt":
+                raise OctopError.localized(ErrorCode.VOICE_CAPABILITY_MISMATCH)
+            return await adapters.transcribe_box(row, audio, mime=mime, language=language)
         if kind == "openai":
             if row is None:
                 raise OctopError(ErrorCode.NOT_FOUND, "OpenAI voice provider is not configured")
@@ -139,6 +157,12 @@ class VoiceManager:
                 details={"provider": name},
             )
         row = resolved.row
+        if kind == "box" and row is not None:
+            if row.capability != "tts":
+                raise OctopError.localized(ErrorCode.VOICE_CAPABILITY_MISMATCH)
+            async for chunk in adapters.synthesize_box(row, text, voice_id=voice_id, speed=speed):
+                yield chunk
+            return
         if kind == "edge":
             source = row or VoiceProviderRow(
                 id=0,
@@ -204,6 +228,7 @@ class VoiceManager:
         mode: str,
         locale: str = "en",
     ) -> dict[str, Any]:
+        validate_voice_configuration(kind=kind, capability=capability, base_url=base_url)
         row = VoiceProviderRow(
             id=0,
             name=name,

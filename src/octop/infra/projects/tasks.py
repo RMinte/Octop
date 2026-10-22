@@ -88,7 +88,11 @@ class TaskExecutionOptions(ProjectModel):
     model_ref: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
         | None
-    ) = Field(default=None, description="本轮模型；省略或 null 使用当前默认模型。")
+    ) = Field(
+        default=None,
+        description="本轮模型引用，原样使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传；省略或 null 使用发送时的服务端默认模型，不继承上一轮选择。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
+        examples=["Box/RM-01 VLM"],
+    )
     skills: list[SkillBinding | SkillHubBinding] | None = Field(
         default=None,
         max_length=64,
@@ -174,8 +178,9 @@ class TaskReasoningCapability(ProjectModel):
 
 
 class TaskModelOption(ProjectModel):
-    model_ref: str
-    name: str
+    model_ref: str = Field(description="客户端选中后原样提交到 options.model_ref 的完整模型引用。")
+    name: str = Field(description="供客户端展示的模型名称；调用时使用 model_ref。")
+    provider_kind: str = Field(default="openai", description="模型连接类型；box 表示盒子内部模型。")
     supports_images: bool = Field(
         description="模型是否支持图片输入；包含图片的任务须选择此类模型。"
     )
@@ -185,8 +190,12 @@ class TaskModelOption(ProjectModel):
 
 
 class TaskResources(ProjectResources):
-    models: list[TaskModelOption]
-    default_model_ref: str | None
+    models: list[TaskModelOption] = Field(
+        description="当前可用于任务的已启用模型，包含盒子和远端；不含 ASR/TTS 模型、密钥或连接地址。"
+    )
+    default_model_ref: str | None = Field(
+        description="当前服务端默认任务模型；null 表示无可用模型。客户端未传 options.model_ref 时由服务端在每次发送时解析。"
+    )
     approval: ApprovalCapabilities
 
 
@@ -916,6 +925,7 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
         TaskModelOption(
             model_ref=f"{provider.name}/{model['id']}",
             name=str(model.get("name") or model["id"]),
+            provider_kind=provider.kind,
             supports_images=providers.is_model_ref_multimodal(f"{provider.name}/{model['id']}"),
             reasoning_config=TaskReasoningCapability.model_validate(capability)
             if (

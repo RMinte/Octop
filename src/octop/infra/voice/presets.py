@@ -6,6 +6,13 @@ from typing import Any, Literal
 
 VoiceCapability = Literal["stt", "tts", "both"]
 
+BOX_STT_BASE_URL = "http://127.0.0.1:58100/v1"
+BOX_TTS_BASE_URL = "http://127.0.0.1:58101/v1"
+DEFAULT_BOX_VOICE_INSTRUCTIONS = (
+    "Use a natural, clear voice at a moderate pace, "
+    "speaking naturally in the language of the input text."
+)
+
 _BUILTIN_PRESET_IDS = frozenset({"browser", "edge", "tencent", "openai", "mimo"})
 
 
@@ -32,6 +39,26 @@ def load_voice_presets() -> list[dict[str, Any]]:
             "free": True,
             "requires_key": False,
             "description": "Free Microsoft Edge neural voices via edge-tts.",
+        },
+        {
+            "id": "box-stt",
+            "name": "Box ASR",
+            "kind": "box",
+            "capability": "stt",
+            "free": True,
+            "requires_key": False,
+            "base_url": BOX_STT_BASE_URL,
+            "extra": {"model": "qwen3-asr"},
+        },
+        {
+            "id": "box-tts",
+            "name": "Box TTS",
+            "kind": "box",
+            "capability": "tts",
+            "free": True,
+            "requires_key": False,
+            "base_url": BOX_TTS_BASE_URL,
+            "extra": {"model": "qwen3-tts", "instructions": ""},
         },
         {
             "id": "tencent",

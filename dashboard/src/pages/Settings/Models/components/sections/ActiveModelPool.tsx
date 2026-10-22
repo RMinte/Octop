@@ -57,7 +57,7 @@ export function ActiveModelPool({
   const providerHasKey = useMemo(() => {
     const map = new Map<number, boolean>();
     for (const p of providers) {
-      map.set(p.id, !!p.api_key);
+      map.set(p.id, p.kind === "box" || !!p.api_key);
     }
     return map;
   }, [providers]);
@@ -298,7 +298,11 @@ export function ActiveModelPool({
                 <span className={styles.poolGroupName}>
                   {group.providerName}
                 </span>
-                <Tag className={styles.poolGroupKind}>{group.providerKind}</Tag>
+                <Tag className={styles.poolGroupKind}>
+                  {group.providerKind === "box"
+                    ? t("models.boxNoAuth")
+                    : group.providerKind}
+                </Tag>
               </div>
               <span className={styles.poolGroupCount}>
                 {group.models.length} {t("models.modelUnit")}

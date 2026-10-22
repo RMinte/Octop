@@ -219,6 +219,28 @@ def load_provider_presets() -> list[dict[str, Any]]:
 
     bundled = resources.files("octop_harness.providers").joinpath("provider_template.json")
     out = [serialize_provider_preset(p) for p in load_provider_templates(str(bundled))]
+    out.insert(
+        0,
+        {
+            "id": "box",
+            "name": "Box",
+            "base_url": "http://127.0.0.1:58000/v1",
+            "protocol": "box",
+            "api_key_prefix": "",
+            "requires_key": False,
+            "models": [
+                {
+                    "id": "RM-01 VLM",
+                    "name": "RM-01 VLM",
+                    "enabled": True,
+                    "task": "chat",
+                    "input": ["text", "image"],
+                    "context_window": 262_144,
+                    "max_tokens": 32_768,
+                }
+            ],
+        },
+    )
     if not any(p.get("id") == "openai-codex" for p in out):
         out.insert(
             0,

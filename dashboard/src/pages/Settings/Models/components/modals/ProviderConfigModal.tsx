@@ -18,6 +18,7 @@ import {
   Modal,
   Progress,
   Select,
+  Typography,
 } from "antd";
 
 import { Download, Key, Loader2, Trash2, X, Zap } from "lucide-react";
@@ -25,7 +26,11 @@ import { useTranslation } from "react-i18next";
 import { request } from "../../../../../api/request";
 import type { ProviderRow, ProviderModel } from "../../useProviders";
 import { isEmbeddingModel } from "../../useProviders";
-import { fetchProviderModels, testProviderDraft } from "../../providerApi";
+import {
+  fetchProviderModels,
+  testProviderDraft,
+  toImportedProviderModel,
+} from "../../providerApi";
 import { getProviderDocs } from "../../../../../assets/providers";
 import { ollamaModelApi } from "../../../../../api/modules/ollamaModel";
 import { onnxModelApi } from "../../../../../api/modules/onnxModel";
@@ -96,6 +101,7 @@ export function ProviderConfigModal({
   const [draftModels, setDraftModels] = useState<ProviderModel[]>([]);
 
   const hasApiKey = !!provider.api_key && provider.api_key.length > 0;
+  const isBox = provider.kind === "box";
   const isOllama = isOllamaProviderRow(provider);
   const isOnnx = isOnnxProviderRow(provider);
   const [downloadedIds, setDownloadedIds] = useState<string[]>([]);
@@ -808,7 +814,7 @@ export function ProviderConfigModal({
         !!draftApiKey ||
         (!!draftBaseUrl && draftBaseUrl !== (provider.base_url ?? ""));
 
-      if (useDraft && !draftApiKey && !hasApiKey) {
+      if (!isBox && useDraft && !draftApiKey && !hasApiKey) {
         message.warning(t("models.pleaseEnterApiKey"));
         return;
       }
@@ -821,7 +827,9 @@ export function ProviderConfigModal({
           ? await testProviderDraft({
               name: provider.name,
               kind: provider.kind,
-              api_key: draftApiKey || provider.api_key || undefined,
+              api_key: isBox
+                ? undefined
+                : draftApiKey || provider.api_key || undefined,
               base_url: draftBaseUrl || provider.base_url,
               model_id: modelId,
               embedding,
@@ -897,22 +905,22 @@ export function ProviderConfigModal({
 
       const values = form.getFieldsValue();
       const kind = (values.kind as string | undefined) ?? provider.kind;
-      if (kind !== "openai") {
+      if (kind !== "openai" && kind !== "box") {
         message.warning(t("models.fetchModelsUnsupportedKind"));
         return;
       }
       const draftApiKey = (values.api_key as string | undefined)?.trim();
       const draftBaseUrl = (values.base_url as string | undefined)?.trim();
       const apiKey = draftApiKey || provider.api_key || "";
-      if (!apiKey) {
+      if (kind !== "box" && !apiKey) {
         message.warning(t("models.pleaseEnterApiKey"));
         return;
       }
 
       setFetchingModels(true);
       const result = await fetchProviderModels({
-        kind: "openai",
-        api_key: apiKey,
+        kind,
+        api_key: kind === "box" ? undefined : apiKey,
         base_url: draftBaseUrl || provider.base_url,
         name: provider.name,
       });
@@ -942,13 +950,7 @@ export function ProviderConfigModal({
         return;
       }
 
-      const added: ProviderModel[] = missing.map((m) => ({
-        id: m.id,
-        name: m.name || m.id,
-        enabled: false,
-        input: ["text"],
-        thinking: null,
-      }));
+      const added = missing.map((m) => toImportedProviderModel(m, kind));
       setDraftModels((prev) => [...prev, ...added]);
       setFormDirty(true);
       message.success(t("models.fetchModelsMerged", { count: missing.length }));
@@ -974,7 +976,7 @@ export function ProviderConfigModal({
       footer={
         <div className={styles.modalFooter}>
           <div className={styles.modalFooterLeft}>
-            {hasApiKey && !isOnnx && (
+            {hasApiKey && !isOnnx && !isBox && (
               <Button danger size="small" onClick={handleRevoke}>
                 {t("models.revokeAuthorization")}
               </Button>
@@ -1013,17 +1015,31 @@ export function ProviderConfigModal({
             <Form.Item
               name="base_url"
               label="Base URL"
-              extra={t("models.baseUrlExtra")}
+              extra={t(
+                isBox ? "models.boxEndpointHint" : "models.baseUrlExtra",
+              )}
             >
-              <Input placeholder="https://api.openai.com/v1" />
-            </Form.Item>
-
-            <Form.Item name="api_key" label="API Key" extra={apiKeyExtra}>
-              <Input.Password
-                placeholder={apiKeyPlaceholder}
-                visibilityToggle
+              <Input
+                placeholder={
+                  isBox
+                    ? "http://127.0.0.1:58000/v1"
+                    : "https://api.openai.com/v1"
+                }
               />
             </Form.Item>
+
+            {isBox ? (
+              <Typography.Paragraph type="secondary">
+                {t("models.boxNoAuth")}
+              </Typography.Paragraph>
+            ) : (
+              <Form.Item name="api_key" label="API Key" extra={apiKeyExtra}>
+                <Input.Password
+                  placeholder={apiKeyPlaceholder}
+                  visibilityToggle
+                />
+              </Form.Item>
+            )}
           </>
         )}
 
@@ -1102,6 +1118,7 @@ export function ProviderConfigModal({
         models={draftModels}
         onModelsChange={handleModelsChange}
         apiPrefix={apiPrefix}
+        canTest={isBox || hasApiKey}
         localDownload={
           isOllama || isOnnx
             ? {
