@@ -64,6 +64,8 @@ token 必填，长度 1–16384 字符。locale 可省略或为 null，非空时
 {"type":"ready","protocol_version":3}
 ```
 
+连接建立不代表服务或鉴权已就绪，必须等到 ready 才发送业务命令。数据库未就绪时，服务端先建立连接，再发送 `503 / SETUP_REQUIRED` 错误帧并以 1013 关闭，不将该故障作为 HTTP 403 拒绝握手。
+
 连接绑定首次认证的用户，不能重新发送 authenticate 切换身份。退出登录或切换账号时，关闭旧连接并清理该账号的内存订阅和待处理命令。
 
 ### 续期与心跳
@@ -725,17 +727,20 @@ REST 首次详情默认最近 50 轮，最多 100 轮；历史页 event_cursor �
 | 422 / TASK_IMAGE_MODEL_REQUIRED | 本轮或历史有图片，须明确选择支持图片的模型 |
 | 422 / PROJECT_RESOURCE_INVALID | 所选 Skill/MCP 无效或无权使用，刷新候选 |
 | 500 / INTERNAL_ERROR | 服务端异常，保留发送身份并按错误范围处理 |
+| 503 / SETUP_REQUIRED 或其他服务错误 | 服务暂不可用；保留登录身份、项目、任务与已缓存正文，退避重连 |
 
 status 是 JSON 业务字段，不是连接建立后的 HTTP 状态。按 code 分支，用本地化 message 展示。执行中的 TASK_RESOURCE_UNAVAILABLE、TASK_EXECUTION_FAILED、TASK_INTERRUPTED、TASK_PLAN_UNFINISHED、TASK_PLAN_BLOCKED 通常通过 `turn.status=failed` 和 turn.error_code 表达；刚收到成功 result 也可能在后续执行失败。
 
 | 关闭代码 | 含义 | 处理 |
 | --- | --- | --- |
-| 4401 | 鉴权失败、过期或用户停用 | 查看之前的 error，恢复登录或结束该账号会话 |
+| 4401 | 仅 AUTH_FAILED、TOKEN_EXPIRED 或 USER_DISABLED 的认证拒绝 | 查看之前的 error，恢复登录或结束该账号会话 |
 | 1009 | 入站文本帧超过 512 KiB | 缩小请求，按 UTF-8 字节计算 |
-| 1011 | 服务端异常 | 保留任务和发送身份，重连后恢复观察 |
-| 1013 或升级失败 | 服务暂不可用，例如数据库未就绪 | 退避重连；握手前拒绝时可能只有连接失败，不保证收到 error 或关闭帧 |
+| 1011 | 连接级非认证异常，例如 500 INTERNAL_ERROR | 保留登录身份、任务和发送身份，重连后恢复观察 |
+| 1013 | 服务暂不可用，例如 503 或数据库未就绪 | 保留登录身份、项目、任务与已缓存正文，退避重连 |
 
 客户端主动关闭或传输层断开同样按第 8 节恢复，不根据 socket 关闭推断任务终态。
+
+网络或代理导致的升级失败也不能单凭握手 HTTP 403 判定登录失效。服务断开时，客户端应保留缓存供只读浏览；未缓存的内容提示暂时无法读取，恢复连接后继续同步。服务端不因 5xx 错误发送 4401；连接级错误先发送包含原始 status 和 error.code 的错误帧，再发送对应关闭码。单条业务命令的 5xx 仍只返回带 id 的错误帧，不因此关闭连接。
 
 ## 10 原生客户端最小连接示例
 

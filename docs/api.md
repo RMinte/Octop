@@ -395,7 +395,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 {"type":"authenticate","token":"<access token>","locale":"zh"}
 ```
 
-原生客户端也可在升级请求中携带 `Authorization: Bearer <access token>`，无需 authenticate 帧。两种方式都不把 token 放进 URL。认证成功返回 `{"type":"ready","protocol_version":3}`。连接绑定当前账号；每条命令和约每 10 秒重新检查登录态，滑动续期通过 `{"type":"session","access_token":"<renewed token>"}` 返回，客户端应按原来的记住登录偏好保存。认证失败返回错误后以 4401 关闭；数据库未就绪时拒绝连接。账号切换或退出时关闭旧连接，不能把旧账号事件交给新账号。
+原生客户端也可在升级请求中携带 `Authorization: Bearer <access token>`，无需 authenticate 帧。两种方式都不把 token 放进 URL。认证成功返回 `{"type":"ready","protocol_version":3}`，收到 ready 前不发送业务命令。连接绑定当前账号；每条命令和约每 10 秒重新检查登录态，滑动续期通过 `{"type":"session","access_token":"<renewed token>"}` 返回，客户端应按原来的记住登录偏好保存。真正的认证失败返回错误后以 4401 关闭；数据库未就绪时先建立连接，再发送 `503 / SETUP_REQUIRED` 错误帧并以 1013 关闭。其他连接级 503 同样使用 1013，内部错误使用 1011；服务故障保留登录身份与缓存，重连后恢复同步。账号切换或退出时关闭旧连接，不能把旧账号事件交给新账号。
 
 所有命令携带 `id`（8–128 位字母、数字、短横线或下划线），用于匹配本次响应。`data.request_id` 是持久化的消息幂等标识，与命令 id 分开：断线后手动重发可换命令 id，但必须保留原 request_id、正文、attachment_ids 及顺序和 options。
 

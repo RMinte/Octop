@@ -174,25 +174,46 @@ _command_id: TypeAdapter[tasks.RequestID] = TypeAdapter(tasks.RequestID)
 async def task_websocket(websocket: WebSocket) -> None:
     """Task commands and resumable state pushes, independent of worker lifetime."""
     server = websocket.app.state.octop_server
-    try:
-        services = _services(server)
-    except OctopError as exc:
-        await websocket.close(code=1013, reason=exc.code.value)
-        return
+    # A close before accept becomes HTTP 403, losing the service failure reason.
     await websocket.accept()
     locale = resolve_request_locale(websocket)
-    token = extract_raw_token(authorization=websocket.headers.get("authorization"))
-    subscriptions: dict[str, str] = {}
-    client_id: str | None = None
-    delivered_calls: dict[str, ClientToolCall] = {}
-    # Commands and pushes share ordering, including subscription cursor changes.
+    closing = False
+    # Commands, pushes and terminal errors share the same send ordering.
     lock = asyncio.Lock()
-    pump: asyncio.Task[None] | None = None
 
     async def error(exc: OctopError, **identity: str) -> None:
         await websocket.send_json(
             {"type": "error", **identity, "status": exc.status, **exc.to_envelope(locale=locale)}
         )
+
+    async def close_with_error(exc: OctopError) -> None:
+        nonlocal closing
+        async with lock:
+            if closing:
+                return
+            closing = True
+            await error(exc)
+            code = 1011
+            if exc.status == 503:
+                code = 1013
+            elif exc.status in {401, 403} and exc.code in {
+                ErrorCode.AUTH_FAILED,
+                ErrorCode.TOKEN_EXPIRED,
+                ErrorCode.USER_DISABLED,
+            }:
+                code = 4401
+            await websocket.close(code=code, reason=exc.code.value)
+
+    try:
+        services = _services(server)
+    except OctopError as exc:
+        await close_with_error(exc)
+        return
+    token = extract_raw_token(authorization=websocket.headers.get("authorization"))
+    subscriptions: dict[str, str] = {}
+    client_id: str | None = None
+    delivered_calls: dict[str, ClientToolCall] = {}
+    pump: asyncio.Task[None] | None = None
 
     async def authenticate() -> None:
         nonlocal token
@@ -212,6 +233,8 @@ async def task_websocket(websocket: WebSocket) -> None:
             while True:
                 await asyncio.sleep(_UPDATE_SECONDS)
                 async with lock:
+                    if closing:
+                        return
                     if time.monotonic() - checked >= _AUTH_CHECK_SECONDS:
                         await authenticate()
                         await websocket.send_json({"type": "heartbeat"})
@@ -269,15 +292,13 @@ async def task_websocket(websocket: WebSocket) -> None:
                             else:
                                 delivered_calls.pop(call.call_id, None)
         except OctopError as exc:
-            await error(exc)
-            await websocket.close(code=4401, reason=exc.code.value)
+            await close_with_error(exc)
         except (WebSocketDisconnect, OSError):
             pass
         except Exception:
             logger.exception("Task WebSocket subscription failed")
             with contextlib.suppress(Exception):
-                await error(OctopError.localized(ErrorCode.INTERNAL_ERROR))
-                await websocket.close(code=1011)
+                await close_with_error(OctopError.localized(ErrorCode.INTERNAL_ERROR))
 
     try:
         if token is None:
@@ -294,10 +315,13 @@ async def task_websocket(websocket: WebSocket) -> None:
         pump = asyncio.create_task(push_updates())
         while True:
             raw = await websocket.receive_text()
-            if len(raw.encode("utf-8")) > _MAX_FRAME_BYTES:
-                await websocket.close(code=1009)
-                return
             async with lock:
+                if closing:
+                    return
+                if len(raw.encode("utf-8")) > _MAX_FRAME_BYTES:
+                    closing = True
+                    await websocket.close(code=1009)
+                    return
                 await authenticate()
                 try:
                     frame = _command.validate_json(raw)
@@ -439,15 +463,13 @@ async def task_websocket(websocket: WebSocket) -> None:
                 except OctopError as exc:
                     await error(exc, id=frame.id)
     except OctopError as exc:
-        await error(exc)
-        await websocket.close(code=4401, reason=exc.code.value)
+        await close_with_error(exc)
     except (WebSocketDisconnect, OSError):
         pass
     except Exception:
         logger.exception("Task WebSocket command failed")
         with contextlib.suppress(Exception):
-            await error(OctopError.localized(ErrorCode.INTERNAL_ERROR))
-            await websocket.close(code=1011)
+            await close_with_error(OctopError.localized(ErrorCode.INTERNAL_ERROR))
     finally:
         if pump is not None:
             pump.cancel()
