@@ -41,6 +41,8 @@ if TYPE_CHECKING:
     from octop.infra.auth.sso.service import SsoService
     from octop.infra.db.services import SharedServices
     from octop.infra.history.trajectory.service import TrajectoryService
+    from octop.infra.projects.conversation_migrations import ConversationMigrationWorker
+    from octop.infra.projects.ingress import TaskIngressWorker
     from octop.infra.projects.runtime import ProjectTaskWorker
 
 logger = logging.getLogger(__name__)
@@ -345,6 +347,8 @@ class OctopServer:
         self._ldap_bind_throttle_services: SharedServices | None = None
         self._agentcomputer_bootstrap = daemon_bootstrap
         self.project_task_worker: ProjectTaskWorker | None = None
+        self.task_ingress_worker: TaskIngressWorker | None = None
+        self.conversation_migration_worker: ConversationMigrationWorker | None = None
         self._stop_task: asyncio.Task[None] | None = None
 
     # Backward compat: expose user_manager directly
@@ -507,18 +511,40 @@ class OctopServer:
 
         cleanup = AsyncExitStack()
         try:
-            await self._construct_runtime(config, cleanup)
             from octop.infra.projects.runtime import ProjectTaskWorker
 
             project_worker = ProjectTaskWorker(self.services)
             self.project_task_worker = project_worker
             cleanup.push_async_callback(project_worker.close)
+            await self._construct_runtime(config, cleanup)
             await project_worker.start()
+
+            from octop.infra.projects.conversation_migrations import ConversationMigrationWorker
+            from octop.infra.projects.ingress import TaskIngressWorker
+
+            assert self.app_runtime is not None
+            ingress_worker = TaskIngressWorker(
+                self.services, project_worker, gateway=self.app_runtime.gateway
+            )
+            self.task_ingress_worker = ingress_worker
+            cleanup.push_async_callback(ingress_worker.close)
+            await ingress_worker.start()
+            migration_worker = ConversationMigrationWorker(
+                self.services,
+                registry=self.app_runtime.agent_registry,
+                hitl_store=self.app_runtime.gateway.processor.hitl_coordinator.store,
+            )
+            self.conversation_migration_worker = migration_worker
+            cleanup.push_async_callback(migration_worker.close)
+            migration_worker.start()
         except BaseException:
             try:
                 await settle_task(asyncio.create_task(cleanup.aclose()))
             finally:
                 self.app_runtime = None
+                self.project_task_worker = None
+                self.task_ingress_worker = None
+                self.conversation_migration_worker = None
                 await self._close_database()
             raise
         else:
@@ -589,6 +615,8 @@ class OctopServer:
             repos=self.services.repos,
             trajectory_service=trajectory_service,
             history_archive=history_archive,
+            services=self.services,
+            task_worker=self.project_task_worker,
         )
         cleanup.push_async_callback(gateway.shutdown)
         await gateway.boot()
@@ -609,6 +637,8 @@ class OctopServer:
             gateway=gateway,
             agent_manager=registry,
             repos=self.services.repos,
+            services=self.services,
+            task_worker=self.project_task_worker,
         )
         cron_mgr = CronManager(
             gateway=gateway,
@@ -768,6 +798,12 @@ class OctopServer:
             raise asyncio.CancelledError
 
     async def _stop(self) -> None:
+        if self.conversation_migration_worker is not None:
+            await self.conversation_migration_worker.close()
+            self.conversation_migration_worker = None
+        if self.task_ingress_worker is not None:
+            await self.task_ingress_worker.close()
+            self.task_ingress_worker = None
         if self.project_task_worker is not None:
             await self.project_task_worker.close()
             self.project_task_worker = None

@@ -1,5 +1,49 @@
 # API Reference
 
+## 统一会话与可选专家（2026-10-23）
+
+普通网页问答与任务使用同一 `project_tasks` 记录和 `/api/project-tasks` 执行链路。首条消息创建 Task，后续消息沿用同一 ID；新网页详情地址为 `/conversations/{task_id}`。项目持有工作目录和项目规则；专家持有人设、默认能力和长期记忆。创建项目或任务不会创建专家。
+
+创建请求可带 `selected_expert_id`（已有专家或本人团队的 `agent_id`，省略/null 为通用助手）与 `action_mode=ask|plan|craft`（默认 craft）。支持本人启用的普通专家、本人团队和已共享的普通专家；私人常驻智能体、远程专家仍沿用专属入口。资源目录返回 `kind`、`is_shared`、`is_owner`、`member_ids`。ask/plan 在服务端执行边界限制写工具，craft 沿用审批策略；行动模式不替代审批模式或推理配置。
+
+Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`pinned`；每轮返回实际专家名称/版本、模式、服务端/客户端目录快照。空闲时用 PATCH 同时提供 `expected_revision` 和 `expected_configuration_revision` 切换专家/模式，显式 `selected_expert_id:null` 切回通用助手；历史身份不变。消息与重试提交 `expected_configuration_revision` 和项目的 `expected_project_revision`，陈旧草稿返回 `TASK_REVISION_CONFLICT`，不能静默改配置执行。幂等重发保留原请求版本。
+
+| 接口 | 行为 |
+| --- | --- |
+| `GET /api/project-tasks?scope=all`、`/sync?scope=all` | 当前账号全部项目及无项目记录；支持 `expert_id`、`status`、`q`；省略 scope 保持仅无项目。筛选和分页/同步游标绑定。 |
+| `POST /api/project-tasks/{task_id}/forks` | `{request_id,operation:fork\|edit\|regenerate,turn_id?,prompt?,project_id?,selected_expert_id?}`；明确创建关联分支。省略目标配置继承，显式 null 清空。带新消息时受理新轮次，原记录不变。 |
+| `POST /api/project-tasks/from-thread` | `{request_id,agent_id,thread_id,project_id,selected_expert_id?}`；显式接入本人有权使用的普通/共享专家或本人团队的空闲旧网页会话，来源 thread 必须属于当前用户；返回 201 TaskDetail，不运行模型。 |
+| `GET /api/project-tasks/{task_id}/expert-memory` | `source=scope\|general\|legacy`、`q`、`path`、`limit`；按当前专家和项目/任务范围读取。 |
+| `POST /api/project-tasks/{task_id}/expert-memory` | `{request_id,source:scope\|general,content,topic?,expected_expert_id?}`；显式保存。completed 可同 ID 重放；uncertain 须核对，不能自动另发。 |
+| `GET/PATCH /api/project-tasks/{task_id}/expert-memory/policy` | 策略修改携带专家 `expected_revision`、`expected_expert_id`；可修改 `legacy_recall_enabled`、`capture_enabled`、`auto_extract_enabled`、`general_promotion_enabled`。共享使用者 `policy_editable=false`。 |
+
+分支历史标记 `history_only` 和来源 ID；只复制公开历史、经校验的任务附件及成果，不复制检查点、审批和执行授权。旧 thread 续接保留来源 thread/agent 以及原附件鉴权链接，缺失资源标记 unavailable，不移动文件、不同步旧会话。旧会话链接继续可读，普通本地旧会话网页通过明确续接入口继续工作。
+
+专家记忆按 owner/专家隔离，进一步区分通用范围与项目范围；无项目任务的 scope 仅属于自身。共享使用者不连接发布者的私人记忆、legacy 或凭据。旧未分域记忆默认不召回，显式启用后只读。恢复原轮重用冻结召回；持久后台工作项在完成轮次后抽取 scope，只有明确跨项目、可核对原句且无项目/临时限定的用户偏好可自动晋升 general。团队委派不能作为人类偏好晋升。查询附带 `extraction_jobs` 阶段和错误状态；未知模型或写入结果保持 uncertain，不盲目重放。实现和恢复边界见[记忆说明](unified-task-conversation-plan.md#61-本轮-m3-记忆实现与边界)。
+
+本人团队固定本轮 roster，主持人和每个成员分别装配人设、能力及记忆，均使用当前 Task 的项目工作区。成员公开结果保留 `speaker_agent_id`、`speaker_name`，不混入主持人 reply；实际成员模型用量计入本轮。每次模型和工具调用重查当前专家授权。成员命令和人工审批由主持人协调，保持现有同步团队边界。
+
+### Task 高级工作台
+
+工作台从 `GET /api/project-tasks/{task_id}/workbench` 读取真实服务端目录、仅保存的客户端目录、`scope_revision`、`read_only` 和当前权限能力。运行中使用本轮冻结目录，空闲时跟随当前项目；没有项目目录时使用 Task 自己的目录。工作台不会连接专家原目录。
+
+以下接口均以前缀 `/api/project-tasks/{task_id}` 定位；变更必须携带 `expected_scope_revision`，旧范围返回 409。HTTP 媒体链接使用 `access_token`；WebSocket 使用 `token`。
+
+| 接口 | 行为 |
+| --- | --- |
+| `GET /workspace/tree-children`、`GET/PUT/DELETE /workspace/file` | 文件列表和文本读写删除；PUT 可携带 `expected_revision` 内容哈希，首次创建使用 `missing`，冲突拒绝覆盖。 |
+| `POST /workspace/mkdir`、`POST /workspace/move`、`POST /workspace/upload?path=完整目标文件路径` | 目录、移动及限额上传；上传为 multipart，scope 字段在 Form 中。系统 `.octop`、路径穿越及越界符号链接不可访问。 |
+| `GET /workspace/media`、`GET /workspace/download-file` | 鉴权预览/下载，支持单段 Range；HTML/SVG 使用 sandbox CSP。 |
+| `GET /browser/sessions`、`POST /browser/handoff`、`WS /browser-stream/ws` | 浏览器 profile 绑定 Task 和范围；控制权切换、输入和输出均受当前权限及范围检查。观察模式不创建浏览器。 |
+| `WS /terminal/ws`、`DELETE /terminal/sessions/{session_id}` | 终端使用 Task 当前服务端目录和独立 scope 会话键；输入前及连接期间重查权限。DELETE 允许本人显式清理本 Task 旧范围会话，不允许重连旧目录。 |
+| `GET /browser/record-replay/status`、`POST /browser/record-replay/start`、`POST /browser/record-replay/stop-and-generate-skill` | 只处理当前 Task 的录制，停止生成草稿，不自动应用。 |
+| `GET /browser/record-replay/skill-content`、`POST /recordings/{recording_id}/apply` | 恢复草稿；用户审阅后以 `{request_id,name,content,expected_scope_revision}` 明确应用，幂等回放。同名不同内容冲突，技能写入 Task 工作区，下轮及团队成员快照生效；改项目目录不复制技能。 |
+| `POST /tool-ui/{turn_id}/{call_id}/request` | 校验本 Task 已保存工具来源，只允许本工作区文件/列表白名单；历史续接工具只读，旧配置不可发起写入，拒绝任意代理接口代理。 |
+
+网页语音输入/朗读复用账号已有 STT/TTS 服务，识别结果进入当前 Task 草稿。普通旧会话、团队和共享旧会话保留只读历史和显式续接入口，新工作写入统一 Task；私人常驻及远程能力沿用各自入口。
+
+删除仍有历史记录的项目返回 `PROJECT_HAS_TASKS`，建议归档；被当前选择、配置历史或旧续接来源引用的专家返回 `EXPERT_IN_USE`。这些操作不级联误删会话。升级使用 SQLite/PostgreSQL 成对的 schema 56；本轮未在真实用户库执行迁移，未进行 PostgreSQL 实机验收。
+
 ## 私人智能体常驻会话（2026-10-20）
 
 每个用户的统一生活工作管家沿用唯一私人 Agent 与稳定 thread，使用六个 REST 接口：`GET/PUT /api/agents/resident-conversation`，以及绑定 thread 下的 `/conversation`、`POST /messages`、`GET /requests/{request_id}`、`POST /cancel`。正文实时观察另通过共享 `/api/project-tasks/ws` 的 `resident.subscribe` 接收 `resident.snapshot`；新能力声明、轮次 revision、重连和客户端接线见 [共用正文 WebSocket 交接](agentcomputer-conversation-stream-handoff.md)。支持普通文字、持久受理、有界快照和定向取消；专业工作通过普通 Task 委派，成果回到同一管家会话，不创建或切换不同专业助手，也不把项目或 Task 绑定到专家，未修改 AgentComputer 客户端。字段、幂等、模型选择、恢复边界和验证范围见 [私人智能体服务端接入说明](resident-agent-conversation.md)。
@@ -16,7 +60,7 @@
 
 ## 独立项目和任务接口（2026-10-15）
 
-独立项目和多轮任务统一使用 `/api/projects` 与 `/api/project-tasks`。当前客户端没有使用 AgentComputer 专用协议，因此移除 `/api/agentcomputer/v1` 及其 Bridge 转发；暂不提供远程项目和任务访问。旧专家绑定、Run、事件、文档和命令回执协议不恢复，已有 `ac_*` 数据原样保留，不迁移、不删除。
+独立项目和多轮任务统一使用 `/api/projects` 与 `/api/project-tasks`。AgentComputer 专用 `/api/agentcomputer/v1` 及其 Bridge 转发已移除；远程访问使用 Bridge 的统一 Task 能力握手、HTTP 操作白名单与专用 Task 流。旧专家绑定、Run、事件、文档和命令回执协议不恢复。已有 `ac_*` 数据保留为特殊来源，不伪造成可执行的新 Task；旧普通会话使用 `/api/project-task-migrations` 预检、批迁、进度、暂停/恢复与自动开关。实现和验收范围见 [外围入口状态表](unified-task-all-entrypoints-plan.md#当前实施与验收状态)。APP 开发以 [最新统一会话接线](agentcomputer-unified-conversations-handoff.md) 读取实际 TaskRef、迁移与工作台契约。
 
 「项目和任务」页面的项目管理使用 `/api/projects`。项目自己保存配置，没有专家或 Agent 外键。创建项目不要求模型服务，不会创建专家。此前的托管专家项目原型不自动转换、不做兼容同步；已有原型数据保留。
 
@@ -27,7 +71,7 @@
 | `GET /api/projects/{project_id}` | 获取项目完整配置和 `revision` | 服务端自动化通过 |
 | `PATCH /api/projects/{project_id}` | 局部修改；未提交字段保持原值，以 `expected_revision` 防止覆盖修改 | 定向自动化通过 |
 | `PUT /api/projects/{project_id}` | 显式完整替换；必须提交全部项目字段，局部请求返回 422 | 定向自动化通过 |
-| `DELETE /api/projects/{project_id}` | 按 ID 永久删除项目及其全部任务，无需版本参数；成功返回 204 | 定向自动化覆盖 |
+| `DELETE /api/projects/{project_id}` | 仅删除空项目；有记录返回 PROJECT_HAS_TASKS，有活动轮次返回 PROJECT_TASKS_BUSY；成功返回 204 | 定向自动化覆盖 |
 | `PATCH /api/projects/{project_id}/archive` | 以 archived 和 expected_revision 归档或恢复项目，保留全部任务及其归档状态 | 定向自动化覆盖 |
 | `GET /api/projects/resources` | 获取可选 Skill、当前用户 MCP 连接和目录浏览范围 | 服务端自动化通过 |
 
@@ -110,7 +154,7 @@ TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy=
 
 `scope` 默认 `all`，可选 `standalone` 或 `project`；`scope=project` 必须携带 `project_id`，其他 scope 不接受该参数。可使用 `task_id` 进一步限定，`kind` 筛选文件类型，`q` 搜索文件名的字面子串（ASCII 字母忽略大小写，去首尾空白，最多 200 字符）。`archived=all|active|archived` 默认 all，active 要求任务和所属项目均未归档，archived 匹配任一已归档。指定他人或不存在的项目/任务返回 404，合法但交集为空的筛选返回空列表。
 
-条目复用 `TaskArtifact` 的公开字段，补充 `file_kind`、`task_title`、`task_archived`、`turn_status` 及可空的 `project_id/project_name/project_archived`。`GET /api/project-tasks/artifacts/{artifact_id}` 返回相同结构的单份元数据；下载继续使用原 `download_url`。列表和详情不加载文件字节、不依赖模型；归档后仍可读取，发布后轮次失败或取消不移除文件。永久删除任务或项目会删除对应成果。输入附件与未发布工作文件不收录。
+条目复用 `TaskArtifact` 的公开字段，补充 `file_kind`、`task_title`、`task_archived`、`turn_status` 及可空的 `project_id/project_name/project_archived`。`GET /api/project-tasks/artifacts/{artifact_id}` 返回相同结构的单份元数据；下载继续使用原 `download_url`。列表和详情不加载文件字节、不依赖模型；归档后仍可读取，发布后轮次失败或取消不移除文件。永久删除任务会删除对应成果，有历史的项目须归档保留。输入附件与未发布工作文件不收录。
 
 资料库统一使用六个筛选标签：全部、文本和PDF、幻灯片、表格、图片、其他。列表、详情、任务历史和发布结果的 `business_category` 必返回 `document`（文本和PDF）、`presentation`（幻灯片）、`spreadsheet`（表格）、`image`（图片）或 `other`（其他）。查询参数 `business_category` 接受这五个值及默认值 `all`（全部）。资料库列表和详情继续返回原格式字段 `file_kind`，原 `kind` 筛选保持可用。例如 `GET /api/project-tasks/artifacts?business_category=document&kind=text&q=季度` 按资料分类、详细格式与文件名求交后分页，来源和归档筛选同样参与交集。
 
@@ -122,13 +166,13 @@ TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy=
 
 列表同步使用 `GET /api/projects/sync`、`GET /api/projects/{project_id}/tasks/sync`、`GET /api/project-tasks/sync`。项目和各任务列表分别维护游标，不能跨账号、列表、实例或用途复用。任务列表返回分页对象；本轮不修改原生客户端 UI。
 
-项目首次不带 `sync_cursor`，返回 `mode=snapshot`、完整项目 `changes` 和 `next_sync_cursor`；之后带上游标只返回期间变化过的项目最终状态。任务首次只获取一页摘要，默认 50 条、最多 100 条；返回 `items`、`next_page_cursor` 和 `sync_cursor`，不预读全部历史或正文。后续以 `page_cursor` 加载更早任务，按 `updated_at DESC, task_id DESC` 续取；历史下一页不产生新同步基线。
+项目首次不带 `sync_cursor`，返回 `mode=snapshot`、完整项目 `changes` 和 `next_sync_cursor`；之后带上游标只返回期间变化过的项目最终状态。任务首次只获取一页摘要，默认 50 条、最多 100 条；返回 `items`、`next_page_cursor` 和 `sync_cursor`，不预读全部历史或正文。后续以 `page_cursor` 加载更早任务，按 `pinned DESC, updated_at DESC, task_id DESC` 续取；历史下一页不产生新同步基线。
 
 任务首页返回的 `sync_cursor` 可立即请求对应 `/sync`，不必等历史读完。即使未加载的旧任务发生新活动，也通过增量进入近期列表。增量返回 `base_sync_cursor`、`changes`、`next_page_cursor`、`next_sync_cursor`；同一对象多次修改合并为截止版本的完整状态，中间页不返回可提交的新同步位置。收齐本批后再一起保存对象和游标。历史分页游标和增量分页游标用途不同，客户端分开保存。
 
 分页与增量响应交错时，使用 `list_revision` 保留较新的任务摘要；项目使用 `revision`。自己写入成功也不能跳过期间其他变化，直接推进同步位置。无效游标返回 HTTP 409 `PROJECT_SYNC_RESET`，重新建立项目快照或对应任务第一页即可。后台任务完成、取消和中断恢复的摘要更新与变更记录同事务提交；回复正文和心跳不产生列表变更。删除项目或任务时，同一事务写入 `operation=delete`、`data=null` 的同步记录；任务删除记录携带递增的 `list_revision`。客户端移除对应项并保存删除标记，防止旧分页或迟到的会话事件重新加入任务。仍不提供自动历史清理，备份恢复流程仍需可靠推进 `restoreEpoch` 后才能使旧游标失效。
 
-删除接口按 ID 操作，不要求 `expected_revision`，不因标题、状态或配置版本变化而拒绝删除；编辑和归档仍保留各自的版本检查。排队或运行中的任务须等待完成或先停止，单任务删除返回 `409 TASK_BUSY`；项目中存在此类任务则返回 `409 PROJECT_TASKS_BUSY`，整个项目及其任务均保持原样。错误响应中的本地化消息说明禁止操作的原因及处理方式，网页在删除确认框中显示具体错误；任务执行期间同时直接显示无法删除的原因。删除项目会原子清理全部任务及会话、附件、工具记录和上下文；其他项目和无项目任务不受影响。删除操作保留工作目录中的文件，包括自动分配的任务工作区，不回滚已执行的工具操作。已删除资源再次读取返回 404；项目名称和创建请求标识随项目删除而释放。
+删除接口按 ID 操作，不要求 `expected_revision`；编辑和归档仍保留各自的版本检查。排队或运行中的任务须等待完成或先停止，单任务删除返回 `409 TASK_BUSY`；项目中存在此类任务返回 `409 PROJECT_TASKS_BUSY`。项目仍有任何保留记录时返回 `409 PROJECT_HAS_TASKS`，使用归档保留历史；仅空项目可删除。错误响应中的本地化消息说明禁止操作的原因，网页确认框显示具体错误。显式删除单任务会清理它的会话、附件、工具记录和上下文，但不删除独立分支及分支已复制的附件。删除保留工作目录中的文件，不回滚已发生的工具操作，也不删除专家记忆。已删除资源再次读取返回 404；项目名称和创建请求标识随空项目删除而释放。
 
 客户端删除请求、错误响应和提示要求见[项目和任务删除接口接入说明](project-task-deletion.md)。网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
 

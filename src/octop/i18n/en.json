@@ -557,7 +557,9 @@
     "RESIDENT_FOLLOWUP_CONFLICT": "The follow-up changed. Refresh and retry.",
     "RESIDENT_READ_ANCHOR_INVALID": "The read anchor does not belong to this conversation.",
     "RESIDENT_MEMORY_EXTRACTION_FAILED": "Memory candidate extraction failed. Retry later.",
-    "RESIDENT_TOOL_INPUT_INVALID": "Invalid private assistant tool input."
+    "RESIDENT_TOOL_INPUT_INVALID": "Invalid private assistant tool input.",
+    "EXPERT_IN_USE": "This expert is still referenced by tasks. Disable it or change the selected expert first.",
+    "PROJECT_HAS_TASKS": "This project still contains tasks. Archive it or explicitly handle its tasks first."
   },
   "desktop": {
     "install_log_deps": "Installing Python dependencies…",
@@ -701,6 +703,10 @@
     "docker-management": "Docker Management"
   },
   "channel": {
+    "task_owner_approval": "The signed-in owner must approve this action in Projects and Tasks. An unverified IM sender cannot grant approval.",
+    "task_command_unsupported": "/{command} is unavailable in a Task conversation. Use /help for Task commands; manage experts in their settings.",
+    "task_help": "Task commands: /new, /stop, /status, /model [provider/model | reset], /mode [ask | plan | craft], /compact, /pending, /reject [interaction ID], /respond <interaction ID> <answer>. Ordinary replies answer the next pending question. The signed-in owner grants tool approvals in Projects and Tasks.",
+    "task_status": "Task: {task_id}\nStatus: {status}\nMode: {mode}\nPending interactions: {pending}",
     "tool_hint_start": "🔧 Calling tool: {tool_name}",
     "tool_hint_end": "✅ {tool_name} done",
     "runtime": {
@@ -1045,6 +1051,24 @@
     "progress_call_reused": "A progress call ID cannot be reused for different text.",
     "artifacts_delivery_required": "This turn has successfully written standalone deliverable files but has no real attachment. Publish a file with publish_workspace_file, or explicitly list the deliverable files in publish_workspace_archive to create a ZIP. Verify status=attached before completing the last plan step or giving a final answer. A server path or an offer to package files later does not deliver them.",
     "publish_workspace_archive_description": "Package an explicit list of server-workspace-relative files into one immutable ZIP attachment and deliver it immediately. Preserve relative paths without scanning directories. Exclude internal configuration and unrelated files.",
-    "client_workspace_required": "This project targets the configured client directory. Server write_file, edit_file and execute cannot create a replacement directory or substitute for local project edits. Use declared client__ file or command tools. If the local channel is not ready, retain the original directory and wait for the client to connect; do not switch to a server directory, substitute a ZIP, or ask the user to select the directory again."
+    "client_workspace_required": "This project targets the configured client directory. Server write_file, edit_file and execute cannot create a replacement directory or substitute for local project edits. Use declared client__ file or command tools. If the local channel is not ready, retain the original directory and wait for the client to connect; do not switch to a server directory, substitute a ZIP, or ask the user to select the directory again.",
+    "task_action_mode_restricted": "The {mode} mode only allows reading and planning. Switch to execution mode to perform this action.",
+    "expert_profile_prompt": "Selected expert: {name}\nUse the following expert identity and professional guidance. The project determines the working directory.\n{content}",
+    "expert_memory_prompt": "Relevant memory of the selected expert:\n{content}",
+    "expert_memory_search_description": "Search the current expert memory within the authorized general and current work scopes.",
+    "expert_memory_get_description": "Read a memory returned by the current expert memory search.",
+    "task_team_prompt": "Use this task’s frozen team synchronously. Every member works only in the task’s project directory with the current user’s authorized capabilities. Do not use expert directories or launch or message legacy expert conversations. Delegate using the current roster and preserve member identity. The host coordinates commands and human approval.",
+    "task_file_paths": "File tools use / as the virtual root of the current Task workspace, for example /notes.txt. Use the server host directory for terminal or execute commands; do not prepend that host directory to file-tool paths. The client directory is a saved reference, not a host filesystem location."
+  },
+  "cli": {
+    "unified_tasks": {
+      "approval_hint": "Use /approve {interaction_id} or /deny {interaction_id}.",
+      "question_hint": "Use /answer {interaction_id} <answer>.",
+      "general": "General assistant",
+      "user_required": "Specify --user or configure the CLI default user.",
+      "unknown_command": "Unsupported command: {command}",
+      "new_draft": "New conversation draft. A task is created with its first message.",
+      "help": "Commands: /new /task /model <model> /mode ask|plan|craft /approve <interaction_id> /deny <interaction_id> /answer <interaction_id> <answer> /cancel [turn_id] /exit"
+    }
   }
 }

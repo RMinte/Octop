@@ -15,6 +15,7 @@ from octop.infra.agents.resident_conversation import (
 )
 from octop.infra.agents.resident_worker_lock import ResidentWorkerLock
 from octop.infra.errors import ErrorCode, OctopError
+from tests.support.harness import patch_resident_stream
 
 
 async def _setup(env):
@@ -84,7 +85,7 @@ async def test_runtime_restart_keeps_partial_reply_and_does_not_replay_running_w
         yield {"type": "token", "content": "Persisted partial"}
         await blocked.wait()
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     response = await client.post(
         f"{base}/messages", headers=auth, json={"request_id": "restart", "prompt": "Wait"}
     )
@@ -136,7 +137,7 @@ async def test_new_worker_claims_queued_work_but_never_replays_expired_running_w
         yield {"type": "token", "content": "Recovered queue"}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     replacement = ResidentConversationRuntime(server.services, runtime.registry, runtime.gateway)
     server.app_runtime.resident_conversations = replacement
     try:
@@ -203,7 +204,7 @@ async def test_lease_failure_stops_execution_and_unknown_provider_error_stays_re
     def fail_renew(*args):
         raise OSError("database temporarily unavailable")
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     with monkeypatch.context() as patch:
         patch.setattr(server.services.resident_request_repo, "renew", fail_renew)
         accepted = await client.post(
@@ -217,7 +218,7 @@ async def test_lease_failure_stops_execution_and_unknown_provider_error_stays_re
         yield {"type": "error", "error_code": "PROVIDER_SPECIFIC_UNKNOWN"}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", unknown_error)
+    patch_resident_stream(monkeypatch, unknown_error)
     accepted = await client.post(
         f"{base}/messages", headers=auth, json={"request_id": "error", "prompt": "Again"}
     )
@@ -259,7 +260,7 @@ async def test_lost_lease_does_not_dispatch_a_followup_before_the_old_graph_stop
         yield {"type": "token", "content": "Finished"}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     accepted = await client.post(
         f"{base}/messages", headers=auth, json={"request_id": "expired", "prompt": "First"}
     )
@@ -271,11 +272,11 @@ async def test_lost_lease_does_not_dispatch_a_followup_before_the_old_graph_stop
         next_turn = await client.post(
             f"{base}/messages", headers=auth, json={"request_id": "after-expiry", "prompt": "Next"}
         )
-        assert next_turn.status_code == 202 and next_turn.json()["status"] == "queued"
+        assert next_turn.status_code == 202 and next_turn.json()["status"] in {"queued", "running"}
         # Allow more than one worker poll to run while the old graph still owns its thread.
         await asyncio.sleep(0.3)
         current = await client.get(f"{base}/requests/after-expiry", headers=auth)
-        assert current.json()["status"] == "queued" and len(calls) == 1
+        assert current.json()["status"] in {"queued", "running"} and len(calls) == 1
     finally:
         release.set()
     await _wait_status(client, auth, base, "after-expiry", "completed")

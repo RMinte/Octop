@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { octopSettingsApi } from "../api/modules/settings";
+import { useTaskHost } from "../context/TaskHostContext";
+import { taskTransport } from "../api/taskTransport";
 
 export const DEFAULT_SERVER_TIMEZONE = "UTC";
 
@@ -52,13 +54,27 @@ async function fetchServerTimezone(): Promise<string> {
 
 /** Server timezone from config.json `default_timezone` (via GET /api/settings/timezone). */
 export function useServerTimezone(): string {
+  const { hostID } = useTaskHost();
   const [timezone, setTimezone] = useState(
     cachedTimezone ?? DEFAULT_SERVER_TIMEZONE,
   );
 
   useEffect(() => {
+    if (hostID) {
+      let active = true;
+      setTimezone(DEFAULT_SERVER_TIMEZONE);
+      void taskTransport(hostID)
+        .request<{ timezone: string }>("/settings/timezone")
+        .then((value) => {
+          if (active) setTimezone(value.timezone || DEFAULT_SERVER_TIMEZONE);
+        })
+        .catch(() => {});
+      return () => {
+        active = false;
+      };
+    }
     void fetchServerTimezone().then(setTimezone);
-  }, []);
+  }, [hostID]);
 
   return timezone;
 }

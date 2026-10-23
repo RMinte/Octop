@@ -886,6 +886,34 @@
     "TaskCreate": {
       "additionalProperties": false,
       "properties": {
+        "expected_configuration_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "发送时看到的任务配置版本；省略按初始版本 1 校验，防止旧队列沿用已变更的专家。",
+          "title": "Expected Configuration Revision"
+        },
+        "expected_project_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "发送时确认的项目版本；有值时须与当前项目一致。",
+          "title": "Expected Project Revision"
+        },
         "request_id": {
           "description": "本次发送的唯一标识；网络重试必须复用，相同标识不会重复执行。",
           "pattern": "^[A-Za-z0-9_-]{8,128}$",
@@ -913,6 +941,32 @@
         "options": {
           "$ref": "#/$defs/TaskExecutionOptions",
           "description": "本轮执行选项；省略时使用当前项目及默认模型，不修改项目。"
+        },
+        "selected_expert_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "可选本人专家、本人团队或已授权共享专家的 agent_id；null 使用通用助手。",
+          "title": "Selected Expert Id"
+        },
+        "action_mode": {
+          "default": "craft",
+          "description": "ask 问答、plan 规划、craft 执行；服务端约束工具能力。",
+          "enum": [
+            "ask",
+            "plan",
+            "craft"
+          ],
+          "title": "Action Mode",
+          "type": "string"
         },
         "web_search_enabled": {
           "default": true,
@@ -955,6 +1009,19 @@
     "TaskExecutionOptions": {
       "additionalProperties": false,
       "properties": {
+        "expert_memory_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮是否使用所选专家的长期记忆；省略遵循专家策略，false 禁用召回和采集。",
+          "title": "Expert Memory Enabled"
+        },
         "action_timeline_enabled": {
           "anyOf": [
             {
@@ -1195,6 +1262,34 @@
     "TaskMessage": {
       "additionalProperties": false,
       "properties": {
+        "expected_configuration_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "发送时看到的任务配置版本；省略按初始版本 1 校验，防止旧队列沿用已变更的专家。",
+          "title": "Expected Configuration Revision"
+        },
+        "expected_project_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "发送时确认的项目版本；有值时须与当前项目一致。",
+          "title": "Expected Project Revision"
+        },
         "request_id": {
           "description": "本次发送的唯一标识；网络重试必须复用，相同标识不会重复执行。",
           "pattern": "^[A-Za-z0-9_-]{8,128}$",
@@ -1233,6 +1328,32 @@
     "TaskRetry": {
       "additionalProperties": false,
       "properties": {
+        "expected_configuration_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Configuration Revision"
+        },
+        "expected_project_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Project Revision"
+        },
         "request_id": {
           "description": "本次重试的唯一标识；网络重传必须复用。",
           "pattern": "^[A-Za-z0-9_-]{8,128}$",
@@ -2028,6 +2149,181 @@
       "title": "InteractionResolution",
       "type": "object"
     },
+    "LegacySourceAttachment": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "media_type": {
+          "default": "application/octet-stream",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "source_agent_id": {
+          "title": "Source Agent Id",
+          "type": "string"
+        },
+        "workspace_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Path"
+        },
+        "download_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "原专家工作区的鉴权下载地址；未复制到新任务目录。",
+          "title": "Download Url"
+        },
+        "available": {
+          "description": "接入时可在原工作区读取；不可达资源明确保留为缺失引用。",
+          "title": "Available",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "source_agent_id",
+        "available"
+      ],
+      "title": "LegacySourceAttachment",
+      "type": "object"
+    },
+    "LegacyTrajectoryEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "source_event_id": {
+          "title": "Source Event Id",
+          "type": "string"
+        },
+        "source_sequence": {
+          "title": "Source Sequence",
+          "type": "integer"
+        },
+        "source_turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Turn Id"
+        },
+        "source_agent_id": {
+          "title": "Source Agent Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "speaker_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Speaker Agent Id"
+        },
+        "speaker_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Speaker Name"
+        },
+        "source_status": {
+          "default": "recorded",
+          "enum": [
+            "recorded",
+            "incomplete",
+            "redacted"
+          ],
+          "title": "Source Status",
+          "type": "string"
+        },
+        "mapping": {
+          "default": "source_thread",
+          "enum": [
+            "tool_call",
+            "message",
+            "source_thread"
+          ],
+          "title": "Mapping",
+          "type": "string"
+        },
+        "history_only": {
+          "const": true,
+          "default": true,
+          "title": "History Only",
+          "type": "boolean"
+        },
+        "restorable": {
+          "const": false,
+          "default": false,
+          "title": "Restorable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_event_id",
+        "source_sequence",
+        "source_agent_id",
+        "kind"
+      ],
+      "title": "LegacyTrajectoryEvent",
+      "type": "object"
+    },
     "MissingImportAttachment": {
       "additionalProperties": false,
       "properties": {
@@ -2345,6 +2641,87 @@
       "title": "TaskArtifact",
       "type": "object"
     },
+    "TaskConfigurationEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        },
+        "previous_expert_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Previous Expert Id"
+        },
+        "selected_expert_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Selected Expert Id"
+        },
+        "selected_expert_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Expert Name"
+        },
+        "previous_action_mode": {
+          "enum": [
+            "ask",
+            "plan",
+            "craft"
+          ],
+          "title": "Previous Action Mode",
+          "type": "string"
+        },
+        "action_mode": {
+          "enum": [
+            "ask",
+            "plan",
+            "craft"
+          ],
+          "title": "Action Mode",
+          "type": "string"
+        },
+        "configuration_revision": {
+          "title": "Configuration Revision",
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "previous_expert_id",
+        "selected_expert_id",
+        "previous_action_mode",
+        "action_mode",
+        "configuration_revision",
+        "created_at"
+      ],
+      "title": "TaskConfigurationEvent",
+      "type": "object"
+    },
     "TaskContentBlock": {
       "additionalProperties": false,
       "properties": {
@@ -2419,6 +2796,32 @@
           "default": null,
           "description": "服务端本地化的工具动作名称。",
           "title": "Tool Label"
+        },
+        "speaker_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "实际发言专家的持久标识；团队成员不会合并为主持人。",
+          "title": "Speaker Agent Id"
+        },
+        "speaker_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "执行时保存的专家显示名称。",
+          "title": "Speaker Name"
         },
         "brief": {
           "anyOf": [
@@ -3068,6 +3471,155 @@
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
+        "history_only": {
+          "default": false,
+          "title": "History Only",
+          "type": "boolean"
+        },
+        "source_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Task Id"
+        },
+        "source_turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Turn Id"
+        },
+        "source_thread_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Thread Id"
+        },
+        "source_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Agent Id"
+        },
+        "legacy_attachments": {
+          "items": {
+            "$ref": "#/$defs/LegacySourceAttachment"
+          },
+          "title": "Legacy Attachments",
+          "type": "array"
+        },
+        "source_trajectory": {
+          "items": {
+            "$ref": "#/$defs/LegacyTrajectoryEvent"
+          },
+          "title": "Source Trajectory",
+          "type": "array"
+        },
+        "source_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Status"
+        },
+        "server_directory": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server Directory"
+        },
+        "client_directory": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Directory"
+        },
+        "selected_expert_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Expert Id"
+        },
+        "expert_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expert Name"
+        },
+        "expert_config_revision": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expert Config Revision"
+        },
+        "action_mode": {
+          "default": "craft",
+          "enum": [
+            "ask",
+            "plan",
+            "craft"
+          ],
+          "title": "Action Mode",
+          "type": "string"
+        },
         "imported_history": {
           "anyOf": [
             {
@@ -3370,6 +3922,38 @@
     "TaskDetail": {
       "additionalProperties": false,
       "properties": {
+        "selected_expert_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Expert Id"
+        },
+        "configuration_revision": {
+          "default": 1,
+          "title": "Configuration Revision",
+          "type": "integer"
+        },
+        "action_mode": {
+          "default": "craft",
+          "enum": [
+            "ask",
+            "plan",
+            "craft"
+          ],
+          "title": "Action Mode",
+          "type": "string"
+        },
+        "pinned": {
+          "default": false,
+          "title": "Pinned",
+          "type": "boolean"
+        },
         "import_source": {
           "anyOf": [
             {
@@ -3474,6 +4058,13 @@
           "title": "Updated At",
           "type": "string"
         },
+        "configuration_events": {
+          "items": {
+            "$ref": "#/$defs/TaskConfigurationEvent"
+          },
+          "title": "Configuration Events",
+          "type": "array"
+        },
         "turns": {
           "items": {
             "$ref": "#/$defs/TaskTurn"
@@ -3528,6 +4119,38 @@
     "TaskSummary": {
       "additionalProperties": false,
       "properties": {
+        "selected_expert_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Expert Id"
+        },
+        "configuration_revision": {
+          "default": 1,
+          "title": "Configuration Revision",
+          "type": "integer"
+        },
+        "action_mode": {
+          "default": "craft",
+          "enum": [
+            "ask",
+            "plan",
+            "craft"
+          ],
+          "title": "Action Mode",
+          "type": "string"
+        },
+        "pinned": {
+          "default": false,
+          "title": "Pinned",
+          "type": "boolean"
+        },
         "import_source": {
           "anyOf": [
             {
@@ -4380,6 +5003,12 @@
     },
     "ServerEvent": {
       "oneOf": [
+        {
+          "$ref": "#/$defs/LegacyTrajectoryEvent"
+        },
+        {
+          "$ref": "#/$defs/TaskConfigurationEvent"
+        },
         {
           "$ref": "#/$defs/ReadyEvent"
         },

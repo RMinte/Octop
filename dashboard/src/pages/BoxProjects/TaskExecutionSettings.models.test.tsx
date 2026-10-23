@@ -9,7 +9,8 @@ import {
 import zh from "../../locales/zh.json";
 import TaskExecutionSettings from "./TaskExecutionSettings";
 
-vi.mock("../../api/modules/projects", () => ({
+vi.mock("../../api/modules/projects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/modules/projects")>()),
   projectTasksApi: { resources: vi.fn() },
 }));
 vi.mock("react-i18next", () => {

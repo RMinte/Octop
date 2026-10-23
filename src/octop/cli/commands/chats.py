@@ -1,19 +1,72 @@
-"""octop chats — thread CRUD + interactive REPL (CLI channel / local DB)."""
+"""Unified Task conversation CRUD, streaming and interactive REPL."""
 
 from __future__ import annotations
 
-import json as _json
-import sys
+import asyncio
+import json
+import uuid
+from dataclasses import asdict
 from typing import Any
 
 import click
 
-from octop.cli.support.ctx import json_output_enabled, require_agent
-from octop.infra.utils.paths import PathLayout
+from octop.cli.support.ctx import json_output_enabled
+from octop.i18n import tr
+from octop.infra.errors import OctopError
+from octop.infra.projects import cli_sessions, tasks
+
+
+def _expert(explicit: str | None) -> str | None:
+    if explicit is not None:
+        return explicit
+    ctx = click.get_current_context(silent=True)
+    return (ctx.find_root().obj or {}).get("agent_id") if ctx else None
+
+
+def _owner(services: Any, username: str | None, agent_id: str | None = None) -> int:
+    from octop.cli.support.ctx import resolve_user
+    from octop.cli.support.state import default_state_path, load
+    from octop.infra.users.acting import resolve_acting_user_id
+
+    return resolve_acting_user_id(
+        services,
+        as_username=resolve_user(username),
+        pinned_username=load(default_state_path()).default_user,
+        agent_id=agent_id,
+    )
+
+
+def _options(function: Any) -> Any:
+    for decorator in reversed(
+        [
+            click.option("--expert", "--agent", "agent_id", default=None),
+            click.option("--no-expert", is_flag=True, default=False),
+            click.option("--user", "as_user", default=None),
+            click.option("--project", "project_id", default=None),
+            click.option("--task-id", default=None),
+            click.option(
+                "--thread-id",
+                default=None,
+                help="Resolve an old thread through its migration route.",
+            ),
+            click.option("--request-id", default=None),
+            click.option("--session-key", default="default"),
+            click.option("--model", default=None),
+            click.option(
+                "--mode",
+                "conversation_mode",
+                type=click.Choice(["ask", "plan", "craft"]),
+                default=None,
+            ),
+            click.option("--plain", is_flag=True),
+        ]
+    ):
+        function = decorator(function)
+    return function
 
 
 def _run_turn(
-    agent_id: str,
+    agent_id: str | None,
     prompt: str,
     *,
     session_key: str,
@@ -22,386 +75,279 @@ def _run_turn(
     conversation_mode: str | None = None,
     plain: bool = False,
     as_user: str | None = None,
+    task_id: str | None = None,
+    request_id: str | None = None,
+    project_id: str | None = None,
+    no_expert: bool = False,
 ) -> Any:
-    import asyncio
-
     from octop.cli.repl.render import ChunkRenderer
     from octop.cli.repl.runtime import run_chat_turn_async
-    from octop.cli.repl.turn import ChatTurnResult
 
-    renderer = ChunkRenderer(plain=plain)
-    renderer.begin_turn()
-    actions: list[dict[str, Any]] = []
-
-    def on_chunk(chunk: dict[str, Any]) -> None:
-        if chunk.get("type") == "slash_action":
-            actions.append(chunk)
-        renderer.feed(chunk)
-
-    asyncio.run(
-        run_chat_turn_async(
-            agent_id,
-            prompt,
-            as_user=as_user,
-            session_key=session_key,
-            thread_id=thread_id,
-            model=model,
-            conversation_mode=conversation_mode,
-            on_chunk=on_chunk,
+    renderer = None if json_output_enabled() else ChunkRenderer(plain=plain)
+    if renderer:
+        renderer.begin_turn()
+    try:
+        result = asyncio.run(
+            run_chat_turn_async(
+                agent_id,
+                prompt,
+                as_user=as_user,
+                session_key=session_key,
+                thread_id=thread_id,
+                model=model,
+                conversation_mode=conversation_mode,
+                on_chunk=renderer.feed if renderer else lambda _chunk: None,
+                task_id=task_id,
+                request_id=request_id,
+                project_id=project_id,
+                no_expert=no_expert,
+            )
         )
-    )
-    renderer.finish_turn()
-    return ChatTurnResult(
-        text=renderer.token_buffer or "",
-        actions=actions,
-        elapsed=renderer.last_elapsed,
-    )
-
-
-def _apply_slash_actions(
-    result: Any,
-    *,
-    agent_id: str,
-    repl_state: Any | None = None,
-    model_holder: list[str | None] | None = None,
-) -> str:
-    """Apply slash side-effects; return possibly updated agent_id."""
-    holder: list[str | None] = model_holder if model_holder is not None else [None]
-    for act in result.actions:
-        name = str(act.get("action", ""))
-        if name == "switch_agent" and act.get("agent_id"):
-            agent_id = str(act["agent_id"])
-            click.echo(click.style(f"switched agent → {agent_id}", fg="cyan"))
-        elif name == "set_model" and act.get("model"):
-            holder[0] = str(act["model"])
-            click.echo(click.style(f"model → {holder[0]}", fg="cyan"))
-        elif name == "clear_model":
-            holder[0] = None
-            click.secho("model override cleared", fg="cyan")
-        elif name == "new_chat" and repl_state is not None:
-            repl_state.on_new_chat(act.get("thread_id"))
-        elif name == "rebind_thread" and repl_state is not None:
-            repl_state.on_rebind_thread(act.get("thread_id"))
-        elif name == "set_conversation_mode" and repl_state is not None:
-            mode = str(act.get("mode") or "").strip()
-            if mode in ("ask", "plan", "craft"):
-                repl_state.conversation_mode = mode
-                click.echo(click.style(f"mode → {mode}", fg="cyan"))
-    return agent_id
+    except (OctopError, ValueError) as exc:
+        raise click.ClickException(
+            exc.message if isinstance(exc, OctopError) else str(exc)
+        ) from exc
+    finally:
+        if renderer:
+            renderer.finish_turn()
+    if json_output_enabled():
+        click.echo(json.dumps(asdict(result), ensure_ascii=False))
+    if result.status in {"failed", "interrupted"}:
+        raise click.exceptions.Exit(1)
+    return result
 
 
 @click.group("chats")
 def chats() -> None:
-    """Thread list/history and interactive chat (CLI channel / local DB)."""
+    """Task conversation list/history, message streaming and REPL."""
 
 
 @chats.command("list")
-@click.option("--agent", "agent_id", default=None)
-@click.option("--user", "as_user", default=None, help="Admin: act as user (username).")
-@click.option("--limit", default=50, show_default=True)
-def list_chats(agent_id: str | None, as_user: str | None, limit: int) -> None:
-    """List conversation threads for an agent."""
-    from rich.console import Console
-    from rich.table import Table
+@click.option("--expert", "--agent", "agent_id", default=None)
+@click.option("--user", "as_user", default=None)
+@click.option("--project", "project_id", default=None)
+@click.option("--limit", default=50, type=click.IntRange(1, 100))
+def list_chats(
+    agent_id: str | None, as_user: str | None, project_id: str | None, limit: int
+) -> None:
+    from octop.cli.support.db import open_cli_services
 
-    from octop.cli.support.db import list_threads_offline
-
-    aid = require_agent(agent_id)
-    try:
-        rows = list_threads_offline(agent_id=aid, as_user=as_user, limit=limit)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    if json_output_enabled():
-        click.echo(_json.dumps(rows, indent=2))
-        return
-    table = Table(title="Threads")
-    for col in ("thread_id", "title", "is_active", "last_active"):
-        table.add_column(col)
-    for row in rows:
-        table.add_row(
-            str(row.get("thread_id", "")),
-            row.get("title", "") or "",
-            "✓" if row.get("is_active") else "",
-            str(row.get("last_active", "") or ""),
-        )
-    Console(file=sys.stdout).print(table)
+    with open_cli_services() as services:
+        try:
+            rows = cli_sessions.listing(
+                services,
+                _owner(services, as_user, _expert(agent_id)),
+                limit=limit,
+                expert_id=_expert(agent_id),
+                project_id=project_id,
+            )
+        except (OctopError, ValueError) as exc:
+            raise click.ClickException(
+                exc.message if isinstance(exc, OctopError) else str(exc)
+            ) from exc
+    click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
 
 
 @chats.command("get")
-@click.argument("thread_id")
+@click.argument("identifier")
 @click.option("--agent", "agent_id", default=None)
 @click.option("--user", "as_user", default=None)
-@click.option("--limit", default=50, show_default=True)
-def get_chat(thread_id: str, agent_id: str | None, as_user: str | None, limit: int) -> None:
-    """Show message history for a thread."""
-    from octop.cli.support.embedded_ops import fetch_thread_history
-    from octop.cli.support.offline_ops import resolve_cron_user_id
-    from octop.infra.errors import OctopError
+@click.option("--limit", default=50, type=click.IntRange(1, 100))
+def get_chat(identifier: str, agent_id: str | None, as_user: str | None, limit: int) -> None:
+    from octop.cli.support.db import open_cli_services
 
-    aid = require_agent(agent_id)
-    try:
-        resolve_cron_user_id(aid, as_user)
-        data = fetch_thread_history(aid, thread_id, limit=limit)
-    except OctopError as exc:
-        raise click.ClickException(exc.message) from exc
-    click.echo(_json.dumps(data, indent=2, default=str))
+    with open_cli_services() as services:
+        try:
+            owner_id = _owner(services, as_user, _expert(agent_id))
+            task_id = cli_sessions.resolve_task(services, owner_id, identifier)
+            result = tasks.detail(services, owner_id, task_id, limit=limit)
+        except (OctopError, ValueError) as exc:
+            raise click.ClickException(
+                exc.message if isinstance(exc, OctopError) else str(exc)
+            ) from exc
+        click.echo(result.model_dump_json(indent=2))
 
 
 @chats.command("create")
-@click.option("--agent", "agent_id", default=None)
-@click.option("--user", "as_user", default=None)
-def create_chat(agent_id: str | None, as_user: str | None) -> None:
-    """Start a new thread (/new equivalent)."""
-    from octop.cli.support.offline_ops import create_thread_offline, resolve_cron_user_id
-    from octop.infra.errors import OctopError
-
-    aid = require_agent(agent_id)
-    try:
-        uid = resolve_cron_user_id(aid, as_user)
-        data = create_thread_offline(agent_id=aid, user_id=uid)
-    except OctopError as exc:
-        raise click.ClickException(exc.message) from exc
-    click.echo(_json.dumps(data, indent=2))
+@click.argument("prompt")
+@_options
+def create_chat(prompt: str, **options: Any) -> None:
+    """Create a Task with its first actual user message."""
+    if options["task_id"] or options["thread_id"]:
+        raise click.UsageError("create: --task-id / --thread-id")
+    event_id = options["request_id"] or uuid.uuid4().hex
+    options["session_key"] = "create:" + event_id
+    options["request_id"] = event_id
+    agent_id = _expert(options.pop("agent_id"))
+    _run_turn(agent_id, prompt, **options)
 
 
 @chats.command("update")
-@click.argument("thread_id")
+@click.argument("identifier")
 @click.option("--agent", "agent_id", default=None)
 @click.option("--user", "as_user", default=None)
 @click.option("--title", default=None)
 @click.option("--pinned/--unpinned", default=None)
 def update_chat(
-    thread_id: str,
+    identifier: str,
     agent_id: str | None,
     as_user: str | None,
     title: str | None,
     pinned: bool | None,
 ) -> None:
-    """Rename or pin a thread."""
-    if title is None and pinned is None:
-        raise click.ClickException("pass --title and/or --pinned/--unpinned")
-    aid = require_agent(agent_id)
-    from octop.cli.support.offline_ops import resolve_cron_user_id, update_thread_offline
-    from octop.infra.errors import OctopError
+    from octop.cli.support.db import open_cli_services
 
-    try:
-        resolve_cron_user_id(aid, as_user)
-        data = update_thread_offline(aid, thread_id, title=title, pinned=pinned)
-    except OctopError as exc:
-        raise click.ClickException(exc.message) from exc
-    click.echo(_json.dumps(data, indent=2))
+    if title is None and pinned is None:
+        raise click.UsageError("--title / --pinned / --unpinned")
+    with open_cli_services() as services:
+        try:
+            owner_id = _owner(services, as_user, _expert(agent_id))
+            task_id = cli_sessions.resolve_task(services, owner_id, identifier)
+            current = tasks.detail(services, owner_id, task_id)
+            changes: dict[str, Any] = {}
+            if title is not None:
+                changes["title"] = title
+            if pinned is not None:
+                changes["pinned"] = pinned
+            result = tasks.patch(
+                services,
+                owner_id,
+                task_id,
+                tasks.TaskPatch(expected_revision=current.list_revision, **changes),
+            )
+        except (OctopError, ValueError) as exc:
+            raise click.ClickException(
+                exc.message if isinstance(exc, OctopError) else str(exc)
+            ) from exc
+        click.echo(result.model_dump_json(indent=2))
 
 
 @chats.command("delete")
-@click.argument("thread_id")
+@click.argument("identifier")
 @click.option("--agent", "agent_id", default=None)
 @click.option("--user", "as_user", default=None)
-@click.option("--yes", is_flag=True, default=False)
-def delete_chat(thread_id: str, agent_id: str | None, as_user: str | None, yes: bool) -> None:
-    """Delete a thread."""
-    from octop.cli.support.offline_ops import delete_thread_offline, resolve_cron_user_id
-    from octop.infra.errors import OctopError
+@click.option("--yes", is_flag=True)
+def delete_chat(identifier: str, agent_id: str | None, as_user: str | None, yes: bool) -> None:
+    from octop.cli.support.db import open_cli_services
 
     if not yes:
-        click.confirm(f"Really delete thread {thread_id}?", abort=True)
-    aid = require_agent(agent_id)
-    try:
-        resolve_cron_user_id(aid, as_user)
-        delete_thread_offline(aid, thread_id)
-    except OctopError as exc:
-        raise click.ClickException(exc.message) from exc
-    click.echo("deleted")
+        click.confirm(identifier, abort=True)
+    with open_cli_services() as services:
+        try:
+            owner_id = _owner(services, as_user, _expert(agent_id))
+            tasks.delete(
+                services, owner_id, cli_sessions.resolve_task(services, owner_id, identifier)
+            )
+        except (OctopError, ValueError) as exc:
+            raise click.ClickException(
+                exc.message if isinstance(exc, OctopError) else str(exc)
+            ) from exc
+    click.echo(json.dumps({"deleted": identifier}))
 
 
 @chats.command("send")
 @click.argument("prompt")
-@click.option("--agent", "agent_id", default=None)
-@click.option("--session-key", default="default")
-@click.option("--thread-id", default=None, help="Pin this thread for every turn.")
-@click.option("--model", default=None)
-@click.option(
-    "--mode",
-    "conversation_mode",
-    type=click.Choice(["ask", "plan", "craft"], case_sensitive=False),
-    default=None,
-    help="Ask (read-only), Plan (write plans/*.md), or Default (craft).",
-)
-@click.option("--plain", is_flag=True, help="Raw token stream (no Markdown finish).")
-def send_chat(
-    prompt: str,
-    agent_id: str | None,
-    session_key: str,
-    thread_id: str | None,
-    model: str | None,
-    conversation_mode: str | None,
-    plain: bool,
-) -> None:
-    """Send one message and stream the response (CLI channel)."""
-    aid = require_agent(agent_id)
-    _run_turn(
-        aid,
-        prompt,
-        session_key=session_key,
-        thread_id=thread_id,
-        model=model,
-        conversation_mode=conversation_mode,
-        plain=plain,
-    )
+@_options
+def send_chat(prompt: str, **options: Any) -> None:
+    """Send or continue a Task, with an optional expert and project."""
+    agent_id = _expert(options.pop("agent_id"))
+    _run_turn(agent_id, prompt, **options)
 
 
 @chats.command("repl")
-@click.option("--agent", "agent_id", default=None)
-@click.option(
-    "--user", "as_user", default=None, help="Act as user (username); defaults to agent owner."
-)
-@click.option("--session-key", default="cli")
-@click.option("--thread-id", default=None, help="Pin this thread for every turn.")
-@click.option("--model", default=None)
-@click.option(
-    "--mode",
-    "conversation_mode",
-    type=click.Choice(["ask", "plan", "craft"], case_sensitive=False),
-    default=None,
-    help="Ask (read-only), Plan (write plans/*.md), or Default (craft).",
-)
-@click.option("--plain", is_flag=True, help="Raw token stream (no Markdown finish).")
+@_options
 def repl(
     agent_id: str | None,
+    no_expert: bool,
     as_user: str | None,
-    session_key: str,
+    project_id: str | None,
+    task_id: str | None,
     thread_id: str | None,
+    request_id: str | None,
+    session_key: str,
     model: str | None,
     conversation_mode: str | None,
     plain: bool,
 ) -> None:
-    """Interactive chat REPL (embedded server + CLI gateway channel)."""
-    import asyncio
-
+    """Keep a Task conversation across interactive turns."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
 
-    from octop.cli.repl.embedded_session import embedded_chat_server
-    from octop.cli.repl.render import print_slash_help, print_welcome
-    from octop.cli.repl.runtime import (
-        CliChatSession,
-        resolve_embedded_user_id,
-    )
-    from octop.cli.repl.session import ReplSession
-    from octop.cli.repl.toolbar import format_repl_toolbar
+    from octop.cli.repl.embedded_session import embedded_task_runtime
+    from octop.cli.repl.render import ChunkRenderer, print_welcome
+    from octop.cli.repl.runtime import CliChatSession, resolve_embedded_user_id
+    from octop.infra.utils.paths import PathLayout
 
-    aid = require_agent(agent_id)
-    repl_state = ReplSession(
-        agent_id=aid,
-        session_key=session_key,
-        model=model,
-        thread_id=thread_id,
-        conversation_mode=conversation_mode,
-    )
-    print_welcome(
-        agent_id=aid,
-        model=repl_state.model_label,
-        session_key=session_key,
-        thread_id=repl_state.thread_id,
-    )
-
+    chosen_expert = _expert(agent_id)
     history_path = PathLayout.from_env().root / "repl_history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(history_path)),
-        bottom_toolbar=lambda: format_repl_toolbar(repl_state),
+    prompt_session: PromptSession[str] = PromptSession(history=FileHistory(str(history_path)))
+    print_welcome(
+        agent_id=chosen_expert or tr("cli.unified_tasks.general", "zh"),
+        model=model or "default",
+        session_key=session_key,
+        thread_id=task_id or thread_id,
     )
 
-    async def _run_repl_turn(chat: CliChatSession, agent: str, text: str) -> Any:
-        from octop.cli.repl.render import ChunkRenderer
-        from octop.cli.repl.turn import ChatTurnResult
-
-        renderer = ChunkRenderer(plain=plain)
-        renderer.begin_turn()
-        actions: list[dict[str, Any]] = []
-
-        def on_chunk(chunk: dict[str, Any]) -> None:
-            if chunk.get("type") == "slash_action":
-                actions.append(chunk)
-            renderer.feed(chunk)
-
-        await chat.run_turn(
-            agent,
-            text,
-            session_key=session_key,
-            thread_id=repl_state.thread_id_for_send(),
-            model=repl_state.model,
-            conversation_mode=repl_state.conversation_mode,
-            on_chunk=on_chunk,
-        )
-        renderer.finish_turn()
-        return ChatTurnResult(
-            text=renderer.token_buffer or "",
-            actions=actions,
-            elapsed=renderer.last_elapsed,
-        )
-
-    async def _loop() -> None:
-        async with embedded_chat_server() as server:
-            user_id = resolve_embedded_user_id(server, agent_id=aid, as_user=as_user)
+    async def loop() -> None:
+        async with embedded_task_runtime() as server:
+            user_id = resolve_embedded_user_id(server, agent_id=chosen_expert, as_user=as_user)
             chat = CliChatSession(server, user_id=user_id)
-            current_agent = aid
+            current_model, current_mode, current_expert = model, conversation_mode, chosen_expert
+            current_no_expert = no_expert
+            current_task, old_thread = task_id, thread_id
+            next_request_id = request_id
             try:
                 while True:
                     try:
-                        text = await asyncio.to_thread(session.prompt, "> ")
+                        text = (await asyncio.to_thread(prompt_session.prompt, "> ")).strip()
                     except (EOFError, KeyboardInterrupt):
-                        click.echo("\nbye")
                         break
-                    text = text.strip()
                     if not text:
                         continue
-                    if text in ("/exit", "/quit"):
+                    if text in {"/exit", "/quit"}:
                         break
-                    if text == "/help":
-                        from octop.cli.support.db import resolve_cli_locale
-
-                        include_hitl = False
-                        if server.app_runtime is not None:
-                            from octop.infra.agents.security import (
-                                tool_execution_may_pause,
-                            )
-
-                            include_hitl = tool_execution_may_pause(
-                                server.app_runtime.agent_registry.security.load()
-                            )
-                        print_slash_help(
-                            locale=resolve_cli_locale(),
-                            include_hitl_approval=include_hitl,
-                        )
-                        continue
                     if text == "/clear":
                         click.echo()
                         continue
-                    if text == "/thread":
-                        tid = repl_state.thread_id
-                        if tid:
-                            pin = " (pinned)" if repl_state.pin_thread else ""
-                            click.echo(f"{tid}{pin}")
-                        else:
-                            click.echo("(server binds thread via session_key)")
+                    renderer = ChunkRenderer(plain=plain)
+                    renderer.begin_turn()
+                    try:
+                        result = await chat.run_turn(
+                            current_expert,
+                            text,
+                            session_key=session_key,
+                            thread_id=old_thread,
+                            model=current_model,
+                            conversation_mode=current_mode,
+                            on_chunk=renderer.feed,
+                            task_id=current_task,
+                            request_id=next_request_id or uuid.uuid4().hex,
+                            project_id=project_id,
+                            no_expert=current_no_expert,
+                        )
+                        next_request_id = None
+                    except (OctopError, ValueError) as exc:
+                        click.echo(
+                            exc.message if isinstance(exc, OctopError) else str(exc), err=True
+                        )
                         continue
-                    click.echo()
-                    result = await _run_repl_turn(chat, current_agent, text)
-                    repl_state.last_elapsed = result.elapsed
-                    repl_state.apply_slash_text(result.text)
-                    model_holder: list[str | None] = [repl_state.model]
-                    current_agent = _apply_slash_actions(
-                        result,
-                        agent_id=current_agent,
-                        repl_state=repl_state,
-                        model_holder=model_holder,
-                    )
-                    repl_state.agent_id = current_agent
-                    repl_state.model = model_holder[0]
-                    if session.app is not None:
-                        session.app.invalidate()
+                    finally:
+                        renderer.finish_turn()
+                    for action in result.actions:
+                        if action["action"] == "set_model":
+                            current_model = action["model"]
+                        elif action["action"] == "clear_model":
+                            current_model = None
+                        elif action["action"] == "set_conversation_mode":
+                            current_mode = action["mode"]
+                        elif action["action"] == "switch_agent":
+                            current_expert = action.get("agent_id")
+                            current_no_expert = current_expert is None
+                        elif action["action"] == "new_chat":
+                            current_task, old_thread = None, None
                     click.echo()
             finally:
                 chat.close()
 
-    asyncio.run(_loop())
+    asyncio.run(loop())

@@ -7,7 +7,8 @@ import {
 } from "../../api/modules/projects";
 import { useTaskConversation } from "./useTaskConversation";
 
-vi.mock("../../api/modules/projects", () => ({
+vi.mock("../../api/modules/projects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/modules/projects")>()),
   projectTasksApi: { open: vi.fn(), get: vi.fn(), events: vi.fn() },
 }));
 vi.mock("react-i18next", () => {

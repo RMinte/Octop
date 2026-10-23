@@ -1,4 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import {
+  taskWorkbenchApi,
+  createTaskWorkbenchApi,
+} from "../api/modules/taskWorkbench";
 import { getAuthToken } from "../api/request";
 import { normalizeUrl } from "../utils/normalizeUrl";
 import {
@@ -29,6 +33,9 @@ interface BrowserStreamCallbacks {
 }
 
 interface ConnectOptions {
+  taskHostID?: string | null;
+  taskID?: string;
+  scopeRevision?: string;
   /** Harness profile for the current user. The WebSocket also binds from JWT. */
   sessionId?: string | null;
   /** When set, screencast is relayed to the peer Octop via Bridge. */
@@ -106,7 +113,17 @@ export function useBrowserStream() {
         wsRef.current.close();
       }
 
-      const wsUrl = buildWsUrl(width, height, options.bridgeConnectionId);
+      const wsUrl = options.taskID
+        ? (options.taskHostID
+            ? createTaskWorkbenchApi(options.taskHostID)
+            : taskWorkbenchApi
+          ).browserStreamUrl(
+            options.taskID,
+            width,
+            height,
+            options.scopeRevision ?? "",
+          )
+        : buildWsUrl(width, height, options.bridgeConnectionId);
       let ws: WebSocket;
       try {
         ws = new WebSocket(wsUrl);
@@ -124,7 +141,7 @@ export function useBrowserStream() {
           height,
           reuse_session: true,
         };
-        if (options.sessionId) {
+        if (options.sessionId && !options.taskID) {
           startMsg.session_id = options.sessionId;
         }
         ws.send(JSON.stringify(startMsg));

@@ -2195,11 +2195,150 @@ def _ensure_independent_projects_schema(db: DatabasePool) -> None:
             )
 
 
+def _ensure_optional_entrypoint_experts(db: DatabasePool) -> None:
+    tables = tuple(table for table in ("channels", "cron_jobs") if _table_exists(db, table))
+    if not tables:
+        return
+    first_expert_column = "cron_jobs" in tables and "selected_expert_id" not in _table_columns(
+        db, "cron_jobs"
+    )
+    if db.dialect == "sqlite":
+        # SQLite cannot remove NOT NULL with ALTER. Rebuild only old tables,
+        # preserving ids, child foreign keys and all original configuration.
+        for table in tables:
+            with db.connect() as conn:
+                columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                original = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()["sql"]
+                old_unique = table == "channels" and re.search(
+                    r"UNIQUE\s*\(\s*agent_id\s*,\s*name\s*\)", original, re.IGNORECASE
+                )
+                if not old_unique and not any(
+                    row["name"] == "agent_id" and row["notnull"] for row in columns
+                ):
+                    continue
+                # Preserve columns from a partially applied unreleased version,
+                # including explicitly cleared expert choices.
+                ddl = re.sub(
+                    r"\bagent_id\s+TEXT\s+NOT\s+NULL\b",
+                    "agent_id TEXT",
+                    original,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                if old_unique:
+                    ddl = re.sub(
+                        r"UNIQUE\s*\(\s*agent_id\s*,\s*name\s*\)",
+                        "UNIQUE(user_id,agent_id,name)",
+                        ddl,
+                        flags=re.IGNORECASE,
+                    )
+                ddl = re.sub(
+                    rf"CREATE TABLE\s+\"?{table}\"?",
+                    f"CREATE TABLE {table}_unified",
+                    ddl,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                extra = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL",
+                    (table,),
+                ).fetchall()
+                names = ",".join('"' + str(row["name"]).replace('"', '""') + '"' for row in columns)
+                conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(ddl)
+                    conn.execute(
+                        f"INSERT INTO {table}_unified({names}) SELECT {names} FROM {table}"
+                    )
+                    conn.execute(f"DROP TABLE {table}")
+                    conn.execute(f"ALTER TABLE {table}_unified RENAME TO {table}")
+                    for row in extra:
+                        conn.execute(row["sql"])
+                    if conn.execute("PRAGMA foreign_key_check").fetchall():
+                        raise RuntimeError("Optional expert upgrade violated a foreign key")
+                    conn.execute("COMMIT")
+                except BaseException:
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
+                    raise
+                finally:
+                    conn.execute("PRAGMA foreign_keys=ON")
+    else:
+        with db.transaction() as conn:
+            for table in tables:
+                conn.execute(f"ALTER TABLE {table} ALTER COLUMN agent_id DROP NOT NULL")
+            if "channels" in tables:
+                conn.execute(
+                    "ALTER TABLE channels DROP CONSTRAINT IF EXISTS channels_agent_id_name_key"
+                )
+                if not conn.execute(
+                    "SELECT 1 FROM pg_constraint WHERE conname='channels_owner_expert_name_key' AND conrelid='channels'::regclass"
+                ).fetchone():
+                    conn.execute(
+                        "ALTER TABLE channels ADD CONSTRAINT channels_owner_expert_name_key UNIQUE(user_id,agent_id,name)"
+                    )
+    if "channels" in tables:
+        with db.transaction() as conn:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_general_name ON channels(user_id,name) WHERE agent_id IS NULL"
+            )
+    if "cron_jobs" not in tables:
+        return
+    for column, definition in (
+        ("selected_expert_id", "TEXT REFERENCES agents(agent_id) ON DELETE SET NULL"),
+        ("project_id", "TEXT REFERENCES projects(project_id) ON DELETE SET NULL"),
+        ("target_task_id", "TEXT REFERENCES project_tasks(task_id) ON DELETE SET NULL"),
+        (
+            "conversation_policy",
+            "TEXT NOT NULL DEFAULT 'continue_target' CHECK(conversation_policy IN ('continue_target','per_run','per_job','task'))",
+        ),
+    ):
+        _ensure_column(db, "cron_jobs", column, definition)
+    if first_expert_column:
+        with db.transaction() as conn:
+            conn.execute("UPDATE cron_jobs SET selected_expert_id=agent_id")
+
+
+def _ensure_unified_task_conversations_schema(db: DatabasePool) -> None:
+    path = next((path for version, path in _discover(db.dialect) if version == 56), None)
+    if path is None:
+        return
+    source = path.read_text(encoding="utf-8")
+    _ensure_optional_entrypoint_experts(db)
+    resources = source.split("-- Unified conversation resources\n", 1)[1]
+    if _table_exists(db, "agents"):
+        _ensure_column(db, "agents", "config_revision", "BIGINT NOT NULL DEFAULT 1")
+    for column, definition in (
+        ("selected_expert_id", "TEXT REFERENCES agents(agent_id)"),
+        ("configuration_revision", "BIGINT NOT NULL DEFAULT 1"),
+        ("internal_kind", "TEXT NOT NULL DEFAULT ''"),
+        (
+            "action_mode",
+            "TEXT NOT NULL DEFAULT 'craft' CHECK (action_mode IN ('ask','plan','craft'))",
+        ),
+        ("pinned", "INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1))"),
+    ):
+        _ensure_column(db, "project_tasks", column, definition)
+    with db.transaction() as conn:
+        # Also repairs newly added durable expert-memory jobs for databases
+        # already carrying the unreleased v56 watermark.
+        for statement in _split_pg_sql(resources):
+            if not statement.startswith(("ALTER TABLE ", "UPDATE _schema_version ")):
+                conn.execute(statement)
+        conn.execute("UPDATE _schema_version SET version = 56 WHERE version < 56")
+    _ensure_column(db, "unified_source_inbox", "error_code", "TEXT NOT NULL DEFAULT ''")
+
+
 def run_migrations(db: DatabasePool) -> None:
     if db.dialect == "sqlite":
         _repair_legacy_schema(db)
     for version, path in _discover(db.dialect):
-        if 28 <= version <= 53 or version <= _current_version(db):
+        # Independent project DDL is repaired below. Apply its dependent v56
+        # only after those tables exist, including on a fresh installation.
+        if 28 <= version <= 53 or version == 56 or version <= _current_version(db):
             continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.
@@ -2248,3 +2387,4 @@ def run_migrations(db: DatabasePool) -> None:
     _ensure_user_role_schema(db)
     _ensure_bridge_connections_schema(db)
     _ensure_independent_projects_schema(db)
+    _ensure_unified_task_conversations_schema(db)

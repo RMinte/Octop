@@ -13,7 +13,8 @@ import {
   useTaskMessageQueue,
 } from "./useTaskMessageQueue";
 
-vi.mock("../../api/modules/projects", () => ({
+vi.mock("../../api/modules/projects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/modules/projects")>()),
   projectTasksApi: { get: vi.fn(), events: vi.fn(), send: vi.fn() },
 }));
 vi.mock("react-i18next", () => ({

@@ -1,12 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useTaskHost } from "../../context/TaskHostContext";
+import { parseTaskRefKey, taskRefKey } from "../../api/taskTransport";
+import {
+  createContext,
+  createElement,
+  useContext,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  useMemo,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
-  projectTasksApi,
+  projectTasksApi as localTaskApi,
+  createProjectTasksApi,
   type TaskDetail,
   type TaskInputAttachment,
   type TaskMessage,
 } from "../../api/modules/projects";
 import { parseApiError } from "../../utils/apiError";
+import { useCurrentUser } from "../../hooks/useCurrentUser";
 
 export const TASK_QUEUE_MAX_ITEMS = 10;
 
@@ -36,7 +50,7 @@ const asError = (error: unknown) =>
   error instanceof Error ? error : new Error(String(error));
 
 /** In-memory FIFO queues live for the projects page, including background tasks. */
-export function useTaskMessageQueue() {
+function useTaskMessageQueueState() {
   const { t } = useTranslation();
   const [queues, setQueues] = useState<Record<string, TaskQueue>>({});
   const [delivered, setDelivered] = useState<Record<string, TaskDetail>>({});
@@ -45,6 +59,7 @@ export function useTaskMessageQueue() {
   const heldTasks = useRef(new Map<string, number>());
   const mounted = useRef(true);
   const translate = useRef(t);
+  const drafts = useRef(new Map<string, string>());
   translate.current = t;
 
   const writeQueues = useCallback((next: Record<string, TaskQueue>) => {
@@ -173,8 +188,12 @@ export function useTaskMessageQueue() {
   }, []);
 
   useEffect(() => {
-    for (const [taskID, queue] of Object.entries(queues)) {
-      const existing = monitors.current.get(taskID);
+    for (const [queueKey, queue] of Object.entries(queues)) {
+      const { host_id: hostID, task_id: taskID } = parseTaskRefKey(queueKey);
+      const projectTasksApi = hostID
+        ? createProjectTasksApi(hostID)
+        : localTaskApi;
+      const existing = monitors.current.get(queueKey);
       if (existing) {
         existing.pump();
         continue;
@@ -195,13 +214,13 @@ export function useTaskMessageQueue() {
       const live = () =>
         !disposed &&
         mounted.current &&
-        monitors.current.get(taskID) === monitor &&
-        !!current.current[taskID]?.items.length;
+        monitors.current.get(queueKey) === monitor &&
+        !!current.current[queueKey]?.items.length;
       const patchQueue = (patch: Partial<TaskQueue>) => {
         if (!live()) return;
         writeQueues({
           ...current.current,
-          [taskID]: { ...current.current[taskID], ...patch },
+          [queueKey]: { ...current.current[queueKey], ...patch },
         });
       };
       const fail = (error: unknown, sent = false) => {
@@ -212,11 +231,11 @@ export function useTaskMessageQueue() {
       };
       const receipt = (id: string) => {
         if (!live() || !snapshot) return;
-        const latest = current.current[taskID];
+        const latest = current.current[queueKey];
         if (latest.items[0]?.id !== id) return;
         const accepted = snapshot;
-        setDelivered((old) => ({ ...old, [taskID]: accepted }));
-        if (latest.items.length === 1) dropQueue(taskID);
+        setDelivered((old) => ({ ...old, [queueKey]: accepted }));
+        if (latest.items.length === 1) dropQueue(queueKey);
         else
           patchQueue({
             items: latest.items.slice(1),
@@ -251,7 +270,7 @@ export function useTaskMessageQueue() {
           controller?.abort();
           return false;
         }
-        const latest = current.current[taskID];
+        const latest = current.current[queueKey];
         // A failed write remains explicit until retry reads its original ID.
         if (
           !latest.error &&
@@ -270,7 +289,7 @@ export function useTaskMessageQueue() {
           if (apply(incoming) && live()) {
             stale = incoming.list_revision < (snapshot?.list_revision ?? 0);
             if (!stale) {
-              verifiedHead = current.current[taskID].items[0]?.id ?? null;
+              verifiedHead = current.current[queueKey].items[0]?.id ?? null;
               verifiedRevision = incoming.list_revision;
               verified = true;
             }
@@ -290,8 +309,8 @@ export function useTaskMessageQueue() {
             !stopped &&
             !signal?.aborted &&
             canSend() &&
-            !current.current[taskID].error &&
-            !current.current[taskID].sendingID &&
+            !current.current[queueKey].error &&
+            !current.current[queueKey].sendingID &&
             snapshot?.active_turn_id === null &&
             recheckedRevision !== snapshot.list_revision
           ) {
@@ -303,11 +322,11 @@ export function useTaskMessageQueue() {
         }
       };
       const pump = () => {
-        const latest = current.current[taskID];
+        const latest = current.current[queueKey];
         if (
           !live() ||
           stopped ||
-          heldTasks.current.has(taskID) ||
+          heldTasks.current.has(queueKey) ||
           checking ||
           !canSend() ||
           !snapshot ||
@@ -333,7 +352,7 @@ export function useTaskMessageQueue() {
         patchQueue({ sendingID: head.id });
         void projectTasksApi.send(taskID, head.body).then(
           (incoming) => {
-            if (!live() || current.current[taskID].items[0]?.id !== head.id)
+            if (!live() || current.current[queueKey].items[0]?.id !== head.id)
               return;
             if (apply(incoming)) {
               receipt(head.id);
@@ -341,7 +360,7 @@ export function useTaskMessageQueue() {
             }
           },
           (error: unknown) => {
-            if (!live() || current.current[taskID].items[0]?.id !== head.id)
+            if (!live() || current.current[queueKey].items[0]?.id !== head.id)
               return;
             if (parseApiError(error)?.code === "TASK_BUSY") {
               blockedRevision = sentRevision;
@@ -408,7 +427,7 @@ export function useTaskMessageQueue() {
         resume: () => void connect(),
         pump,
         retry: () => {
-          if (!live() || current.current[taskID].sendingID) return;
+          if (!live() || current.current[queueKey].sendingID) return;
           stopped = false;
           blockedRevision = null;
           recheckedRevision = null;
@@ -420,12 +439,13 @@ export function useTaskMessageQueue() {
           });
         },
       };
-      monitors.current.set(taskID, monitor);
+      monitors.current.set(queueKey, monitor);
       void connect();
     }
   }, [queues, dropQueue, writeQueues]);
 
   return {
+    drafts,
     queues,
     delivered,
     enqueue,
@@ -438,4 +458,80 @@ export function useTaskMessageQueue() {
   };
 }
 
-export type TaskMessageQueue = ReturnType<typeof useTaskMessageQueue>;
+export type TaskMessageQueue = ReturnType<typeof useTaskMessageQueueState>;
+const TaskQueueContext = createContext<TaskMessageQueue | null>(null);
+
+function TaskQueueOwner({ children }: { children: ReactNode }) {
+  const queue = useTaskMessageQueueState();
+  return createElement(TaskQueueContext.Provider, { value: queue }, children);
+}
+
+/** Pending messages survive navigation between projects and Task detail pages. */
+export function TaskMessageQueueProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const user = useCurrentUser();
+  return createElement(TaskQueueOwner, { key: user?.id ?? "guest", children });
+}
+
+export function useTaskMessageQueue(): TaskMessageQueue {
+  const shared = useContext(TaskQueueContext);
+  const local = useTaskMessageQueueState();
+  const queue = shared ?? local;
+  const { hostID } = useTaskHost();
+  const key = useCallback(
+    (taskID: string) => taskRefKey({ host_id: hostID, task_id: taskID }),
+    [hostID],
+  );
+  const backing = useRef(queue);
+  backing.current = queue;
+  const actions = useMemo<
+    Pick<
+      TaskMessageQueue,
+      "enqueue" | "remove" | "reclaim" | "clear" | "retry" | "hold" | "isHeld"
+    >
+  >(
+    () => ({
+      enqueue: (id, project, body, attachments) =>
+        backing.current.enqueue(key(id), project, body, attachments),
+      remove: (id, request) => backing.current.remove(key(id), request),
+      reclaim: (id, request) => backing.current.reclaim(key(id), request),
+      clear: (id) => backing.current.clear(key(id)),
+      retry: (id) => backing.current.retry(key(id)),
+      hold: (id, value) => backing.current.hold(key(id), value),
+      isHeld: (id) => backing.current.isHeld(key(id)),
+    }),
+    [key],
+  );
+  const drafts = useMemo(
+    () => ({
+      current: new Proxy(queue.drafts.current, {
+        get(target, property) {
+          if (property === "get") return (id: string) => target.get(key(id));
+          if (property === "set")
+            return (id: string, value: string) => target.set(key(id), value);
+          if (property === "delete")
+            return (id: string) => target.delete(key(id));
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    }),
+    [queue.drafts, key],
+  );
+  const scoped = <T>(values: Record<string, T>) =>
+    Object.fromEntries(
+      Object.entries(values)
+        .filter(([id]) => parseTaskRefKey(id).host_id === hostID)
+        .map(([id, value]) => [parseTaskRefKey(id).task_id, value]),
+    );
+  return {
+    ...queue,
+    ...(hostID ? actions : {}),
+    queues: scoped(queue.queues),
+    delivered: scoped(queue.delivered),
+    drafts: hostID ? drafts : queue.drafts,
+  };
+}

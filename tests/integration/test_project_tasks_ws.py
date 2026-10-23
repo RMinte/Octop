@@ -64,15 +64,20 @@ async def ws_env(env_with_provider, monkeypatch):
         gate.set()
 
 
-async def test_ws_streams_text_queues_other_tasks_and_cancels_exact_turn(ws_env, monkeypatch):
-    client, server, auth, calls, _ = ws_env
+async def test_ws_streams_tasks_concurrently_and_cancels_exact_turn(ws_env, monkeypatch):
+    client, server, auth, calls, gates = ws_env
     subscribed = asyncio.Event()
+    second_streamed = asyncio.Event()
     original_run = runtime.run_turn
 
     async def run(services, owner, turn, history):
         await subscribed.wait()
         async for event in original_run(services, owner, turn, history):
             yield event
+            if turn.prompt == "Second" and event.get("content") == "实时中文":
+                # The worker has consumed and persisted this token before the
+                # generator resumes. Subscribe after it to cover snapshot catch-up.
+                second_streamed.set()
 
     monkeypatch.setattr(runtime, "run_turn", run)
     experts = server.services.agent_repo.list_all()
@@ -99,38 +104,62 @@ async def test_ws_streams_text_queues_other_tasks_and_cancels_exact_turn(ws_env,
                 data={"request_id": "second-message", "prompt": "Second"},
             )
         )["data"]
-        assert second["status"] == "queued" and len(calls) == 1
-        await command(ws, "task.subscribe", "watch-second", task_id=second["task_id"])
-        cancelled = await command(
-            ws,
-            "task.cancel",
-            "cancel-first",
-            task_id=first["task_id"],
-            data={"turn_id": first["active_turn_id"]},
+        assert second["status"] == "queued"
+        await asyncio.wait_for(second_streamed.wait(), 5)
+        assert len(calls) == 2
+        await ws.send_json(
+            {"type": "task.subscribe", "id": "watch-second", "task_id": second["task_id"]}
         )
-        assert cancelled["data"]["turns"][0]["cancel_requested"]
-        frames = []
-        while not (
-            any(f["data"]["turn"]["status"] == "cancelled" for f in frames)
-            and any(
-                f["data"]["task"]["task_id"] == second["task_id"]
-                and f["data"]["turn"]["reply"] == "实时中文"
-                for f in frames
-            )
-        ):
+        snapshot = await until(
+            ws,
+            lambda frame: (
+                frame["type"] == "snapshot" and frame["data"]["task_id"] == second["task_id"]
+            ),
+        )
+        assert snapshot["data"]["status"] == "running"
+        assert snapshot["data"]["turns"][0]["reply"] == "实时中文"
+        assert snapshot["data"]["turns"][0]["turn_id"] == second["active_turn_id"]
+        await until(ws, lambda frame: frame.get("id") == "watch-second")
+        await ws.send_json(
+            {
+                "type": "task.cancel",
+                "id": "cancel-first",
+                "task_id": first["task_id"],
+                "data": {"turn_id": first["active_turn_id"]},
+            }
+        )
+        cancelled, terminal = None, None
+        while cancelled is None or terminal is None:
             frame = await ws.receive_json(timeout=5)
-            if frame["type"] == "turn":
-                frames.append(frame)
+            if frame.get("id") == "cancel-first":
+                cancelled = frame
+            elif (
+                frame["type"] == "turn"
+                and frame["data"]["turn"]["turn_id"] == first["active_turn_id"]
+                and frame["data"]["turn"]["status"] == "cancelled"
+            ):
+                terminal = frame
+        assert cancelled["type"] == "result"
+        assert cancelled["data"]["turns"][0]["cancel_requested"]
+        assert terminal["data"]["turn"]["reply"] == "实时中文"
+        independent = (
+            await client.get(f"/api/project-tasks/{second['task_id']}", headers=auth)
+        ).json()
+        assert independent["status"] == "running"
+        assert independent["active_turn_id"] == second["active_turn_id"]
+        assert not independent["turns"][0]["cancel_requested"]
+        gates["Second"].set()
+        completed = await until(
+            ws,
+            lambda frame: (
+                frame["type"] == "turn"
+                and frame["data"]["turn"]["turn_id"] == second["active_turn_id"]
+                and frame["data"]["turn"]["status"] == "completed"
+            ),
+        )
+        assert completed["data"]["turn"]["reply"] == "实时中文，已经完成"
         assert len(calls) == 2
         assert server.services.agent_repo.list_all() == experts
-        # Stop the queued/active second task too; cancellation is still independent of subscriptions.
-        await command(
-            ws,
-            "task.cancel",
-            "cancel-second",
-            task_id=second["task_id"],
-            data={"turn_id": second["active_turn_id"]},
-        )
     finally:
         await session.__aexit__(None, None, None)
 
@@ -186,22 +215,35 @@ async def test_ws_disconnect_keeps_execution_and_resumes_without_replaying(ws_en
         await until(ws, lambda f: f.get("id") == "resume-first")
         gates["Follow up"] = asyncio.Event()
         gates["Follow up"].set()
-        next_round = await command(
-            ws,
-            "task.message",
-            "message-next",
-            task_id=first["task_id"],
-            data={"request_id": "followup-message", "prompt": "Follow up"},
+        await ws.send_json(
+            {
+                "type": "task.message",
+                "id": "message-next",
+                "task_id": first["task_id"],
+                "data": {"request_id": "followup-message", "prompt": "Follow up"},
+            }
         )
+        next_round = None
+        streamed = []
+        while next_round is None:
+            frame = await ws.receive_json(timeout=5)
+            if frame.get("id") == "message-next":
+                next_round = frame
+            elif frame["type"] == "turn":
+                streamed.append(frame)
         assert next_round["data"]["task_id"] == first["task_id"]
-        await until(
-            ws,
-            lambda f: (
-                f["type"] == "turn"
-                and f["data"]["turn"]["turn_id"] == next_round["data"]["active_turn_id"]
-                and f["data"]["turn"]["status"] == "completed"
-            ),
-        )
+
+        def completed(frame):
+            return (
+                frame["type"] == "turn"
+                and frame["data"]["turn"]["turn_id"] == next_round["data"]["active_turn_id"]
+                and frame["data"]["turn"]["status"] == "completed"
+            )
+
+        final = next((frame for frame in streamed if completed(frame)), None)
+        if final is None:
+            final = await until(ws, completed)
+        assert final["data"]["turn"]["reply"] == "实时中文，已经完成"
         assert len(calls) == 2
         assert calls[1][1][-1]["content"] == "实时中文，已经完成"
     finally:
@@ -284,7 +326,7 @@ async def test_ws_scopes_commands_and_cursors_without_dropping_other_tasks(ws_en
         assert invalid["status"] == 409 and invalid["error"]["code"] == "PROJECT_SYNC_RESET"
         assert (await command(ws, "ping", "connection-alive"))["type"] == "result"
         await ws.send_json({"type": "unknown", "secret": "never-echo-this"})
-        invalid = await ws.receive_json()
+        invalid = await until(ws, lambda frame: frame["type"] == "error")
         assert invalid["error"]["code"] == "TASK_FRAME_INVALID"
         assert "never-echo-this" not in str(invalid)
         foreign_session, foreign_ws = await connected(client, alice)

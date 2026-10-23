@@ -1,5 +1,7 @@
 # AgentComputer 与 Octop 集成
 
+> 2026-10-23 最新交接：任务/会话统一、可选专家和高级工作台的当前协议见 [APP 统一会话接线](agentcomputer-unified-conversations-handoff.md)。本轮已接批迁工具、IM/CLI/cron 与远程 Task，实现及验证范围见 [外围入口与旧数据方案](unified-task-all-entrypoints-plan.md)。APP 本次仅更新文档，未修改原生源码；真实主库尚未切换。以下历次“当前”状态按其记录日期理解，不恢复 `/api/agentcomputer/v1`。
+
 > 2026-10-15 当前接口收敛：用户确认当前客户端没有使用专用协议，移除 `/api/agentcomputer/v1` 及项目/任务 Bridge 转发，暂不提供远程项目和任务访问。项目与多轮任务仅使用 `/api/projects`、`/api/project-tasks`；已有数据保留。下文专用协议及旧转发的交付记录仅为历史过程，以 [当前接口契约](api.md) 为准。
 
 > 2026-10-15 数据库收敛：新安装仅在 main v20 基础上新增四张独立项目/任务表，不再修改原有专家和会话表；早期 021–027 专家绑定迁移、`ac_*` 仓储及运行实现已移除，已有旧表、字段和数据原样保留。028–032 编号和 schema 水位 32 保留。下文早期专家绑定方案及预检命令为历史记录，当前实现见 [数据库收敛记录](agentcomputer-progress.md#2026-10-15-独立项目任务数据库收敛)。

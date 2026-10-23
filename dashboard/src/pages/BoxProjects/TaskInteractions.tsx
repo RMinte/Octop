@@ -1,8 +1,8 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useRef, useState } from "react";
 import { Alert, Button, Input, Space, Spin, Tag, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import {
-  projectTasksApi,
   type InteractionResponse,
   type TaskDetail,
   type TaskInteraction,
@@ -61,6 +61,7 @@ function InteractionCard({
   disabled: boolean;
   onChange: (detail: TaskDetail) => void;
 }) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const timeZone = useServerTimezone();
   const [answer, setAnswer] = useState("");

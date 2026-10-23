@@ -141,10 +141,16 @@ export function buildNavSections(
     {
       items: [
         {
+          key: "box-projects",
+          path: "/conversations",
+          icon: <Boxes size={iconSize} strokeWidth={iconStroke} />,
+          labelKey: "nav.boxProjects",
+        },
+        {
           key: "chat",
           path: "/chat",
           icon: <MessageSquareText size={iconSize} strokeWidth={iconStroke} />,
-          labelKey: "nav.chat",
+          labelKey: "nav.legacyChat",
         },
         {
           key: "experts",
@@ -157,12 +163,6 @@ export function buildNavSections(
           path: "/tasks",
           icon: <Timer size={iconSize} strokeWidth={iconStroke} />,
           labelKey: "nav.tasks",
-        },
-        {
-          key: "box-projects",
-          path: "/box-projects",
-          icon: <Boxes size={iconSize} strokeWidth={iconStroke} />,
-          labelKey: "nav.boxProjects",
         },
         {
           key: "token-usage",

@@ -159,9 +159,11 @@ def test_migration_from_50_preserves_existing_records(tmp_path, monkeypatch):
         migrate.run_migrations(pool)
         migrate.run_migrations(pool)
         with pool.connect() as conn:
-            assert dict(conn.execute("SELECT * FROM agents").fetchone()) == before
+            after = dict(conn.execute("SELECT * FROM agents").fetchone())
+            assert after.pop("config_revision") == 1
+            assert after == before
             assert conn.execute("SELECT COUNT(*) FROM resident_conversations").fetchone()[0] == 0
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 53
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()

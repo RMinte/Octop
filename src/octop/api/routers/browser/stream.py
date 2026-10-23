@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -389,6 +390,8 @@ async def run_browser_stream_session(
     default_width: int = 1280,
     default_height: int = 800,
     start_msg: dict[str, Any] | None = None,
+    profile_name: str | None = None,
+    screenshots_dir: Path | None = None,
 ) -> None:
     """Run one screencast / listen-only session over arbitrary send/receive hooks.
 
@@ -396,7 +399,7 @@ async def run_browser_stream_session(
     the same Chrome / harness lifecycle.
     """
     sess: Any | None = None
-    profile = user_browser_profile(user_id)
+    profile = profile_name or user_browser_profile(user_id)
     stream_task: asyncio.Task[None] | None = None
 
     try:
@@ -410,7 +413,11 @@ async def run_browser_stream_session(
         if listen_only:
             stream_task = asyncio.create_task(_listen_state_loop(send_json, is_connected, profile))
         else:
-            sess = await resolve_harness_session(profile)
+            sess = (
+                await resolve_harness_session(profile, screenshots_dir=screenshots_dir)
+                if screenshots_dir is not None
+                else await resolve_harness_session(profile)
+            )
             assert sess is not None  # create=True always returns or raises
 
             start_url = _normalize_nav_url(str(start_msg.get("url") or ""))

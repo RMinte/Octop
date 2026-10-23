@@ -1,3 +1,9 @@
+import { Dropdown } from "antd";
+import TaskMemory from "./TaskMemory";
+import TaskPromptPolish from "./TaskPromptPolish";
+import TaskMedia from "./TaskMedia";
+import { useTaskHost } from "../../context/TaskHostContext";
+import { taskExpertLabel } from "./taskExpertLabel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -7,6 +13,7 @@ import {
   Input,
   Modal,
   Segmented,
+  Select,
   Space,
   Spin,
   Tag,
@@ -25,23 +32,33 @@ import {
   Send,
   Shrink,
   Square,
+  Pin,
+  PinOff,
+  GitBranch,
+  Pencil,
+  RefreshCw,
   Trash2,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import {
-  projectTasksApi,
   type TaskMessage,
   type TaskCreate,
   type TaskExecutionOptions,
   type TaskArtifact,
   type Project,
   type TaskSummary,
+  type TaskPatch,
+  type TaskActionMode,
+  type TaskResources,
+  type TaskStatus,
+  type TaskFork,
+  type TaskTurn,
 } from "../../api/modules/projects";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { useTaskPresentationSettings } from "../../hooks/useTaskPresentationSettings";
-import { apiErrorMessage } from "../../utils/apiError";
+import { apiErrorMessage, parseApiError } from "../../utils/apiError";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import styles from "./index.module.less";
 import { useTaskList } from "./useProjectLists";
@@ -52,6 +69,9 @@ import TaskInteractions from "./TaskInteractions";
 import TaskApprovalModePicker from "./TaskApprovalMode";
 import TaskWebSearch from "./TaskWebSearch";
 import TaskInputImages from "./TaskInputImages";
+import TaskExpertMemory from "./TaskExpertMemory";
+import TaskWorkbench from "./TaskWorkbench";
+import { TaskVoiceInput, TaskVoiceRead } from "./TaskVoice";
 import TaskContextUsage, { TaskTurnUsage } from "./TaskContextUsage";
 import { MAX_TASK_IMAGES, useTaskImages } from "./useTaskImages";
 import {
@@ -61,21 +81,73 @@ import {
 
 export default function TaskConversations({
   projectID,
-  project,
+  project: initialProject,
   queue: sharedQueue,
+  selectedTaskID: routedTaskID,
+  onSelectTask,
+  allTasks = false,
+  defaultExpertID = null,
+  projectOptions = [],
 }: {
   projectID: string | null;
   project?: Project;
   queue?: TaskMessageQueue;
+  selectedTaskID?: string | null;
+  onSelectTask?: (id: string | null) => void;
+  allTasks?: boolean;
+  defaultExpertID?: string | null;
+  projectOptions?: Project[];
 }) {
+  const { projectTasksApi, projectsApi, taskExtrasApi, hostID } = useTaskHost();
   const { t } = useTranslation();
+  const [project, setProject] = useState(initialProject);
+  useEffect(() => setProject(initialProject), [initialProject]);
   const localQueue = useTaskMessageQueue();
   const queue = sharedQueue ?? localQueue;
   const clearQueue = queue.clear;
   const timeZone = useServerTimezone();
   const presentationSettings = useTaskPresentationSettings();
   const [params, setParams] = useSearchParams();
-  const taskID = params.get("task");
+  const taskID = routedTaskID !== undefined ? routedTaskID : params.get("task");
+  const [resources, setResources] = useState<TaskResources | null>(null);
+  const [resourceError, setResourceError] = useState("");
+  const [resourceVersion, setResourceVersion] = useState(0);
+  const [expertID, setExpertID] = useState<string | null>(defaultExpertID);
+  const [actionMode, setActionMode] = useState<TaskActionMode>("craft");
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [expertFilter, setExpertFilter] = useState<string | undefined>();
+  const [statusFilter, setStatusFilter] = useState<TaskStatus | undefined>();
+  const [projectFilter, setProjectFilter] = useState<string | undefined>();
+  const [branch, setBranch] = useState<Omit<TaskFork, "request_id"> | null>(
+    null,
+  );
+  const [forking, setForking] = useState(false);
+  const branchRequest = useRef<{ key: string; requestID: string } | null>(null);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQuery(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => {
+    let disposed = false;
+    void projectTasksApi
+      .resources()
+      .then((result) => {
+        if (!disposed) {
+          setResources(result);
+          setResourceError("");
+        }
+      })
+      .catch((err) => {
+        if (!disposed)
+          setResourceError(
+            apiErrorMessage(err, t("projects.tasks.failure"), t),
+          );
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [projectTasksApi, resourceVersion, t]);
   const queued = taskID ? queue.queues[taskID] : undefined;
   const queuedItems = queued?.items ?? [];
   const queueDelivery = taskID ? queue.delivered[taskID] : undefined;
@@ -89,7 +161,18 @@ export default function TaskConversations({
     upsert: upsertTask,
     remove: removeTask,
     isDeleted,
-  } = useTaskList(projectID, archivedView);
+  } = useTaskList(
+    allTasks ? projectFilter ?? null : projectID,
+    archivedView,
+    allTasks || query || expertFilter || statusFilter
+      ? {
+          scope: allTasks && !projectFilter ? "all" : undefined,
+          q: query || undefined,
+          expert_id: expertFilter,
+          status: statusFilter,
+        }
+      : undefined,
+  );
   const {
     detail,
     loading,
@@ -100,6 +183,11 @@ export default function TaskConversations({
     applyWrite,
     loadHistory,
   } = useTaskConversation(taskID, projectID);
+  const [workbenchTool, setWorkbenchTool] = useState<{
+    taskID: string;
+    callID: string;
+    sequence: number;
+  } | null>(null);
   const [error, setError] = useState("");
   const [loadError, setLoadError] = useState("");
   const alive = useRef(true);
@@ -114,6 +202,7 @@ export default function TaskConversations({
     };
   }, []);
   const [draft, setDraft] = useState("");
+  const draftKey = taskID ?? `draft:${projectID ?? "standalone"}`;
   const images = useTaskImages(`${projectID ?? ""}:${taskID ?? "new"}`);
   const imageInput = useRef<HTMLInputElement>(null);
   const [options, setOptions] = useState<TaskExecutionOptions>({});
@@ -186,10 +275,63 @@ export default function TaskConversations({
     }
   };
   const projectArchived = !!project?.archived;
+  const selectionDisabled =
+    busy ||
+    sending ||
+    loading ||
+    updating ||
+    reconnecting ||
+    queuedItems.length > 0 ||
+    !!queued?.sendingID ||
+    !!detail?.archived ||
+    projectArchived ||
+    webSearchSaving ||
+    approvalSaving;
+  const selectedExpert = taskID ? detail?.selected_expert_id ?? null : expertID;
+  const selectedMode = taskID ? detail?.action_mode ?? "craft" : actionMode;
+  const revisions = {
+    expected_configuration_revision: detail?.configuration_revision ?? 1,
+    expected_project_revision: project?.revision ?? null,
+  };
+  const [confirmedDirectory, setConfirmedDirectory] = useState<string | null>(
+    null,
+  );
+  const directoryKey = JSON.stringify([
+    taskID,
+    projectID,
+    project?.directory,
+    project?.client_directory,
+  ]);
+  const lastScope = detail?.turns.at(-1);
+  const directoryChanged =
+    !!lastScope &&
+    "server_directory" in lastScope &&
+    ((lastScope.server_directory ?? null) !== (project?.directory ?? null) ||
+      (lastScope.client_directory ?? null) !==
+        (project?.client_directory ?? null)) &&
+    confirmedDirectory !== directoryKey;
+  const recoverConflict = async (err: unknown) => {
+    const code = parseApiError(err)?.code;
+    if (
+      code !== "TASK_REVISION_CONFLICT" &&
+      code !== "PROJECT_REVISION_CONFLICT"
+    )
+      return;
+    compactRequest.current = null;
+    retryRequest.current = null;
+    pending.current = null;
+    await refreshDetail();
+    if (projectID) {
+      const incoming = await projectsApi.get(projectID);
+      if (alive.current && selectedProjectID.current === projectID)
+        setProject(incoming);
+    }
+  };
   const composerDisabled =
     sending ||
     loading ||
     !!detail?.archived ||
+    directoryChanged ||
     projectArchived ||
     !!(taskID && !detail);
   const compactDisabled =
@@ -219,10 +361,14 @@ export default function TaskConversations({
   useEffect(() => {
     if (!taskDeleted) return;
     if (taskID) clearQueue(taskID);
+    if (onSelectTask) {
+      onSelectTask(null);
+      return;
+    }
     const next = new URLSearchParams(params);
     next.delete("task");
     setParams(next, { replace: true });
-  }, [taskDeleted, taskID, clearQueue, params, setParams]);
+  }, [taskDeleted, taskID, clearQueue, params, setParams, onSelectTask]);
 
   const refresh = useCallback(async () => {
     try {
@@ -236,7 +382,10 @@ export default function TaskConversations({
 
   useEffect(() => {
     setError("");
-    setDraft("");
+    setWorkbenchTool(null);
+    setDraft(queue.drafts.current.get(draftKey) ?? "");
+    setExpertID(defaultExpertID);
+    setActionMode("craft");
     const created = createdTaskSelection.current;
     setOptions(
       created?.taskID === taskID &&
@@ -251,7 +400,7 @@ export default function TaskConversations({
     compactRequest.current = null;
     retryRequest.current = null;
     followOutput.current = true;
-  }, [taskID, projectID]);
+  }, [taskID, projectID, defaultExpertID, draftKey, queue.drafts]);
 
   useEffect(() => {
     let disposed = false;
@@ -330,6 +479,10 @@ export default function TaskConversations({
   };
 
   const selectTask = (id: string | null) => {
+    if (onSelectTask) {
+      onSelectTask(id);
+      return;
+    }
     const next = new URLSearchParams(params);
     if (id) next.set("task", id);
     else {
@@ -351,14 +504,23 @@ export default function TaskConversations({
       sending ||
       approvalSaving ||
       webSearchSaving ||
+      updating ||
       inFlight.current ||
-      (taskID && !detail)
+      (taskID && !detail) ||
+      directoryChanged
     )
       return;
     const target = taskID ?? `new:${projectID ?? ""}`;
     if (
       pending.current?.target !== target ||
       pending.current.body.prompt !== prompt ||
+      pending.current.body.expected_configuration_revision !==
+        revisions.expected_configuration_revision ||
+      pending.current.body.expected_project_revision !==
+        revisions.expected_project_revision ||
+      (!taskID &&
+        ((pending.current.body as TaskCreate).selected_expert_id !== expertID ||
+          (pending.current.body as TaskCreate).action_mode !== actionMode)) ||
       JSON.stringify(pending.current.body.attachment_ids ?? []) !==
         JSON.stringify(attachmentIDs) ||
       JSON.stringify(pending.current.body.options ?? {}) !==
@@ -372,6 +534,10 @@ export default function TaskConversations({
         body: {
           request_id: crypto.randomUUID(),
           prompt,
+          ...revisions,
+          ...(!taskID
+            ? { selected_expert_id: expertID, action_mode: actionMode }
+            : {}),
           ...(attachmentIDs.length ? { attachment_ids: attachmentIDs } : {}),
           ...(!taskID
             ? {
@@ -396,6 +562,7 @@ export default function TaskConversations({
         return;
       }
       setDraft("");
+      queue.drafts.current.delete(draftKey);
       images.clear();
       setOptions((current) =>
         current.model_ref ? { model_ref: current.model_ref } : {},
@@ -423,6 +590,7 @@ export default function TaskConversations({
       upsertTask(result);
       applyWrite(result);
       setDraft("");
+      queue.drafts.current.delete(draftKey);
       images.clear();
       setOptions((current) =>
         current.model_ref ? { model_ref: current.model_ref } : {},
@@ -441,6 +609,7 @@ export default function TaskConversations({
           setLoadError(apiErrorMessage(err, t("projects.tasks.failure"), t));
       });
     } catch (err) {
+      await recoverConflict(err).catch(() => {});
       if (
         alive.current &&
         selectedTaskID.current === taskID &&
@@ -461,6 +630,7 @@ export default function TaskConversations({
         body: {
           request_id: crypto.randomUUID(),
           prompt: "/compact",
+          ...revisions,
           ...(options.model_ref
             ? { options: { model_ref: options.model_ref } }
             : {}),
@@ -484,6 +654,7 @@ export default function TaskConversations({
       applyWrite(result);
       compactRequest.current = null;
     } catch (err) {
+      await recoverConflict(err).catch(() => {});
       if (
         alive.current &&
         selectedTaskID.current === taskID &&
@@ -508,6 +679,7 @@ export default function TaskConversations({
       const item = queue.reclaim(taskID, id);
       if (!item) return;
       setDraft(item.body.prompt ?? "");
+      queue.drafts.current.set(draftKey, item.body.prompt ?? "");
       images.restore(item.attachments);
       setOptions(item.body.options ?? {});
       pending.current = { target: taskID, body: item.body };
@@ -567,7 +739,7 @@ export default function TaskConversations({
       inFlight.current
     )
       return;
-    const optionsKey = JSON.stringify(options);
+    const optionsKey = JSON.stringify([options, revisions]);
     if (
       retryRequest.current?.turnID !== turnID ||
       retryRequest.current.optionsKey !== optionsKey
@@ -586,6 +758,7 @@ export default function TaskConversations({
         turnID,
         retryRequest.current.requestID,
         options,
+        revisions,
       );
       if (
         !alive.current ||
@@ -599,6 +772,7 @@ export default function TaskConversations({
       );
       retryRequest.current = null;
     } catch (err) {
+      await recoverConflict(err).catch(() => {});
       if (
         alive.current &&
         selectedTaskID.current === taskID &&
@@ -612,10 +786,7 @@ export default function TaskConversations({
   };
 
   const updateTask = async (
-    changes: {
-      title?: string;
-      archived?: boolean;
-    },
+    changes: Omit<TaskPatch, "expected_revision">,
     expectedRevision?: number,
   ) => {
     if (!taskID || !detail || updating || webSearchSaving || deleteTarget)
@@ -630,6 +801,13 @@ export default function TaskConversations({
       const result = await projectTasksApi.update(taskID, {
         ...changes,
         expected_revision: expectedRevision ?? detail.list_revision,
+        ...(changes.selected_expert_id !== undefined ||
+        changes.action_mode !== undefined
+          ? {
+              expected_configuration_revision:
+                detail.configuration_revision ?? 1,
+            }
+          : {}),
       });
       if (
         !alive.current ||
@@ -646,6 +824,7 @@ export default function TaskConversations({
         setParams(next);
       }
     } catch (err) {
+      await recoverConflict(err).catch(() => {});
       if (
         alive.current &&
         selectedTaskID.current === taskID &&
@@ -668,9 +847,7 @@ export default function TaskConversations({
       if (!alive.current) return;
       setDeleteTarget(null);
       if (selectedTaskID.current === deleteTarget.task_id) {
-        const next = new URLSearchParams(params);
-        next.delete("task");
-        setParams(next);
+        selectTask(null);
       }
     } catch (err) {
       if (alive.current)
@@ -682,6 +859,46 @@ export default function TaskConversations({
     }
   };
 
+  const openBranch = (turn: TaskTurn, operation: TaskFork["operation"]) => {
+    setBranch({
+      operation,
+      turn_id: turn.turn_id,
+      project_id: projectID,
+      selected_expert_id: detail?.selected_expert_id ?? null,
+      ...(operation !== "fork" ? { prompt: turn.prompt } : {}),
+    });
+    branchRequest.current = null;
+  };
+  const createBranch = async () => {
+    if (
+      !taskID ||
+      !branch ||
+      forking ||
+      (branch.operation === "edit" && !branch.prompt?.trim())
+    )
+      return;
+    const key = JSON.stringify([taskID, branch]);
+    if (branchRequest.current?.key !== key)
+      branchRequest.current = { key, requestID: crypto.randomUUID() };
+    setForking(true);
+    setError("");
+    try {
+      const result = await projectTasksApi.fork(taskID, {
+        ...branch,
+        request_id: branchRequest.current.requestID,
+      });
+      if (!alive.current || selectedTaskID.current !== taskID) return;
+      setBranch(null);
+      upsertTask(result);
+      selectTask(result.task_id);
+    } catch (err) {
+      if (alive.current)
+        setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
+    } finally {
+      if (alive.current) setForking(false);
+    }
+  };
+
   return (
     <section
       className={`${styles.taskSection} ${
@@ -690,6 +907,59 @@ export default function TaskConversations({
       aria-label={t("projects.tasks.title")}
     >
       <div className={styles.taskSidebar}>
+        {allTasks && (
+          <Select
+            aria-label={t("projects.tasks.filterProject")}
+            placeholder={t("projects.tasks.filterProject")}
+            allowClear
+            value={projectFilter}
+            options={projectOptions.map((item) => ({
+              value: item.project_id,
+              label: item.name,
+            }))}
+            onChange={setProjectFilter}
+          />
+        )}
+        <Input.Search
+          aria-label={t("projects.tasks.search")}
+          placeholder={t("projects.tasks.search")}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          allowClear
+        />
+        <Select
+          aria-label={t("projects.tasks.filterExpert")}
+          placeholder={t("projects.tasks.filterExpert")}
+          allowClear
+          value={expertFilter}
+          options={(resources?.experts ?? []).map((expert) => ({
+            value: expert.expert_id,
+            label: taskExpertLabel(expert, t),
+          }))}
+          onChange={setExpertFilter}
+        />
+        <Select
+          aria-label={t("projects.tasks.filterStatus")}
+          placeholder={t("projects.tasks.filterStatus")}
+          allowClear
+          value={statusFilter}
+          options={[
+            "queued",
+            "running",
+            "waiting_approval",
+            "waiting_answer",
+            "waiting_client_tool",
+            "paused",
+            "interrupted",
+            "completed",
+            "failed",
+            "cancelled",
+          ].map((status) => ({
+            value: status,
+            label: t(`projects.tasks.status.${status}`),
+          }))}
+          onChange={setStatusFilter}
+        />
         <Segmented
           block
           aria-label={t("projects.tasks.listScope")}
@@ -709,7 +979,6 @@ export default function TaskConversations({
         <Button
           icon={<Plus size={16} />}
           onClick={() => {
-            if (taskID) queue.clear(taskID);
             selectTask(null);
           }}
           disabled={sending || !!queued?.sendingID || projectArchived}
@@ -725,6 +994,11 @@ export default function TaskConversations({
           <button
             key={task.task_id}
             type="button"
+            aria-label={`${task.title} ${t(
+              `projects.tasks.status.${task.status}`,
+            )} ${
+              task.selected_expert_id ?? t("projects.tasks.generalAssistant")
+            }`}
             className={`${styles.taskItem} ${
               taskID === task.task_id ? styles.active : ""
             }`}
@@ -733,8 +1007,16 @@ export default function TaskConversations({
           >
             <MessageSquare size={16} />
             <span>
-              <strong>{task.title}</strong>
+              <strong>
+                {task.pinned && <Pin size={12} />} {task.title}
+              </strong>
               <small>
+                {(resources?.experts ?? []).find(
+                  (expert) => expert.expert_id === task.selected_expert_id,
+                )?.name ??
+                  (task.selected_expert_id ||
+                    t("projects.tasks.generalAssistant"))}
+                {" · "}
                 {t(`projects.tasks.status.${task.status}`)}
                 {" · "}
                 {formatServerIsoDateTime(task.updated_at, timeZone)}
@@ -818,6 +1100,107 @@ export default function TaskConversations({
                   {detail.title}
                 </Typography.Title>
                 <Space wrap>
+                  <Dropdown
+                    menu={{
+                      items: [
+                        { key: "json", label: t("projects.tasks.exportJson") },
+                        {
+                          key: "markdown",
+                          label: t("projects.tasks.exportMarkdown"),
+                        },
+                      ],
+                      onClick: ({ key }) => {
+                        void taskExtrasApi
+                          .export(detail.task_id, key as "json" | "markdown")
+                          .then((blob) => {
+                            const url = URL.createObjectURL(blob);
+                            const anchor = document.createElement("a");
+                            anchor.href = url;
+                            anchor.download = `${detail.title.replace(
+                              /[\\/:*?"<>|]/g,
+                              "_",
+                            )}.${key === "json" ? "json" : "md"}`;
+                            anchor.click();
+                            setTimeout(() => URL.revokeObjectURL(url), 1000);
+                          })
+                          .catch((err) =>
+                            setError(
+                              apiErrorMessage(
+                                err,
+                                t("projects.tasks.failure"),
+                                t,
+                              ),
+                            ),
+                          );
+                      },
+                    }}
+                  >
+                    <Button size="small" icon={<Download size={14} />}>
+                      {t("projects.tasks.export")}
+                    </Button>
+                  </Dropdown>
+                  {!selectedExpert && (
+                    <TaskMemory
+                      key={`memory:${detail.task_id}`}
+                      taskID={detail.task_id}
+                      readOnly={detail.archived || projectArchived}
+                    />
+                  )}
+                  <TaskWorkbench
+                    key={`workbench:${detail.task_id}:${detail.configuration_revision}:${project?.revision}`}
+                    task={detail}
+                    requestedTool={
+                      workbenchTool?.taskID === detail.task_id
+                        ? workbenchTool
+                        : null
+                    }
+                  />
+                  {!!selectedExpert && (
+                    <TaskExpertMemory
+                      key={`${detail.task_id}:${selectedExpert}`}
+                      taskID={detail.task_id}
+                      expertID={selectedExpert}
+                      projectID={projectID}
+                      disabled={sending || updating}
+                    />
+                  )}
+                  <Button
+                    size="small"
+                    icon={<GitBranch size={15} />}
+                    disabled={
+                      busy ||
+                      sending ||
+                      !detail.turns.some(
+                        (turn) =>
+                          turn.status === "completed" && !turn.history_only,
+                      )
+                    }
+                    onClick={() => {
+                      const turn = [...detail.turns]
+                        .reverse()
+                        .find(
+                          (item) =>
+                            item.status === "completed" && !item.history_only,
+                        );
+                      if (turn) openBranch(turn, "fork");
+                    }}
+                  >
+                    {t("projects.tasks.fork")}
+                  </Button>
+                  <Button
+                    size="small"
+                    icon={
+                      detail.pinned ? <PinOff size={15} /> : <Pin size={15} />
+                    }
+                    disabled={updating || sending}
+                    onClick={() => void updateTask({ pinned: !detail.pinned })}
+                  >
+                    {t(
+                      detail.pinned
+                        ? "projects.tasks.unpin"
+                        : "projects.tasks.pin",
+                    )}
+                  </Button>
                   <Button
                     size="small"
                     icon={<Shrink size={15} />}
@@ -876,6 +1259,29 @@ export default function TaskConversations({
               {detail.archived && (
                 <Alert type="info" message={t("projects.tasks.archivedHint")} />
               )}
+              {!!detail.configuration_events?.length && (
+                <Space direction="vertical" style={{ marginBottom: 12 }}>
+                  {detail.configuration_events.map((event) => (
+                    <Typography.Text key={event.event_id} type="secondary">
+                      {t("projects.tasks.configurationChange", {
+                        expert:
+                          resources?.experts?.find(
+                            (expert) =>
+                              expert.expert_id === event.selected_expert_id,
+                          )?.name ??
+                          event.selected_expert_id ??
+                          t("projects.tasks.generalAssistant"),
+                        mode: t(
+                          `projects.tasks.actionModes.${event.action_mode}`,
+                        ),
+                        revision: event.configuration_revision,
+                      })}
+                      {" · "}
+                      {formatServerIsoDateTime(event.created_at, timeZone)}
+                    </Typography.Text>
+                  ))}
+                </Space>
+              )}
               {detail.next_page_cursor && (
                 <Button
                   loading={loadingHistory}
@@ -894,10 +1300,31 @@ export default function TaskConversations({
                     <TaskInputImages attachments={turn.attachments ?? []} />
                   </div>
                   <div className={styles.assistantMessage}>
+                    {turn.history_only && (
+                      <Space wrap style={{ marginBottom: 8 }}>
+                        <Tag>{t("projects.tasks.historyOnly")}</Tag>
+                        {turn.source_task_id && (
+                          <Button
+                            type="link"
+                            size="small"
+                            onClick={() => selectTask(turn.source_task_id!)}
+                          >
+                            {t("projects.tasks.viewSource")}
+                          </Button>
+                        )}
+                      </Space>
+                    )}
                     <Space size="small">
                       <Typography.Text type="secondary">
-                        {t("projects.tasks.assistant")}
+                        {turn.expert_name ??
+                          (turn.selected_expert_id ||
+                            t("projects.tasks.generalAssistant"))}
                       </Typography.Text>
+                      {turn.action_mode && (
+                        <Tag title={t("projects.tasks.actionMode")}>
+                          {t(`projects.tasks.actionModes.${turn.action_mode}`)}
+                        </Tag>
+                      )}
                       <Tag>
                         {t(
                           turn.cancel_requested &&
@@ -915,12 +1342,70 @@ export default function TaskConversations({
                     <TaskTurnContent
                       turn={turn}
                       settings={presentationSettings}
+                      onOpenToolUI={(callID) =>
+                        setWorkbenchTool((previous) => ({
+                          taskID: detail.task_id,
+                          callID,
+                          sequence: (previous?.sequence ?? 0) + 1,
+                        }))
+                      }
                       onOpenArtifacts={() =>
                         document
                           .getElementById(`task-artifacts-${turn.turn_id}`)
                           ?.scrollIntoView({ block: "nearest" })
                       }
                     />
+                    {turn.status !== "running" &&
+                      (turn.reply ||
+                        turn.content_blocks.some(
+                          (block) => block.type === "text" && block.text,
+                        )) && (
+                        <TaskVoiceRead
+                          id={`${hostID ?? "local"}:${detail.task_id}:${
+                            turn.turn_id
+                          }`}
+                          text={
+                            turn.content_blocks
+                              .filter((block) => block.type === "text")
+                              .map((block) => block.text)
+                              .join("\n\n") ||
+                            turn.reply ||
+                            ""
+                          }
+                        />
+                      )}
+                    {turn.status === "completed" && !turn.history_only && (
+                      <Space wrap style={{ marginBottom: 10 }}>
+                        <Button
+                          size="small"
+                          icon={<GitBranch size={14} />}
+                          disabled={busy || sending || forking}
+                          onClick={() => openBranch(turn, "fork")}
+                        >
+                          {t("projects.tasks.fork")}
+                        </Button>
+                        <Button
+                          size="small"
+                          icon={<Pencil size={14} />}
+                          disabled={
+                            busy || sending || forking || detail.archived
+                          }
+                          onClick={() => openBranch(turn, "edit")}
+                        >
+                          {t("projects.tasks.editBranch")}
+                        </Button>
+                        <Button
+                          size="small"
+                          icon={<RefreshCw size={14} />}
+                          disabled={
+                            busy || sending || forking || detail.archived
+                          }
+                          onClick={() => openBranch(turn, "regenerate")}
+                        >
+                          {t("projects.tasks.regenerate")}
+                        </Button>
+                      </Space>
+                    )}
                     {!!turn.interactions?.length && (
                       <TaskInteractions
                         taskID={detail.task_id}
@@ -950,15 +1435,24 @@ export default function TaskConversations({
                         aria-label={t("projects.tasks.artifacts")}
                       >
                         {turn.artifacts.map((artifact) => (
-                          <Button
+                          <Space
+                            direction="vertical"
                             key={artifact.artifact_id}
-                            icon={<Download size={14} />}
-                            loading={downloading === artifact.artifact_id}
-                            disabled={downloading !== null}
-                            onClick={() => void downloadArtifact(artifact)}
                           >
-                            {artifact.name}
-                          </Button>
+                            <TaskMedia
+                              taskID={detail.task_id}
+                              artifact={artifact}
+                            />
+                            <Button
+                              key={artifact.artifact_id}
+                              icon={<Download size={14} />}
+                              loading={downloading === artifact.artifact_id}
+                              disabled={downloading !== null}
+                              onClick={() => void downloadArtifact(artifact)}
+                            >
+                              {artifact.name}
+                            </Button>
+                          </Space>
                         ))}
                       </Space>
                     )}
@@ -973,6 +1467,7 @@ export default function TaskConversations({
                       !detail.archived &&
                       !projectArchived &&
                       turn.turn_id === latestTurnID &&
+                      !turn.history_only &&
                       (turn.status === "failed" ||
                         turn.status === "cancelled") && (
                         <Space direction="vertical" size="small">
@@ -1013,6 +1508,95 @@ export default function TaskConversations({
               images.add(Array.from(event.dataTransfer.files));
           }}
         >
+          {resourceError && (
+            <Alert
+              type="error"
+              showIcon
+              message={resourceError}
+              action={
+                <Button
+                  size="small"
+                  onClick={() => setResourceVersion((version) => version + 1)}
+                >
+                  {t("projects.refresh")}
+                </Button>
+              }
+            />
+          )}
+          {directoryChanged && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t("projects.tasks.directoryChanged")}
+              description={
+                <Space direction="vertical">
+                  <Typography.Text>
+                    {t("projects.tasks.directoryRange", {
+                      directory:
+                        project?.directory ?? t("projects.tasks.taskSpace"),
+                      clientDirectory:
+                        project?.client_directory ??
+                        t("projects.tasks.notConfigured"),
+                    })}
+                  </Typography.Text>
+                  <Button onClick={() => setConfirmedDirectory(directoryKey)}>
+                    {t("projects.tasks.confirmDirectory")}
+                  </Button>
+                </Space>
+              }
+            />
+          )}
+          <Space wrap style={{ marginBottom: 10 }}>
+            <Typography.Text>{t("projects.tasks.expert")}</Typography.Text>
+            <Select
+              aria-label={t("projects.tasks.expert")}
+              style={{ minWidth: 220 }}
+              loading={!resources && !resourceError}
+              onOpenChange={(open) => {
+                if (open) setResourceVersion((version) => version + 1);
+              }}
+              disabled={selectionDisabled}
+              value={selectedExpert ?? ""}
+              options={[
+                { value: "", label: t("projects.tasks.generalAssistant") },
+                ...(resources?.experts ?? []).map((expert) => ({
+                  value: expert.expert_id,
+                  label: taskExpertLabel(expert, t),
+                })),
+                ...(selectedExpert &&
+                !resources?.experts?.some((e) => e.expert_id === selectedExpert)
+                  ? [
+                      {
+                        value: selectedExpert,
+                        label: selectedExpert,
+                        disabled: true,
+                      },
+                    ]
+                  : []),
+              ]}
+              onChange={(id) => {
+                if (taskID) void updateTask({ selected_expert_id: id || null });
+                else setExpertID(id || null);
+              }}
+            />
+            <Segmented
+              aria-label={t("projects.tasks.actionMode")}
+              disabled={selectionDisabled}
+              value={selectedMode}
+              options={["ask", "plan", "craft"].map((mode) => ({
+                value: mode,
+                label: t(`projects.tasks.actionModes.${mode}`),
+              }))}
+              onChange={(mode) => {
+                if (taskID)
+                  void updateTask({ action_mode: mode as TaskActionMode });
+                else setActionMode(mode as TaskActionMode);
+              }}
+            />
+          </Space>
+          <Typography.Paragraph type="secondary">
+            {t("projects.tasks.expertHint")}
+          </Typography.Paragraph>
           <TaskApprovalModePicker
             onBusyChange={setApprovalSaving}
             disabled={sending || webSearchSaving}
@@ -1045,7 +1629,36 @@ export default function TaskConversations({
             value={options}
             onChange={setOptions}
             project={project}
-            disabled={sending || !!detail?.archived || projectArchived}
+            disabled={
+              sending || updating || !!detail?.archived || projectArchived
+            }
+            selectedExpertID={selectedExpert}
+          />
+          <TaskPromptPolish
+            key={`polish:${hostID ?? "local"}:${taskID ?? "new"}`}
+            text={draft}
+            taskID={taskID ?? undefined}
+            expertID={selectedExpert}
+            modelRef={options.model_ref}
+            disabled={composerDisabled}
+            onApply={(text) => {
+              setDraft(text);
+              queue.drafts.current.set(draftKey, text);
+            }}
+          />
+          <TaskVoiceInput
+            key={`voice:${taskID ?? "new"}:${projectID ?? "standalone"}`}
+            disabled={composerDisabled}
+            onText={(text) =>
+              setDraft((current) => {
+                const next = `${current}${current ? "\n" : ""}${text}`.slice(
+                  0,
+                  32768,
+                );
+                queue.drafts.current.set(draftKey, next);
+                return next;
+              })
+            }
           />
           <Input.TextArea
             aria-label={t("projects.tasks.message")}
@@ -1058,7 +1671,10 @@ export default function TaskConversations({
                 ? "projects.tasks.continuePlaceholder"
                 : "projects.tasks.placeholder",
             )}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              queue.drafts.current.set(draftKey, event.target.value);
+            }}
             onPaste={(event) => {
               const files = Array.from(event.clipboardData.files);
               if (files.length) {
@@ -1292,8 +1908,10 @@ export default function TaskConversations({
                   images.blocked ||
                   approvalSaving ||
                   webSearchSaving ||
+                  updating ||
                   !!deleteTarget ||
                   loading ||
+                  directoryChanged ||
                   !!detail?.archived ||
                   projectArchived ||
                   !!(taskID && !detail)
@@ -1310,6 +1928,96 @@ export default function TaskConversations({
           </div>
         </div>
       </div>
+      <Modal
+        title={t("projects.tasks.branchTitle")}
+        okText={t("common.confirm")}
+        cancelText={t("common.cancel")}
+        open={branch !== null}
+        onCancel={() => {
+          if (!forking) setBranch(null);
+        }}
+        onOk={() => void createBranch()}
+        confirmLoading={forking}
+        okButtonProps={{
+          disabled: branch?.operation === "edit" && !branch.prompt?.trim(),
+        }}
+        cancelButtonProps={{ disabled: forking }}
+        closable={!forking}
+        maskClosable={!forking}
+      >
+        <Typography.Paragraph>
+          {t("projects.tasks.forkHint")}
+        </Typography.Paragraph>
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Typography.Text>{t("projects.tasks.branchProject")}</Typography.Text>
+          <Select
+            aria-label={t("projects.tasks.branchProject")}
+            style={{ width: "100%" }}
+            disabled={forking}
+            value={branch?.project_id ?? ""}
+            options={[
+              { value: "", label: t("projects.tasks.noProject") },
+              ...(project &&
+              !projectOptions.some(
+                (item) => item.project_id === project.project_id,
+              )
+                ? [project]
+                : []
+              )
+                .concat(projectOptions)
+                .filter((item) => !item.archived)
+                .map((item) => ({ value: item.project_id, label: item.name })),
+            ]}
+            onChange={(id) =>
+              setBranch((current) =>
+                current ? { ...current, project_id: id || null } : current,
+              )
+            }
+          />
+          <Typography.Text>{t("projects.tasks.expert")}</Typography.Text>
+          <Select
+            aria-label={t("projects.tasks.branchExpert")}
+            style={{ width: "100%" }}
+            disabled={forking}
+            value={branch?.selected_expert_id ?? ""}
+            options={[
+              { value: "", label: t("projects.tasks.generalAssistant") },
+              ...(resources?.experts ?? []).map((expert) => ({
+                value: expert.expert_id,
+                label: taskExpertLabel(expert, t),
+              })),
+            ]}
+            onChange={(id) =>
+              setBranch((current) =>
+                current
+                  ? { ...current, selected_expert_id: id || null }
+                  : current,
+              )
+            }
+          />
+          {branch?.operation !== "fork" && (
+            <>
+              <Typography.Text>
+                {t("projects.tasks.branchPrompt")}
+              </Typography.Text>
+              <Input.TextArea
+                aria-label={t("projects.tasks.branchPrompt")}
+                value={branch?.prompt}
+                disabled={forking}
+                readOnly={branch?.operation === "regenerate"}
+                onChange={(event) =>
+                  setBranch((current) =>
+                    current
+                      ? { ...current, prompt: event.target.value }
+                      : current,
+                  )
+                }
+                autoSize={{ minRows: 3, maxRows: 8 }}
+              />
+            </>
+          )}
+        </Space>
+      </Modal>
       <Modal
         title={t("projects.tasks.delete")}
         open={deleteTarget !== null}

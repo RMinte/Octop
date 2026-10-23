@@ -1,3 +1,4 @@
+import { expertConversationUrl } from "../../../utils/remoteExpert";
 // dashboard/src/pages/Experts/components/AgentCard.tsx
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -250,8 +251,8 @@ export const AgentCard = memo(function AgentCard({
 
   const handleOpenChat = useCallback(() => {
     setActiveAgent(agent.agent_id);
-    navigate(`/chat/${agent.agent_id}`);
-  }, [agent.agent_id, setActiveAgent, navigate]);
+    navigate(expertConversationUrl(agent.agent_id, agent.kind));
+  }, [agent, setActiveAgent, navigate]);
 
   const copyAgentId = useCallback(async () => {
     const ok = await copyText(agent.agent_id);
@@ -283,6 +284,8 @@ export const AgentCard = memo(function AgentCard({
   const meta = getStateMeta(localState);
   const friendlyError = formatAgentError(localError, t);
   const chatReady = isAgentChatReady(localState);
+  const unifiedEligible =
+    !agent.kind || agent.kind === "expert" || agent.kind === "team";
   const sharedViewer = isSharedExpertViewer(agent);
   const isOwner = agent.is_owner !== false;
 
@@ -493,11 +496,14 @@ export const AgentCard = memo(function AgentCard({
             </>
           )}
 
-          {chatReady ? (
+          {chatReady || unifiedEligible ? (
             <button
               className={styles.agentCard2ChatBtn}
               style={{ color: accent, borderColor: `${accent}55` }}
               onClick={handleOpenChat}
+              title={
+                unifiedEligible ? undefined : t("projects.tasks.legacyOnlyHint")
+              }
             >
               <MessageSquare size={13} />
               {t("experts.openChat", "对话")}

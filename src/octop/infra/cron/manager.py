@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from apscheduler.events import EVENT_JOB_SUBMITTED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from octop.i18n import tr
@@ -38,7 +40,7 @@ class CronCreateSpec:
     """Input spec for creating a new cron job."""
 
     cron_id: str
-    agent_id: str
+    agent_id: str | None
     user_id: int
     trigger: str
     prompt: str
@@ -51,6 +53,10 @@ class CronCreateSpec:
     enabled: bool = True
     meta: dict[str, Any] = field(default_factory=dict)
     username: str | None = None
+    conversation_policy: str = "continue_target"
+    target_task_id: str | None = None
+    project_id: str | None = None
+    selected_expert_id: str | None | object = UNSET
 
 
 class CronManager:
@@ -69,6 +75,8 @@ class CronManager:
         self._repos = repos
         self._timezone = timezone
         self._scheduler: AsyncIOScheduler = AsyncIOScheduler(timezone=timezone)
+        self._scheduled_occurrences: dict[str, list[Any]] = {}
+        self._scheduler.add_listener(self._capture_occurrences, EVENT_JOB_SUBMITTED)
         self._lock = asyncio.Lock()
         self._mail_watch = AgentlyWatchManager()
         # Process-level jobs (e.g. TLS auto-renew) that must survive reload_from_db.
@@ -114,9 +122,16 @@ class CronManager:
     async def create(self, spec: CronCreateSpec | None = None, **kwargs: Any) -> CronJobRow:
         if spec is None:
             spec = CronCreateSpec(**kwargs)
+        self._validate_selection(
+            spec.user_id,
+            spec.conversation_policy,
+            spec.target_task_id,
+            spec.project_id,
+            spec.selected_expert_id if spec.selected_expert_id is not UNSET else spec.agent_id,
+        )
         self._mail_source(spec.trigger, spec.user_id)
         session_key = spec.session_key or ThreadRegistry.dashboard_key(
-            agent_id=spec.agent_id,
+            agent_id=spec.agent_id or "general",
             user_id=spec.user_id,
         )
         await self._ensure_session(
@@ -138,6 +153,10 @@ class CronManager:
                 task_type=normalize_cron_task_type(spec.task_type),
                 mcp_servers=list(spec.mcp_servers or []),
                 enabled=spec.enabled,
+                conversation_policy=spec.conversation_policy,
+                target_task_id=spec.target_task_id,
+                project_id=spec.project_id,
+                selected_expert_id=spec.selected_expert_id,
             )
             row = self._repos.cron_repo.get(spec.cron_id)
             assert row is not None
@@ -184,12 +203,23 @@ class CronManager:
         task_type: str | None = None,
         model: str | None | object = UNSET,
         mcp_servers: list[str] | None | object = UNSET,
+        conversation_policy: str | None = None,
+        target_task_id: str | None | object = UNSET,
+        project_id: str | None | object = UNSET,
+        selected_expert_id: str | None | object = UNSET,
     ) -> CronJobRow:
         enabled_bool: bool | None = bool(enabled) if enabled is not None else None
         async with self._lock:
             existing = self._repos.cron_repo.get(cron_id)
             if existing is None:
                 raise OctopError(ErrorCode.NOT_FOUND, f"cron job {cron_id!r} not found")
+            self._validate_selection(
+                existing.user_id,
+                conversation_policy or existing.conversation_policy,
+                existing.target_task_id if target_task_id is UNSET else target_task_id,
+                existing.project_id if project_id is UNSET else project_id,
+                existing.selected_expert_id if selected_expert_id is UNSET else selected_expert_id,
+            )
             if trigger is not None or enabled_bool is True:
                 self._mail_source(trigger or existing.trigger, existing.user_id)
             repo_kwargs: dict[str, Any] = {
@@ -199,6 +229,10 @@ class CronManager:
                 "session_key": session_key,
                 "fresh_thread": fresh_thread,
                 "enabled": enabled_bool,
+                "conversation_policy": conversation_policy,
+                "target_task_id": target_task_id,
+                "project_id": project_id,
+                "selected_expert_id": selected_expert_id,
             }
             if task_type is not None:
                 repo_kwargs["task_type"] = normalize_cron_task_type(task_type)
@@ -233,10 +267,22 @@ class CronManager:
             raise OctopError(ErrorCode.NOT_FOUND, f"cron job {cron_id!r} not found")
         job = self._make_job(row)
         logger.info("CronJob %s triggered manually", cron_id)
+        from octop.infra.utils.ulid import new_ulid
+
+        event_key = "manual:" + new_ulid()
+        from octop.infra.db.services import SharedServices
+
+        if isinstance(self._delivery_service._task_services, SharedServices):
+            from octop.infra.cron.task_delivery import reserve
+
+            await asyncio.to_thread(reserve, self._delivery_service, job.command(event_key))
+        self._repos.cron_repo.set_run_status(
+            cron_id, ts=int(time.time()), status="queued", error=None
+        )
         if wait:
-            await job.run(raise_on_error=True)
+            await job.run(raise_on_error=True, event_key=event_key)
         else:
-            asyncio.ensure_future(job.run())
+            asyncio.ensure_future(job.run(event_key=event_key))
 
     def _make_job(self, row: Any) -> CronJob:
         return CronJob.from_row(
@@ -245,6 +291,23 @@ class CronManager:
             cron_repo=self._repos.cron_repo,
             audit_repo=self._repos.audit_repo,
         )
+
+    def _validate_selection(
+        self, owner: int, policy: str, target: Any, project: Any, expert: Any
+    ) -> None:
+        from octop.infra.cron.configuration import validate_task_selection
+        from octop.infra.db.services import SharedServices
+
+        services = getattr(self._gateway, "_task_services", None)
+        if isinstance(services, SharedServices):
+            validate_task_selection(
+                services,
+                owner,
+                conversation_policy=policy,
+                target_task_id=target,
+                project_id=project,
+                selected_expert_id=expert,
+            )
 
     def _schedule(self, row: Any) -> None:
         if not row.enabled:
@@ -272,13 +335,27 @@ class CronManager:
         job = self._make_job(row)
         if self._scheduler.get_job(row.cron_id):
             self._scheduler.remove_job(row.cron_id)
+
+        async def run_scheduled() -> None:
+            await asyncio.sleep(0)
+            occurrences = self._scheduled_occurrences.pop(row.cron_id, [])
+            if not occurrences:
+                raise RuntimeError("scheduled occurrence identity unavailable")
+            for occurred_at in occurrences:
+                await job.run(event_key="schedule:" + occurred_at.isoformat())
+
         self._scheduler.add_job(
-            job.run,
+            run_scheduled,
             trigger=trigger,
             id=row.cron_id,
             replace_existing=True,
             misfire_grace_time=60,
         )
+
+    def _capture_occurrences(self, event: Any) -> None:
+        if event.job_id in self._system_job_ids:
+            return
+        self._scheduled_occurrences.setdefault(event.job_id, []).extend(event.scheduled_run_times)
 
     async def _unschedule(self, cron_id: str) -> None:
         await self._mail_watch.unsubscribe(cron_id)
@@ -339,7 +416,9 @@ class CronManager:
             prompt=prompt,
             mcp_servers=list(dict.fromkeys([source.mcp_server_name, *row.mcp_servers])),
         )
-        await self._make_job(event_row).run()
+        await self._make_job(event_row).run(
+            event_key="mail:" + source.instance_id + ":" + message_id
+        )
 
     async def reload_mail_watches(self) -> None:
         """Rebuild every mailbox watch after a full cron reload."""
@@ -375,7 +454,9 @@ class CronManager:
     async def resume_mail_watch(self, instance_id: str) -> None:
         await self.sync_mail_watch(instance_id)
 
-    async def _ensure_session(self, session_key: str, *, agent_id: str, user_id: int) -> None:
+    async def _ensure_session(
+        self, session_key: str, *, agent_id: str | None, user_id: int
+    ) -> None:
         registry = self._gateway.thread_registry
         existing = registry.get_session(session_key)
         if existing is not None:
@@ -391,12 +472,14 @@ class CronManager:
                 )
                 raise ValueError(msg)
             return
+        if getattr(self._gateway, "_task_services", None) is not None:
+            return
         parts = session_key.split(":", 3)
         channel_type = parts[1] if len(parts) >= 2 else "cron"
         chat_type = parts[3] if len(parts) >= 4 else ThreadRegistry.CHAT_TYPE_DM
         await registry.get_or_create_by_key(
             session_key=session_key,
-            agent_id=agent_id,
+            agent_id=agent_id or "general",
             user_id=user_id,
             channel_type=channel_type,
             channel_chat_type=chat_type,

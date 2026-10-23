@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, convert_to_messages
 from tests.support.app import octop_client
 from tests.support.auth import auth_header, bootstrap_admin, create_user, seed_openai_provider
 from tests.support.fakes import FakeHarnessAgent
+from tests.support.harness import patch_resident_stream
 
 
 def _request_id() -> str:
@@ -130,7 +131,7 @@ async def test_new_user_can_send_using_get_binding_without_initialization_reques
         yield {"type": "token", "content": "Ready to help."}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     request_id = _request_id()
     base = _base(binding)
     sent = await client.post(
@@ -186,7 +187,7 @@ async def test_resident_message_acceptance_is_idempotent_and_does_not_accept_cha
         yield {"type": "token", "content": "answer."}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     request_id = _request_id()
     body = {"request_id": request_id, "prompt": "Remember this conversation."}
     try:
@@ -200,6 +201,10 @@ async def test_resident_message_acceptance_is_idempotent_and_does_not_accept_cha
         assert concurrent_replay.status_code in {200, 202}, concurrent_replay.text
         assert concurrent_replay.json()["turn_id"] == original["turn_id"]
         await asyncio.wait_for(entered.wait(), 5)
+
+        active_history = await client.get(f"{base}/history", headers=auth)
+        assert active_history.status_code == 200, active_history.text
+        assert active_history.json()["turn_active"] is True
 
         duplicate = await client.post(f"{base}/messages", headers=auth, json=body)
         assert duplicate.status_code in {200, 202}, duplicate.text
@@ -248,7 +253,7 @@ async def test_closing_the_http_client_after_acceptance_keeps_the_resident_turn_
         yield {"type": "token", "content": "after disconnect."}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     request_id = _request_id()
     try:
         async with httpx.AsyncClient(
@@ -285,7 +290,7 @@ async def test_resident_followups_keep_the_thread_and_snapshot_only_returns_the_
         yield {"type": "token", "content": f"Reply to {message.text}"}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     turns = []
     for prompt in ("First topic", "A followup", "Third question"):
         request_id = _request_id()
@@ -324,7 +329,7 @@ async def test_resident_conversation_and_request_endpoints_hide_other_users_reso
         yield {"type": "token", "content": "Private reply"}
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     request_id = _request_id()
     created = await client.post(
         f"{base}/messages",
@@ -363,7 +368,7 @@ async def test_old_cancel_receipt_cannot_cancel_a_followup_turn(env_with_provide
         await release[index].wait()
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     first_request = _request_id()
     cancel_request = _request_id()
     try:
@@ -422,7 +427,7 @@ async def test_resident_error_followed_by_done_is_failed_and_keeps_partial_reply
         }
         yield {"type": "done"}
 
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     request_id = _request_id()
     accepted = await client.post(
         f"{base}/messages", headers=auth, json={"request_id": request_id, "prompt": "Some work"}
@@ -443,8 +448,8 @@ async def test_resident_gateway_preserves_context_and_public_history_message_ide
 
     async def contextual_stream(self, request):
         thread_id = request["thread_id"]
-        previous = await self.aget_history(thread_id, limit=50)
-        incoming = convert_to_messages(request["messages"])
+        messages = convert_to_messages(request["messages"])
+        previous, incoming = messages[:-1], messages[-1:]
         observed.append((request, previous, incoming))
         if previous:
             earlier_users = [message.content for message in previous if message.type == "human"]
@@ -469,6 +474,8 @@ async def test_resident_gateway_preserves_context_and_public_history_message_ide
         await seed_openai_provider(client, auth)
         binding = await _binding(client, auth)
         base = _base(binding)
+        archive = server.app_runtime.history_archive
+        archived_before = archive.store.segments(binding["thread_id"]) if archive else None
         completed = []
         for prompt in ("My code is ORCHID.", "What code did I give you?"):
             request_id = _request_id()
@@ -487,7 +494,7 @@ async def test_resident_gateway_preserves_context_and_public_history_message_ide
             "I will remember ORCHID.",
         ]
         for turn, (request, _previous, incoming) in zip(completed, observed, strict=True):
-            assert request["thread_id"] == binding["thread_id"]
+            assert request["thread_id"] == turn["turn_id"]
             assert incoming[0].id == turn["user_message_id"]
             assert incoming[0].additional_kwargs["resident_request_id"] == turn["request_id"]
 
@@ -520,11 +527,33 @@ async def test_resident_gateway_preserves_context_and_public_history_message_ide
             "What code did I give you?",
             "ORCHID",
         ]
+        assert [
+            message["id"] for message in history["messages"] if message["role"] == "assistant"
+        ] == [turn["assistant_message_id"] for turn in completed]
+        tail = (await client.get(f"{base}/history", headers=auth, params={"limit": 2})).json()
+        assert tail["messages"] == history["messages"][-2:]
+        assert tail["has_more"] and tail["next_cursor"]
+        earlier = await client.get(
+            f"{base}/history",
+            headers=auth,
+            params={"limit": 2, "cursor": tail["next_cursor"]},
+        )
+        assert earlier.status_code == 200, earlier.text
+        assert earlier.json()["messages"] == history["messages"][:2]
+        assert not earlier.json()["has_more"]
+        exported = await client.get(f"{base}/history/export", headers=auth)
+        assert exported.status_code == 200, exported.text
+        assert [message["data"]["id"] for message in exported.json()["messages"]] == [
+            message["id"] for message in history["messages"]
+        ]
+        assert exported.json()["latest_turn"] is None
+        other_auth = await create_user(client, auth, username="history-private-other")
+        for suffix in ("history", "history/export"):
+            forbidden = await client.get(f"{base}/{suffix}", headers=other_auth)
+            assert forbidden.status_code in {403, 404}, forbidden.text
         if versioned_history:
-            archive = server.app_runtime.history_archive
             assert archive is not None
-            segments = archive.store.segments(binding["thread_id"])
-            assert any(segment["format"] == "v2" for segment in segments)
+            assert archive.store.segments(binding["thread_id"]) == archived_before
 
 
 async def test_resident_routes_require_authentication_and_expose_typed_openapi(resident_docs_env):

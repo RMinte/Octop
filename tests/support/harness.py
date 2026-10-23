@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,6 +43,58 @@ def _wire_add_provider(mock_manager: MagicMock) -> None:
 
     mock_manager.add_provider = MagicMock(side_effect=_add_provider)
     mock_manager.remove_provider = MagicMock()
+
+
+def patch_resident_stream(monkeypatch: Any, stream: Any) -> None:
+    """Replace only the model stream, retaining native Task claims and guards."""
+    from langchain_core.messages import AIMessage, convert_to_messages
+
+    from octop.infra.agents.resident_identity import ResidentTextOnlyMiddleware
+
+    async def model_stream(self: Any, request: dict[str, Any]) -> Any:
+        thread_id = next(
+            middleware.thread_id
+            for middleware in self.config.middleware
+            if isinstance(middleware, ResidentTextOnlyMiddleware)
+        )
+        messages = convert_to_messages(request["messages"])
+        incoming = messages[-1]
+        message = SimpleNamespace(
+            text=incoming.content,
+            agent_id=request["agent_id"],
+            user_id=int(request["user"]),
+            metadata={
+                "thread_id": thread_id,
+                "_resident_request_id": incoming.additional_kwargs["resident_request_id"],
+            },
+        )
+        reply = ""
+        async for event in stream(message):
+            if event.get("type") == "token":
+                reply += str(event.get("content") or "")
+            yield event
+        self.seed_thread_messages(request["thread_id"], [*messages, AIMessage(content=reply)])
+
+    monkeypatch.setattr(FakeHarnessAgent, "stream", model_stream)
+
+
+def patch_task_stream(monkeypatch: Any, stream: Any) -> None:
+    """Program ordinary Tasks without intercepting the private resident runtime."""
+    import json
+
+    from octop.infra.projects import resident_tasks
+    from octop.infra.projects import runtime as task_runtime
+
+    async def run(services: Any, owner: int, turn: Any, history: list[Any]) -> Any:
+        target = (
+            resident_tasks.run
+            if json.loads(turn.configuration_json).get("execution_kind") == "resident"
+            else stream
+        )
+        async for event in target(services, owner, turn, history):
+            yield event
+
+    monkeypatch.setattr(task_runtime, "run_turn", run)
 
 
 def build_harness_manager_mock(
@@ -186,11 +239,47 @@ def patch_harness(fake_agent: Any | None = None):
             providers=kw.get("providers"),
         )
 
+    class TaskResidentHarness(FakeHarnessAgent):
+        """Expose the short-lived Task harness surface to existing test streams."""
+
+        def __init__(self, config: Any, *, agent_id: str) -> None:
+            super().__init__(
+                chunks=list(agent.chunks),
+                raise_on_stream=agent.raise_on_stream,
+                workspace_dir=Path(config.workspace_dir),
+                system_files_path=config.system_files_path or "",
+            )
+            self.config = config
+            self.agent_id = agent_id
+            self.checkpointer = config.checkpointer
+            self._base_graph = self.graph
+            self.protocol = SimpleNamespace(_graph=self.graph)
+            self.memory = None
+
+        async def stream(self, request: Any, *, protocol: Any = None) -> Any:
+            from langchain_core.messages import AIMessage, convert_to_messages
+
+            request = request if isinstance(request, dict) else vars(request)
+            reply = ""
+            async for chunk in FakeHarnessAgent.stream(self, request):
+                if chunk.get("type") == "token":
+                    reply += str(chunk.get("content") or "")
+                yield chunk
+            if not await self.aget_history(request["thread_id"], limit=100_000):
+                messages = convert_to_messages(request["messages"])
+                if reply:
+                    messages.append(AIMessage(content=reply))
+                self.seed_thread_messages(request["thread_id"], messages)
+
+        async def aclose(self) -> None:
+            self.close()
+
     with (
         patch(
             "octop.infra.agents.manager.HarnessAgentManager",
             side_effect=_constructor,
         ),
+        patch("octop.infra.projects.resident_tasks.HarnessAgent", TaskResidentHarness),
         patch("octop.infra.projects.title.ChatModelFactory") as title_factory,
         patch("octop.infra.projects.narration.ChatModelFactory") as narration_factory,
     ):

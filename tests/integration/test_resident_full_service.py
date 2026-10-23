@@ -25,6 +25,7 @@ from octop.infra.agents.resident_profiles import (
 )
 from tests.support.auth import create_user
 from tests.support.fakes import FakeHarnessAgent
+from tests.support.harness import patch_task_stream
 
 
 def _key() -> str:
@@ -81,8 +82,8 @@ async def full_service(env_with_provider, monkeypatch, tmp_path):
         return messages
 
     async def stream(self, request):
-        previous = await self.aget_history(request["thread_id"], limit=1000)
-        incoming = convert_to_messages(request["messages"])
+        messages = convert_to_messages(request["messages"])
+        previous, incoming = messages[:-1], messages[-1:]
         requests.append((request["thread_id"], previous, incoming))
         answer = AIMessage(content=f"Answer: {incoming[-1].content}", id=_key())
         self.seed_thread_messages(request["thread_id"], [*previous, *incoming, answer])
@@ -137,8 +138,8 @@ async def test_single_steward_keeps_identity_history_and_memory_across_work_and_
     assert (primary["agent_id"], primary["thread_id"]) != (other["agent_id"], other["thread_id"])
     first = await _send(client, auth, primary, "Help organize my work this week.")
     await _send(client, stranger, other, "Another user's private discussion")
-    await _send(client, auth, primary, "Also plan dinner around that work schedule.")
-    assert requests[-1][0] == primary["thread_id"]
+    latest = await _send(client, auth, primary, "Also plan dinner around that work schedule.")
+    assert requests[-1][0] == latest["turn_id"]
     assert "Help organize my work this week." in str(requests[-1][1])
     assert "Another user's private discussion" not in str(requests[-1][1])
     memory = _json(
@@ -419,7 +420,6 @@ async def test_task_watch_is_quiet_until_change_and_stops_after_one_terminal_not
     full_service, monkeypatch
 ):
     from octop.infra.agents.resident_followups import poll_followups
-    from octop.infra.projects import runtime as task_runtime
 
     client, server, auth, primary, _requests, _template, _catalog = full_service
     runtime = server.app_runtime.resident_conversations
@@ -431,7 +431,7 @@ async def test_task_watch_is_quiet_until_change_and_stops_after_one_terminal_not
         await release.wait()
         yield {"type": "token", "content": "The watched task has finished."}
 
-    monkeypatch.setattr(task_runtime, "run_turn", work)
+    patch_task_stream(monkeypatch, work)
     created = _json(
         await client.post(
             "/api/project-tasks",
@@ -765,7 +765,6 @@ async def test_scheduled_task_uses_normal_admission_and_survives_later_followup_
     full_service, monkeypatch, stop
 ):
     from octop.infra.agents.resident_followups import poll_followups
-    from octop.infra.projects import runtime as task_runtime
 
     client, server, auth, primary, _requests, _template, catalog = full_service
     profile = (
@@ -788,7 +787,7 @@ async def test_scheduled_task_uses_normal_admission_and_survives_later_followup_
         await release.wait()
         yield {"type": "token", "content": "Scheduled task result."}
 
-    monkeypatch.setattr(task_runtime, "run_turn", work)
+    patch_task_stream(monkeypatch, work)
     body = {
         "request_id": _key(),
         "purpose": "Produce my authorized periodic result",

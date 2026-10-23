@@ -304,7 +304,7 @@ def test_migration_upgrades_v53_and_is_idempotent(
         migrate.run_migrations(pool)
         assert ModelCallRepo(pool).get(saved.call_id) == saved
         with pool.connect() as conn:
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 55
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -380,7 +380,7 @@ def test_migration_upgrades_v54_sources_without_changing_receipt_facts(
             {**row, "source": "box" if row["source"] == "box" else "third_party"} for row in before
         ]
         with pool.connect() as conn:
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 55
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
             assert [
                 dict(row) for row in conn.execute("SELECT * FROM model_calls ORDER BY id")
             ] == expected

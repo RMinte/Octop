@@ -13,9 +13,15 @@ def task_scope(project_id: str | None) -> str:
     return "tasks:" + (project_id or "")
 
 
+def all_task_scope() -> str:
+    return "tasks:all"
+
+
 def record_change(
     conn: Any, owner_id: int, scope: str, entity_id: str, row: Any, *, deleted: bool = False
 ) -> None:
+    if getattr(row, "internal_kind", ""):
+        return
     # UPDATE takes the stream lock until commit, so sequence order is commit order.
     conn.execute(
         "INSERT INTO project_sync_scopes(owner_id, scope) VALUES (?, ?) "
@@ -39,6 +45,8 @@ def record_change(
             json.dumps({**asdict(row), **({"deleted": True} if deleted else {})}),
         ),
     )
+    if scope.startswith("tasks:") and scope != all_task_scope():
+        record_change(conn, owner_id, all_task_scope(), entity_id, row, deleted=deleted)
 
 
 @dataclass(frozen=True)

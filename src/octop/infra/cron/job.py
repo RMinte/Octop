@@ -24,7 +24,7 @@ class CronJob:
         *,
         cron_id: str,
         name: str,
-        agent_id: str,
+        agent_id: str | None,
         prompt: str,
         fresh_thread: bool,
         session_key: str,
@@ -35,6 +35,10 @@ class CronJob:
         delivery_service: CronDeliveryService,
         cron_repo: CronJobRepo,
         audit_repo: AuditRepo,
+        conversation_policy: str = "continue_target",
+        target_task_id: str | None = None,
+        project_id: str | None = None,
+        selected_expert_id: str | None = None,
     ) -> None:
         self._cron_id = cron_id
         self._name = name
@@ -49,6 +53,12 @@ class CronJob:
         self._delivery_service = delivery_service
         self._cron_repo = cron_repo
         self._audit_repo = audit_repo
+        (
+            self._conversation_policy,
+            self._target_task_id,
+            self._project_id,
+            self._selected_expert_id,
+        ) = conversation_policy, target_task_id, project_id, selected_expert_id
 
     @classmethod
     def from_row(
@@ -73,9 +83,13 @@ class CronJob:
             delivery_service=delivery_service,
             cron_repo=cron_repo,
             audit_repo=audit_repo,
+            conversation_policy=row.conversation_policy,
+            target_task_id=row.target_task_id,
+            project_id=row.project_id,
+            selected_expert_id=row.selected_expert_id,
         )
 
-    async def run(self, *, raise_on_error: bool = False) -> None:
+    async def run(self, *, raise_on_error: bool = False, event_key: str = "") -> None:
         from octop.infra.metrics import METRICS  # noqa: PLC0415
 
         METRICS.inc("cron_runs_total")
@@ -94,6 +108,11 @@ class CronJob:
                     task_type=self._task_type,
                     model=self._model,
                     mcp_servers=tuple(self._mcp_servers),
+                    event_key=event_key,
+                    conversation_policy=self._conversation_policy,
+                    target_task_id=self._target_task_id,
+                    project_id=self._project_id,
+                    selected_expert_id=self._selected_expert_id,
                 )
             )
         except Exception as exc:
@@ -115,4 +134,23 @@ class CronJob:
             actor=ACTOR_SYSTEM,
             action="cron.run_ok",
             target=self._cron_id,
+        )
+
+    def command(self, event_key: str) -> CronDeliveryCommand:
+        return CronDeliveryCommand(
+            cron_id=self._cron_id,
+            cron_name=self._name,
+            agent_id=self._agent_id,
+            user_id=self._user_id,
+            session_key=self._session_key,
+            prompt=self._prompt,
+            fresh_thread=self._fresh_thread,
+            task_type=self._task_type,
+            model=self._model,
+            mcp_servers=tuple(self._mcp_servers),
+            event_key=event_key,
+            conversation_policy=self._conversation_policy,
+            target_task_id=self._target_task_id,
+            project_id=self._project_id,
+            selected_expert_id=self._selected_expert_id,
         )

@@ -25,6 +25,10 @@ class TaskContentBlock(ProjectModel):
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_label: str | None = Field(default=None, description="服务端本地化的工具动作名称。")
+    speaker_agent_id: str | None = Field(
+        default=None, description="实际发言专家的持久标识；团队成员不会合并为主持人。"
+    )
+    speaker_name: str | None = Field(default=None, description="执行时保存的专家显示名称。")
     brief: str | None = Field(
         default=None, max_length=240, description="本次工具动作及目的的简短公开说明。"
     )
@@ -98,6 +102,8 @@ class TaskContent:
         *,
         plan_id: str | None = None,
         step_id: str | None = None,
+        speaker_agent_id: str | None = None,
+        speaker_name: str | None = None,
     ) -> None:
         if not text:
             return
@@ -106,9 +112,17 @@ class TaskContent:
             or self._text.type != kind
             or self._text_key != key
             or (self._text.plan_id, self._text.step_id) != (plan_id, step_id)
+            or (self._text.speaker_agent_id, self._text.speaker_name)
+            != (speaker_agent_id, speaker_name)
         ):
             self.end_text()
-            self._text = self._new(kind, plan_id=plan_id, step_id=step_id)
+            self._text = self._new(
+                kind,
+                plan_id=plan_id,
+                step_id=step_id,
+                speaker_agent_id=speaker_agent_id,
+                speaker_name=speaker_name,
+            )
             self._text_key = key
         self._text.text += text
         self.revision += 1
@@ -175,6 +189,8 @@ class TaskContent:
         arguments: dict[str, Any] | None = None,
         started_at: datetime | str | None = None,
         brief: str | None = None,
+        speaker_agent_id: str | None = None,
+        speaker_name: str | None = None,
     ) -> None:
         existing = self._tools.get(call_id)
         if existing is not None:
@@ -191,6 +207,9 @@ class TaskContent:
                 existing.arguments = arguments
             if brief is not None:
                 existing.brief = brief
+            if speaker_agent_id is not None:
+                existing.speaker_agent_id = speaker_agent_id
+                existing.speaker_name = speaker_name
             if existing.model_dump() != before:
                 self.revision += 1
             return
@@ -205,6 +224,8 @@ class TaskContent:
             arguments=arguments,
             started_at=started_at,
             brief=brief,
+            speaker_agent_id=speaker_agent_id,
+            speaker_name=speaker_name,
         )
         self.revision += 1
 

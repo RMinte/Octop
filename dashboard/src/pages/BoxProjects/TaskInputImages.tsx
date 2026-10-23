@@ -1,15 +1,15 @@
+import TaskMedia, { taskMediaKind } from "./TaskMedia";
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useRef, useState } from "react";
 import { Button, Image, Spin, Typography } from "antd";
 import { Download, FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import {
-  projectTasksApi,
-  type TaskInputAttachment,
-} from "../../api/modules/projects";
+import { type TaskInputAttachment } from "../../api/modules/projects";
 import styles from "./index.module.less";
 import { isTaskImage } from "./useTaskImages";
 
 function TaskInputFile({ attachment }: { attachment: TaskInputAttachment }) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [downloading, setDownloading] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -70,6 +70,7 @@ function TaskInputFile({ attachment }: { attachment: TaskInputAttachment }) {
 }
 
 function TaskInputImage({ attachment }: { attachment: TaskInputAttachment }) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [url, setURL] = useState("");
   const [failed, setFailed] = useState(false);
@@ -93,7 +94,7 @@ function TaskInputImage({ attachment }: { attachment: TaskInputAttachment }) {
       controller.abort();
       if (previewURL) URL.revokeObjectURL(previewURL);
     };
-  }, [attachment.attachment_id, attempt]);
+  }, [attachment.attachment_id, attempt, projectTasksApi]);
   return (
     <div className={styles.inputImage}>
       {url ? (
@@ -121,7 +122,9 @@ export default function TaskInputImages({
   return (
     <div className={styles.inputImages}>
       {attachments.map((attachment) =>
-        isTaskImage(attachment.media_type) ? (
+        taskMediaKind(attachment.media_type, attachment.name) ? (
+          <TaskMedia key={attachment.attachment_id} attachment={attachment} />
+        ) : isTaskImage(attachment.media_type) ? (
           <TaskInputImage
             key={attachment.attachment_id}
             attachment={attachment}

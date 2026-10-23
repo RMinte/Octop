@@ -3,7 +3,7 @@ import { getAuthToken } from "../../api/request";
 import type { InstalledPlugin } from "../../api/modules/plugins";
 import { createPluginUiHost } from "./host";
 import { unregisterPluginRenderers } from "./registry";
-import type { PluginUiModule } from "./types";
+import type { OctopPluginUIHost, PluginUiModule } from "./types";
 
 const loadedPlugins = new Set<string>();
 const blobUrls: string[] = [];
@@ -92,4 +92,21 @@ export function resetPluginUiLoader(): void {
 
 export function isPluginUiLoaded(pluginId: string): boolean {
   return loadedPlugins.has(pluginId);
+}
+
+/** Re-run plugin setup with an isolated host and registry for a Task workbench. */
+export async function loadScopedPluginToolUis(
+  plugins: InstalledPlugin[],
+  createHost: (pluginId: string) => OctopPluginUIHost,
+): Promise<void> {
+  for (const plugin of plugins) {
+    if (plugin.error || !plugin.ui?.entry) continue;
+    try {
+      const mod = await importPluginEsm(plugin.id, plugin.ui.entry);
+      const setup = mod.setup ?? mod.default?.setup;
+      if (typeof setup === "function") setup(createHost(plugin.id));
+    } catch (err) {
+      console.warn(`[plugin-ui] scoped renderer failed: ${plugin.id}`, err);
+    }
+  }
 }

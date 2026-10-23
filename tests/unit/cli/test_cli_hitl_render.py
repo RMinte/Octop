@@ -66,3 +66,38 @@ def test_message_event_to_cli_chunks() -> None:
     )
     assert message_event_to_cli_chunks(err) == [{"type": "error", "message": "boom"}]
     assert message_event_to_cli_chunks(MessageEvent(type=MessageEventType.TYPING)) == []
+
+
+def test_task_question_card_uses_exact_answer_command() -> None:
+    card = format_cli_hitl_pause(
+        {
+            "interaction": {
+                "interaction_id": "interaction-full-id",
+                "kind": "question",
+                "payload": {"question": "Which library?", "options": [{"label": "SQLite"}]},
+            }
+        },
+        locale="en",
+    )
+    assert "Which library?" in card and "SQLite" in card
+    assert "/answer interaction-full-id <answer>" in card
+    assert "/approve" not in card
+
+
+def test_task_approval_card_shows_exact_action_and_interaction() -> None:
+    card = format_cli_hitl_pause(
+        {
+            "interaction": {
+                "interaction_id": "approval-full-id",
+                "kind": "approval",
+                "payload": {
+                    "tool_name": "execute",
+                    "reason": "Verify the project",
+                    "arguments": {"command": "python -m pytest tests/unit/selected"},
+                },
+            }
+        },
+        locale="en",
+    )
+    assert "python -m pytest tests/unit/selected" in card
+    assert "/approve approval-full-id" in card and "/deny approval-full-id" in card

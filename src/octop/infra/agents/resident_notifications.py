@@ -120,6 +120,7 @@ class ResidentNotificationDelivery:
         history_archive: HistoryArchive | None,
     ) -> None:
         self.services, self.registry, self.archive = services, registry, history_archive
+        self.task_backed = False
 
     async def deliver(self, notification: ResidentNotificationRow) -> None:
         # Executor writes continue after cancellation. Keep both caller-held locks
@@ -169,6 +170,15 @@ class ResidentNotificationDelivery:
             json.dumps(message_to_dict(message), ensure_ascii=False),
         )
         message = cast(AIMessage, messages_from_dict([json.loads(frozen)])[0])
+        if self.task_backed:
+            from octop.infra.projects.resident_tasks import append_message
+
+            await append_message(self.services, row.owner_id, row.thread_id, message)
+            now = time.time_ns() // 1_000_000
+            await asyncio.to_thread(repo.mark_stage, row.notification_id, "archive_written_at", now)
+            await asyncio.to_thread(repo.mark_stage, row.notification_id, "context_written_at", now)
+            await asyncio.to_thread(repo.mark_delivered, row.notification_id, now)
+            return
         if row.archive_written_at is None:
             if self.archive is not None:
                 await asyncio.to_thread(

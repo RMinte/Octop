@@ -25,6 +25,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _REPO_ROOT / ".env"
 
 
+@pytest.fixture
+async def live_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Isolated real Task runtime; opt in with an explicit read-only provider DB."""
+    if not os.environ.get("OCTOP_LIVE_PROVIDER_DB") or not os.environ.get("OCTOP_LIVE_MODEL_REF"):
+        pytest.skip("Set OCTOP_LIVE_PROVIDER_DB and OCTOP_LIVE_MODEL_REF for live Task acceptance")
+    from tests.live.unified_task_support import live_task_environment
+
+    home = tmp_path / "live-octop"
+    monkeypatch.setenv("OCTOP_HOME", str(home))
+    monkeypatch.setenv("BROWSER_RECORD_REPLAY_DIR", str(tmp_path / "record-replay"))
+    async with live_task_environment(home) as environment:
+        yield environment
+
+
 def _load_env_file() -> None:
     if not _ENV_FILE.is_file():
         return

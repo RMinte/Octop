@@ -1,10 +1,8 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useState } from "react";
 import { Alert, Form, Select, Space, Spin, Switch, Typography } from "antd";
 import { useTranslation } from "react-i18next";
-import {
-  knowledgeBasesApi,
-  type KnowledgeBase,
-} from "../../api/modules/knowledgeBases";
+import { type KnowledgeBase } from "../../api/modules/knowledgeBases";
 import { useCurrentUser } from "../../hooks/useCurrentUser";
 import { apiErrorMessage } from "../../utils/apiError";
 
@@ -19,6 +17,7 @@ export default function TaskKnowledgeField({
   active: boolean;
   disabled: boolean;
 }) {
+  const { knowledgeBasesApi, hostID } = useTaskHost();
   const { t } = useTranslation();
   const user = useCurrentUser();
   const [bases, setBases] = useState<KnowledgeBase[]>([]);
@@ -27,7 +26,9 @@ export default function TaskKnowledgeField({
   const [error, setError] = useState("");
   const inherited = value == null;
   const defaults = bases
-    .filter((base) => base.default_open && base.owner_user_id === user?.id)
+    .filter(
+      (base) => !hostID && base.default_open && base.owner_user_id === user?.id,
+    )
     .map((base) => base.id);
 
   useEffect(() => {
@@ -60,7 +61,7 @@ export default function TaskKnowledgeField({
     return () => {
       disposed = true;
     };
-  }, [active, t, user?.id]);
+  }, [active, t, user?.id, knowledgeBasesApi]);
 
   return (
     <Form.Item

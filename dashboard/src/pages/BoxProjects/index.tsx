@@ -1,3 +1,6 @@
+import TaskHostBoundary from "./TaskHostBoundary";
+import { useTaskHost } from "../../context/TaskHostContext";
+import TaskHostDirectory from "./TaskHostDirectory";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -29,7 +32,6 @@ import {
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  projectsApi,
   type Project,
   type ProjectFields,
   type ProjectResources,
@@ -63,9 +65,31 @@ const EMPTY: ProjectFields = {
 type FormValues = ProjectFields;
 
 export default function BoxProjectsPage() {
+  const [params] = useSearchParams();
+  const hostID = params.get("host_id");
+  return (
+    <TaskHostBoundary key={hostID ?? "local"} hostID={hostID}>
+      <ProjectsBody />
+    </TaskHostBoundary>
+  );
+}
+function ProjectsBody() {
+  const { projectsApi, hostID } = useTaskHost();
   const { t } = useTranslation();
   const taskQueue = useTaskMessageQueue();
-  const navigate = useNavigate();
+  const rawNavigate = useNavigate();
+  const navigate = useCallback(
+    (url: string) => {
+      if (!hostID) {
+        rawNavigate(url);
+        return;
+      }
+      const target = new URL(url, window.location.origin);
+      target.searchParams.set("host_id", hostID);
+      rawNavigate(`${target.pathname}${target.search}`);
+    },
+    [rawNavigate, hostID],
+  );
   const { projectID } = useParams<{ projectID: string }>();
   const timeZone = useServerTimezone();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -143,7 +167,7 @@ export default function BoxProjectsPage() {
         apiErrorMessage(cause, t("projects.resourcesFailed"), t),
       );
     }
-  }, [t]);
+  }, [projectsApi, t]);
 
   useEffect(() => {
     void loadResources();
@@ -286,6 +310,7 @@ export default function BoxProjectsPage() {
         </Space>
       }
     >
+      <TaskHostDirectory hostID={hostID} />
       {error && (
         <Alert type="error" showIcon message={error} className={styles.alert} />
       )}
@@ -293,9 +318,9 @@ export default function BoxProjectsPage() {
         <aside className={styles.list} aria-label={t("projects.list")}>
           <Button
             type={standalone ? "primary" : "default"}
-            onClick={() => navigate("/box-projects?view=tasks")}
+            onClick={() => navigate("/conversations")}
           >
-            {t("projects.tasks.standalone")}
+            {t("projects.tasks.all")}
           </Button>
           <Segmented
             block
@@ -359,6 +384,14 @@ export default function BoxProjectsPage() {
               key="standalone"
               projectID={null}
               queue={taskQueue}
+              allTasks
+              onSelectTask={(id) =>
+                navigate(
+                  id
+                    ? `/conversations/${encodeURIComponent(id)}`
+                    : "/conversations",
+                )
+              }
             />
           ) : loading ? (
             <div className={styles.loading}>
@@ -447,6 +480,15 @@ export default function BoxProjectsPage() {
                         projectID={selected.project_id}
                         project={selected}
                         queue={taskQueue}
+                        onSelectTask={(id) =>
+                          navigate(
+                            id
+                              ? `/conversations/${encodeURIComponent(id)}`
+                              : `/conversations?project_id=${encodeURIComponent(
+                                  selected.project_id,
+                                )}`,
+                          )
+                        }
                       />
                     ),
                   },
@@ -648,10 +690,19 @@ export default function BoxProjectsPage() {
                       extra={t("projects.directoryHint")}
                     >
                       <Form.Item name="directory" noStyle>
-                        <RootDirSelect
-                          disabled={saving || !resources}
-                          treeRoots={resources?.directory_roots}
-                        />
+                        {hostID ? (
+                          <Input
+                            disabled={saving || !resources}
+                            placeholder={t(
+                              "projects.tasks.hosts.remoteDirectory",
+                            )}
+                          />
+                        ) : (
+                          <RootDirSelect
+                            disabled={saving || !resources}
+                            treeRoots={resources?.directory_roots}
+                          />
+                        )}
                       </Form.Item>
                       <Button
                         type="link"

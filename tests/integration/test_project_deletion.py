@@ -68,6 +68,26 @@ def assert_task_deleted(services, task_id):
             )
 
 
+def task_records(services, task_id):
+    with services.db.connect() as conn:
+        return {
+            table: [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {table} WHERE task_id=?", (task_id,)
+                ).fetchall()
+            ]
+            for table in (
+                "project_tasks",
+                "project_task_turns",
+                "project_task_artifacts",
+                "project_task_tool_calls",
+                "project_task_contexts",
+                "project_task_titles",
+            )
+        }
+
+
 @pytest.mark.parametrize("in_project", [False, True])
 @pytest.mark.parametrize("previously_archived", [False, True])
 async def test_delete_task_cleans_children_and_sync_without_deleting_project(
@@ -114,7 +134,7 @@ async def test_delete_task_cleans_children_and_sync_without_deleting_project(
 
 
 @pytest.mark.parametrize("archived_project", [False, True])
-async def test_delete_project_cascades_active_and_archived_tasks_but_keeps_files(
+async def test_delete_project_preserves_tasks_until_explicitly_deleted_and_keeps_files(
     deletion_env, tmp_path, archived_project
 ):
     client, services, auth, owner = deletion_env
@@ -133,16 +153,66 @@ async def test_delete_project_cascades_active_and_archived_tasks_but_keeps_files
     first = seed_task(services, owner, project.project_id)
     archived = seed_task(services, owner, project.project_id, previously_archived=True)
     unrelated = seed_task(services, owner)
-    baseline = (await client.get("/api/projects/sync", headers=auth)).json()["next_sync_cursor"]
     if archived_project:
         project = service.archive_project(
             services, owner, project.project_id, project.revision, True
         )
     base = f"/api/projects/{project.project_id}"
+    baseline = (await client.get("/api/projects/sync", headers=auth)).json()["next_sync_cursor"]
+    task_cursors = {
+        archived_filter: (
+            await client.get(base + "/tasks", headers=auth, params={"archived": archived_filter})
+        ).json()["sync_cursor"]
+        for archived_filter in (False, True)
+    }
+    before_project = (await client.get(base, headers=auth)).json()
+    before_tasks = {
+        task.task_id: task_records(services, task.task_id) for task in (first, archived, unrelated)
+    }
     response = await client.delete(base, headers=auth)
-    assert response.status_code == 204, response.text
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "PROJECT_HAS_TASKS"
+    assert (await client.get(base, headers=auth)).json() == before_project
+    for task_id, records in before_tasks.items():
+        assert task_records(services, task_id) == records
+        assert (await client.get(f"/api/project-tasks/{task_id}", headers=auth)).status_code == 200
+    assert file.read_text() == "keep me"
+    assert (
+        await client.get("/api/projects/sync", headers=auth, params={"sync_cursor": baseline})
+    ).json()["changes"] == []
+    for archived_filter, cursor in task_cursors.items():
+        assert (
+            await client.get(
+                base + "/tasks/sync",
+                headers=auth,
+                params={"archived": archived_filter, "sync_cursor": cursor},
+            )
+        ).json()["changes"] == []
+
+    assert (
+        await client.delete(f"/api/project-tasks/{first.task_id}", headers=auth)
+    ).status_code == 204
     assert_task_deleted(services, first.task_id)
+    retained = await client.delete(base, headers=auth)
+    assert retained.status_code == 409 and retained.json()["error"]["code"] == "PROJECT_HAS_TASKS"
+    assert task_records(services, archived.task_id) == before_tasks[archived.task_id]
+    assert (
+        await client.delete(f"/api/project-tasks/{archived.task_id}", headers=auth)
+    ).status_code == 204
     assert_task_deleted(services, archived.task_id)
+    for archived_filter, cursor in task_cursors.items():
+        changes = (
+            await client.get(
+                base + "/tasks/sync",
+                headers=auth,
+                params={"archived": archived_filter, "sync_cursor": cursor},
+            )
+        ).json()["changes"]
+        assert {change["task_id"] for change in changes} == {first.task_id, archived.task_id}
+        assert all(change["operation"] == "delete" and change["data"] is None for change in changes)
+    response = await client.delete(base, headers=auth)
+    assert response.status_code == 204 and response.content == b""
+    assert response.headers["cache-control"] == "no-store"
     assert file.read_text() == "keep me"
     assert (await client.get(base, headers=auth)).status_code == 404
     assert (await client.delete(base, headers=auth)).status_code == 404
@@ -150,6 +220,7 @@ async def test_delete_project_cascades_active_and_archived_tasks_but_keeps_files
     assert (
         await client.get(f"/api/project-tasks/{unrelated.task_id}", headers=auth)
     ).status_code == 200
+    assert task_records(services, unrelated.task_id) == before_tasks[unrelated.task_id]
     with services.db.connect() as conn:
         assert (
             conn.execute("SELECT COUNT(*) AS n FROM project_create_requests").fetchone()["n"] == 0
@@ -188,8 +259,9 @@ async def test_deletion_checks_ownership_and_reports_busy_reason_before_any_remo
         project_id=project.project_id,
     )
     if status == "running":
-        with services.db.transaction() as conn:
-            services.project_task_repo.start(conn, queued.task_id, queued.active_turn_id, 2)
+        claimed = services.project_task_turn_repo.claim("deletion-worker", 2)
+        assert claimed.turn_id == queued.active_turn_id
+    before_tasks = {task.task_id: task_records(services, task.task_id) for task in (saved, queued)}
     alice = await create_user(client, auth, username="deletion-alice")
     project_path = f"/api/projects/{project.project_id}"
     task_path = f"/api/project-tasks/{saved.task_id}"
@@ -202,6 +274,8 @@ async def test_deletion_checks_ownership_and_reports_busy_reason_before_any_remo
     busy_task = await client.delete(f"/api/project-tasks/{queued.task_id}", headers=auth)
     assert busy_task.status_code == 409 and busy_task.json()["error"]["code"] == "TASK_BUSY"
     assert busy_task.json()["error"]["message"] == error_message("TASK_BUSY", locale)
+    for task_id, records in before_tasks.items():
+        assert task_records(services, task_id) == records
     with services.db.connect() as conn:
         for task_id in (saved.task_id, queued.task_id):
             assert conn.execute(
@@ -209,5 +283,26 @@ async def test_deletion_checks_ownership_and_reports_busy_reason_before_any_remo
             ).fetchone()
     assert (await client.get(task_path, headers=auth)).status_code == 200
     assert (await client.get(project_path, headers=auth)).status_code == 200
-    tasks.cancel(services, owner, queued.task_id, queued.active_turn_id)
+    cancelled = tasks.cancel(services, owner, queued.task_id, queued.active_turn_id)
+    if status == "running":
+        assert cancelled.active_turn_id == queued.active_turn_id
+        pending = await client.delete(project_path, headers=auth)
+        assert (
+            pending.status_code == 409 and pending.json()["error"]["code"] == "PROJECT_TASKS_BUSY"
+        )
+        # This fixture has no worker loop; acknowledge the exact cancellation
+        # through the same fenced terminal transition used by the worker.
+        with services.db.transaction() as conn:
+            assert services.project_task_turn_repo.finish(
+                conn, queued.active_turn_id, "deletion-worker", "cancelled", "", "", 3
+            )
+            services.project_task_repo.finish(conn, queued.task_id, queued.active_turn_id, 3)
+    retained = await client.delete(project_path, headers=auth)
+    assert retained.status_code == 409 and retained.json()["error"]["code"] == "PROJECT_HAS_TASKS"
+    assert retained.json()["error"]["message"] == error_message("PROJECT_HAS_TASKS", locale)
+    for task in (saved, queued):
+        assert (
+            await client.delete(f"/api/project-tasks/{task.task_id}", headers=auth)
+        ).status_code == 204
+        assert_task_deleted(services, task.task_id)
     assert (await client.delete(project_path, headers=auth)).status_code == 204

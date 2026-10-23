@@ -22,7 +22,8 @@ import zh from "../../locales/zh.json";
 import TaskConversations from "./TaskConversations";
 import type { TaskMessageQueue } from "./useTaskMessageQueue";
 
-vi.mock("../../api/modules/projects", () => ({
+vi.mock("../../api/modules/projects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/modules/projects")>()),
   projectTasksApi: {
     settings: vi.fn(),
     contextUsage: vi.fn(),
@@ -550,7 +551,7 @@ describe("项目任务消息队列", () => {
     expect(screen.queryByText("原任务后台追问")).not.toBeInTheDocument();
   });
 
-  it("新任务清空当前任务的待发队列，原任务随后完成不会再派发", async () => {
+  it("opening a new task preserves the original task queue", async () => {
     await mount();
     await enqueue("不再发送");
     await userEvent.click(screen.getByRole("button", { name: "新任务" }));
@@ -560,7 +561,12 @@ describe("项目任务消息队列", () => {
     expect(composer()).toHaveValue("");
     expect(screen.queryByLabelText("排队中的消息")).not.toBeInTheDocument();
     await publish("task_a", "completed");
-    expect(api.send).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(api.send).toHaveBeenCalledWith(
+        "task_a",
+        expect.objectContaining({ prompt: "\u4e0d\u518d\u53d1\u9001" }),
+      ),
+    );
   });
 
   it("取回确认期间切换任务，迟到确认不能覆盖新任务草稿", async () => {
@@ -600,6 +606,7 @@ describe("项目任务消息队列", () => {
       }),
     );
     const shared: TaskMessageQueue = {
+      drafts: { current: new Map() },
       queues: {},
       delivered: { task_a: newer },
       enqueue: vi.fn(() => "ok" as const),

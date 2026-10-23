@@ -17,14 +17,18 @@ from pathlib import Path as _FsPath
 from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from octop.api.common.agent import require_agent_owner_row
 from octop.api.deps import get_server, require_permission
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.gateway import channel_bindings
 from octop.infra.gateway.bot_creators.feishu_runner import extract_feishu_credentials
 from octop.infra.gateway.channels import dingtalk_registration, qr_bind
 from octop.infra.gateway.gateway import ChannelKind
+from octop.infra.projects.models import Reference
+from octop.infra.server import OctopServer
+from octop.infra.users.identity import User
 from octop.infra.utils.locale import DEFAULT_LOCALE, resolve_request_locale
 from octop.infra.utils.subprocess_io import parse_subprocess_json_lines
 
@@ -113,6 +117,177 @@ def _require_agent_access(
 
 def _acting_user_id(user: Any, as_user: int | None) -> int:
     return int(as_user if as_user is not None else user.id)
+
+
+class TaskChannelCreateBody(BaseModel):
+    """An owned IM source whose messages enter unified Tasks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ChannelKind
+    name: str = Field(min_length=1)
+    config: dict[str, Any] = Field(
+        default_factory=dict, description="Channel adapter credentials and options."
+    )
+    selected_expert_id: Reference | None = Field(
+        default=None,
+        description="Optional ordinary expert/team. Null uses the general assistant; Resident uses its dedicated binding.",
+    )
+    project_id: Reference | None = Field(
+        default=None,
+        description="Owned project on this host, or null for an independent Task workspace.",
+    )
+    action_mode: Literal["ask", "plan", "craft"] = "craft"
+    enabled: bool = True
+
+
+class TaskChannelPatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ChannelKind | None = None
+    name: str | None = Field(default=None, min_length=1)
+    config: dict[str, Any] | None = None
+    selected_expert_id: Reference | None = Field(
+        default=None, description="Omit to preserve; explicit null clears the selected expert."
+    )
+    project_id: Reference | None = Field(
+        default=None, description="Omit to preserve; explicit null clears the project."
+    )
+    action_mode: Literal["ask", "plan", "craft"] | None = None
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _nonnullable_changes(self) -> TaskChannelPatchBody:
+        for name in self.model_fields_set - {"selected_expert_id", "project_id"}:
+            if getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        return self
+
+
+class TaskChannelView(BaseModel):
+    id: str
+    kind: str
+    name: str
+    enabled: bool
+    selected_expert_id: str | None
+    project_id: str | None
+    action_mode: Literal["ask", "plan", "craft"]
+    config: dict[str, Any]
+    runtime: dict[str, Any] | None = None
+
+
+def _task_channel_view(row: Any, server: OctopServer, request: Request) -> TaskChannelView:
+    assert server.app_runtime is not None
+    detail = _row_to_detail(
+        row, gateway=server.app_runtime.gateway, locale=resolve_request_locale(request)
+    )
+    config = detail["config"]
+    binding = config.pop("_octop_task", {})
+    return TaskChannelView(
+        id=row.channel_id,
+        kind=row.kind,
+        name=row.name,
+        enabled=bool(row.enabled),
+        selected_expert_id=row.agent_id,
+        project_id=binding.get("project_id"),
+        action_mode=binding.get("action_mode", "craft"),
+        config=config,
+        runtime=detail.get("runtime"),
+    )
+
+
+@router.get("/channels", response_model=list[TaskChannelView], summary="列出本人统一会话频道")
+async def list_task_channels(
+    request: Request,
+    user: User = Depends(require_permission("channels")),
+    server: OctopServer = Depends(get_server),
+) -> list[TaskChannelView]:
+    assert server.services is not None
+    rows = await asyncio.to_thread(channel_bindings.list_owned, server.services, user.id)
+    return [_task_channel_view(row, server, request) for row in rows]
+
+
+@router.post(
+    "/channels",
+    response_model=TaskChannelView,
+    status_code=201,
+    summary="创建统一会话频道",
+    description="频道归当前账号所有。专家和项目可为空；新消息进入统一 Task，Resident 继续使用专用频道绑定。",
+)
+async def create_task_channel(
+    body: TaskChannelCreateBody,
+    request: Request,
+    user: User = Depends(require_permission("channels")),
+    server: OctopServer = Depends(get_server),
+) -> TaskChannelView:
+    assert server.services is not None and server.app_runtime is not None
+    spec = channel_bindings.ChannelBindingSpec(
+        kind=body.kind,
+        name=body.name,
+        config=body.config,
+        selected_expert_id=body.selected_expert_id,
+        project_id=body.project_id,
+        action_mode=body.action_mode,
+        enabled=body.enabled,
+    )
+    row = await asyncio.to_thread(channel_bindings.create, server.services, user.id, spec)
+    await server.app_runtime.gateway.reload_channel(row.channel_id)
+    return _task_channel_view(row, server, request)
+
+
+@router.get(
+    "/channels/{channel_id}", response_model=TaskChannelView, summary="读取本人统一会话频道"
+)
+async def get_task_channel(
+    channel_id: str,
+    request: Request,
+    user: User = Depends(require_permission("channels")),
+    server: OctopServer = Depends(get_server),
+) -> TaskChannelView:
+    assert server.services is not None
+    row = await asyncio.to_thread(channel_bindings.get, server.services, user.id, channel_id)
+    return _task_channel_view(row, server, request)
+
+
+@router.patch(
+    "/channels/{channel_id}",
+    response_model=TaskChannelView,
+    summary="修改统一会话频道绑定",
+    description="省略专家/项目字段时保留当前值；显式 null 清空。保存后重载频道，历史 Task 及已冻结执行配置保持原样。",
+)
+async def patch_task_channel(
+    channel_id: str,
+    body: TaskChannelPatchBody,
+    request: Request,
+    user: User = Depends(require_permission("channels")),
+    server: OctopServer = Depends(get_server),
+) -> TaskChannelView:
+    assert server.services is not None and server.app_runtime is not None
+    row = await asyncio.to_thread(
+        channel_bindings.update,
+        server.services,
+        user.id,
+        channel_id,
+        body.model_dump(mode="json", exclude_unset=True),
+    )
+    await server.app_runtime.gateway.reload_channel(row.channel_id)
+    return _task_channel_view(row, server, request)
+
+
+@router.delete(
+    "/channels/{channel_id}",
+    status_code=204,
+    summary="删除本人统一会话频道",
+    description="停止该频道；保留已接入的 Task 会话与原始来源记录。",
+)
+async def delete_task_channel(
+    channel_id: str,
+    user: User = Depends(require_permission("channels")),
+    server: OctopServer = Depends(get_server),
+) -> None:
+    assert server.services is not None and server.app_runtime is not None
+    await asyncio.to_thread(channel_bindings.delete, server.services, user.id, channel_id)
+    await server.app_runtime.gateway.reload_channel(channel_id)
 
 
 @router.get("/agents/{agent_id}/channels")

@@ -45,7 +45,12 @@ The caller must own the agent unless they are an admin.
 
 ## Streaming chat
 
-Dashboard live turns use **WebSocket** at `/api/agents/{agent_id}/chat/ws` (pass JWT as
+Unified project/task conversations use `/api/project-tasks` and **WebSocket** at
+`/api/project-tasks/ws` with first-frame authentication. Tasks may select an owned
+expert or use the general assistant; projects determine the working directory.
+Configuration changes apply to future turns, while accepted turns retain snapshots.
+
+Legacy and advanced dashboard turns use **WebSocket** at `/api/agents/{agent_id}/chat/ws` (pass JWT as
 `?token=` query param). Send `{"type":"user_turn", ...}` frames; the server replies with JSON
 chunks matching the harness stream format, ending with `{"type":"done"}` or
 `{"type":"error","message":"..."}`.
@@ -60,7 +65,7 @@ HITL resume still uses `POST /api/agents/{agent_id}/chat/hitl/resume` (SSE).
 OPENAPI_TAGS: list[dict[str, str]] = [
     {
         "name": "projects",
-        "description": "独立项目和任务：管理项目自己的目录、Skill、MCP、插件、子代理角色、长期记忆、团队协作与行动指南；发送首条消息创建任务，在同一任务内继续多轮对话。支持持久工具上下文、任务独立记忆、增量回复和停止。独立保存并实时传送模型返回的思考内容，本轮可选择模型支持的思考模式和强度。团队使用任务内选定角色同步协作，无需专家。任务实时通道为 `/api/project-tasks/ws`，支持多任务共用连接；浏览器首帧 authenticate 鉴权，命令包括 task.create、task.open、task.message、task.subscribe、task.cancel、task.retry。task.open 表示进入任务详情，按需补生成标题；普通订阅和断线恢复不触发标题重试。支持按轮声明客户端工具，通过 client.attach、tool.claim、tool.result 完成客户端执行和模型续跑。create_artifact、publish_workspace_file 由服务端提供；每轮 artifacts 返回已发布附件元数据，内容通过鉴权 HTTP 下载。成果资料库为 `/api/project-tasks/artifacts`，跨任务按文件发布时间倒序分页，支持文件名、项目、任务、详细格式、资料分类与归档筛选。资料库筛选为全部、文本和PDF、幻灯片、表格、图片、其他；business_category 按最终发布文件名后缀自动保存，取值 document/presentation/spreadsheet/image/other，默认查询 all 包含所有成果。历史成果按相同规则回填；file_kind 保留原详细格式。WebSocket 帧协议见仓库 docs/project-task-websocket.md；REST 保留配置、列表、历史和快照。",
+        "description": "独立项目和任务：管理项目自己的目录、Skill、MCP、插件、子代理角色、长期记忆、团队协作与行动指南；发送首条消息创建任务，在同一任务内继续多轮对话。支持持久工具上下文、任务独立记忆、增量回复和停止。独立保存并实时传送模型返回的思考内容，本轮可选择模型支持的思考模式和强度。专家可选，支持本人团队和共享普通专家；团队使用任务内角色或固定专家成员同步协作，成员身份分别保存。高级工作台文件、浏览器、终端、录制技能及工具UI均使用Task范围；专家记忆支持独立范围、持久自动抽取与有来源约束的通用偏好晋升。任务实时通道为 `/api/project-tasks/ws`，支持多任务共用连接；浏览器首帧 authenticate 鉴权，命令包括 task.create、task.open、task.message、task.subscribe、task.cancel、task.retry。task.open 表示进入任务详情，按需补生成标题；普通订阅和断线恢复不触发标题重试。支持按轮声明客户端工具，通过 client.attach、tool.claim、tool.result 完成客户端执行和模型续跑。create_artifact、publish_workspace_file 由服务端提供；每轮 artifacts 返回已发布附件元数据，内容通过鉴权 HTTP 下载。成果资料库为 `/api/project-tasks/artifacts`，跨任务按文件发布时间倒序分页，支持文件名、项目、任务、详细格式、资料分类与归档筛选。资料库筛选为全部、文本和PDF、幻灯片、表格、图片、其他；business_category 按最终发布文件名后缀自动保存，取值 document/presentation/spreadsheet/image/other，默认查询 all 包含所有成果。历史成果按相同规则回填；file_kind 保留原详细格式。WebSocket 帧协议见仓库 docs/project-task-websocket.md；REST 保留配置、列表、历史和快照。",
     },
     {
         "name": "setup",

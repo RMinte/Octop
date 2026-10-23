@@ -1,3 +1,4 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useState } from "react";
 import {
   Alert,
@@ -12,7 +13,6 @@ import {
 } from "antd";
 import { useTranslation } from "react-i18next";
 import {
-  projectTasksApi,
   type Project,
   type TaskExecutionOptions,
   type TaskResources,
@@ -26,12 +26,15 @@ export default function TaskExecutionSettings({
   onChange,
   project,
   disabled,
+  selectedExpertID,
 }: {
   value: TaskExecutionOptions;
   onChange: (value: TaskExecutionOptions) => void;
   project?: Project;
   disabled: boolean;
+  selectedExpertID?: string | null;
 }) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [resources, setResources] = useState<TaskResources | null>(null);
@@ -84,7 +87,7 @@ export default function TaskExecutionSettings({
     return () => {
       disposed = true;
     };
-  }, [resourceVersion, t]);
+  }, [projectTasksApi, resourceVersion, t]);
   return (
     <>
       <Space
@@ -104,9 +107,14 @@ export default function TaskExecutionSettings({
           options={[
             {
               value: "",
-              label: t("projects.tasks.followDefaultModel", {
-                model: defaultLabel,
-              }),
+              label: t(
+                selectedExpertID
+                  ? "projects.tasks.followExpertModel"
+                  : "projects.tasks.followDefaultModel",
+                {
+                  model: defaultLabel,
+                },
+              ),
             },
             ...modelGroups,
           ]}
@@ -124,12 +132,14 @@ export default function TaskExecutionSettings({
         />
         <Space wrap size={6}>
           <Typography.Text type="secondary">
-            {t("projects.tasks.usingModel", {
-              model: selectedModel
-                ? modelLabel(selectedModel)
-                : selectedRef ||
-                  (resources ? t("models.noModels") : t("common.loading")),
-            })}
+            {selectedExpertID && !value.model_ref
+              ? t("projects.tasks.expertModelHint")
+              : t("projects.tasks.usingModel", {
+                  model: selectedModel
+                    ? modelLabel(selectedModel)
+                    : selectedRef ||
+                      (resources ? t("models.noModels") : t("common.loading")),
+                })}
           </Typography.Text>
           {selectedModel && (
             <Tag>
@@ -307,6 +317,33 @@ export default function TaskExecutionSettings({
                         active={open}
                         disabled={disabled}
                       />
+                      {!!selectedExpertID && (
+                        <Form.Item label={t("projects.tasks.expertMemory")}>
+                          <Select
+                            aria-label={t("projects.tasks.expertMemory")}
+                            disabled={disabled}
+                            value={
+                              value.expert_memory_enabled === false
+                                ? "off"
+                                : "inherit"
+                            }
+                            options={[
+                              {
+                                value: "inherit",
+                                label: t("projects.tasks.expertMemoryDefault"),
+                              },
+                              { value: "off", label: t("projects.disabled") },
+                            ]}
+                            onChange={(selected) =>
+                              onChange({
+                                ...value,
+                                expert_memory_enabled:
+                                  selected === "off" ? false : undefined,
+                              })
+                            }
+                          />
+                        </Form.Item>
+                      )}
                       {(["memory_enabled", "team_enabled"] as const).map(
                         (key) => (
                           <Form.Item

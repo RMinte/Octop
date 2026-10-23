@@ -66,7 +66,7 @@ class CronJobRow:
     id: int
     cron_id: str
     name: str
-    agent_id: str
+    agent_id: str | None
     user_id: int
     trigger: str
     prompt: str
@@ -81,6 +81,10 @@ class CronJobRow:
     last_error: str | None
     created_at: int
     updated_at: int
+    conversation_policy: str = "continue_target"
+    target_task_id: str | None = None
+    project_id: str | None = None
+    selected_expert_id: str | None = None
 
     @classmethod
     def from_row(cls, r: DbRow) -> CronJobRow:
@@ -103,6 +107,10 @@ class CronJobRow:
             last_error=r["last_error"],
             created_at=r["created_at"],
             updated_at=r["updated_at"],
+            conversation_policy=str(r["conversation_policy"]),
+            target_task_id=_optional_str(r, "target_task_id"),
+            project_id=_optional_str(r, "project_id"),
+            selected_expert_id=_optional_str(r, "selected_expert_id"),
         )
 
     def to_public_dict(self, *, include_agent: bool = False) -> dict[str, Any]:
@@ -119,6 +127,10 @@ class CronJobRow:
             "mcp_servers": list(self.mcp_servers),
             "last_run_at": self.last_run_at,
             "last_status": self.last_status,
+            "conversation_policy": self.conversation_policy,
+            "target_task_id": self.target_task_id,
+            "project_id": self.project_id,
+            "selected_expert_id": self.selected_expert_id,
         }
         if include_agent:
             out["agent_id"] = self.agent_id
@@ -134,7 +146,7 @@ class CronJobRepo:
         self,
         *,
         cron_id: str,
-        agent_id: str,
+        agent_id: str | None,
         user_id: int,
         trigger: str,
         prompt: str,
@@ -145,14 +157,18 @@ class CronJobRepo:
         mcp_servers: list[str] | None = None,
         enabled: bool = True,
         name: str | None = None,
+        conversation_policy: str = "continue_target",
+        target_task_id: str | None = None,
+        project_id: str | None = None,
+        selected_expert_id: str | None | object = UNSET,
     ) -> str:
         ts = now_ts()
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO cron_jobs(cron_id, name, agent_id, user_id, schedule_spec, prompt, "
                 "session_key, model, fresh_thread, task_type, mcp_servers, enabled, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "created_at, updated_at,conversation_policy,target_task_id,project_id,selected_expert_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?)",
                 (
                     cron_id,
                     (name or "").strip() or default_cron_name(prompt, cron_id),
@@ -168,6 +184,10 @@ class CronJobRepo:
                     bool_int(enabled),
                     ts,
                     ts,
+                    conversation_policy,
+                    target_task_id,
+                    project_id,
+                    agent_id if selected_expert_id is UNSET else selected_expert_id,
                 ),
             )
         return cron_id
@@ -233,6 +253,10 @@ class CronJobRepo:
         task_type: CronTaskType | None = None,
         model: str | None | object = UNSET,
         mcp_servers: list[str] | None | object = UNSET,
+        conversation_policy: str | None = None,
+        target_task_id: str | None | object = UNSET,
+        project_id: str | None | object = UNSET,
+        selected_expert_id: str | None | object = UNSET,
     ) -> None:
         fields, params = partial_updates(
             [
@@ -241,11 +265,20 @@ class CronJobRepo:
                 ("prompt", prompt),
                 ("session_key", session_key),
                 ("task_type", task_type),
+                ("conversation_policy", conversation_policy),
             ]
         )
         if fresh_thread is not None:
             fields.append("fresh_thread = ?")
             params.append(bool_int(fresh_thread))
+        for key, value in (
+            ("target_task_id", target_task_id),
+            ("project_id", project_id),
+            ("selected_expert_id", selected_expert_id),
+        ):
+            if value is not UNSET:
+                fields.append(key + " = ?")
+                params.append(value)
         if model is not UNSET:
             fields.append("model = ?")
             params.append(model)

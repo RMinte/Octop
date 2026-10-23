@@ -15,10 +15,11 @@ import pytest
 from langchain_core.messages import AIMessage, SystemMessage, convert_to_messages
 
 from octop.infra.agents.resident_identity import ResidentTextOnlyMiddleware
-from octop.infra.projects import runtime as task_runtime
+from octop.infra.projects import resident_tasks
 from octop.infra.projects.recovery import TaskInterruption, TaskRecovery
 from tests.support.auth import create_user, resolve_user_id
 from tests.support.fakes import FakeHarnessAgent
+from tests.support.harness import patch_resident_stream, patch_task_stream
 
 
 def _key() -> str:
@@ -116,8 +117,8 @@ async def closed_loop(env_with_provider, monkeypatch):
         return appended
 
     async def resident_stream(self, request):
-        previous = await self.aget_history(request["thread_id"], limit=100_000)
-        incoming = convert_to_messages(request["messages"])
+        messages = convert_to_messages(request["messages"])
+        previous, incoming = messages[:-1], messages[-1:]
         row = server.services.agent_repo.get(binding["agent_id"])
         guard = ResidentTextOnlyMiddleware("en", row.user_id, binding["thread_id"])
         system = SystemMessage(content="Resident baseline.")
@@ -150,7 +151,7 @@ async def closed_loop(env_with_provider, monkeypatch):
 
     monkeypatch.setattr(FakeHarnessAgent, "aappend_messages", append_messages, raising=False)
     monkeypatch.setattr(FakeHarnessAgent, "stream", resident_stream)
-    monkeypatch.setattr(task_runtime, "run_turn", task_run)
+    patch_task_stream(monkeypatch, task_run)
     binding = await _json(
         await client.put("/api/agents/resident-conversation", headers=auth, json={})
     )
@@ -329,7 +330,7 @@ async def test_failed_retry_reports_each_attempt_but_plain_followup_does_not(
         yield {"type": "token", "content": "Saved partial result."}
         raise RuntimeError("internal-secret-must-not-be-a-report")
 
-    monkeypatch.setattr(task_runtime, "run_turn", fail)
+    patch_task_stream(monkeypatch, fail)
     delegated = await _json(
         await client.post(
             f"{base}/conversation/delegations", headers=auth, json=_delegate_body(source)
@@ -345,7 +346,7 @@ async def test_failed_retry_reports_each_attempt_but_plain_followup_does_not(
         calls.append((turn, history))
         yield {"type": "token", "content": "Retry succeeded."}
 
-    monkeypatch.setattr(task_runtime, "run_turn", succeed)
+    patch_task_stream(monkeypatch, succeed)
     retry_id = _key()
     retry_path = (
         f"/api/project-tasks/{delegated['task_id']}/turns/{failed['turns'][0]['turn_id']}/retry"
@@ -392,7 +393,7 @@ async def test_cancelling_resident_turn_does_not_cancel_delegated_task(closed_lo
         yield {"type": "token", "content": "Resident partial."}
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(task_runtime, "run_turn", blocked_task)
+    patch_task_stream(monkeypatch, blocked_task)
     delegated = await _json(
         await client.post(
             f"{base}/conversation/delegations", headers=auth, json=_delegate_body(source)
@@ -400,7 +401,7 @@ async def test_cancelling_resident_turn_does_not_cancel_delegated_task(closed_lo
         202,
     )
     await asyncio.wait_for(task_entered.wait(), 5)
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", blocked_resident)
+    patch_resident_stream(monkeypatch, blocked_resident)
     resident = await _json(
         await client.post(
             f"{base}/messages", headers=auth, json={"request_id": _key(), "prompt": "Wait."}
@@ -467,7 +468,7 @@ async def test_recoverable_task_interruption_is_not_a_false_terminal_report(
             "prepare",
         )
 
-    monkeypatch.setattr(task_runtime, "run_turn", interrupted)
+    patch_task_stream(monkeypatch, interrupted)
     delegated = await _json(
         await client.post(
             f"{base}/conversation/delegations", headers=auth, json=_delegate_body(source)
@@ -486,17 +487,17 @@ async def test_report_checkpoint_retry_after_shutdown_is_idempotent(
 ):
     client, server, auth, binding, base, source, requests, _calls = closed_loop
     assert (server.app_runtime.history_archive is not None) is report_history_v2
-    original = FakeHarnessAgent.aappend_messages
+    original = resident_tasks.append_message
     checkpoint_written = asyncio.Event()
 
-    async def append_then_lose_receipt(self, thread_id, messages):
-        appended = await original(self, thread_id, messages)
-        if any(message.additional_kwargs.get("task_report") for message in messages):
+    async def append_then_lose_receipt(services, owner, thread_id, message):
+        appended = await original(services, owner, thread_id, message)
+        if message.additional_kwargs.get("task_report"):
             checkpoint_written.set()
             raise asyncio.CancelledError
         return appended
 
-    monkeypatch.setattr(FakeHarnessAgent, "aappend_messages", append_then_lose_receipt)
+    monkeypatch.setattr(resident_tasks, "append_message", append_then_lose_receipt)
     delegated = await _json(
         await client.post(
             f"{base}/conversation/delegations", headers=auth, json=_delegate_body(source)
@@ -511,7 +512,7 @@ async def test_report_checkpoint_retry_after_shutdown_is_idempotent(
         await runtime.close()
     pending = await _delegation(client, auth, base, delegated["delegation_id"], delivered=False)
     assert pending["reports"][0]["delivery_status"] == "pending"
-    monkeypatch.setattr(FakeHarnessAgent, "aappend_messages", original)
+    monkeypatch.setattr(resident_tasks, "append_message", original)
     await runtime.start()
     delivered = await _delegation(client, auth, base, delegated["delegation_id"])
     report = delivered["reports"][0]
@@ -587,17 +588,17 @@ async def test_shutdown_drains_an_admitted_report_write_before_releasing_thread(
     closed_loop, monkeypatch
 ):
     client, server, auth, _binding, base, source, requests, _calls = closed_loop
-    original = FakeHarnessAgent.aappend_messages
+    original = resident_tasks.append_message
     admitted, release = asyncio.Event(), asyncio.Event()
 
-    async def admitted_append(self, thread_id, messages):
-        appended = await original(self, thread_id, messages)
-        if any(message.additional_kwargs.get("task_report") for message in messages):
+    async def admitted_append(services, owner, thread_id, message):
+        appended = await original(services, owner, thread_id, message)
+        if message.additional_kwargs.get("task_report"):
             admitted.set()
             await release.wait()
         return appended
 
-    monkeypatch.setattr(FakeHarnessAgent, "aappend_messages", admitted_append)
+    monkeypatch.setattr(resident_tasks, "append_message", admitted_append)
     delegated = await _json(
         await client.post(
             f"{base}/conversation/delegations", headers=auth, json=_delegate_body(source)
@@ -615,7 +616,7 @@ async def test_shutdown_drains_an_admitted_report_write_before_releasing_thread(
         release.set()
         if shutdown is not None:
             await asyncio.wait_for(shutdown, 5)
-    monkeypatch.setattr(FakeHarnessAgent, "aappend_messages", original)
+    monkeypatch.setattr(resident_tasks, "append_message", original)
     await runtime.start()
     returned = await _delegation(client, auth, base, delegated["delegation_id"])
     report = returned["reports"][0]
@@ -706,9 +707,14 @@ async def test_closed_loop_routes_require_auth_and_publish_typed_schemas(closed_
 
 
 async def test_admin_cannot_read_another_users_private_data_through_legacy_routes(
-    env_with_provider,
+    env_with_provider, monkeypatch
 ):
     client, _server, admin = env_with_provider
+
+    async def private_reply(_message):
+        yield {"type": "token", "content": "Private answer."}
+
+    patch_resident_stream(monkeypatch, private_reply)
     alice = await create_user(client, admin, username="private-alice")
     alice_id = await resolve_user_id(client, admin, "private-alice")
     binding = await _json(

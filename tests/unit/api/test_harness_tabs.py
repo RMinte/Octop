@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from octop.api.routers.browser import harness as harness_mod
+from octop.infra.browser import sessions as browser_sessions
 
 
 def _fake_sess(*, active_id: str | None = "T1", port: int = 9222) -> SimpleNamespace:
@@ -43,7 +44,7 @@ async def test_status_probes_do_not_extend_browser_idle_timeout() -> None:
     client = SimpleNamespace(send=active, send_passive=passive)
     sess = SimpleNamespace(_internal=SimpleNamespace(client=client))
 
-    assert await harness_mod._is_session_alive(sess)
+    assert await browser_sessions._is_session_alive(sess)
     assert await harness_mod.harness_page_url(sess) == "https://example.com"
     assert passive.await_count == 2
     active.assert_not_awaited()

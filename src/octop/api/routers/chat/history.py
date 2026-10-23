@@ -304,11 +304,23 @@ async def get_thread_history(
         _enrich_history_tool_media,
         _serialize_history_message,
     )
-    from octop.infra.history.reader import read_page  # noqa: PLC0415
+    from octop.infra.history.reader import read_page, resident_page  # noqa: PLC0415
+    from octop.infra.projects.resident_tasks import (  # noqa: PLC0415
+        history_active,
+        history_messages,
+    )
 
     archive = getattr(server.app_runtime, "history_archive", None)
+    effective_uid = as_user if as_user is not None else user.id
+    native = (
+        await asyncio.to_thread(history_messages, server.services, effective_uid, thread_id)
+        if await asyncio.to_thread(server.services.thread_repo.is_resident, thread_id)
+        else None
+    )
     next_cursor = None
-    if isinstance(archive, HistoryArchive):
+    if native is not None:
+        page = resident_page(native, thread_id, limit=page_limit, offset=page_offset, cursor=cursor)
+    elif isinstance(archive, HistoryArchive):
         page = await read_page(
             archive,
             server.app_runtime.agent_registry,
@@ -318,6 +330,9 @@ async def get_thread_history(
             offset=page_offset,
             cursor=cursor,
         )
+    else:
+        page = None
+    if page is not None:
         has_more, next_cursor = page["has_more"], page["next_cursor"]
         messages = []
         for message in messages_from_dict(page["messages"]):
@@ -367,7 +382,6 @@ async def get_thread_history(
                 offset=page_offset,
                 user=user,
             )
-    effective_uid = as_user if as_user is not None else user.id
     hitl_pending = pending_hitl_payload(
         server.app_runtime.gateway.processor.hitl_coordinator.store,
         thread_id=thread_id,
@@ -385,7 +399,11 @@ async def get_thread_history(
         "history_loading": history_loading,
         "history_status": projection_status,
         "history_retry_after_ms": 1500 if history_loading else 0,
-        "turn_active": server.app_runtime.gateway.ws_hub.is_turn_active(thread_id),
+        "turn_active": (
+            await asyncio.to_thread(history_active, server.services, effective_uid, thread_id)
+            if native is not None
+            else server.app_runtime.gateway.ws_hub.is_turn_active(thread_id)
+        ),
         "hitl_pending": hitl_pending,
         **thread_artifacts_payload(
             row.artifacts,
@@ -485,23 +503,35 @@ async def export_history(
     server: Any = Depends(get_server),
 ) -> Any:
     from fastapi.responses import JSONResponse  # noqa: PLC0415
+    from langchain_core.messages import messages_to_dict  # noqa: PLC0415
 
     from octop.infra.history.reader import export_messages  # noqa: PLC0415
+    from octop.infra.projects.resident_tasks import history_messages  # noqa: PLC0415
 
     _require_thread(server, agent_id, thread_id, user, as_user)
-    archive = getattr(server.app_runtime, "history_archive", None)
-    if not isinstance(archive, HistoryArchive):
-        raise OctopError(ErrorCode.NOT_FOUND, "Versioned history is not enabled")
-
-    messages = await export_messages(
-        archive, server.app_runtime.agent_registry, agent_id, thread_id
+    effective_uid = as_user if as_user is not None else user.id
+    native = (
+        await asyncio.to_thread(history_messages, server.services, effective_uid, thread_id)
+        if await asyncio.to_thread(server.services.thread_repo.is_resident, thread_id)
+        else None
     )
+    archive = getattr(server.app_runtime, "history_archive", None)
+    if native is not None:
+        messages = messages_to_dict(native)
+        latest_turn = None
+    elif isinstance(archive, HistoryArchive):
+        messages = await export_messages(
+            archive, server.app_runtime.agent_registry, agent_id, thread_id
+        )
+        latest_turn = await asyncio.to_thread(archive.store.turn, thread_id)
+    else:
+        raise OctopError(ErrorCode.NOT_FOUND, "Versioned history is not enabled")
     return JSONResponse(
         {
             "format": "octop-history-v2",
             "thread_id": thread_id,
             "messages": messages,
-            "latest_turn": await asyncio.to_thread(archive.store.turn, thread_id),
+            "latest_turn": latest_turn,
         },
         headers={"Content-Disposition": 'attachment; filename="history.json"'},
     )

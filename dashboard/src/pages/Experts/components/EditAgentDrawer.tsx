@@ -66,20 +66,9 @@ import {
 } from "./welcomeManifest";
 import { fetchConfigMdFiles } from "./expertFileGroups";
 import {
-  buildBackendSpec,
-  DEFAULT_BACKEND,
-  ensureBubblewrapAfterProbe,
-  ensureBwrapMessage,
-  ensureBwrapToastKind,
   parseBackendSpec,
-  probeRootDir,
-  rootDirProbeMessage,
-  shouldProbeRootDir,
   supportsHostSkillPackages,
-  validatePathMappings,
-  type PathMapping,
 } from "./agentBackendForm";
-import AgentBackendFields from "./AgentBackendFields";
 import ExpertComposerDefaultsFields from "./ExpertComposerDefaultsFields";
 import SkillCatalogDrawer from "./SkillCatalogDrawer";
 import SubagentCatalogDrawer from "./SubagentCatalogDrawer";
@@ -138,9 +127,6 @@ interface EditFormValues {
   is_shared?: boolean;
   default_model: string;
   conversation_mode: ConversationMode;
-  backend_choice: string;
-  composite_default: string;
-  root_dir?: string;
   max_iters?: number;
   max_input_length?: number;
   temperature?: number;
@@ -235,9 +221,7 @@ function EditAgentDrawerBody({
   const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
   const [agentSkills, setAgentSkills] = useState<SkillSummary[]>([]);
   const [agentSubagents, setAgentSubagents] = useState<SubagentSummary[]>([]);
-  const { models, modelsLoading, backends, backendsLoading } =
-    useAgentFormResources(true);
-  const [pathMappings, setPathMappings] = useState<PathMapping[]>([]);
+  const { models, modelsLoading } = useAgentFormResources(true);
   const [agentConfig, setAgentConfig] = useState<Record<string, unknown>>({});
   const [colorPalette, setColorPalette] = useState<string>(
     () => parseStoredColor(agent.color) ?? DEFAULT_PALETTE,
@@ -265,23 +249,20 @@ function EditAgentDrawerBody({
     [agentSubagents],
   );
 
-  const backendChoice =
-    Form.useWatch("backend_choice", form) ?? DEFAULT_BACKEND;
-  const watchedRootDir = Form.useWatch("root_dir", form);
+  const parsedStorage = parseBackendSpec(agentConfig.backend);
   const workspaceDirFromConfig =
     typeof agentConfig.workspace_dir === "string"
       ? agentConfig.workspace_dir
       : null;
   const skillPackagesSupported = supportsHostSkillPackages({
-    backendChoice,
-    rootDir: watchedRootDir,
+    backendChoice: parsedStorage.backendChoice,
+    rootDir: parsedStorage.rootDir,
     workspaceDir: workspaceDirFromConfig,
   });
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setPathMappings([]);
     setAgentConfig({});
 
     const load = async () => {
@@ -303,8 +284,6 @@ function EditAgentDrawerBody({
             ? ag.icon_url
             : null,
         );
-        const parsedBackend = parseBackendSpec(cfg.backend);
-        setPathMappings(parsedBackend.pathMappings);
 
         form.setFieldsValue({
           name: ag.name,
@@ -314,9 +293,6 @@ function EditAgentDrawerBody({
           is_shared: agent.is_shared ?? false,
           default_model: defaultModelToForm(ag.default_model),
           conversation_mode: parseConversationMode(cfg.conversation_mode),
-          backend_choice: parsedBackend.backendChoice,
-          composite_default: parsedBackend.compositeDefault,
-          root_dir: parsedBackend.rootDir,
           ...readAgentRuntimeFormValues(ag),
           enable_trajectory: cfg.enable_trajectory !== false,
           knowledge_base_ids: Array.isArray(ag.knowledge_base_ids)
@@ -390,48 +366,13 @@ function EditAgentDrawerBody({
 
   const handleSave = useCallback(async () => {
     const values = await form.validateFields();
-    if (values.backend_choice === "composite") {
-      const pathError = validatePathMappings(pathMappings, t);
-      if (pathError) {
-        message.error(pathError);
-        return;
-      }
-    }
-    if (shouldProbeRootDir(values.backend_choice, values.root_dir)) {
-      const probe = await probeRootDir(values.root_dir ?? "/");
-      if (!probe.ok) {
-        message.error(
-          `${rootDirProbeMessage(probe, t)}\n${t(
-            "experts.rootDirProbe.guidance",
-          )}`,
-        );
-        return;
-      }
-    }
     setSaving(true);
-    let bwrapToast: { kind: "success" | "warning"; text: string } | null = null;
     try {
-      if (shouldProbeRootDir(values.backend_choice, values.root_dir)) {
-        const bwrap = await ensureBubblewrapAfterProbe();
-        const kind = ensureBwrapToastKind(bwrap.status);
-        if (kind !== "none") {
-          bwrapToast = { kind, text: ensureBwrapMessage(bwrap, t) };
-        }
-      }
-
-      const backendSpec = buildBackendSpec(
-        values.backend_choice,
-        values.composite_default ?? DEFAULT_BACKEND,
-        pathMappings,
-        values.root_dir,
-      );
-
       const nextColor = isCuratedPalette(colorPalette)
         ? expertPaletteColor(colorPalette)
         : colorPalette;
       const nextConfig = omitAgentRuntimeConfig({
         ...agentConfig,
-        backend: backendSpec,
         enable_trajectory: values.enable_trajectory === true,
         conversation_mode: values.conversation_mode,
       });
@@ -498,11 +439,6 @@ function EditAgentDrawerBody({
       }
 
       message.success(t("common.saveSuccess"));
-      if (bwrapToast?.kind === "success") {
-        message.success(bwrapToast.text);
-      } else if (bwrapToast?.kind === "warning") {
-        message.warning(bwrapToast.text);
-      }
       const defaultModel = defaultModelFromForm(values.default_model);
       onSaved({
         agent_id: agent.agent_id,
@@ -528,7 +464,6 @@ function EditAgentDrawerBody({
     iconUrl,
     onClose,
     onSaved,
-    pathMappings,
     skillPackagesSupported,
     t,
   ]);
@@ -683,19 +618,6 @@ function EditAgentDrawerBody({
     }
   };
 
-  const addPathMapping = () =>
-    setPathMappings((prev) => [...prev, { path: "", backend: "" }]);
-  const removePathMapping = (index: number) =>
-    setPathMappings((prev) => prev.filter((_, i) => i !== index));
-  const updatePathMapping = (
-    index: number,
-    field: keyof PathMapping,
-    value: string,
-  ) =>
-    setPathMappings((prev) =>
-      prev.map((m, i) => (i === index ? { ...m, [field]: value } : m)),
-    );
-
   return (
     <>
       {loading ? (
@@ -838,16 +760,11 @@ function EditAgentDrawerBody({
                 />
               </Form.Item>
 
-              <AgentBackendFields
-                backends={backends}
-                backendsLoading={backendsLoading}
-                backendChoice={backendChoice}
-                pathMappings={pathMappings}
-                rootDirMode="edit"
-                disabled
-                onAddPathMapping={addPathMapping}
-                onRemovePathMapping={removePathMapping}
-                onUpdatePathMapping={updatePathMapping}
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message={t("projects.tasks.expertStorageHint")}
               />
               <AgentTrajectoryField />
               <ExpertComposerDefaultsFields />

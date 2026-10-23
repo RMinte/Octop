@@ -8,6 +8,9 @@ const ConnectorsPage = lazy(() => import("../pages/Agent/Connectors"));
 const SkillPackagesPage = lazy(() => import("../pages/SkillPackages"));
 const KnowledgeBasesPage = lazy(() => import("../pages/KnowledgeBases"));
 const BoxProjectsPage = lazy(() => import("../pages/BoxProjects"));
+const UnifiedConversationsPage = lazy(
+  () => import("../pages/BoxProjects/UnifiedConversations"),
+);
 const BridgePage = lazy(() => import("../pages/Settings/Bridge"));
 const PersonalizationPage = lazy(
   () => import("../pages/Agent/Personalization"),
@@ -53,6 +56,7 @@ export const pathToKey: Record<string, string> = {
   "/experts": "experts",
   "/tasks": "tasks",
   "/box-projects": "box-projects",
+  "/conversations": "box-projects",
   "/connectors": "connectors",
   "/skill-packages": "skill-packages",
   "/knowledge-bases": "knowledge-bases",
@@ -140,6 +144,7 @@ export function resolveSelectedKey(pathname: string): string {
   if (pathToKey[pathname]) return pathToKey[pathname];
   if (pathname.startsWith("/chat/")) return "chat";
   if (pathname.startsWith("/box-projects/")) return "box-projects";
+  if (pathname.startsWith("/conversations/")) return "box-projects";
   if (pathname.startsWith("/workbench/")) return "workbench";
   if (pathname.startsWith("/remote-desktop/")) return "remote-desktop";
   if (pathname.startsWith("/personalization/")) return "personalization";
@@ -156,6 +161,8 @@ export const routeConfigs: RouteConfig[] = [
   { path: "/experts", element: <ExpertsPage /> },
   { path: "/tasks", element: <CronJobsPage /> },
   { path: "/box-projects", element: <BoxProjectsPage /> },
+  { path: "/conversations", element: <UnifiedConversationsPage /> },
+  { path: "/conversations/:taskID", element: <UnifiedConversationsPage /> },
   { path: "/box-projects/:projectID", element: <BoxProjectsPage /> },
   { path: "/connectors", element: <ConnectorsPage /> },
   { path: "/skill-packages", element: <SkillPackagesPage /> },
@@ -290,6 +297,6 @@ export const routeConfigs: RouteConfig[] = [
 
   // Misc
   { path: "/pwa-debug", element: <PwaDebugPage /> },
-  { path: "/", element: <Navigate to="/chat" replace /> },
+  { path: "/", element: <Navigate to="/conversations" replace /> },
   { path: "*", element: <NotFoundPage /> },
 ];

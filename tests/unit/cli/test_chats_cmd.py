@@ -25,49 +25,14 @@ def test_chats_send_help_lists_mode() -> None:
     assert "--mode" in result.output
 
 
-def test_chats_list_requires_agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_chats_list_requires_user_not_expert(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("OCTOP_HOME", str(tmp_path))
     monkeypatch.delenv("OCTOP_AGENT", raising=False)
-    runner = CliRunner()
-    result = runner.invoke(cli, ["chats", "list"])
-    assert result.exit_code == 2
-
-
-def test_chats_list_uses_offline_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict = {}
-
-    def fake_list_threads_offline(**kwargs):
-        captured.update(kwargs)
-        return [{"thread_id": "t1", "title": "hi", "is_active": True}]
-
-    from octop.cli.support import db as db_mod
-
-    monkeypatch.setattr(db_mod, "list_threads_offline", fake_list_threads_offline)
-    runner = CliRunner()
-    result = runner.invoke(cli, ["--json", "chats", "list", "--agent", "agent-1"])
-    assert result.exit_code == 0, result.output
-    assert captured["agent_id"] == "agent-1"
-
-
-def test_chats_update_sends_title(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict = {}
-
-    def fake_update_thread_offline(agent_id, thread_id, *, title=None, pinned=None):
-        captured["agent_id"] = agent_id
-        captured["thread_id"] = thread_id
-        captured["title"] = title
-        return {"thread_id": thread_id, "title": title}
-
-    from octop.cli.support import offline_ops as offline_mod
-
-    monkeypatch.setattr(offline_mod, "resolve_cron_user_id", lambda *_a, **_k: 1)
-    monkeypatch.setattr(offline_mod, "update_thread_offline", fake_update_thread_offline)
-    runner = CliRunner()
-    result = runner.invoke(
-        cli, ["chats", "update", "abc", "--agent", "agent-1", "--title", "renamed"]
-    )
-    assert result.exit_code == 0
-    assert captured["title"] == "renamed"
+    result = CliRunner().invoke(cli, ["chats", "list"])
+    assert result.exit_code == 1
+    assert "user" in result.output
 
 
 def test_delete_thread_offline_unbinds_session(tmp_octop_home: Path) -> None:

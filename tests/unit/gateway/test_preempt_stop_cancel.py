@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from octop_gateway.models import ChannelSubject, InboundMessage, TextContent
@@ -73,3 +73,33 @@ async def test_preempt_cancel_ignores_non_stop() -> None:
     )
     await gw._preempt_cancel_on_stop("ch1", msg)  # noqa: SLF001
     agent_manager.cancel_stream.assert_not_called()
+
+
+@pytest.mark.parametrize("channel_type,uses_task", [("dashboard", False), ("feishu", True)])
+async def test_preempt_cancel_keeps_dashboard_and_im_protocols_separate(
+    monkeypatch, channel_type, uses_task
+):
+    from octop.infra.gateway.process.task_adapter import TaskChannelAdapter
+
+    submit = AsyncMock()
+    monkeypatch.setattr(TaskChannelAdapter, "submit", submit)
+    manager = MagicMock()
+    gateway = Gateway(agent_manager=manager, repos=MagicMock(), services=object())
+    gateway._thread_registry = MagicMock()  # noqa: SLF001
+    gateway._thread_registry.get_bound_thread_id.return_value = "legacy-thread"  # noqa: SLF001
+    message = InboundMessage(
+        channel_id="channel",
+        channel_type=channel_type,
+        tenant_id="agent",
+        channel_subject=ChannelSubject(subject_id="owner"),
+        content=[TextContent(text="/stop")],
+    )
+
+    await gateway._preempt_cancel_on_stop("channel", message)  # noqa: SLF001
+
+    if uses_task:
+        submit.assert_awaited_once_with(message)
+        manager.cancel_stream.assert_not_called()
+    else:
+        submit.assert_not_awaited()
+        manager.cancel_stream.assert_called_once_with("agent", "legacy-thread")

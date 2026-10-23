@@ -1,8 +1,6 @@
+import { useTaskHost } from "../context/TaskHostContext";
 import { useEffect, useState } from "react";
-import {
-  projectTasksApi,
-  type TaskPresentationSettings,
-} from "../api/modules/projects";
+import { type TaskPresentationSettings } from "../api/modules/projects";
 
 export const DEFAULT_TASK_PRESENTATION_SETTINGS: TaskPresentationSettings = {
   action_timeline_enabled: true,
@@ -17,6 +15,7 @@ export function invalidateTaskPresentationSettings() {
 
 /** One page owns these preferences and passes them to all loaded turns. */
 export function useTaskPresentationSettings(): TaskPresentationSettings {
+  const { projectTasksApi } = useTaskHost();
   const [settings, setSettings] = useState(DEFAULT_TASK_PRESENTATION_SETTINGS);
 
   useEffect(() => {
@@ -46,7 +45,7 @@ export function useTaskPresentationSettings(): TaskPresentationSettings {
       window.removeEventListener(settingsChanged, refresh);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, []);
+  }, [projectTasksApi]);
 
   return settings;
 }

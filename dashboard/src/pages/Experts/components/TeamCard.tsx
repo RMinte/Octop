@@ -1,3 +1,4 @@
+import { expertConversationUrl } from "../../../utils/remoteExpert";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
@@ -209,8 +210,8 @@ export const TeamCard = memo(function TeamCard({
 
   const handleOpenChat = useCallback(() => {
     setActiveAgent(agent.agent_id);
-    navigate(`/chat/${agent.agent_id}`);
-  }, [agent.agent_id, setActiveAgent, navigate]);
+    navigate(expertConversationUrl(agent.agent_id, agent.kind));
+  }, [setActiveAgent, agent.agent_id, agent.kind, navigate]);
 
   return (
     <>
@@ -412,7 +413,7 @@ export const TeamCard = memo(function TeamCard({
             </Tooltip>
           </Dropdown>
 
-          {chatReady ? (
+          {chatReady || !agent.bridge ? (
             <button
               type="button"
               className={`${styles.agentCard2ChatBtn} ${styles.teamCardChatBtn}`}

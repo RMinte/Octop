@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Literal
 
 from pydantic import Field
 
-from octop.infra.db.repos.project_sync import ListChange, task_scope
+from octop.infra.db.repos._base import UNSET
+from octop.infra.db.repos.project_sync import ListChange, all_task_scope, task_scope
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.repos.projects import ProjectRow
 from octop.infra.db.services import SharedServices
@@ -61,12 +63,25 @@ def task_page(
     limit: int = 50,
     page_cursor: str | None = None,
     archived: bool = False,
+    scope: Literal["standalone", "all"] = "standalone",
+    expert_id: str | None = None,
+    status: str | None = None,
+    query: str | None = None,
 ) -> TaskListPage:
+    storage_scope = all_task_scope() if scope == "all" else task_scope(project_id)
+    filters = json.dumps([scope, expert_id, status, query], ensure_ascii=False)
     codec = cursor_codec(
-        services, owner_id, task_scope(project_id) + f":archive-v1:{archived}:status-v1"
+        services,
+        owner_id,
+        storage_scope + f":archive-v2:{archived}:" + hashlib.sha256(filters.encode()).hexdigest(),
     )
     cursor = codec.decode(page_cursor, "history") if page_cursor is not None else None
-    boundary = (cursor.updated_at, cursor.after) if cursor else None
+    boundary = None
+    if cursor:
+        pin, _, identifier = cursor.after.partition(":")
+        if pin not in {"0", "1"} or not identifier:
+            raise cursor_reset()
+        boundary = (int(pin), cursor.updated_at, identifier)
     with services.db.read_snapshot() as conn:
         if (
             project_id is not None
@@ -74,15 +89,26 @@ def task_page(
         ):
             raise OctopError.localized(ErrorCode.NOT_FOUND)
         policy = approval_policy.in_transaction(conn, services, owner_id)
-        head = services.project_sync_repo.head(conn, owner_id, task_scope(project_id))
+        head = services.project_sync_repo.head(conn, owner_id, storage_scope)
         rows = services.project_task_repo.page(
-            conn, owner_id, project_id, limit + 1, boundary, archived
+            conn,
+            owner_id,
+            project_id,
+            limit + 1,
+            boundary,
+            archived,
+            scope="all" if scope == "all" else None,
+            selected_expert_id=expert_id if expert_id is not None else UNSET,
+            status=status,
+            query=query,
         )
     items = rows[:limit]
     next_page = None
     if len(rows) > limit:
         last = items[-1]
-        next_page = codec.encode("history", updated_at=last.updated_at, after=last.task_id)
+        next_page = codec.encode(
+            "history", updated_at=last.updated_at, after=f"{int(last.pinned)}:{last.task_id}"
+        )
     return TaskListPage(
         items=[summary(row, policy) for row in items],
         next_page_cursor=next_page,
@@ -104,7 +130,7 @@ def _delta(
     with services.db.read_snapshot() as conn:
         if (
             scope.startswith("tasks:")
-            and scope != "tasks:"
+            and scope not in {"tasks:", all_task_scope()}
             and services.project_repo.get_in_transaction(
                 conn, scope.removeprefix("tasks:"), owner_id
             )
@@ -196,13 +222,22 @@ def task_sync(
     page_cursor: str | None = None,
     limit: int = 50,
     archived: bool = False,
+    scope: Literal["standalone", "all"] = "standalone",
+    expert_id: str | None = None,
+    status: str | None = None,
+    query: str | None = None,
 ) -> TaskSyncPage:
-    scope = task_scope(project_id)
-    codec = cursor_codec(services, owner_id, scope + f":archive-v1:{archived}:status-v1")
+    filters = json.dumps([scope, expert_id, status, query], ensure_ascii=False)
+    storage_scope = all_task_scope() if scope == "all" else task_scope(project_id)
+    codec = cursor_codec(
+        services,
+        owner_id,
+        storage_scope + f":archive-v2:{archived}:" + hashlib.sha256(filters.encode()).hexdigest(),
+    )
     rows, next_sync, next_page = _delta(
         services,
         owner_id,
-        scope,
+        storage_scope,
         codec,
         sync_cursor,
         page_cursor,
@@ -215,6 +250,11 @@ def task_sync(
         payload.setdefault("web_search_enabled", True)
         deleted = payload.pop("deleted", False)
         data = summary(ProjectTaskRow.from_row(payload), policy)
+        deleted = deleted or (
+            (expert_id is not None and data.selected_expert_id != expert_id)
+            or (status is not None and data.status != status)
+            or (query is not None and query.casefold() not in data.title.casefold())
+        )
         changes.append(
             TaskChange(
                 operation="delete" if deleted else "upsert",

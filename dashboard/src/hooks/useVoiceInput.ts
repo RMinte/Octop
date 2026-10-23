@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { voiceApi, type ActiveVoice } from "../api/modules/voice";
 import { speechLocaleFromUi } from "../utils/localePrefs";
@@ -133,7 +133,10 @@ function pickRecorderMimeType(): string {
  * Important: settle only on `onend` / error / timeout. Resolving in `onresult`
  * races Chrome's `onend` and often yields empty text for Chinese utterances.
  */
-async function transcribeWithBrowser(language: string): Promise<string> {
+async function transcribeWithBrowser(
+  language: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const Ctor = getSpeechRecognition();
   if (!Ctor) {
     throw new Error("SpeechRecognition not supported");
@@ -150,11 +153,22 @@ async function transcribeWithBrowser(language: string): Promise<string> {
       if (settled) return;
       settled = true;
       if (timer) window.clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
       rec.onresult = null;
       rec.onerror = null;
       rec.onend = null;
       fn();
     };
+
+    const cancel = () => {
+      settle(() => resolve(""));
+      rec.abort?.();
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) {
+      cancel();
+      return;
+    }
 
     rec.lang = language;
     rec.continuous = false;
@@ -243,11 +257,26 @@ export function useVoiceInput(onText: (text: string) => void) {
   const [transcribing, setTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const mounted = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    abortRef.current = new AbortController();
+    return () => {
+      mounted.current = false;
+      abortRef.current?.abort();
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    };
+  }, []);
   const recordingProviderRef = useRef<string | null>(null);
 
   // Follow dashboard UI locale — not navigator.language (often en-US on
   // machines used with Chinese UI / Chinese speech).
-  const language = speechLocaleFromUi(i18n.language);
+  const language = speechLocaleFromUi(i18n?.language);
 
   const stopRecording = useCallback(async () => {
     const recorder = mediaRecorderRef.current;
@@ -259,10 +288,11 @@ export function useVoiceInput(onText: (text: string) => void) {
     const provider = recordingProviderRef.current;
     recordingProviderRef.current = null;
     await new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve();
+      recorder.addEventListener("stop", () => resolve(), { once: true });
       recorder.stop();
     });
     mediaRecorderRef.current = null;
+    if (!mounted.current) return;
     setRecording(false);
 
     const blob = new Blob(chunksRef.current, {
@@ -283,9 +313,11 @@ export function useVoiceInput(onText: (text: string) => void) {
       const upload = await recordedBlobToWav(blob);
       const result = await voiceApi.transcribe(upload, language, provider);
       const text = result.text?.trim() ?? "";
+      if (!mounted.current) return;
       if (text) onText(text);
       else antMessage.info(t("voice.sttEmpty"));
     } catch (err) {
+      if (!mounted.current) return;
       const msg = err instanceof Error ? err.message : "";
       if (msg.includes("VOICE_BROWSER_ONLY") || msg.includes("422")) {
         antMessage.error(t("voice.sttProviderRequired"));
@@ -293,7 +325,7 @@ export function useVoiceInput(onText: (text: string) => void) {
         antMessage.error(t("voice.sttFailed"));
       }
     } finally {
-      setTranscribing(false);
+      if (mounted.current) setTranscribing(false);
     }
   }, [onText, t, language]);
 
@@ -305,22 +337,29 @@ export function useVoiceInput(onText: (text: string) => void) {
       try {
         active = await fetchActiveVoice();
       } catch {
+        if (!mounted.current) return;
         antMessage.error(t("voice.sttFailed"));
         return;
       } finally {
-        setTranscribing(false);
+        if (mounted.current) setTranscribing(false);
       }
     }
+    if (!mounted.current) return;
     const provider = active.stt;
 
     if (provider === "browser" && browserSttAvailable()) {
       // Browser STT: use the native SpeechRecognition API directly.
       setTranscribing(true);
       try {
-        const text = await transcribeWithBrowser(language);
+        const text = await transcribeWithBrowser(
+          language,
+          abortRef.current?.signal,
+        );
+        if (!mounted.current) return;
         if (text) onText(text);
         else antMessage.info(t("voice.sttEmpty"));
       } catch (err) {
+        if (!mounted.current) return;
         const msg = err instanceof Error ? err.message : "";
         if (msg.includes("network")) {
           antMessage.error(t("voice.sttNetworkFailed"));
@@ -328,7 +367,7 @@ export function useVoiceInput(onText: (text: string) => void) {
           antMessage.error(t("voice.sttFailed"));
         }
       } finally {
-        setTranscribing(false);
+        if (mounted.current) setTranscribing(false);
       }
       return;
     }
@@ -341,6 +380,11 @@ export function useVoiceInput(onText: (text: string) => void) {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mounted.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      streamRef.current = stream;
       const mimeType = pickRecorderMimeType();
       const recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
@@ -351,12 +395,16 @@ export function useVoiceInput(onText: (text: string) => void) {
       };
       recorder.onstop = () => {
         stream.getTracks().forEach((track) => track.stop());
+        if (streamRef.current === stream) streamRef.current = null;
       };
       mediaRecorderRef.current = recorder;
       recordingProviderRef.current = provider;
       recorder.start();
       setRecording(true);
     } catch {
+      if (!mounted.current) return;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
       recordingProviderRef.current = null;
       antMessage.error(t("voice.micDenied"));
     }

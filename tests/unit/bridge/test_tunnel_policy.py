@@ -37,7 +37,7 @@ def test_allows_composer_readonly_paths() -> None:
     assert not is_tunnel_path_allowed("PUT", "/api/providers/active-model")
     assert not is_tunnel_path_allowed("POST", "/api/knowledge-bases")
     assert not is_tunnel_path_allowed("GET", "/api/knowledge-bases/kb1")
-    assert not is_tunnel_path_allowed("GET", "/api/knowledge-bases/kb1/documents")
+    assert is_tunnel_path_allowed("GET", "/api/knowledge-bases/kb1/documents")
     assert not is_tunnel_path_allowed("GET", "/api/providers")
 
 
@@ -80,7 +80,7 @@ def test_denies_management_and_auth_paths() -> None:
     assert not is_tunnel_path_allowed("DELETE", "/api/setup/password")
 
 
-def test_denies_independent_projects_tasks_and_retired_protocol() -> None:
+def test_denies_retired_agentcomputer_protocol() -> None:
     resources = [
         "/capabilities",
         "/projects",
@@ -95,21 +95,22 @@ def test_denies_independent_projects_tasks_and_retired_protocol() -> None:
         "/tasks/task_01DEF/turns",
         "/tasks/task_01DEF/cancel",
     ]
-    local_resources = [
-        "/projects",
-        "/projects/resources",
-        "/projects/sync",
-        "/projects/proj_01ABC",
-        "/projects/proj_01ABC/tasks",
-        "/projects/proj_01ABC/tasks/sync",
-        "/project-tasks",
-        "/project-tasks/sync",
-        "/project-tasks/task_01DEF",
-        "/project-tasks/task_01DEF/messages",
-        "/project-tasks/task_01DEF/cancel",
-    ]
     for method in ("GET", "POST", "PATCH", "PUT", "DELETE", "HEAD"):
         for path in resources:
             assert not is_tunnel_path_allowed(method, "/api/agentcomputer/v1" + path)
-        for path in local_resources:
-            assert not is_tunnel_path_allowed(method, "/api" + path)
+
+
+def test_unified_projects_and_tasks_have_product_operation_allowlist() -> None:
+    for method, path in (
+        ("GET", "/api/projects/resources"),
+        ("GET", "/api/projects/sync"),
+        ("POST", "/api/projects/proj_01ABC/tasks"),
+        ("GET", "/api/project-tasks"),
+        ("POST", "/api/project-tasks/task_01DEF/messages"),
+        ("POST", "/api/project-tasks/task_01DEF/cancel"),
+        ("POST", "/api/project-tasks/attachments"),
+        ("GET", "/api/project-tasks/attachments/attachment_01ABC"),
+    ):
+        assert is_tunnel_path_allowed(method, path)
+    assert not is_tunnel_path_allowed("DELETE", "/api/projects/resources")
+    assert not is_tunnel_path_allowed("POST", "/api/project-tasks/task_01DEF/resident/subscribe")

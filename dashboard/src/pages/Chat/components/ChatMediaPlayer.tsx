@@ -32,6 +32,7 @@ export function ChatMediaPlayer({
   kind,
   agentId,
   compact = false,
+  fetchBlob,
 }: {
   url: string;
   filename?: string;
@@ -40,6 +41,7 @@ export function ChatMediaPlayer({
   kind: "video" | "audio";
   agentId?: string | null;
   compact?: boolean;
+  fetchBlob?: (url: string) => Promise<Blob>;
 }) {
   const { t } = useTranslation();
   const resolvedUrl = useMemo(() => {
@@ -67,14 +69,20 @@ export function ChatMediaPlayer({
 
     const load = async () => {
       try {
-        if (!needsAuthBlobFetch(resolvedUrl) && !isDataUrl(resolvedUrl)) {
+        if (
+          !fetchBlob &&
+          !needsAuthBlobFetch(resolvedUrl) &&
+          !isDataUrl(resolvedUrl)
+        ) {
           if (!cancelled) {
             setSrc(resolvedUrl);
             setLoadState("ready");
           }
           return;
         }
-        const blob = isDataUrl(resolvedUrl)
+        const blob = fetchBlob
+          ? await fetchBlob(resolvedUrl)
+          : isDataUrl(resolvedUrl)
           ? await (await fetch(resolvedUrl)).blob()
           : await requestBlob(apiPathFromUrl(resolvedUrl), {
               cache: "no-store",
@@ -99,7 +107,7 @@ export function ChatMediaPlayer({
     return () => {
       cancelled = true;
     };
-  }, [resolvedUrl, mediaType]);
+  }, [resolvedUrl, mediaType, fetchBlob]);
 
   useLayoutEffect(() => {
     return () => {

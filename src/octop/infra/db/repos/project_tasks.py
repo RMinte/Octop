@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow, strict_int
+from octop.infra.db.repos._base import UNSET, DbRow, strict_int
 from octop.infra.db.repos.project_sync import record_change, task_scope
 
 
@@ -31,6 +31,11 @@ class ProjectTaskRow:
     web_search_enabled: bool = True
     import_source: str = ""
     external_session_id: str = ""
+    selected_expert_id: str | None = None
+    configuration_revision: int = 1
+    action_mode: str = "craft"
+    pinned: bool = False
+    internal_kind: str = ""
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -54,6 +59,38 @@ class ProjectTaskRow:
             bool(row["web_search_enabled"]),
             str(row["import_source"]),
             str(row["external_session_id"]),
+            str(row["selected_expert_id"]) if row["selected_expert_id"] is not None else None,
+            strict_int(row["configuration_revision"]),
+            str(row["action_mode"]),
+            bool(row["pinned"]),
+            str(row["internal_kind"]),
+        )
+
+
+@dataclass(frozen=True)
+class ProjectTaskConfigurationEventRow:
+    configuration_revision: int
+    previous_expert_id: str | None
+    selected_expert_id: str | None
+    selected_expert_name: str
+    previous_action_mode: str
+    action_mode: str
+    created_at: int
+
+    @classmethod
+    def from_row(cls, row: DbRow) -> ProjectTaskConfigurationEventRow:
+        return cls(
+            configuration_revision=strict_int(row["configuration_revision"]),
+            previous_expert_id=(
+                str(row["previous_expert_id"]) if row["previous_expert_id"] is not None else None
+            ),
+            selected_expert_id=(
+                str(row["selected_expert_id"]) if row["selected_expert_id"] is not None else None
+            ),
+            selected_expert_name=str(row["selected_expert_name"]),
+            previous_action_mode=str(row["previous_action_mode"]),
+            action_mode=str(row["action_mode"]),
+            created_at=strict_int(row["created_at"]),
         )
 
 
@@ -67,26 +104,57 @@ class ProjectTaskRepo:
         owner_id: int,
         project_id: str | None,
         limit: int,
-        boundary: tuple[int, str] | None = None,
+        boundary: tuple[int, str] | tuple[int, int, str] | None = None,
         archived: bool = False,
+        *,
+        scope: str | None = None,
+        selected_expert_id: str | None | object = UNSET,
+        status: str | None = None,
+        query: str | None = None,
     ) -> list[ProjectTaskRow]:
         params: list[Any] = [owner_id]
-        scope = "project_id IS NULL"
-        if project_id is not None:
-            scope = "project_id=?"
+        condition = "project_id IS NULL"
+        if scope == "all":
+            condition = "1=1"
+        elif project_id is not None:
+            condition = "project_id=?"
             params.append(project_id)
-        scope += " AND archived=?"
+        condition += " AND internal_kind='' AND archived=?"
         params.append(int(archived))
+        if selected_expert_id is None:
+            condition += " AND selected_expert_id IS NULL"
+        elif selected_expert_id is not UNSET:
+            condition += " AND selected_expert_id=?"
+            params.append(selected_expert_id)
+        if status is not None:
+            condition += (
+                " AND (CASE WHEN status='running' THEN CASE wait_kind "
+                "WHEN 'approval' THEN 'waiting_approval' WHEN 'answer' THEN 'waiting_answer' "
+                "WHEN 'client_tool' THEN 'waiting_client_tool' WHEN 'user' THEN 'paused' "
+                "WHEN 'interrupted' THEN 'interrupted' ELSE status END ELSE status END)=?"
+            )
+            params.append(status)
+        if query:
+            condition += " AND LOWER(title) LIKE LOWER(?) ESCAPE '!'"
+            escaped = query.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            params.append("%" + escaped + "%")
         position = ""
         if boundary is not None:
-            position = " AND (updated_at, task_id)<(?, ?)"
-            params.extend(boundary)
+            if len(boundary) == 3:
+                position = " AND (pinned, updated_at, task_id)<(?, ?, ?)"
+                params.extend(boundary)
+            else:
+                position = (
+                    " AND (pinned, updated_at, task_id)<(COALESCE((SELECT pinned "
+                    "FROM project_tasks WHERE task_id=? AND owner_id=?),0), ?, ?)"
+                )
+                params.extend((boundary[1], owner_id, *boundary))
         params.append(limit)
         rows = conn.execute(
             "SELECT * FROM project_tasks WHERE owner_id=? AND "
-            + scope
+            + condition
             + position
-            + " ORDER BY updated_at DESC, task_id DESC LIMIT ?",
+            + " ORDER BY pinned DESC, updated_at DESC, task_id DESC LIMIT ?",
             tuple(params),
         ).fetchall()
         return [ProjectTaskRow.from_row(row) for row in rows]
@@ -97,6 +165,20 @@ class ProjectTaskRepo:
 
     @staticmethod
     def get_in_transaction(conn: Any, task_id: str, owner_id: int) -> ProjectTaskRow | None:
+        row = conn.execute(
+            "SELECT * FROM project_tasks WHERE task_id=? AND owner_id=? AND internal_kind=''",
+            (task_id, owner_id),
+        ).fetchone()
+        return ProjectTaskRow.from_row(row) if row else None
+
+    def get_internal(self, task_id: str, owner_id: int) -> ProjectTaskRow | None:
+        with self._db.connect() as conn:
+            return self.get_internal_in_transaction(conn, task_id, owner_id)
+
+    @staticmethod
+    def get_internal_in_transaction(
+        conn: Any, task_id: str, owner_id: int
+    ) -> ProjectTaskRow | None:
         row = conn.execute(
             "SELECT * FROM project_tasks WHERE task_id=? AND owner_id=?", (task_id, owner_id)
         ).fetchone()
@@ -112,12 +194,20 @@ class ProjectTaskRepo:
 
     @staticmethod
     def delete(conn: Any, row: ProjectTaskRow) -> None:
+        conn.execute(
+            "UPDATE unified_source_inbox SET payload_json='{}',status='target_deleted' WHERE task_id=?",
+            (row.task_id,),
+        )
         for table in (
+            "unified_source_deliveries",
             "project_task_execution_receipts",
             "project_task_artifacts",
             "project_task_tool_calls",
             "project_task_contexts",
             "project_task_titles",
+            "project_task_configuration_events",
+            "project_task_branches",
+            "project_task_legacy_sources",
             "project_task_turns",
         ):
             conn.execute(f"DELETE FROM {table} WHERE task_id=?", (row.task_id,))
@@ -146,7 +236,8 @@ class ProjectTaskRepo:
     @staticmethod
     def by_request(conn: Any, owner_id: int, request_id: str) -> ProjectTaskRow | None:
         row = conn.execute(
-            "SELECT * FROM project_tasks WHERE owner_id=? AND request_id=?", (owner_id, request_id)
+            "SELECT * FROM project_tasks WHERE owner_id=? AND request_id=? AND internal_kind=''",
+            (owner_id, request_id),
         ).fetchone()
         return ProjectTaskRow.from_row(row) if row else None
 
@@ -156,8 +247,9 @@ class ProjectTaskRepo:
             "INSERT INTO project_tasks(task_id, owner_id, project_id, title, request_id, "
             "active_turn_id, created_at, updated_at, status, title_source, "
             "approval_mode, approval_revision, approval_updated_at, web_search_enabled, "
-            "import_source, external_session_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?, ?, ?, ?)",
+            "import_source, external_session_id, selected_expert_id, configuration_revision, "
+            "action_mode, pinned, archived, internal_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.task_id,
                 row.owner_id,
@@ -174,6 +266,12 @@ class ProjectTaskRepo:
                 int(row.web_search_enabled),
                 row.import_source,
                 row.external_session_id,
+                row.selected_expert_id,
+                row.configuration_revision,
+                row.action_mode,
+                int(row.pinned),
+                int(row.archived),
+                row.internal_kind,
             ),
         )
         record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
@@ -258,7 +356,7 @@ class ProjectTaskRepo:
         conn: Any, row: ProjectTaskRow, expected_revision: int, *, manual_title: bool = False
     ) -> ProjectTaskRow | None:
         result = conn.execute(
-            "UPDATE project_tasks SET title=?, archived=?, web_search_enabled=?, updated_at=?, "
+            "UPDATE project_tasks SET title=?, archived=?, web_search_enabled=?, pinned=?, updated_at=?, "
             "list_revision=list_revision+1, "
             "title_source=CASE WHEN ?=1 THEN 'manual' ELSE title_source END, "
             "title_revision=title_revision+? "
@@ -267,6 +365,7 @@ class ProjectTaskRepo:
                 row.title,
                 int(row.archived),
                 int(row.web_search_enabled),
+                int(row.pinned),
                 row.updated_at,
                 int(manual_title),
                 int(manual_title),
@@ -282,6 +381,84 @@ class ProjectTaskRepo:
             conn, updated.owner_id, task_scope(updated.project_id), updated.task_id, updated
         )
         return updated
+
+    @staticmethod
+    def update_configuration(
+        conn: Any,
+        row: ProjectTaskRow,
+        expected_configuration_revision: int,
+        *,
+        expected_list_revision: int | None = None,
+    ) -> ProjectTaskRow | None:
+        list_revision = (
+            row.list_revision if expected_list_revision is None else expected_list_revision
+        )
+        previous = ProjectTaskRepo.get_in_transaction(conn, row.task_id, row.owner_id)
+        if (
+            previous is None
+            or previous.active_turn_id is not None
+            or previous.configuration_revision != expected_configuration_revision
+            or previous.list_revision != list_revision
+        ):
+            return None
+        if (previous.selected_expert_id, previous.action_mode) == (
+            row.selected_expert_id,
+            row.action_mode,
+        ):
+            unchanged = conn.execute(
+                "UPDATE project_tasks SET configuration_revision=configuration_revision "
+                "WHERE task_id=? AND owner_id=? AND configuration_revision=? "
+                "AND list_revision=? AND active_turn_id IS NULL RETURNING *",
+                (row.task_id, row.owner_id, expected_configuration_revision, list_revision),
+            ).fetchone()
+            return ProjectTaskRow.from_row(unchanged) if unchanged is not None else None
+        result = conn.execute(
+            "UPDATE project_tasks SET selected_expert_id=?, action_mode=?, updated_at=?, "
+            "configuration_revision=configuration_revision+1, list_revision=list_revision+1 "
+            "WHERE task_id=? AND owner_id=? AND configuration_revision=? "
+            "AND list_revision=? AND active_turn_id IS NULL RETURNING *",
+            (
+                row.selected_expert_id,
+                row.action_mode,
+                row.updated_at,
+                row.task_id,
+                row.owner_id,
+                expected_configuration_revision,
+                list_revision,
+            ),
+        ).fetchone()
+        if result is None:
+            return None
+        updated = ProjectTaskRow.from_row(result)
+        conn.execute(
+            "INSERT INTO project_task_configuration_events(task_id,configuration_revision,"
+            "previous_expert_id,selected_expert_id,selected_expert_name,previous_action_mode,"
+            "action_mode,created_at) VALUES(?,?,?,?,COALESCE((SELECT name FROM agents "
+            "WHERE agent_id=?),''),?,?,?)",
+            (
+                updated.task_id,
+                updated.configuration_revision,
+                previous.selected_expert_id,
+                updated.selected_expert_id,
+                updated.selected_expert_id,
+                previous.action_mode,
+                updated.action_mode,
+                updated.updated_at,
+            ),
+        )
+        record_change(
+            conn, updated.owner_id, task_scope(updated.project_id), updated.task_id, updated
+        )
+        return updated
+
+    @staticmethod
+    def configuration_events(conn: Any, task_id: str) -> list[ProjectTaskConfigurationEventRow]:
+        rows = conn.execute(
+            "SELECT * FROM project_task_configuration_events WHERE task_id=? "
+            "ORDER BY configuration_revision",
+            (task_id,),
+        ).fetchall()
+        return [ProjectTaskConfigurationEventRow.from_row(row) for row in rows]
 
     @staticmethod
     def allow_legacy_title_generation(

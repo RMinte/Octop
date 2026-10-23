@@ -1,3 +1,4 @@
+import { useLegacyHistoryReadOnly } from "../LegacyHistoryContext";
 import { memo, useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { Image, Tooltip } from "antd";
 import { message as antMessage } from "@/utils/antdMessage";
@@ -371,6 +372,7 @@ export function ToolDetailsInline({
   forceInline?: boolean;
 }) {
   const { t } = useTranslation();
+  const readOnlyHistory = useLegacyHistoryReadOnly();
   const toolDock = useChatToolDock();
   // Plugin UIs load async after mount — bump forces resolve() to re-run.
   const rendererVersion = useToolRendererVersion();
@@ -388,13 +390,15 @@ export function ToolDetailsInline({
 
   const registration = useMemo(
     () =>
-      resolveToolRenderer({
-        toolName: toolData.name,
-        pluginId: pluginId === "builtin" ? null : pluginId,
-        parsed,
-      }),
+      readOnlyHistory
+        ? null
+        : resolveToolRenderer({
+            toolName: toolData.name,
+            pluginId: pluginId === "builtin" ? null : pluginId,
+            parsed,
+          }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- rendererVersion invalidates registry lookups
-    [toolData.name, pluginId, parsed, rendererVersion],
+    [toolData.name, pluginId, parsed, rendererVersion, readOnlyHistory],
   );
 
   const status: ToolRenderStatus = toolData.errorCode
@@ -428,11 +432,12 @@ export function ToolDetailsInline({
     output: toolData.output,
     isStreaming,
     hideMediaPreview,
-    onAcpPermissionSelect,
+    onAcpPermissionSelect: readOnlyHistory ? undefined : onAcpPermissionSelect,
     agentId,
   };
 
-  const dockable = canDockToolUi(registration ?? null, parsed);
+  const dockable =
+    !readOnlyHistory && canDockToolUi(registration ?? null, parsed);
   const callId = toolData.callId;
   const isDocked =
     !forceInline &&

@@ -35,10 +35,10 @@ describe("sidebarNavLayout", () => {
     expect(sectionsFromLayout(sections, null)).toBe(sections);
     const editor = editorFromCatalog(sections, null);
     expect(editor.ungrouped).toEqual([
+      "box-projects",
       "chat",
       "experts",
       "tasks",
-      "box-projects",
       "token-usage",
     ]);
     expect(editor.groups.map((group) => group.id)).toEqual([
@@ -127,7 +127,11 @@ describe("sidebarNavLayout", () => {
   it("places an item before another and can hide it", () => {
     const editor = editorFromCatalog(catalog(), null);
     const moved = placeItem(editor, "tasks", { kind: "ungrouped" }, "chat");
-    expect(moved.ungrouped.slice(0, 2)).toEqual(["tasks", "chat"]);
+    expect(moved.ungrouped.slice(0, 3)).toEqual([
+      "box-projects",
+      "tasks",
+      "chat",
+    ]);
     const hidden = placeItem(moved, "tasks", { kind: "hidden" }, null);
     expect(hidden.ungrouped).not.toContain("tasks");
     expect(hidden.hidden).toContain("tasks");

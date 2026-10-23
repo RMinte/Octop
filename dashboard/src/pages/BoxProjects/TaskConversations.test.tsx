@@ -17,7 +17,8 @@ import {
 } from "../../api/modules/projects";
 import TaskConversations from "./TaskConversations";
 
-vi.mock("../../api/modules/projects", () => ({
+vi.mock("../../api/modules/projects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/modules/projects")>()),
   projectTasksApi: {
     settings: vi.fn(),
     contextUsage: vi.fn(),
@@ -36,6 +37,7 @@ vi.mock("../../api/modules/projects", () => ({
     approvalEvents: vi.fn(),
     events: vi.fn(),
     retry: vi.fn(),
+    fork: vi.fn(),
     resources: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
@@ -159,6 +161,14 @@ beforeEach(() => {
     );
   });
   api.resources.mockResolvedValue({
+    experts: [
+      {
+        expert_id: "expert_a",
+        name: "Finance expert",
+        description: "",
+        config_revision: 3,
+      },
+    ],
     skills: [],
     mcp_servers: [],
     plugins: [],
@@ -189,6 +199,190 @@ beforeEach(() => {
   let imageURL = 0;
   URL.createObjectURL = vi.fn(() => `blob:task-image-${++imageURL}`);
   URL.revokeObjectURL = vi.fn();
+});
+
+it("creates one record with an optional expert and freezes the execution selection", async () => {
+  const user = userEvent.setup();
+  mount("", null);
+  const input = screen.getByRole("textbox", {
+    name: zh.projects.tasks.message,
+  });
+  await user.type(input, "Review the report");
+  await user.click(
+    await screen.findByRole("combobox", { name: zh.projects.tasks.expert }),
+  );
+  await user.click(
+    await screen.findByText("Finance expert", {
+      selector: ".ant-select-item-option-content",
+    }),
+  );
+  expect(input).toHaveValue("Review the report");
+  await user.click(screen.getByText(zh.projects.tasks.actionModes.ask));
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.send }),
+  );
+  await waitFor(() =>
+    expect(api.create).toHaveBeenCalledWith(
+      null,
+      expect.objectContaining({
+        prompt: "Review the report",
+        selected_expert_id: "expert_a",
+        action_mode: "ask",
+        expected_project_revision: null,
+      }),
+    ),
+  );
+});
+
+it("changes the expert only between turns, retaining the draft and both revisions", async () => {
+  const selected = { ...fixture, configuration_revision: 5 };
+  api.open.mockResolvedValue(selected);
+  api.update.mockResolvedValue({
+    ...selected,
+    list_revision: 2,
+    configuration_revision: 6,
+    selected_expert_id: "expert_a",
+  });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  const input = await screen.findByRole("textbox", {
+    name: zh.projects.tasks.message,
+  });
+  await waitFor(() => expect(input).toBeEnabled());
+  await user.type(input, "Keep this draft");
+  await user.click(
+    screen.getByRole("combobox", { name: zh.projects.tasks.expert }),
+  );
+  await user.click(
+    await screen.findByText("Finance expert", {
+      selector: ".ant-select-item-option-content",
+    }),
+  );
+  await waitFor(() =>
+    expect(api.update).toHaveBeenCalledWith("task_a", {
+      selected_expert_id: "expert_a",
+      expected_revision: 1,
+      expected_configuration_revision: 5,
+    }),
+  );
+  expect(input).toHaveValue("Keep this draft");
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.send }),
+  );
+  await waitFor(() =>
+    expect(api.send).toHaveBeenCalledWith(
+      "task_a",
+      expect.objectContaining({ expected_configuration_revision: 6 }),
+    ),
+  );
+});
+
+it("keeps the accepted expert fixed while a turn waits for approval", async () => {
+  api.open.mockResolvedValue({
+    ...fixture,
+    selected_expert_id: "expert_a",
+    status: "waiting_approval",
+    active_turn_id: "turn_a",
+  });
+  mount("?task=task_a");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("combobox", { name: zh.projects.tasks.expert }),
+    ).toBeDisabled(),
+  );
+  expect(api.update).not.toHaveBeenCalled();
+});
+
+it("uses the owner-wide scope rather than treating no project as all projects", async () => {
+  render(
+    <MemoryRouter>
+      <TaskConversations projectID={null} allTasks />
+    </MemoryRouter>,
+  );
+  await waitFor(() =>
+    expect(api.list).toHaveBeenCalledWith(null, undefined, false, {
+      scope: "all",
+    }),
+  );
+});
+
+it("edits into a new branch and leaves the source message and task untouched", async () => {
+  api.fork.mockResolvedValue({ ...fixture, task_id: "branch_a" });
+  const navigate = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <MemoryRouter>
+      <TaskConversations
+        projectID="proj_a"
+        selectedTaskID="task_a"
+        onSelectTask={navigate}
+      />
+    </MemoryRouter>,
+  );
+  await user.click(
+    await screen.findByRole("button", { name: zh.projects.tasks.editBranch }),
+  );
+  const input = screen.getByRole("textbox", {
+    name: zh.projects.tasks.branchPrompt,
+  });
+  await user.clear(input);
+  await user.type(input, "Revised request");
+  await user.click(
+    screen.getByRole("button", {
+      name: new RegExp(zh.common.confirm.split("").join("\\s*")),
+    }),
+  );
+  await waitFor(() =>
+    expect(api.fork).toHaveBeenCalledWith(
+      "task_a",
+      expect.objectContaining({
+        operation: "edit",
+        turn_id: "turn_a",
+        prompt: "Revised request",
+        project_id: "proj_a",
+        selected_expert_id: null,
+      }),
+    ),
+  );
+  expect(navigate).toHaveBeenCalledWith("branch_a");
+  expect(api.send).not.toHaveBeenCalled();
+  expect(fixture.turns[0].prompt).not.toBe("Revised request");
+});
+
+it("marks imported branch history without offering retry or regeneration", async () => {
+  api.open.mockResolvedValue({
+    ...fixture,
+    turns: [
+      {
+        ...fixture.turns[0],
+        history_only: true,
+        source_task_id: "source_task",
+        source_turn_id: "source_turn",
+      },
+    ],
+  });
+  const navigate = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <MemoryRouter>
+      <TaskConversations
+        projectID="proj_a"
+        selectedTaskID="task_a"
+        onSelectTask={navigate}
+      />
+    </MemoryRouter>,
+  );
+  await screen.findByText(zh.projects.tasks.historyOnly);
+  expect(
+    screen.queryByRole("button", { name: zh.projects.tasks.editBranch }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: zh.projects.tasks.regenerate }),
+  ).not.toBeInTheDocument();
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.viewSource }),
+  );
+  expect(navigate).toHaveBeenCalledWith("source_task");
 });
 const imageAttachment: TaskInputAttachment = {
   attachment_id: "image_a",
@@ -692,6 +886,8 @@ describe("项目任务对话", () => {
     expect(api.send).toHaveBeenCalledWith("task_a", {
       request_id: expect.any(String),
       prompt: "/compact",
+      expected_configuration_revision: 1,
+      expected_project_revision: null,
     });
     expect(compact).toBeDisabled();
     expect(composer).toHaveValue("保留这段追问");
@@ -779,6 +975,8 @@ describe("项目任务对话", () => {
     expect(api.send.mock.calls[2][1]).toEqual({
       request_id: expect.any(String),
       prompt: "/compact",
+      expected_configuration_revision: 1,
+      expected_project_revision: null,
     });
     expect(api.send.mock.calls[2][1].request_id).not.toBe(requestID);
   });
@@ -815,6 +1013,8 @@ describe("项目任务对话", () => {
     expect(api.send.mock.calls[0][1]).toEqual({
       request_id: expect.any(String),
       prompt: "/compact",
+      expected_configuration_revision: 1,
+      expected_project_revision: null,
       options: { model_ref: "glm/glm" },
     });
     await user.click(model);
@@ -1622,6 +1822,7 @@ it("常驻模型选择用于重试，跟随默认和切换任务不会沿用另�
       "turn_a",
       expect.any(String),
       expect.objectContaining({ model_ref: "box/RM-01 VLM" }),
+      { expected_configuration_revision: 1, expected_project_revision: null },
     ),
   );
   expect(selector.closest(".ant-select")).toHaveTextContent("RM-01 VLM");

@@ -9,10 +9,13 @@ from urllib.parse import urlencode
 
 import httpx
 
-from octop.infra.bridge.tunnel_policy import is_tunnel_path_allowed
+from octop.infra.bridge.tunnel_policy import is_task_tunnel_path_allowed, is_tunnel_path_allowed
 from octop.infra.errors import ErrorCode, OctopError
 
 logger = logging.getLogger(__name__)
+
+# JSON/base64 framing must fit the Bridge's existing 32 MiB WS message bound.
+MAX_TASK_TUNNEL_BODY_BYTES = 16 * 1024 * 1024
 
 # Hop-by-hop / sensitive headers we never forward into the local ASGI call
 # from a remote tunnel initiator (auth is injected as the connection owner).
@@ -95,6 +98,14 @@ async def execute_local_http(
             url,
             headers=clean_headers,
             content=body or None,
+        )
+    if is_task_tunnel_path_allowed(method, path) and len(resp.content) > MAX_TASK_TUNNEL_BODY_BYTES:
+        # Return a bounded product error instead of disconnecting every stream
+        # multiplexed on this bridge. Range requests can retrieve smaller media.
+        return encode_tunnel_response(
+            status=413,
+            headers={"content-type": "application/json"},
+            body=b'{"error":{"code":"TASK_ATTACHMENT_UNAVAILABLE"}}',
         )
     out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in _DROP_RESPONSE_HEADERS}
     return encode_tunnel_response(status=resp.status_code, headers=out_headers, body=resp.content)

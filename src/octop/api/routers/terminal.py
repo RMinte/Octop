@@ -555,6 +555,21 @@ async def terminal_ws(
         return
     workspace_dir = str(resolve_agent_workspace_dir(server, agent_id))
 
+    await run_terminal_session(websocket, agent_id, user, workspace_dir, session_id, cols, rows)
+
+
+async def run_terminal_session(
+    websocket: WebSocket,
+    agent_id: str,
+    user: Any,
+    workspace_dir: str,
+    session_id: str | None,
+    cols: int,
+    rows: int,
+    *,
+    validate: Any = None,
+) -> None:
+    """Serve an authenticated terminal transport using an explicit owner and scope."""
     supported, unsupported_reason = terminal_supported()
     if not supported:
         await websocket.accept()
@@ -695,6 +710,12 @@ async def terminal_ws(
             while True:
                 try:
                     raw = await websocket.receive_text()
+                    if validate is not None:
+                        try:
+                            await validate()
+                        except Exception:
+                            await _destroy_session(session, cancel_pump=True)
+                            return
                 except WebSocketDisconnect:
                     return
                 try:

@@ -48,6 +48,7 @@ class AgentRow:
     knowledge_base_ids: str | None = None
     mcp_servers: str | None = None
     kind: str = "expert"
+    config_revision: int = 1
 
     @classmethod
     def from_row(cls, r: DbRow) -> AgentRow:
@@ -89,6 +90,7 @@ class AgentRow:
             knowledge_base_ids=_opt_str(r, "knowledge_base_ids"),
             mcp_servers=_opt_str(r, "mcp_servers"),
             kind=kind,
+            config_revision=int(r["config_revision"]),
         )
 
 
@@ -128,7 +130,7 @@ class AgentRepo:
     ) -> bool:
         return bool(
             conn.execute(
-                "UPDATE agents SET system_prompt=?,updated_at=? "
+                "UPDATE agents SET system_prompt=?,updated_at=?,config_revision=config_revision+1 "
                 "WHERE agent_id=? AND user_id=? AND is_shared=0 AND kind='expert'",
                 (system_prompt, now, agent_id, user_id),
             ).rowcount
@@ -264,14 +266,16 @@ class AgentRepo:
     def set_enabled(self, agent_id: str, enabled: bool) -> None:
         with self._db.transaction() as conn:
             conn.execute(
-                "UPDATE agents SET enabled = ?, updated_at = ? WHERE agent_id = ?",
+                "UPDATE agents SET enabled = ?, updated_at = ?, config_revision=config_revision+1 "
+                "WHERE agent_id = ?",
                 (bool_int(enabled), now_ts(), agent_id),
             )
 
     def set_shared(self, agent_id: str, shared: bool) -> None:
         with self._db.transaction() as conn:
             conn.execute(
-                "UPDATE agents SET is_shared = ?, updated_at = ? WHERE agent_id = ?",
+                "UPDATE agents SET is_shared = ?, updated_at = ?, config_revision=config_revision+1 "
+                "WHERE agent_id = ?",
                 (bool_int(shared), now_ts(), agent_id),
             )
 
@@ -337,12 +341,78 @@ class AgentRepo:
         )
         if not fields:
             return
+        fields.append("config_revision = config_revision + 1")
         fields.append("updated_at = ?")
         params.append(now_ts())
         params.append(agent_id)
         with self._db.transaction() as conn:
             conn.execute(f"UPDATE agents SET {', '.join(fields)} WHERE agent_id = ?", params)
 
+    def update_memory_policy(
+        self, agent_id: str, owner_id: int, expected_revision: int, config_json: str
+    ) -> bool:
+        with self._db.transaction() as conn:
+            return bool(
+                conn.execute(
+                    "UPDATE agents SET config_json=?,config_revision=config_revision+1,"
+                    "updated_at=? WHERE agent_id=? AND user_id=? AND kind IN ('expert','team') "
+                    "AND config_revision=? AND NOT EXISTS "
+                    "(SELECT 1 FROM resident_conversations WHERE agent_id=agents.agent_id)",
+                    (config_json, now_ts(), agent_id, owner_id, expected_revision),
+                ).rowcount
+            )
+
     def delete(self, agent_id: str) -> None:
         with self._db.transaction() as conn:
             conn.execute("DELETE FROM agents WHERE agent_id = ?", (agent_id,))
+
+    def delete_if_unreferenced(self, agent_id: str) -> bool:
+        if self._db.dialect == "postgresql":
+            historical = (
+                "configuration_json::jsonb->'expert_profile'->>'expert_id'=? "
+                "OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE("
+                "configuration_json::jsonb->'legacy_attachments','[]'::jsonb)) files(value) "
+                "WHERE files.value->>'source_agent_id'=?) "
+                "OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE("
+                "configuration_json::jsonb->'expert_profile'->'team'->'members','[]'::jsonb)) members(value) "
+                "WHERE members.value->>'expert_id'=?) "
+                "OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE("
+                "content_blocks_json::jsonb,'[]'::jsonb)) blocks(value) "
+                "WHERE blocks.value->>'speaker_agent_id'=?) "
+                "OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE("
+                "configuration_json::jsonb->'migrated_history'->'trajectory','[]'::jsonb)) events(value) "
+                "WHERE events.value->>'source_agent_id'=? OR events.value->>'speaker_agent_id'=?)"
+            )
+        else:
+            historical = (
+                "json_extract(configuration_json,'$.expert_profile.expert_id')=? "
+                "OR EXISTS (SELECT 1 FROM json_each(configuration_json,'$.legacy_attachments') files "
+                "WHERE json_extract(files.value,'$.source_agent_id')=?) "
+                "OR EXISTS (SELECT 1 FROM json_each(configuration_json,'$.expert_profile.team.members') members "
+                "WHERE json_extract(members.value,'$.expert_id')=?) "
+                "OR EXISTS (SELECT 1 FROM json_each(content_blocks_json) blocks "
+                "WHERE json_extract(blocks.value,'$.speaker_agent_id')=?) "
+                "OR EXISTS (SELECT 1 FROM json_each(configuration_json,'$.migrated_history.trajectory') events "
+                "WHERE json_extract(events.value,'$.source_agent_id')=? "
+                "OR json_extract(events.value,'$.speaker_agent_id')=?)"
+            )
+        with self._db.transaction() as conn:
+            row = conn.execute(
+                "UPDATE agents SET agent_id=agent_id WHERE agent_id=? RETURNING agent_id",
+                (agent_id,),
+            ).fetchone()
+            if row is None:
+                return True
+            referenced = conn.execute(
+                "SELECT 1 FROM project_tasks WHERE selected_expert_id=? "
+                "UNION ALL SELECT 1 FROM project_task_configuration_events "
+                "WHERE previous_expert_id=? OR selected_expert_id=? "
+                "UNION ALL SELECT 1 FROM project_task_legacy_sources "
+                "WHERE source_agent_id=? "
+                "UNION ALL SELECT 1 FROM project_task_turns WHERE " + historical + " LIMIT 1",
+                (agent_id,) * 10,
+            ).fetchone()
+            if referenced is not None:
+                return False
+            conn.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
+            return True

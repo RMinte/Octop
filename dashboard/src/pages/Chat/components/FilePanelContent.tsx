@@ -1,3 +1,4 @@
+import { useLegacyHistoryReadOnly } from "../LegacyHistoryContext";
 import {
   useCallback,
   useEffect,
@@ -57,6 +58,10 @@ export default function FilePanelContent({
   onActionsChange,
 }: FilePanelContentProps) {
   const { t } = useTranslation();
+  const readOnly = useLegacyHistoryReadOnly();
+  useEffect(() => {
+    if (readOnly) setEditMode(false);
+  }, [readOnly]);
   const resolvedPath = normalizeDockFilePath(filePath);
   const [content, setContent] = useState<string>("");
   const [editMode, setEditMode] = useState(false);
@@ -70,7 +75,7 @@ export default function FilePanelContent({
   const mediaKind = resolvedPath ? getMediaKind(resolvedPath) : null;
   const previewKind = resolvedPath ? getPreviewKind(resolvedPath) : null;
   const isText = resolvedPath ? isProbablyText(resolvedPath) : false;
-  const showEditButton = isText && !fileMissing;
+  const showEditButton = isText && !fileMissing && !readOnly;
   const showPreviewToggle =
     isText &&
     previewKind !== null &&
@@ -159,7 +164,7 @@ export default function FilePanelContent({
   }, []);
 
   const save = useCallback(async () => {
-    if (!resolvedPath) return;
+    if (!resolvedPath || readOnly) return;
     setSaving(true);
     try {
       await request(
@@ -178,7 +183,7 @@ export default function FilePanelContent({
     } finally {
       setSaving(false);
     }
-  }, [agentId, apiFilePath, content, resolvedPath, t]);
+  }, [agentId, apiFilePath, content, resolvedPath, readOnly, t]);
 
   const download = useCallback(async () => {
     if (!resolvedPath) return;

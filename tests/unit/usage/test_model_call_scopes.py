@@ -41,7 +41,12 @@ def services(tmp_path) -> Iterator[SimpleNamespace]:
     }
     service = SimpleNamespace(
         model_call_repo=ModelCallRepo(db),
-        project_task_repo=SimpleNamespace(get=MagicMock(side_effect=tasks.get)),
+        project_task_repo=SimpleNamespace(
+            get=MagicMock(side_effect=tasks.get),
+            get_internal=MagicMock(
+                side_effect=lambda task_id, owner_id: tasks.get((task_id, owner_id))
+            ),
+        ),
         user_repo=SimpleNamespace(
             get=MagicMock(return_value=SimpleNamespace(locale="en", disabled=False))
         ),

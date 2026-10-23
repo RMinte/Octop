@@ -1,3 +1,4 @@
+import { expertConversationUrl } from "../../../utils/remoteExpert";
 // dashboard/src/pages/Experts/components/AgentExpertsTable.tsx
 import {
   useCallback,
@@ -261,9 +262,10 @@ export default function AgentExpertsTable({
   const handleOpenChat = useCallback(
     (agentId: string) => {
       setActiveAgent(agentId);
-      navigate(`/chat/${agentId}`);
+      const agent = agents.find((row) => row.agent_id === agentId);
+      navigate(expertConversationUrl(agentId, agent?.kind));
     },
-    [setActiveAgent, navigate],
+    [setActiveAgent, navigate, agents],
   );
 
   const copyAgentId = useCallback(
@@ -518,11 +520,16 @@ export default function AgentExpertsTable({
                 />
               </>
             )}
-            {chatReady ? (
+            {chatReady ||
+            (!row.bridge &&
+              (!row.kind || row.kind === "expert" || row.kind === "team")) ? (
               <button
                 type="button"
                 className={styles.tableChatBtn}
                 onClick={() => handleOpenChat(row.agent_id)}
+                title={
+                  row.bridge ? t("projects.tasks.legacyOnlyHint") : undefined
+                }
               >
                 <MessageSquare size={13} />
                 {t("experts.openChat", "对话")}

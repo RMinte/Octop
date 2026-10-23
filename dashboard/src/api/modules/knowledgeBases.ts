@@ -1,9 +1,5 @@
-import {
-  bridgeAgentHeaders,
-  request,
-  requestBlob,
-  requestUpload,
-} from "../request";
+import { bridgeAgentHeaders } from "../request";
+import { taskTransport } from "../taskTransport";
 
 export interface KnowledgeLimits {
   max_bases_per_owner: number;
@@ -118,210 +114,214 @@ export const DEFAULT_KNOWLEDGE_LIMITS: KnowledgeLimits = {
   max_document_bytes: 100 * 1024 * 1024,
 };
 
-export const knowledgeBasesApi = {
-  getCapability: (agentId?: string | null) =>
-    request<KnowledgeCapability>("/knowledge-bases/capability", {
-      headers: bridgeAgentHeaders(agentId),
-    }),
+export function createKnowledgeBasesApi(hostID: string | null = null) {
+  const { request, requestBlob, requestUpload } = taskTransport(hostID);
+  return {
+    getCapability: (agentId?: string | null) =>
+      request<KnowledgeCapability>("/knowledge-bases/capability", {
+        headers: bridgeAgentHeaders(agentId),
+      }),
 
-  setFeature: (body: {
-    enabled: boolean;
-    backend?: "onnx" | "remote";
-    model?: string;
-    provider_id?: string;
-    ocr_enabled?: boolean;
-    ocr_backend?: "onnx" | "remote";
-    ocr_model?: string;
-    ocr_provider_id?: string;
-  }) =>
-    request<KnowledgeCapability>("/knowledge-bases/feature", {
-      method: "PUT",
-      body: JSON.stringify(body),
-    }),
+    setFeature: (body: {
+      enabled: boolean;
+      backend?: "onnx" | "remote";
+      model?: string;
+      provider_id?: string;
+      ocr_enabled?: boolean;
+      ocr_backend?: "onnx" | "remote";
+      ocr_model?: string;
+      ocr_provider_id?: string;
+    }) =>
+      request<KnowledgeCapability>("/knowledge-bases/feature", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
 
-  list: (agentId?: string | null) =>
-    request<KnowledgeBase[]>("/knowledge-bases", {
-      headers: bridgeAgentHeaders(agentId),
-    }),
-  getEmbeddingOptions: (opts?: { allOnnx?: boolean }) =>
-    request<KnowledgeEmbeddingOptions>(
-      opts?.allOnnx
-        ? "/knowledge-bases/embedding-options?all_onnx=true"
-        : "/knowledge-bases/embedding-options",
-    ),
+    list: (agentId?: string | null) =>
+      request<KnowledgeBase[]>("/knowledge-bases", {
+        headers: bridgeAgentHeaders(agentId),
+      }),
+    getEmbeddingOptions: (opts?: { allOnnx?: boolean }) =>
+      request<KnowledgeEmbeddingOptions>(
+        opts?.allOnnx
+          ? "/knowledge-bases/embedding-options?all_onnx=true"
+          : "/knowledge-bases/embedding-options",
+      ),
 
-  getOcrOptions: () =>
-    request<KnowledgeOcrOptions>("/knowledge-bases/ocr-options"),
+    getOcrOptions: () =>
+      request<KnowledgeOcrOptions>("/knowledge-bases/ocr-options"),
 
-  downloadOnnx: (model: string) =>
-    request<KnowledgeOnnxDownloadState>("/knowledge-bases/onnx-download", {
-      method: "POST",
-      body: JSON.stringify({ model }),
-    }),
-
-  getOnnxDownloadStatus: () =>
-    request<KnowledgeOnnxDownloadState>(
-      "/knowledge-bases/onnx-download-status",
-    ),
-
-  testOnnx: (model: string) =>
-    request<{
-      ok: boolean;
-      latency_ms?: number | null;
-      dim?: number | null;
-      error?: string | null;
-    }>("/knowledge-bases/onnx-test", {
-      method: "POST",
-      body: JSON.stringify({ model }),
-    }),
-
-  activateOnnx: (model: string) =>
-    request<{ enabled: boolean; model: string; ready: boolean }>(
-      "/knowledge-bases/onnx-activate",
-      {
+    downloadOnnx: (model: string) =>
+      request<KnowledgeOnnxDownloadState>("/knowledge-bases/onnx-download", {
         method: "POST",
         body: JSON.stringify({ model }),
-      },
-    ),
+      }),
 
-  get: (id: string) => request<KnowledgeBase>(`/knowledge-bases/${id}`),
+    getOnnxDownloadStatus: () =>
+      request<KnowledgeOnnxDownloadState>(
+        "/knowledge-bases/onnx-download-status",
+      ),
 
-  create: (body: {
-    name: string;
-    description?: string;
-    default_open?: boolean;
-    shared?: boolean;
-    icon_name?: string;
-    max_documents?: number;
-  }) =>
-    request<KnowledgeBase>("/knowledge-bases", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+    testOnnx: (model: string) =>
+      request<{
+        ok: boolean;
+        latency_ms?: number | null;
+        dim?: number | null;
+        error?: string | null;
+      }>("/knowledge-bases/onnx-test", {
+        method: "POST",
+        body: JSON.stringify({ model }),
+      }),
 
-  update: (
-    id: string,
-    body: {
-      name?: string;
+    activateOnnx: (model: string) =>
+      request<{ enabled: boolean; model: string; ready: boolean }>(
+        "/knowledge-bases/onnx-activate",
+        {
+          method: "POST",
+          body: JSON.stringify({ model }),
+        },
+      ),
+
+    get: (id: string) => request<KnowledgeBase>(`/knowledge-bases/${id}`),
+
+    create: (body: {
+      name: string;
       description?: string;
       default_open?: boolean;
       shared?: boolean;
       icon_name?: string;
       max_documents?: number;
-    },
-  ) =>
-    request<KnowledgeBase>(`/knowledge-bases/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-
-  delete: (id: string) =>
-    request<void>(`/knowledge-bases/${id}`, { method: "DELETE" }),
-
-  listDocuments: (id: string, prefix?: string) =>
-    request<KnowledgeDocument[]>(
-      prefix
-        ? `/knowledge-bases/${id}/documents?prefix=${encodeURIComponent(
-            prefix,
-          )}`
-        : `/knowledge-bases/${id}/documents`,
-    ),
-
-  createFolder: (id: string, path: string) =>
-    request<KnowledgeDocument>(`/knowledge-bases/${id}/folders`, {
-      method: "POST",
-      body: JSON.stringify({ path }),
-    }),
-
-  createTextDocument: (
-    id: string,
-    body: {
-      name: string;
-      format: "md" | "txt";
-      content?: string;
-      path?: string;
-    },
-  ) =>
-    request<KnowledgeDocument>(`/knowledge-bases/${id}/documents/text`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-
-  getTextDocument: (id: string, documentId: string) =>
-    request<{
-      id: string;
-      filename: string;
-      content_type: string;
-      text: string;
-    }>(`/knowledge-bases/${id}/documents/${documentId}/content`),
-
-  updateTextDocument: (id: string, documentId: string, content: string) =>
-    request<KnowledgeDocument>(
-      `/knowledge-bases/${id}/documents/${documentId}/content`,
-      {
-        method: "PUT",
-        body: JSON.stringify({ content }),
-      },
-    ),
-
-  uploadDocument: (
-    id: string,
-    file: File,
-    relativePath?: string,
-    onProgress?: (percent: number) => void,
-  ) => {
-    const body = new FormData();
-    body.append("upload", file);
-    if (relativePath) body.append("path", relativePath);
-    return requestUpload<KnowledgeDocument>(
-      `/knowledge-bases/${id}/documents`,
-      body,
-      { method: "POST" },
-      onProgress,
-    );
-  },
-
-  deleteDocument: (id: string, documentId: string) =>
-    request<void>(`/knowledge-bases/${id}/documents/${documentId}`, {
-      method: "DELETE",
-    }),
-
-  reindexDocument: (id: string, documentId: string) =>
-    request<KnowledgeDocument>(
-      `/knowledge-bases/${id}/documents/${documentId}/reindex`,
-      { method: "POST" },
-    ),
-
-  previewDocument: (id: string, documentId: string) =>
-    request<{ id: string; filename: string; text: string }>(
-      `/knowledge-bases/${id}/documents/${documentId}/preview`,
-    ),
-
-  /** Authenticated original-file bytes (download or preview). */
-  fetchDocumentFile: (
-    id: string,
-    documentId: string,
-    disposition: "attachment" | "inline" = "attachment",
-    onProgress?: (loaded: number, total: number) => void,
-    signal?: AbortSignal,
-  ) =>
-    requestBlob(
-      `/knowledge-bases/${id}/documents/${documentId}/file?disposition=${disposition}`,
-      { signal },
-      onProgress,
-    ),
-
-  reindex: (id: string) =>
-    request<{ enqueued: number }>(`/knowledge-bases/${id}/reindex`, {
-      method: "POST",
-    }),
-
-  renameDocument: (id: string, documentId: string, newName: string) =>
-    request<KnowledgeDocument>(
-      `/knowledge-bases/${id}/documents/${documentId}/rename`,
-      {
+    }) =>
+      request<KnowledgeBase>("/knowledge-bases", {
         method: "POST",
-        body: JSON.stringify({ new_name: newName }),
+        body: JSON.stringify(body),
+      }),
+
+    update: (
+      id: string,
+      body: {
+        name?: string;
+        description?: string;
+        default_open?: boolean;
+        shared?: boolean;
+        icon_name?: string;
+        max_documents?: number;
       },
-    ),
-};
+    ) =>
+      request<KnowledgeBase>(`/knowledge-bases/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+
+    delete: (id: string) =>
+      request<void>(`/knowledge-bases/${id}`, { method: "DELETE" }),
+
+    listDocuments: (id: string, prefix?: string) =>
+      request<KnowledgeDocument[]>(
+        prefix
+          ? `/knowledge-bases/${id}/documents?prefix=${encodeURIComponent(
+              prefix,
+            )}`
+          : `/knowledge-bases/${id}/documents`,
+      ),
+
+    createFolder: (id: string, path: string) =>
+      request<KnowledgeDocument>(`/knowledge-bases/${id}/folders`, {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      }),
+
+    createTextDocument: (
+      id: string,
+      body: {
+        name: string;
+        format: "md" | "txt";
+        content?: string;
+        path?: string;
+      },
+    ) =>
+      request<KnowledgeDocument>(`/knowledge-bases/${id}/documents/text`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    getTextDocument: (id: string, documentId: string) =>
+      request<{
+        id: string;
+        filename: string;
+        content_type: string;
+        text: string;
+      }>(`/knowledge-bases/${id}/documents/${documentId}/content`),
+
+    updateTextDocument: (id: string, documentId: string, content: string) =>
+      request<KnowledgeDocument>(
+        `/knowledge-bases/${id}/documents/${documentId}/content`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ content }),
+        },
+      ),
+
+    uploadDocument: (
+      id: string,
+      file: File,
+      relativePath?: string,
+      onProgress?: (percent: number) => void,
+    ) => {
+      const body = new FormData();
+      body.append("upload", file);
+      if (relativePath) body.append("path", relativePath);
+      return requestUpload<KnowledgeDocument>(
+        `/knowledge-bases/${id}/documents`,
+        body,
+        { method: "POST" },
+        onProgress,
+      );
+    },
+
+    deleteDocument: (id: string, documentId: string) =>
+      request<void>(`/knowledge-bases/${id}/documents/${documentId}`, {
+        method: "DELETE",
+      }),
+
+    reindexDocument: (id: string, documentId: string) =>
+      request<KnowledgeDocument>(
+        `/knowledge-bases/${id}/documents/${documentId}/reindex`,
+        { method: "POST" },
+      ),
+
+    previewDocument: (id: string, documentId: string) =>
+      request<{ id: string; filename: string; text: string }>(
+        `/knowledge-bases/${id}/documents/${documentId}/preview`,
+      ),
+
+    /** Authenticated original-file bytes (download or preview). */
+    fetchDocumentFile: (
+      id: string,
+      documentId: string,
+      disposition: "attachment" | "inline" = "attachment",
+      onProgress?: (loaded: number, total: number) => void,
+      signal?: AbortSignal,
+    ) =>
+      requestBlob(
+        `/knowledge-bases/${id}/documents/${documentId}/file?disposition=${disposition}`,
+        { signal },
+        onProgress,
+      ),
+
+    reindex: (id: string) =>
+      request<{ enqueued: number }>(`/knowledge-bases/${id}/reindex`, {
+        method: "POST",
+      }),
+
+    renameDocument: (id: string, documentId: string, newName: string) =>
+      request<KnowledgeDocument>(
+        `/knowledge-bases/${id}/documents/${documentId}/rename`,
+        {
+          method: "POST",
+          body: JSON.stringify({ new_name: newName }),
+        },
+      ),
+  };
+}
+export const knowledgeBasesApi = createKnowledgeBasesApi();

@@ -557,7 +557,9 @@
     "RESIDENT_FOLLOWUP_CONFLICT": "跟进事项已更新，请刷新后重试。",
     "RESIDENT_READ_ANCHOR_INVALID": "已读消息不属于当前会话。",
     "RESIDENT_MEMORY_EXTRACTION_FAILED": "记忆候选提炼失败，请稍后重试。",
-    "RESIDENT_TOOL_INPUT_INVALID": "智能体工具参数无效。"
+    "RESIDENT_TOOL_INPUT_INVALID": "智能体工具参数无效。",
+    "EXPERT_IN_USE": "该专家仍被任务引用，请先停用或更换任务专家。",
+    "PROJECT_HAS_TASKS": "该项目仍有任务，请先归档项目或明确处理任务。"
   },
   "desktop": {
     "install_log_deps": "正在安装 Python 依赖…",
@@ -701,6 +703,10 @@
     "docker-management": "Docker 管理"
   },
   "channel": {
+    "task_owner_approval": "请由已登录的本人在「项目和任务」中批准此操作；未验证身份的 IM 发送者不能授予权限。",
+    "task_command_unsupported": "任务会话不支持 /{command}。请用 /help 查看任务命令；专家配置仍在专家设置中管理。",
+    "task_help": "任务命令：/new、/stop、/status、/model [提供方/模型 | reset]、/mode [ask | plan | craft]、/compact、/pending、/reject [交互 ID]、/respond <交互 ID> <答案>。直接回复可回答下一道待答问题；工具授权请由已登录本人在「项目和任务」中完成。",
+    "task_status": "任务：{task_id}\n状态：{status}\n模式：{mode}\n待处理交互：{pending}",
     "tool_hint_start": "🔧 正在调用工具：{tool_name}",
     "tool_hint_end": "✅ {tool_name} 已完成",
     "runtime": {
@@ -1045,6 +1051,24 @@
     "progress_call_reused": "同一进展调用标识不能用于不同内容。",
     "artifacts_delivery_required": "本轮已成功写入独立成果文件，但尚无实际交付附件。请先调用 publish_workspace_file，或用 publish_workspace_archive 明确列出需要交付的文件并生成 ZIP，确认 status=attached，再完成最后计划步骤或给出最终答复。只写服务端路径或说可以稍后打包不算交付。",
     "publish_workspace_archive_description": "将明确列出的服务端工作目录相对文件打包成一个不可变 ZIP 附件并立即交付；保留相对目录结构，不扫描目录。不要包含内部配置或与本次交付无关的文件。",
-    "client_workspace_required": "此项目已指定客户端工作目录，不能用服务端 write_file、edit_file 或 execute 另建目录或替代本机项目编辑。请使用已声明的 client__ 文件或命令工具。若本机通道尚未就绪，请保留用户原目录并等待客户端接入，不要改写服务端目录、把 ZIP 当替代方案或要求重新选择目录。"
+    "client_workspace_required": "此项目已指定客户端工作目录，不能用服务端 write_file、edit_file 或 execute 另建目录或替代本机项目编辑。请使用已声明的 client__ 文件或命令工具。若本机通道尚未就绪，请保留用户原目录并等待客户端接入，不要改写服务端目录、把 ZIP 当替代方案或要求重新选择目录。",
+    "task_action_mode_restricted": "当前 {mode} 模式仅允许读取与规划，请切换执行模式后再进行此操作。",
+    "expert_profile_prompt": "当前专家：{name}\n请遵循以下专家人设与专业方法，实际工作目录由项目决定。\n{content}",
+    "expert_memory_prompt": "所选专家的相关记忆：\n{content}",
+    "expert_memory_search_description": "在授权的通用及当前工作范围内检索所选专家的记忆。",
+    "expert_memory_get_description": "读取当前专家记忆检索返回的记忆。",
+    "task_team_prompt": "本轮使用固定的任务团队同步协作。所有成员仅在当前任务的项目工作目录和当前用户已授权能力内工作，不使用专家原有目录，不启动或发送到旧专家会话。按本轮成员注册表分配工作并保留各成员身份；需要命令执行或人工审批时由主任务协调。",
+    "task_file_paths": "文件工具以 / 为当前 Task 工作区的虚拟根，例如 /notes.txt。终端或 execute 使用服务端主机目录；文件工具路径不要重复拼接该主机目录。客户端目录仅为位置记录，不是主机上的文件位置。"
+  },
+  "cli": {
+    "unified_tasks": {
+      "approval_hint": "使用 /approve {interaction_id} 批准，或 /deny {interaction_id} 拒绝。",
+      "question_hint": "使用 /answer {interaction_id} <回答内容>。",
+      "general": "通用助手",
+      "user_required": "请指定 --user 或先设置 CLI 默认用户。",
+      "unknown_command": "不支持此命令：{command}",
+      "new_draft": "已开始新会话，发送首条消息后创建任务。",
+      "help": "命令：/new /task /model <模型> /mode ask|plan|craft /approve <交互ID> /deny <交互ID> /answer <交互ID> <回答> /cancel [轮次ID] /exit"
+    }
   }
 }

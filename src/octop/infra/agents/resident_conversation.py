@@ -261,6 +261,8 @@ class ResidentConversationRuntime:
         self.notification_delivery = ResidentNotificationDelivery(
             services, registry, history_archive
         )
+        self.report_delivery.task_backed = getattr(gateway, "_task_worker", None) is not None
+        self.notification_delivery.task_backed = self.report_delivery.task_backed
         self._closing = False
         self._process_lock = ResidentWorkerLock(services.paths.root / "resident-worker.lock")
 
@@ -467,11 +469,16 @@ class ResidentConversationRuntime:
             raise OctopError.localized(ErrorCode.RESIDENT_REQUEST_CONFLICT) from exc
         if row is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        if getattr(self.gateway, "_task_worker", None) is not None:
+            from octop.infra.projects.resident_tasks import cancel
+
+            await asyncio.to_thread(cancel, self.services, owner_id, thread_id, row.turn_id)
         # A repeated cancellation for an old turn can never signal the next turn.
         task = self._active.get(row.turn_id)
         if row.status == "running" and row.cancel_requested and task is not None:
-            with resident_execution_scope(owner_id, thread_id):
-                self.registry.cancel_stream(agent_id, thread_id)
+            if getattr(self.gateway, "_task_worker", None) is None:
+                with resident_execution_scope(owner_id, thread_id):
+                    self.registry.cancel_stream(agent_id, thread_id)
             task.cancel()
         self._updates.notify(thread_id)
         self.wake()
@@ -672,6 +679,9 @@ class ResidentConversationRuntime:
                 self.registry.providers.is_model_ref_usable, model
             ):
                 raise OctopError.localized(ErrorCode.RESIDENT_MODEL_UNAVAILABLE)
+            if getattr(self.gateway, "_task_worker", None) is not None:
+                reply, status, code = await self._execute_task(queued)
+                return
             try:
                 harness = self.registry.get_agent(binding.agent_id)
             except OctopError:
@@ -741,6 +751,12 @@ class ResidentConversationRuntime:
             claimed = await claim
             if not claimed:
                 return
+            if getattr(self.gateway, "_task_worker", None) is not None:
+                from octop.infra.projects.resident_tasks import cancel
+
+                await asyncio.to_thread(
+                    cancel, self.services, queued.owner_id, queued.thread_id, queued.turn_id
+                )
             current = await asyncio.to_thread(repo.get, queued.owner_id, queued.request_id)
             status = "cancelled" if current and current.cancel_requested else "interrupted"
             code = ErrorCode.RESIDENT_INTERRUPTED.value if status == "interrupted" else None
@@ -754,6 +770,26 @@ class ResidentConversationRuntime:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
             if claimed:
+                if getattr(self.gateway, "_task_worker", None) is not None:
+                    from octop.infra.projects.resident_tasks import cancel
+
+                    if status != "completed":
+                        await _settled_io(
+                            cancel, self.services, queued.owner_id, queued.thread_id, queued.turn_id
+                        )
+                    native = await _settled_io(
+                        self.services.project_task_turn_repo.get, queued.turn_id
+                    )
+                    receipt = await _settled_io(repo.get, queued.owner_id, queued.request_id)
+                    # A cancellation may interrupt the observing coroutine before
+                    # its tuple assignment. Canonical persisted output wins.
+                    reply = (
+                        native.reply
+                        if native and native.reply
+                        else receipt.reply
+                        if receipt
+                        else reply
+                    )
                 try:
                     await _settled_io(
                         repo.finish,
@@ -767,6 +803,47 @@ class ResidentConversationRuntime:
                 finally:
                     self._updates.notify(queued.thread_id)
             self.wake()
+
+    async def _execute_task(self, queued: ResidentRequestRow) -> tuple[str, str, str | None]:
+        from octop.infra.projects import resident_tasks
+
+        while True:
+            try:
+                identifier = await resident_tasks.admit(self.services, queued)
+                break
+            except OctopError as exc:
+                if exc.code != ErrorCode.TASK_BUSY:
+                    raise
+                # The previous exact turn may still be settling its Task
+                # cancellation after the resident receipt became terminal.
+                await asyncio.sleep(0.05)
+        worker = self.gateway._task_worker
+        assert worker is not None
+        stop = worker.watch_updates(identifier, lambda: self._updates.notify(queued.thread_id))
+        worker.wake()
+        try:
+            while True:
+                current = await asyncio.to_thread(
+                    self.services.project_task_turn_repo.get, queued.turn_id
+                )
+                if current is None:
+                    raise OctopError.localized(ErrorCode.RESIDENT_INTERRUPTED)
+                if not await asyncio.to_thread(
+                    self.services.resident_request_repo.update_reply,
+                    queued.turn_id,
+                    self.worker_id,
+                    current.reply,
+                    now_ms(),
+                ):
+                    raise OctopError.localized(ErrorCode.RESIDENT_INTERRUPTED)
+                self._updates.notify(queued.thread_id)
+                if current.status in {"completed", "failed", "cancelled"}:
+                    return current.reply, current.status, current.error_code or None
+                if current.wait_kind or current.pause_json:
+                    return current.reply, "interrupted", ErrorCode.RESIDENT_INTERRUPTED.value
+                await asyncio.sleep(0.1)
+        finally:
+            stop()
 
     def _finished(self, turn_id: str, thread_id: str, task: asyncio.Task[None]) -> None:
         self._active.pop(turn_id, None)

@@ -7,7 +7,8 @@ import {
 import zh from "../../locales/zh.json";
 import TaskContextUsage, { TaskTurnUsage } from "./TaskContextUsage";
 
-vi.mock("../../api/modules/projects", () => ({
+vi.mock("../../api/modules/projects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/modules/projects")>()),
   projectTasksApi: { contextUsage: vi.fn() },
 }));
 vi.mock("react-i18next", () => ({

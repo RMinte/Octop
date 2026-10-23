@@ -1,10 +1,10 @@
-"""Persistent task conversations independent of experts and legacy Bridge projects."""
+"""Unified multi-turn work records with an optional expert and independent project."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Self, cast
 
@@ -36,6 +36,10 @@ from octop.infra.projects.image_tools import READ_TASK_IMAGE
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction, public_status
 from octop.infra.projects.knowledge import selection_snapshot
+from octop.infra.projects.legacy_conversation_models import (
+    LegacySourceAttachment,
+    LegacyTrajectoryEvent,
+)
 from octop.infra.projects.model_routing import (
     ModelRoutingDecision,
     RoutingCapabilities,
@@ -66,6 +70,7 @@ from octop.infra.utils.ulid import new_ulid
 
 RequestID = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{8,128}$")]
 Prompt = Annotated[str, StringConstraints(strip_whitespace=True, max_length=32768)]
+ActionMode = Literal["ask", "plan", "craft"]
 TurnStatus = Literal[
     "queued",
     "running",
@@ -81,6 +86,10 @@ TurnStatus = Literal[
 
 
 class TaskExecutionOptions(ProjectModel):
+    expert_memory_enabled: StrictBool | None = Field(
+        default=None,
+        description="本轮是否使用所选专家的长期记忆；省略遵循专家策略，false 禁用召回和采集。",
+    )
     action_timeline_enabled: StrictBool | None = Field(
         default=None,
         description="本轮结构化动作链路开关；省略或 null 使用当前全局默认值，入队后固定，不修改计划执行或步骤面板显示。",
@@ -160,6 +169,7 @@ class TaskExecutionOptions(ProjectModel):
                         "reasoning_effort",
                         "action_timeline_enabled",
                         "knowledge_base_ids",
+                        "expert_memory_enabled",
                     },
                 ),
             }
@@ -204,7 +214,22 @@ class TaskModelOption(ProjectModel):
     )
 
 
+class TaskExpertOption(ProjectModel):
+    expert_id: str = Field(description="持久专家的 agent_id，不是模板名或发布资源 ID。")
+    name: str
+    description: str | None = None
+    config_revision: int = 1
+    kind: Literal["expert", "team"] = "expert"
+    is_shared: bool = False
+    is_owner: bool = True
+    member_ids: list[str] = Field(default_factory=list)
+
+
 class TaskResources(ProjectResources):
+    experts: list[TaskExpertOption] = Field(
+        default_factory=list,
+        description="本人可用的本地专家、本人团队及已授权共享专家；不含私人管家。",
+    )
     models: list[TaskModelOption] = Field(
         description="当前可用于任务的已启用模型，包含盒子和远端；不含 ASR/TTS 模型、密钥或连接地址。"
     )
@@ -221,6 +246,12 @@ class TaskPatch(ProjectModel):
     expected_revision: Annotated[StrictInt, Field(ge=1)] = Field(
         description="详情或摘要的 list_revision；冲突返回 409。"
     )
+    expected_configuration_revision: Annotated[StrictInt, Field(ge=1)] | None = None
+    selected_expert_id: Reference | None = Field(
+        default=None, description="省略不变；显式 null 切换为通用助手。"
+    )
+    action_mode: ActionMode | SkipJsonSchema[None] = None
+    pinned: StrictBool | SkipJsonSchema[None] = None
     title: (
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
         | SkipJsonSchema[None]
@@ -235,13 +266,31 @@ class TaskPatch(ProjectModel):
 
     @model_validator(mode="after")
     def validate_changes(self) -> Self:
-        changes = self.model_dump(exclude_unset=True, exclude={"expected_revision"})
-        if not changes or any(value is None for value in changes.values()):
+        changes = self.model_dump(
+            exclude_unset=True, exclude={"expected_revision", "expected_configuration_revision"}
+        )
+        if not changes or any(
+            value is None for key, value in changes.items() if key != "selected_expert_id"
+        ):
             raise ValueError("a non-null task setting is required")
+        if {
+            "selected_expert_id",
+            "action_mode",
+        } & changes.keys() and self.expected_configuration_revision is None:
+            raise ValueError(
+                "expected_configuration_revision is required for configuration changes"
+            )
         return self
 
 
 class TaskMessage(ProjectModel):
+    expected_configuration_revision: Annotated[StrictInt, Field(ge=1)] | None = Field(
+        default=None,
+        description="发送时看到的任务配置版本；省略按初始版本 1 校验，防止旧队列沿用已变更的专家。",
+    )
+    expected_project_revision: Annotated[StrictInt, Field(ge=1)] | None = Field(
+        default=None, description="发送时确认的项目版本；有值时须与当前项目一致。"
+    )
     request_id: RequestID = Field(
         description="本次发送的唯一标识；网络重试必须复用，相同标识不会重复执行。"
     )
@@ -269,6 +318,8 @@ class TaskMessage(ProjectModel):
 
 
 class TaskRetry(ProjectModel):
+    expected_configuration_revision: Annotated[StrictInt, Field(ge=1)] | None = None
+    expected_project_revision: Annotated[StrictInt, Field(ge=1)] | None = None
     request_id: RequestID = Field(description="本次重试的唯一标识；网络重传必须复用。")
     options: TaskExecutionOptions = Field(
         default_factory=TaskExecutionOptions,
@@ -283,6 +334,13 @@ class TaskCancel(ProjectModel):
 
 
 class ProjectTaskCreate(TaskMessage):
+    selected_expert_id: Reference | None = Field(
+        default=None,
+        description="可选本人专家、本人团队或已授权共享专家的 agent_id；null 使用通用助手。",
+    )
+    action_mode: ActionMode = Field(
+        default="craft", description="ask 问答、plan 规划、craft 执行；服务端约束工具能力。"
+    )
     web_search_enabled: StrictBool = Field(
         default=True, description="任务网络搜索开关；默认开启，持久保存，追问和重试沿用任务当前值。"
     )
@@ -298,6 +356,20 @@ class TaskCreate(ProjectTaskCreate):
 
 
 class TaskTurn(ProjectModel):
+    history_only: bool = False
+    source_task_id: str | None = None
+    source_turn_id: str | None = None
+    source_thread_id: str | None = None
+    source_agent_id: str | None = None
+    legacy_attachments: list[LegacySourceAttachment] = Field(default_factory=list)
+    source_trajectory: list[LegacyTrajectoryEvent] = Field(default_factory=list)
+    source_status: str | None = None
+    server_directory: str | None = None
+    client_directory: str | None = None
+    selected_expert_id: str | None = None
+    expert_name: str | None = None
+    expert_config_revision: int | None = None
+    action_mode: ActionMode = "craft"
     imported_history: ImportedTurnHistory | None = Field(
         default=None,
         description="外部来源的可见历史副本；不构成 Octop 工具执行、授权或文件修改回执。",
@@ -382,6 +454,10 @@ class TaskTurn(ProjectModel):
 
 
 class TaskSummary(ProjectModel):
+    selected_expert_id: str | None = None
+    configuration_revision: int = 1
+    action_mode: ActionMode = "craft"
+    pinned: bool = False
     import_source: ImportSource | None = Field(
         default=None, description="任务导入来源；原生任务为 null。"
     )
@@ -401,7 +477,19 @@ class TaskSummary(ProjectModel):
     updated_at: datetime
 
 
+class TaskConfigurationEvent(ProjectModel):
+    event_id: str
+    previous_expert_id: str | None
+    selected_expert_id: str | None
+    selected_expert_name: str | None = None
+    previous_action_mode: ActionMode
+    action_mode: ActionMode
+    configuration_revision: int
+    created_at: datetime
+
+
 class TaskDetail(TaskSummary):
+    configuration_events: list[TaskConfigurationEvent] = Field(default_factory=list)
     turns: list[TaskTurn]
     next_page_cursor: str | None = Field(
         default=None, description="读取更早轮次的游标；每页按时间正序。"
@@ -427,6 +515,10 @@ def _datetime(value: int) -> datetime:
 
 def summary(row: ProjectTaskRow, policy: TaskApprovalPolicy) -> TaskSummary:
     return TaskSummary(
+        selected_expert_id=row.selected_expert_id,
+        configuration_revision=row.configuration_revision,
+        action_mode=cast(ActionMode, row.action_mode),
+        pinned=row.pinned,
         import_source=cast(ImportSource, row.import_source) if row.import_source else None,
         external_session_id=row.external_session_id or None,
         task_id=row.task_id,
@@ -445,6 +537,8 @@ def summary(row: ProjectTaskRow, policy: TaskApprovalPolicy) -> TaskSummary:
 
 def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = None) -> TaskTurn:
     configuration = json.loads(t.configuration_json)
+    expert = configuration.get("expert_profile") or {}
+    origin = configuration.get("branch_origin") or {}
     blocks = [TaskContentBlock.model_validate(block) for block in json.loads(t.content_blocks_json)]
     plan = next((block.plan for block in reversed(blocks) if block.type == "plan"), None)
     if t.status not in {"queued", "running"} or t.wait_kind == "interrupted":
@@ -452,6 +546,20 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
             if block.status == "streaming":
                 block.status = "interrupted"
     return TaskTurn(
+        history_only=origin.get("history_only", False),
+        source_task_id=origin.get("source_task_id"),
+        source_turn_id=origin.get("source_turn_id"),
+        source_thread_id=origin.get("source_thread_id"),
+        source_agent_id=origin.get("source_agent_id"),
+        legacy_attachments=configuration.get("legacy_attachments", []),
+        source_trajectory=(configuration.get("migrated_history") or {}).get("trajectory", []),
+        source_status=origin.get("source_status"),
+        server_directory=configuration.get("directory"),
+        client_directory=configuration.get("client_directory"),
+        selected_expert_id=expert.get("expert_id"),
+        expert_name=expert.get("name"),
+        expert_config_revision=expert.get("config_revision"),
+        action_mode=configuration.get("action_mode", "craft"),
         imported_history=configuration.get("imported_history"),
         sequence=t.pk,
         turn_id=t.turn_id,
@@ -500,6 +608,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
             or {"mode": "ask_for_approval", "revision": 1, "updated_at": _datetime(t.created_at)}
         ),
         options=TaskExecutionOptions(
+            expert_memory_enabled=configuration.get("expert_memory_enabled"),
             action_timeline_enabled=configuration.get("action_timeline_enabled", True),
             model_ref=t.model_ref or None,
             routing=configuration.get("execution_options", {}).get("routing"),
@@ -555,12 +664,23 @@ def detail(
         policy = approval_policy.in_transaction(conn, services, owner_id)
         turns = services.project_task_turn_repo.page(conn, task_id, limit + 1, before)
         attachments = artifacts.for_turns(services, conn, task_id, [turn.turn_id for turn in turns])
+        configuration_events = services.project_task_repo.configuration_events(conn, task_id)
     more = len(turns) > limit
     turns = turns[-limit:]
     views = [turn_view(t, attachments.get(t.turn_id)) for t in turns]
     stream = cursor_codec(services, owner_id, f"conversation:{task_id}:events")
     return TaskDetail(
         **summary(row, policy).model_dump(),
+        configuration_events=[
+            TaskConfigurationEvent(
+                **{
+                    **asdict(event),
+                    "event_id": f"{task_id}:configuration:{event.configuration_revision}",
+                    "created_at": _datetime(event.created_at),
+                }
+            )
+            for event in configuration_events
+        ],
         turns=views,
         next_page_cursor=(codec.encode("conversation", position=turns[0].pk) if more else None),
         event_cursor=(
@@ -634,13 +754,31 @@ def _reasoning_configuration(
 
 
 def _base_configuration(
-    services: SharedServices, owner_id: int, project_id: str | None, options: TaskExecutionOptions
+    services: SharedServices,
+    owner_id: int,
+    project_id: str | None,
+    options: TaskExecutionOptions,
+    selected_expert_id: str | None = None,
+    action_mode: ActionMode = "craft",
+    configuration_revision: int = 1,
 ) -> dict[str, Any]:
+    from octop.infra.projects.expert_profiles import (
+        resolve_expert_profile,
+        validate_expert_workspace_skills,
+    )
+
     project = get_project(services, owner_id, project_id) if project_id else None
     if project and project.archived:
         raise OctopError.localized(ErrorCode.PROJECT_ARCHIVED)
     fields = project or ProjectFields(name="Task")
     snapshot = fields.model_dump(mode="json")
+    expert = resolve_expert_profile(services, owner_id, selected_expert_id)
+    capabilities = expert.get("capabilities", {}) if expert else {}
+    defaults = fields.model_dump(include=set(ProjectFields.model_fields), mode="json")
+    project_defaults = dict(defaults)
+    for key in ("skills", "mcp_servers", "plugins", "subagents"):
+        merged = [*capabilities.get(key, []), *defaults[key]]
+        defaults[key] = list({json.dumps(item, sort_keys=True): item for item in merged}.values())
     overrides = options.model_dump(
         exclude_none=True,
         exclude={
@@ -652,17 +790,35 @@ def _base_configuration(
             "reasoning_effort",
             "action_timeline_enabled",
             "knowledge_base_ids",
+            "expert_memory_enabled",
         },
     )
+    is_expert_team = bool(expert and expert.get("kind") == "team" and expert.get("team"))
     fields = ProjectFields.model_validate(
-        {**fields.model_dump(include=set(ProjectFields.model_fields)), **overrides}
+        {**defaults, **overrides, **({"team_enabled": True} if is_expert_team else {})}
     )
-    _validate(services, owner_id, fields)
+    if len({skill.slug for skill in fields.skills}) != len(fields.skills):
+        raise OctopError.localized(ErrorCode.PROJECT_RESOURCE_INVALID, status=422)
+    validate_expert_workspace_skills(
+        expert, fields.skills, inherit_workspace=options.skills is None
+    )
+    _validate(services, owner_id, fields, allow_expert_team=is_expert_team)
     assert_token_quota_available(services.user_policy_repo, services.usage_repo, owner_id)
     return {
         **snapshot,
         **fields.model_dump(),
-        **selection_snapshot(services, owner_id, options.knowledge_base_ids),
+        **selection_snapshot(
+            services,
+            owner_id,
+            options.knowledge_base_ids
+            if options.knowledge_base_ids is not None
+            else capabilities.get("knowledge_base_ids") or None,
+        ),
+        "expert_profile": expert,
+        "project_defaults": project_defaults,
+        "expert_memory_enabled": options.expert_memory_enabled,
+        "action_mode": action_mode,
+        "configuration_revision": configuration_revision,
         "action_timeline_enabled": (
             options.action_timeline_enabled
             if options.action_timeline_enabled is not None
@@ -678,8 +834,19 @@ def _configuration(
     project_id: str | None,
     options: TaskExecutionOptions,
     routing_decision: ModelRoutingDecision | None = None,
+    selected_expert_id: str | None = None,
+    action_mode: ActionMode = "craft",
+    configuration_revision: int = 1,
 ) -> tuple[str, str]:
-    snapshot = _base_configuration(services, owner_id, project_id, options)
+    snapshot = _base_configuration(
+        services,
+        owner_id,
+        project_id,
+        options,
+        selected_expert_id,
+        action_mode,
+        configuration_revision,
+    )
     if options.routing is not None and options.model_ref and routing_decision is None:
         routing_decision = decide_model(
             ProviderStore(services.provider_repo),
@@ -693,8 +860,11 @@ def _configuration(
         raise OctopError.localized(
             ErrorCode.TASK_SETTINGS_INVALID, setting="routing", details={"setting": "routing"}
         )
+    expert = snapshot.get("expert_profile") or {}
     ref = options.model_ref or (
-        routing_decision.model_ref if routing_decision is not None else resolve_model_ref(services)
+        routing_decision.model_ref
+        if routing_decision is not None
+        else expert.get("default_model") or resolve_model_ref(services)
     )
     providers = ProviderStore(services.provider_repo)
     if not ref or not providers.is_model_ref_usable(ref):
@@ -724,16 +894,22 @@ def resolve_model_ref(services: SharedServices) -> str | None:
 
 
 def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: str | None) -> None:
+    saved = json.loads(old.configuration_json)
     if (
         old.prompt != body.prompt
         or json.loads(old.configuration_json).get("attachment_ids", []) != body.attachment_ids
         or json.loads(old.configuration_json).get("retry_of_turn_id") != retry_of_turn_id
         or json.loads(old.configuration_json).get("execution_options", {})
         != body.options.model_dump(exclude_none=True)
+        or saved.get("request_configuration_revision") != body.expected_configuration_revision
+        or saved.get("request_project_revision") != body.expected_project_revision
         or (
             isinstance(body, ProjectTaskCreate)
-            and json.loads(old.configuration_json).get("web_search_enabled", True)
-            != body.web_search_enabled
+            and (
+                saved.get("web_search_enabled", True) != body.web_search_enabled
+                or (saved.get("expert_profile") or {}).get("expert_id") != body.selected_expert_id
+                or saved.get("action_mode", "craft") != body.action_mode
+            )
         )
     ):
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
@@ -762,6 +938,8 @@ def _input_configuration(
     return json.dumps(
         {
             **json.loads(configuration),
+            "request_configuration_revision": body.expected_configuration_revision,
+            "request_project_revision": body.expected_project_revision,
             "attachment_ids": body.attachment_ids,
             "attachments": [item.model_dump(mode="json") for item in attached],
         }
@@ -793,8 +971,12 @@ def _submission_state(
         original = turns.get_in_transaction(conn, retry_of_turn_id)
         if original is None or original.task_id != task_id:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        if json.loads(original.configuration_json).get("branch_origin", {}).get("history_only"):
+            raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
         body = TaskMessage(
             request_id=body.request_id,
+            expected_configuration_revision=body.expected_configuration_revision,
+            expected_project_revision=body.expected_project_revision,
             prompt=original.prompt,
             attachment_ids=json.loads(original.configuration_json).get("attachment_ids", []),
             options=body.options,
@@ -808,6 +990,12 @@ def _submission_state(
     if previous:
         _same_prompt(previous, body, retry_of_turn_id)
         return task, body, previous
+    if (body.expected_configuration_revision or 1) != task.configuration_revision:
+        raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+    if body.expected_project_revision is not None:
+        project = get_project(services, owner_id, task.project_id) if task.project_id else None
+        if project is None or project.revision != body.expected_project_revision:
+            raise OctopError.localized(ErrorCode.PROJECT_REVISION_CONFLICT)
     if task.archived:
         raise OctopError.localized(ErrorCode.TASK_ARCHIVED)
     if task.active_turn_id is not None:
@@ -872,7 +1060,14 @@ def send_in_transaction(
         return task.task_id, previous.turn_id
     if task:
         configuration, model_ref = _configuration(
-            services, owner_id, task.project_id, body.options, routing_decision
+            services,
+            owner_id,
+            task.project_id,
+            body.options,
+            routing_decision,
+            selected_expert_id=task.selected_expert_id,
+            action_mode=cast(ActionMode, task.action_mode),
+            configuration_revision=task.configuration_revision,
         )
         configuration = json.dumps(
             {
@@ -914,8 +1109,24 @@ def send_in_transaction(
         )
         task_id = task.task_id
     else:
+        if body.expected_configuration_revision not in {None, 1}:
+            raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+        if body.expected_project_revision is not None:
+            project = get_project(services, owner_id, project_id) if project_id else None
+            if project is None or project.revision != body.expected_project_revision:
+                raise OctopError.localized(ErrorCode.PROJECT_REVISION_CONFLICT)
+        selected_expert_id = (
+            body.selected_expert_id if isinstance(body, ProjectTaskCreate) else None
+        )
+        action_mode = body.action_mode if isinstance(body, ProjectTaskCreate) else "craft"
         configuration, model_ref = _configuration(
-            services, owner_id, project_id, body.options, routing_decision
+            services,
+            owner_id,
+            project_id,
+            body.options,
+            routing_decision,
+            selected_expert_id=selected_expert_id,
+            action_mode=action_mode,
         )
         task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
         web_search_enabled = (
@@ -951,6 +1162,8 @@ def send_in_transaction(
                 approval_revision=start_policy.revision,
                 approval_updated_at=int(start_policy.updated_at.timestamp() * 1000),
                 web_search_enabled=web_search_enabled,
+                selected_expert_id=selected_expert_id,
+                action_mode=action_mode,
             ),
         )
         configuration = _input_configuration(
@@ -1005,6 +1218,9 @@ def cancel(services: SharedServices, owner_id: int, task_id: str, turn_id: str) 
 
 
 def resources(services: SharedServices, owner_id: int) -> TaskResources:
+    from octop.infra.projects.expert_profiles import _workspace, expert_profile_supported
+    from octop.infra.projects.expert_teams import member_ids as team_member_ids
+
     available = project_resources(services, owner_id)
     providers = ProviderStore(services.provider_repo)
     models = [
@@ -1025,8 +1241,44 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
         for model in provider.get_models()
         if providers.is_model_ref_usable(f"{provider.name}/{model['id']}")
     ]
+    experts = []
+    rows = [
+        *services.agent_repo.list_by_user(owner_id, include_disabled=False, exclude_resident=True),
+        *services.agent_repo.list_shared(exclude_user_id=owner_id),
+    ]
+    for row in rows:
+        if row.kind not in {"expert", "team"} or (
+            row.kind == "team" and (row.is_shared or row.user_id != owner_id)
+        ):
+            continue
+        if services.resident_conversation_repo.get_by_agent(row.agent_id) is not None:
+            continue
+        try:
+            config = json.loads(row.config_json or "{}")
+            if not isinstance(config, dict) or not expert_profile_supported(config):
+                continue
+            roster = (
+                team_member_ids(services, owner_id, _workspace(services, row, config))
+                if row.kind == "team"
+                else []
+            )
+        except (OctopError, ValueError, OSError):
+            continue
+        experts.append(
+            TaskExpertOption(
+                expert_id=row.agent_id,
+                name=row.name,
+                description=row.description,
+                config_revision=row.config_revision,
+                kind=cast(Literal["expert", "team"], row.kind),
+                is_shared=bool(row.is_shared),
+                is_owner=row.user_id == owner_id,
+                member_ids=roster,
+            )
+        )
     return TaskResources(
         **available.model_dump(),
+        experts=experts,
         models=models,
         default_model_ref=resolve_model_ref(services),
         routing=routing_capabilities(services),
@@ -1044,6 +1296,30 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
             raise OctopError.localized(ErrorCode.NOT_FOUND)
         if current.list_revision != body.expected_revision:
             raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+        if {"selected_expert_id", "action_mode"} & body.model_fields_set:
+            from octop.infra.projects.expert_profiles import resolve_expert_profile
+
+            selected = (
+                body.selected_expert_id
+                if "selected_expert_id" in body.model_fields_set
+                else current.selected_expert_id
+            )
+            if current.active_turn_id:
+                raise OctopError.localized(ErrorCode.TASK_BUSY)
+            resolve_expert_profile(services, owner_id, selected)
+            updated = repo.update_configuration(
+                conn,
+                replace(
+                    current,
+                    selected_expert_id=selected,
+                    action_mode=body.action_mode or current.action_mode,
+                    updated_at=now_ms(),
+                ),
+                body.expected_configuration_revision or 1,
+            )
+            if updated is None:
+                raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+            current = updated
         title = body.title if body.title is not None else current.title
         archived = body.archived if body.archived is not None else current.archived
         web_search_enabled = (
@@ -1051,12 +1327,14 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
             if body.web_search_enabled is not None
             else current.web_search_enabled
         )
+        pinned = body.pinned if body.pinned is not None else current.pinned
         if archived and not current.archived and current.active_turn_id:
             raise OctopError.localized(ErrorCode.TASK_BUSY)
         if (
             body.title is not None
             or archived != current.archived
             or web_search_enabled != current.web_search_enabled
+            or pinned != current.pinned
         ):
             updated = repo.update_metadata(
                 conn,
@@ -1065,9 +1343,10 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
                     title=title,
                     archived=archived,
                     web_search_enabled=web_search_enabled,
+                    pinned=pinned,
                     updated_at=now_ms(),
                 ),
-                body.expected_revision,
+                current.list_revision,
                 manual_title=body.title is not None,
             )
             if updated is None:

@@ -1,11 +1,8 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Space, Switch, Typography } from "antd";
 import { useTranslation } from "react-i18next";
-import {
-  projectTasksApi,
-  type TaskDetail,
-  type TaskPatch,
-} from "../../api/modules/projects";
+import { type TaskDetail, type TaskPatch } from "../../api/modules/projects";
 import { apiErrorMessage } from "../../utils/apiError";
 
 export default function TaskWebSearch({
@@ -23,6 +20,7 @@ export default function TaskWebSearch({
   onBusyChange: (busy: boolean) => void;
   disabled: boolean;
 }) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");

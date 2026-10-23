@@ -14,10 +14,10 @@ from langchain_core.messages import AIMessage, SystemMessage, convert_to_message
 
 from octop.i18n import tr
 from octop.infra.agents.resident_identity import ResidentTextOnlyMiddleware
-from octop.infra.projects import runtime as task_runtime
 from octop.infra.projects.tasks import now_ms
 from tests.support.auth import create_user, resolve_user_id
 from tests.support.fakes import FakeHarnessAgent
+from tests.support.harness import patch_task_stream
 
 
 def _key():
@@ -80,7 +80,12 @@ async def tools_http(env_with_provider, monkeypatch):
         return messages
 
     async def stream(self, request):
-        binding = server.services.resident_conversation_repo.get_by_thread(request["thread_id"])
+        binding = server.services.resident_conversation_repo.get_by_agent(request["agent_id"])
+        assert request["source"] == "resident-task"
+        assert request["thread_id"] != binding.thread_id
+        assert self.config.tools == [] and self.config.mcp_server_configs == {}
+        assert self.config.subagents == [] and not self.config.team_enabled
+        assert not self.config.acp_delegate_enabled and not self.config.web_search_tools
         guard = ResidentTextOnlyMiddleware("en", binding.owner_id, binding.thread_id)
         system = SystemMessage(content="Private assistant")
         prepared = guard._prepare(
@@ -89,8 +94,8 @@ async def tools_http(env_with_provider, monkeypatch):
             )
         )
         names = [tool["function"]["name"] for tool in prepared.tools]
-        previous = await self.aget_history(binding.thread_id, limit=1000)
-        incoming = convert_to_messages(request["messages"])
+        messages = convert_to_messages(request["messages"])
+        previous, incoming = messages[:-1], messages[-1:]
         current = {
             "request": request,
             "tools": names,
@@ -116,7 +121,7 @@ async def tools_http(env_with_provider, monkeypatch):
             )
             history.extend(messages)
         history.append(answer)
-        self.seed_thread_messages(binding.thread_id, history)
+        self.seed_thread_messages(request["thread_id"], history)
         yield {"type": "token", "content": answer.content, "message_id": answer.id}
         yield {"type": "state_snapshot", "data": {"messages": history}}
 
@@ -126,7 +131,7 @@ async def tools_http(env_with_provider, monkeypatch):
 
     monkeypatch.setattr(FakeHarnessAgent, "stream", stream)
     monkeypatch.setattr(FakeHarnessAgent, "aappend_messages", append_messages, raising=False)
-    monkeypatch.setattr(task_runtime, "run_turn", work)
+    patch_task_stream(monkeypatch, work)
     binding = _json(await client.put("/api/agents/resident-conversation", headers=auth, json={}))
     base = f"/api/agents/{binding['agent_id']}/threads/{binding['thread_id']}"
     return SimpleNamespace(
@@ -238,7 +243,6 @@ async def test_http_default_dispatch_tools_and_explicit_private_memory_are_per_t
 
     async def default(guard, current):
         assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
-        assert current["request"]["conversation_mode"] == "craft"
         return [
             await _call(guard, "resident_read_tasks"),
             await _call(guard, "resident_read_memory"),
@@ -258,7 +262,6 @@ async def test_http_default_dispatch_tools_and_explicit_private_memory_are_per_t
             "resident_read_memory",
             "resident_read_tasks",
         }
-        assert current["request"]["conversation_mode"] == "craft"
         return [
             await _call(guard, "resident_read_memory"),
             await _call(guard, "execute", {"command": "Forbidden"}),
@@ -295,7 +298,6 @@ async def test_http_task_context_freezes_options_and_one_task_returns_to_origina
 
     async def delegate(guard, current):
         assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
-        assert current["request"]["configurable"]["conversation_mode"] == "craft"
         return [
             await _call(guard, "resident_create_task", {"brief": "Write the authorized draft"}),
             await _call(guard, "resident_create_task", {"brief": "Write the authorized draft"}),
@@ -364,7 +366,6 @@ async def test_http_plain_language_delegation_has_host_defaults_and_returns_to_s
 
     async def delegate(guard, current):
         assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
-        assert current["request"]["conversation_mode"] == "craft"
         return [
             await _call(guard, "resident_create_task", {"brief": "制定五个工作日的安排"}),
             await _call(guard, "resident_create_task", {"brief": "制定五个工作日的安排"}),
@@ -467,7 +468,6 @@ async def test_http_accepted_legacy_turn_does_not_gain_new_default_dispatch(tool
 
         async def old_turn(guard, current):
             assert current["tools"] == []
-            assert current["request"]["conversation_mode"] == "ask"
             return [await _call(guard, "resident_create_task", {"brief": "Never authorized"})]
 
         env.actions.append(old_turn)

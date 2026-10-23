@@ -289,3 +289,25 @@ it("rejects incompatible task protocol versions before sending commands", async 
   await rejected;
   expect(ws.sent.some((frame) => frame.type === "task.open")).toBe(false);
 });
+
+it("keeps remote socket authentication and peer session refresh separate from the local account", async () => {
+  const connection = new ProjectTaskSocket("peer:a");
+  const controller = new AbortController();
+  const receive = vi.fn();
+  const stream = connection.events("same_id", null, receive, controller.signal);
+  const ws = await ready();
+  expect(ws.url).toBe(
+    "ws://localhost/api/bridge/connections/peer%3Aa/project-tasks/ws",
+  );
+  expect(ws.sent[0]).toMatchObject({
+    type: "authenticate",
+    token: "user-token",
+  });
+  ws.result("task.subscribe");
+  ws.receive({ type: "session", access_token: "peer-secret" });
+  expect(auth.token).toBe("user-token");
+  ws.receive({ type: "snapshot", data: { task_id: "same_id" } });
+  expect(receive).toHaveBeenCalledTimes(1);
+  controller.abort();
+  await stream;
+});

@@ -5,14 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from octop.infra.db.pool import DatabasePool
-from octop.infra.db.repos._base import DbRow, bool_int, map_rows, now_ts, partial_updates
+from octop.infra.db.repos._base import UNSET, DbRow, bool_int, map_rows, now_ts, partial_updates
 
 
 @dataclass(frozen=True)
 class ChannelRow:
     id: int
     channel_id: str
-    agent_id: str
+    agent_id: str | None
     user_id: int
     kind: str
     name: str
@@ -45,7 +45,7 @@ class ChannelRepo:
         self,
         *,
         channel_id: str,
-        agent_id: str,
+        agent_id: str | None,
         user_id: int,
         kind: str,
         name: str,
@@ -75,6 +75,17 @@ class ChannelRepo:
             ).fetchone()
         return ChannelRow.from_row(r) if r else None
 
+    def get_by_owner_agent_name(
+        self, user_id: int, agent_id: str | None, name: str
+    ) -> ChannelRow | None:
+        with self._db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM channels WHERE user_id=? AND name=? AND "
+                + ("agent_id=?" if agent_id is not None else "agent_id IS NULL"),
+                (user_id, name, agent_id) if agent_id is not None else (user_id, name),
+            ).fetchone()
+        return ChannelRow.from_row(row) if row else None
+
     def list_by_agent(self, agent_id: str, *, include_disabled: bool = True) -> list[ChannelRow]:
         sql = "SELECT * FROM channels WHERE agent_id = ?"
         if not include_disabled:
@@ -93,6 +104,13 @@ class ChannelRepo:
             rows = conn.execute(sql).fetchall()
         return map_rows(rows, ChannelRow)
 
+    def list_owned(self, user_id: int) -> list[ChannelRow]:
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM channels WHERE user_id=? ORDER BY name", (user_id,)
+            ).fetchall()
+        return map_rows(rows, ChannelRow)
+
     def update(
         self,
         channel_id: str,
@@ -101,6 +119,7 @@ class ChannelRepo:
         name: str | None = None,
         config_json: str | None = None,
         enabled: bool | None = None,
+        agent_id: str | None | object = UNSET,
     ) -> None:
         fields, params = partial_updates(
             [("kind", kind), ("name", name), ("config_json", config_json)]
@@ -108,6 +127,9 @@ class ChannelRepo:
         if enabled is not None:
             fields.append("enabled = ?")
             params.append(bool_int(enabled))
+        if agent_id is not UNSET:
+            fields.append("agent_id = ?")
+            params.append(agent_id if isinstance(agent_id, str) else None)
         if not fields:
             return
         fields.append("updated_at = ?")

@@ -1,5 +1,11 @@
 # AgentComputer 盒子集成进度
 
+## 2026-10-23 统一会话接线与后续范围
+
+当前 Task 可选专家，项目始终独立；本地高级工作台、团队/共享和记忆自动抽取已接入，真实 GLM-5 验收范围见 [实际验收记录](unified-task-live-acceptance-2026-10-23.md)。APP 的现有 DTO、请求版本、Task WebSocket 与工作台适配见 [最新接线文档](agentcomputer-unified-conversations-handoff.md)，本次未修改 APP 源码。
+
+本轮批迁、远程专家和 IM/CLI/cron 的实现与验证见 [外围入口方案](unified-task-all-entrypoints-plan.md)。已新增 Bridge 统一 Task 转发并完成双实例真实模型验收；批迁工具已用真实数据副本演练，尚未修改运行主库。以下旧专用协议与排除范围保留为历史记录，以新文档区分当前实现和后续提案。
+
 ## 2026-10-15 移除专用协议和项目任务转发
 
 用户确认当前客户端没有使用 AgentComputer 专用接口，项目暂时不需要远程转发。本轮移除 `/api/agentcomputer/v1` 和 `/api/bridge/connections/{connection_id}/agentcomputer/v1` 路由，以及专用鉴权、错误信封、请求体限制、能力查询和 HTTP 操作关闭等待；Bridge 白名单不再允许项目和任务请求。标准 `/api/projects`、`/api/project-tasks` 及其分页、增量同步和多轮会话服务保留，不新增远程替代入口。

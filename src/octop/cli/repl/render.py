@@ -285,6 +285,34 @@ def format_cli_hitl_pause(chunk: dict[str, Any], *, locale: str = "zh") -> str:
     """Render a ``hitl_required`` chunk as the same card IM users see."""
     from octop.infra.gateway.hitl.format import format_hitl_card, parse_action_requests
 
+    interaction = chunk.get("interaction")
+    if isinstance(interaction, dict):
+        from octop.i18n import tr
+
+        payload = interaction.get("payload") or {}
+        identifier = str(interaction.get("interaction_id") or "")
+        if interaction.get("kind") == "question":
+            lines = [str(payload.get("question") or "")]
+            lines.extend(str(option["label"]) for option in payload.get("options", []))
+            hint = "question_hint"
+        else:
+            import json
+
+            from octop.i18n import tool_display_name
+
+            lines = [tool_display_name(payload.get("tool_name"), locale)]
+            lines.append(str(payload.get("reason") or ""))
+            lines.extend(
+                [
+                    "```json",
+                    json.dumps(payload.get("arguments") or {}, ensure_ascii=False, indent=2),
+                    "```",
+                ]
+            )
+            hint = "approval_hint"
+        lines.extend(["", tr("cli.unified_tasks." + hint, locale, interaction_id=identifier)])
+        return "\n".join(lines)
+
     raw = chunk.get("request")
     request = raw if isinstance(raw, dict) else {}
     pending_id = str(chunk.get("pending_id") or request.get("pending_id") or "")

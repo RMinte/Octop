@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+import asyncio
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -22,6 +23,9 @@ from octop.infra.utils.ulid import new_cron_id
 router = APIRouter()
 
 
+ConversationPolicy = Literal["continue_target", "per_run", "per_job", "task"]
+
+
 class CronCreateBody(BaseModel):
     name: str | None = None
     trigger: str = Field(
@@ -34,6 +38,14 @@ class CronCreateBody(BaseModel):
     model: str | None = None
     task_type: str = "text"
     mcp_servers: list[str] = Field(default_factory=list)
+    conversation_policy: ConversationPolicy = "continue_target"
+    target_task_id: str | None = Field(
+        default=None, description="Existing owned Task for the task policy."
+    )
+    project_id: str | None = None
+    selected_expert_id: str | None = Field(
+        default=None, description="Optional expert; null uses the general assistant."
+    )
 
 
 class CronPatchBody(BaseModel):
@@ -49,6 +61,35 @@ class CronPatchBody(BaseModel):
     model: str | None = None
     task_type: str | None = None
     mcp_servers: list[str] | None = None
+    conversation_policy: ConversationPolicy | None = None
+    target_task_id: str | None = None
+    project_id: str | None = None
+    selected_expert_id: str | None = None
+
+
+class TaskCronCreateBody(CronCreateBody):
+    conversation_policy: ConversationPolicy = "per_job"
+
+
+class CronResponse(BaseModel):
+    id: str
+    name: str
+    agent_id: str | None = None
+    trigger: str
+    prompt: str
+    session_key: str
+    model: str | None = None
+    fresh_thread: bool
+    enabled: bool
+    task_type: str
+    mcp_servers: list[str]
+    last_run_at: int | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+    conversation_policy: ConversationPolicy
+    target_task_id: str | None = None
+    project_id: str | None = None
+    selected_expert_id: str | None = None
 
 
 class CronExamplesResponse(BaseModel):
@@ -124,7 +165,7 @@ async def list_cron(
 
 @router.post("/agents/{agent_id}/cron", status_code=201, summary="Create cron job")
 async def create_cron(
-    agent_id: str,
+    agent_id: str | None,
     body: CronCreateBody,
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
@@ -133,8 +174,9 @@ async def create_cron(
     from octop.api.common.validators import validate_chat_mcp_servers  # noqa: PLC0415
     from octop.infra.cron.manager import CronCreateSpec  # noqa: PLC0415
 
-    agent_row = require_agent_row(agent_id, user=user, as_user=None, server=server)
-    _assert_cron_manage(agent_id=agent_id, agent_row=agent_row, user=user)
+    if agent_id is not None:
+        agent_row = require_agent_row(agent_id, user=user, as_user=None, server=server)
+        _assert_cron_manage(agent_id=agent_id, agent_row=agent_row, user=user)
     prompt = require_cron_prompt(body.prompt)
     cron_id = new_cron_id()
     mcp_servers = (
@@ -154,6 +196,12 @@ async def create_cron(
         task_type=normalize_cron_task_type(body.task_type),
         mcp_servers=mcp_servers,
         username=user.username,
+        conversation_policy=body.conversation_policy,
+        target_task_id=body.target_task_id,
+        project_id=body.project_id,
+        selected_expert_id=(
+            body.selected_expert_id if "selected_expert_id" in body.model_fields_set else agent_id
+        ),
     )
     row = await _get_cron_manager(server).create(spec)
     return cast(dict[str, Any], row.to_public_dict(include_agent=True))
@@ -177,7 +225,7 @@ async def get_cron(
 
 @router.patch("/agents/{agent_id}/cron/{cron_id}", summary="Update cron job")
 async def patch_cron(
-    agent_id: str,
+    agent_id: str | None,
     cron_id: str,
     body: CronPatchBody,
     user: Any = Depends(current_user),
@@ -187,12 +235,15 @@ async def patch_cron(
     from octop.api.common.validators import validate_chat_mcp_servers  # noqa: PLC0415
     from octop.infra.db.repos._base import UNSET  # noqa: PLC0415
 
-    agent_row = require_agent_row(agent_id, user=user, as_user=None, server=server)
     mgr = _get_cron_manager(server)
     existing = mgr.get(cron_id)
     if existing is None:
         raise OctopError(ErrorCode.NOT_FOUND, "cron job not found")
-    _assert_cron_manage(agent_id=agent_id, agent_row=agent_row, user=user, row=existing)
+    if agent_id is not None:
+        agent_row = require_agent_row(agent_id, user=user, as_user=None, server=server)
+        _assert_cron_manage(agent_id=agent_id, agent_row=agent_row, user=user, row=existing)
+    elif existing.user_id != user.id:
+        raise OctopError.localized(ErrorCode.NOT_FOUND)
     if body.trigger is not None:
         build_trigger(body.trigger)
     patch_fields = body.model_dump(exclude_unset=True)
@@ -217,6 +268,12 @@ async def patch_cron(
         task_type=normalize_cron_task_type(body.task_type) if body.task_type is not None else None,
         **({"model": (body.model or "").strip() or None} if "model" in patch_fields else {}),
         mcp_servers=mcp_arg,
+        conversation_policy=body.conversation_policy,
+        **{
+            field: patch_fields[field]
+            for field in ("target_task_id", "project_id", "selected_expert_id")
+            if field in patch_fields
+        },
     )
     return cast(dict[str, Any], row.to_public_dict(include_agent=True))
 
@@ -253,3 +310,80 @@ async def run_now(
         raise OctopError(ErrorCode.NOT_FOUND, "cron job not found")
     _assert_cron_manage(agent_id=agent_id, agent_row=agent_row, user=user, row=existing)
     await mgr.run_now(cron_id)
+
+
+@router.get("/cron", response_model=list[CronResponse], summary="List your unified Task schedules")
+async def list_task_cron(
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> list[dict[str, Any]]:
+    rows = await asyncio.to_thread(_get_cron_manager(server).list_all)
+    return [row.to_public_dict(include_agent=True) for row in rows if row.user_id == user.id]
+
+
+@router.post(
+    "/cron",
+    status_code=201,
+    response_model=CronResponse,
+    summary="Schedule a unified Task with an optional expert",
+)
+async def create_task_cron(
+    body: TaskCronCreateBody,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    return await create_cron(None, body, user, server)
+
+
+async def _owned_task_cron(cron_id: str, user: Any, server: Any) -> Any:
+    row = await asyncio.to_thread(_get_cron_manager(server).get, cron_id)
+    if row is None or row.user_id != user.id:
+        raise OctopError.localized(ErrorCode.NOT_FOUND)
+    return row
+
+
+@router.get(
+    "/cron/{cron_id}", response_model=CronResponse, summary="Read your unified Task schedule"
+)
+async def get_task_cron(
+    cron_id: str,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    row = await _owned_task_cron(cron_id, user, server)
+    return cast(dict[str, Any], row.to_public_dict(include_agent=True))
+
+
+@router.patch(
+    "/cron/{cron_id}", response_model=CronResponse, summary="Update your unified Task schedule"
+)
+async def patch_task_cron(
+    cron_id: str,
+    body: CronPatchBody,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    await _owned_task_cron(cron_id, user, server)
+    return await patch_cron(None, cron_id, body, user, server)
+
+
+@router.delete("/cron/{cron_id}", status_code=204, summary="Delete your unified Task schedule")
+async def delete_task_cron(
+    cron_id: str,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> None:
+    await _owned_task_cron(cron_id, user, server)
+    await _get_cron_manager(server).delete(cron_id)
+
+
+@router.post(
+    "/cron/{cron_id}/run-now", status_code=204, summary="Trigger your unified Task schedule now"
+)
+async def run_task_cron(
+    cron_id: str,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> None:
+    await _owned_task_cron(cron_id, user, server)
+    await _get_cron_manager(server).run_now(cron_id)

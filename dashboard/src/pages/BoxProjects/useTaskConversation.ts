@@ -1,10 +1,7 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  projectTasksApi,
-  type TaskDetail,
-  type TaskTurn,
-} from "../../api/modules/projects";
+import { type TaskDetail, type TaskTurn } from "../../api/modules/projects";
 import { apiErrorMessage, parseApiError } from "../../utils/apiError";
 
 const terminal = (turn: TaskTurn) =>
@@ -88,6 +85,7 @@ export function useTaskConversation(
   taskID: string | null,
   projectID: string | null,
 ) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -136,7 +134,7 @@ export function useTaskConversation(
       )
         setError(apiErrorMessage(err, t("projects.tasks.failure"), t));
     }
-  }, [taskID, projectID, applyWrite, t]);
+  }, [taskID, projectTasksApi, projectID, t, applyWrite]);
 
   useEffect(() => {
     let disposed = false;
@@ -264,7 +262,7 @@ export function useTaskConversation(
       window.removeEventListener("online", resume);
       window.removeEventListener("offline", resume);
     };
-  }, [taskID, projectID, t, restart]);
+  }, [taskID, projectID, t, restart, projectTasksApi]);
 
   const loadHistory = useCallback(async () => {
     const pageCursor = current.current?.next_page_cursor;
@@ -302,7 +300,7 @@ export function useTaskConversation(
         setLoadingHistory(false);
       }
     }
-  }, [taskID, projectID, t]);
+  }, [taskID, projectTasksApi, projectID, t]);
 
   return {
     detail,

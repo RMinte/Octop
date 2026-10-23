@@ -18,6 +18,8 @@ export interface ParsedToolOutput {
 export type ToolRenderStatus = "running" | "done" | "error";
 
 export interface ToolRenderContext {
+  taskId?: string;
+  turnId?: string;
   agentId: string | null;
   threadId: string | null;
   locale: string;

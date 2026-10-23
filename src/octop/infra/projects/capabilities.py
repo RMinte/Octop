@@ -52,14 +52,22 @@ def capability_options(
 
 
 def plugin_capabilities(
-    fields: ProjectFields, *, reserved: set[str], include_skills: bool = True
+    fields: ProjectFields,
+    *,
+    reserved: set[str],
+    include_skills: bool = True,
+    agent_plugins: dict[str, Any] | None = None,
 ) -> tuple[list[Any], list[Any], list[tuple[str, list[tuple[str, bytes]]]]]:
     """Load current plugin code; only the attached skill files can come from a turn snapshot."""
     registry = PluginRegistry()
     enabled = {p.manifest.id: p.manifest.id in fields.plugins for p in registry.list_plugins()}
     if not set(fields.plugins) <= enabled.keys():
         raise ValueError("selected plugin unavailable")
-    tools = build_plugin_tools(global_plugins=enabled) if fields.plugins else []
+    tools = (
+        build_plugin_tools(global_plugins=enabled, agent_plugins=agent_plugins)
+        if fields.plugins
+        else []
+    )
     sanitize_plugin_tool_names(tools, reserved=reserved)
     middleware = registry.build_middleware_chain(global_enabled=enabled) if fields.plugins else []
     skills: list[tuple[str, list[tuple[str, bytes]]]] = []

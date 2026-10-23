@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from collections.abc import AsyncIterator
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -21,8 +23,11 @@ from octop.infra.projects import (
     approval_policy,
     artifact_library,
     artifacts,
+    branches,
+    expert_memory_management,
     input_attachments,
     interactions,
+    legacy_conversations,
     model_routing,
     service,
     sync,
@@ -41,6 +46,7 @@ from octop.infra.projects.artifact_library_models import (
 )
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import InteractionResponse, TaskControl
+from octop.infra.projects.legacy_conversation_models import LegacyConversationCreate
 from octop.infra.projects.models import (
     ProjectArchive,
     ProjectFields,
@@ -267,8 +273,8 @@ async def archive_project(
     "/{project_id}",
     status_code=204,
     response_class=Response,
-    summary="删除项目及其全部任务",
-    description="按 ID 永久删除本人项目，以及其中全部任务的会话、附件和工具记录，无需版本参数。项目中有排队或执行中的任务时返回 409 PROJECT_TASKS_BUSY，须等待完成或先停止。保留服务端与客户端工作目录中的文件。其他用户的项目返回 404。",
+    summary="删除没有会话记录的项目",
+    description="按 ID 删除本人空项目，无需版本参数。有活动轮次返回 PROJECT_TASKS_BUSY，有保留记录返回 PROJECT_HAS_TASKS，应使用归档保留历史。保留服务端与客户端目录文件。其他用户的项目返回 404。",
 )
 async def delete_project(
     project_id: str,
@@ -414,7 +420,7 @@ async def task_artifact_library(
     "/artifacts/{artifact_id}",
     response_model=TaskArtifactLibraryItem,
     summary="读取任务成果资料及来源",
-    description="按成果 ID 读取本人已发布文件的元数据及当前任务、项目信息。归档后仍可读取，内容通过返回的鉴权 download_url 下载。不加载完整会话或文件字节；不存在或他人成果返回 404。永久删除任务或项目会同时删除成果。",
+    description="按成果 ID 读取本人已发布文件的元数据及当前任务、项目信息。归档后仍可读取，内容通过返回的鉴权 download_url 下载。不加载完整会话或文件字节；不存在或他人成果返回 404。永久删除任务会删除其成果，有历史的项目须归档保留。",
 )
 async def task_artifact_library_detail(
     artifact_id: str,
@@ -520,11 +526,15 @@ async def download_task_attachment(
 @task_router.get(
     "",
     response_model=sync.TaskListPage,
-    summary="列出无项目任务",
-    description="按最近活动位置分页读取本人无项目任务摘要，包含每个任务的 status 和 list_revision，无需逐个读取详情。默认 50 条；仅首页返回同步基线。",
+    summary="列出本人任务与会话",
+    description="scope=all 读取本人全部任务，默认 standalone 仅无项目任务。支持专家、状态和标题筛选，置顶优先；仅首页返回同步基线，游标绑定筛选条件。",
 )
 async def list_standalone_tasks(
     response: Response,
+    scope: Literal["standalone", "all"] = Query(default="standalone"),
+    expert_id: str | None = Query(default=None, min_length=1, max_length=256),
+    status: tasks.TurnStatus | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=256),
     archived: bool = Query(
         default=False, description="false 读取未归档任务，true 读取归档任务；两种游标不可混用。"
     ),
@@ -544,6 +554,10 @@ async def list_standalone_tasks(
         limit=limit,
         page_cursor=page_cursor,
         archived=archived,
+        scope=scope,
+        expert_id=expert_id,
+        status=status,
+        query=q,
     )
 
 
@@ -629,6 +643,10 @@ async def update_task_approval_policy(
 )
 async def sync_standalone_tasks(
     response: Response,
+    scope: Literal["standalone", "all"] = Query(default="standalone"),
+    expert_id: str | None = Query(default=None, min_length=1, max_length=256),
+    status: tasks.TurnStatus | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=256),
     archived: bool = Query(
         default=False, description="false 读取未归档任务，true 读取归档任务；两种游标不可混用。"
     ),
@@ -650,6 +668,10 @@ async def sync_standalone_tasks(
         page_cursor=page_cursor,
         limit=limit,
         archived=archived,
+        scope=scope,
+        expert_id=expert_id,
+        status=status,
+        query=q,
     )
 
 
@@ -699,11 +721,40 @@ async def update_model_routing_settings(
     return await asyncio.to_thread(model_routing.save_settings, _services(server), body)
 
 
+@task_router.post(
+    "/from-thread",
+    response_model=tasks.TaskDetail,
+    status_code=201,
+    summary="明确将旧专家会话续接为统一任务",
+    description="仅接入本人普通本地专家的空闲会话。复制可见历史及附件来源引用，不启动专家、不改旧历史、不复制审批、工具执行授权或检查点，也不自动发送新消息。重复请求复用同一任务；项目必须显式选择或传 null。",
+)
+async def continue_legacy_conversation(
+    body: LegacyConversationCreate,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    response.headers["Cache-Control"] = "no-store"
+    if server.app_runtime is None:
+        raise OctopError.localized(ErrorCode.CONTROL_PLANE_BUSY)
+    services = _services(server)
+    runtime = server.app_runtime
+    task_id = await legacy_conversations.create(
+        services,
+        user.id,
+        body,
+        registry=runtime.agent_registry,
+        history_archive=runtime.history_archive,
+        hitl_store=runtime.gateway.processor.hitl_coordinator.store,
+    )
+    return await asyncio.to_thread(tasks.detail, services, user.id, task_id)
+
+
 @task_router.patch(
     "/{task_id}",
     response_model=tasks.TaskDetail,
-    summary="修改任务标题、网络搜索或归档状态",
-    description="必须提供 expected_revision（list_revision）。web_search_enabled 随任务保存，只影响之后入队的轮次；运行和暂停中的轮次保留原设置。归档保留会话，可恢复；执行中的任务须先结束或停止再归档，归档任务须恢复后才能继续发送。版本冲突返回 409。",
+    summary="修改统一会话的标题、专家、模式或归档状态",
+    description="必须提供 expected_revision（list_revision）；切换专家或行动模式还须提供 expected_configuration_revision 且任务空闲，历史轮次身份不变。置顶、网络搜索和归档随任务保存；归档保留会话，恢复后可继续。版本冲突返回 409。",
 )
 async def patch_task(
     task_id: str,
@@ -713,7 +764,12 @@ async def patch_task(
     user: User = Depends(current_user),
 ) -> tasks.TaskDetail:
     response.headers["Cache-Control"] = "no-store"
-    return await asyncio.to_thread(tasks.patch, _services(server), user.id, task_id, body)
+    result = await asyncio.to_thread(tasks.patch, _services(server), user.id, task_id, body)
+    if body.archived is True or {"selected_expert_id", "action_mode"} & body.model_fields_set:
+        from octop.api.routers.project_task_workbench import close_task_sessions
+
+        await close_task_sessions(task_id, user.id)
+    return result
 
 
 @task_router.delete(
@@ -729,7 +785,47 @@ async def delete_task(
     user: User = Depends(current_user),
 ) -> Response:
     await asyncio.to_thread(tasks.delete, _services(server), user.id, task_id)
+    from octop.api.routers.project_task_workbench import close_task_sessions
+
+    await close_task_sessions(task_id, user.id)
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
+@task_router.post(
+    "/{task_id}/forks",
+    response_model=tasks.TaskDetail,
+    status_code=202,
+    summary="从历史锚点分叉、编辑或重新生成",
+    description="明确创建关联的新任务，原历史不变；只复制可见历史和已校验附件，不复制执行授权、审批、检查点或工作文件。edit/regenerate 或提供 prompt 时以稳定请求 ID 受理新轮次，工具可能再次执行；无新消息时仅创建空闲分支。",
+)
+async def fork_task(
+    task_id: str,
+    body: branches.TaskFork,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> tasks.TaskDetail:
+    response.headers["Cache-Control"] = "no-store"
+    services = _services(server)
+    worker = _task_worker(server) if body.operation != "fork" or body.prompt else None
+    result = await asyncio.to_thread(branches.create, services, user.id, task_id, body)
+    if result.continuation_prompt is not None or result.continuation_attachment_ids:
+        identifier = hashlib.sha256(f"{task_id}:{body.request_id}".encode()).hexdigest()
+        detail = await task_submission.submit(
+            services,
+            user.id,
+            tasks.TaskMessage(
+                request_id="branch_" + identifier,
+                prompt=result.continuation_prompt or "",
+                attachment_ids=result.continuation_attachment_ids,
+                expected_configuration_revision=1,
+            ),
+            task_id=result.task_id,
+        )
+        assert worker is not None
+        worker.wake()
+        return detail
+    return await asyncio.to_thread(tasks.detail, services, user.id, result.task_id)
 
 
 @task_router.get(
@@ -766,6 +862,87 @@ async def task_context_usage(
 ) -> TaskContextUsage:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(read_usage, _services(server), user.id, task_id)
+
+
+@task_router.get(
+    "/{task_id}/expert-memory",
+    response_model=expert_memory_management.ExpertMemoryEntries,
+    summary="查看当前专家的通用、项目或旧版记忆",
+    description="按本人任务解析当前专家和记忆范围。legacy 只读且须先显式启用；无项目任务的 scope 仅属于该任务。不会把历史会话的记忆合并到新范围。",
+)
+async def task_expert_memory(
+    task_id: str,
+    response: Response,
+    source: expert_memory_management.MemorySource = "scope",
+    q: str = Query(default="", max_length=4096),
+    path: str | None = Query(default=None, min_length=1, max_length=1024),
+    limit: int = Query(default=20, ge=1, le=100),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> expert_memory_management.ExpertMemoryEntries:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        expert_memory_management.query_memory,
+        _services(server),
+        user.id,
+        task_id,
+        expert_memory_management.ExpertMemoryQuery(source=source, query=q, path=path, limit=limit),
+    )
+
+
+@task_router.post(
+    "/{task_id}/expert-memory",
+    response_model=expert_memory_management.ExpertMemorySaveResult,
+    summary="明确保存一条专家记忆",
+    description="用户明确选择通用或当前项目/任务范围。请求 ID 保证同一保存不重复执行；结果 uncertain 须先核对记忆，不能自动换 ID 重试。旧版范围不可写。",
+)
+async def save_task_expert_memory(
+    task_id: str,
+    body: expert_memory_management.ExpertMemorySave,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> expert_memory_management.ExpertMemorySaveResult:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        expert_memory_management.save_memory, _services(server), user.id, task_id, body
+    )
+
+
+@task_router.get(
+    "/{task_id}/expert-memory/policy",
+    response_model=expert_memory_management.ExpertMemoryPolicy,
+    summary="读取当前专家的记忆策略",
+)
+async def task_expert_memory_policy(
+    task_id: str,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> expert_memory_management.ExpertMemoryPolicy:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        expert_memory_management.memory_policy, _services(server), user.id, task_id
+    )
+
+
+@task_router.patch(
+    "/{task_id}/expert-memory/policy",
+    response_model=expert_memory_management.ExpertMemoryPolicy,
+    summary="修改当前专家的记忆采集和旧版召回策略",
+    description="使用专家 config_revision 做并发检查；修改影响该专家后续受理的轮次，已入队快照保留原策略，但现时权限或召回/采集授权的撤销优先。不自动导入或修改旧记忆。",
+)
+async def update_task_expert_memory_policy(
+    task_id: str,
+    body: expert_memory_management.ExpertMemoryPolicyPatch,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> expert_memory_management.ExpertMemoryPolicy:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        expert_memory_management.update_memory_policy, _services(server), user.id, task_id, body
+    )
 
 
 @task_router.get(

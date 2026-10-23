@@ -37,7 +37,7 @@ class CronDeliveryCommand:
 
     cron_id: str
     cron_name: str
-    agent_id: str
+    agent_id: str | None
     user_id: int
     session_key: str
     prompt: str
@@ -45,6 +45,11 @@ class CronDeliveryCommand:
     task_type: CronTaskType
     model: str | None
     mcp_servers: tuple[str, ...]
+    event_key: str = ""
+    conversation_policy: str = "continue_target"
+    target_task_id: str | None = None
+    project_id: str | None = None
+    selected_expert_id: str | None = None
 
 
 class CronDeliveryService:
@@ -56,10 +61,16 @@ class CronDeliveryService:
         gateway: Gateway,
         agent_manager: AgentManager,
         repos: RepoBundle,
+        services: Any | None = None,
+        task_worker: Any | None = None,
     ) -> None:
         self._gateway = gateway
         self._agent_manager = agent_manager
         self._repos = repos
+        self._task_services = services
+        self._task_worker = task_worker
+        if services is not None:
+            gateway._task_cron_delivery = self
 
     def replace_repos(self, repos: RepoBundle) -> None:
         """Retarget projection and locale lookups after a control-plane swap."""
@@ -67,11 +78,19 @@ class CronDeliveryService:
 
     async def deliver(self, command: CronDeliveryCommand) -> None:
         """Run one delivery under the target channel session lock."""
+        if self._task_services is not None:
+            from octop.infra.cron.task_delivery import deliver
+
+            await deliver(self, command)
+            return
+        if command.agent_id is None:
+            raise ValueError("legacy delivery requires an expert")
+        agent_id = command.agent_id
 
         async def _locked() -> None:
             if command.fresh_thread:
                 await self._gateway.thread_registry.reset_by_session_key(command.session_key)
-            session = self._gateway.require_session(command.agent_id, command.session_key)
+            session = self._gateway.require_session(agent_id, command.session_key)
             if session.user_id != command.user_id:
                 raise ValueError(
                     f"session {command.session_key!r} does not belong to user {command.user_id!r}"
@@ -92,6 +111,7 @@ class CronDeliveryService:
         command: CronDeliveryCommand,
         session: SessionRow,
     ) -> None:
+        assert command.agent_id is not None
         projected: list[ThreadMessageInput] = []
         title_source = command.prompt
         if session.channel_type == ThreadRegistry.CHANNEL_DASHBOARD:
@@ -135,6 +155,7 @@ class CronDeliveryService:
         command: CronDeliveryCommand,
         session: SessionRow,
     ) -> None:
+        assert command.agent_id is not None
         request = await self._build_agent_request(command, session)
         tracker = TurnHistoryTracker.from_request(request)
         usage = UsageTracker()
@@ -190,6 +211,7 @@ class CronDeliveryService:
         command: CronDeliveryCommand,
         session: SessionRow,
     ) -> dict[str, Any]:
+        assert command.agent_id is not None
         from octop.infra.agents.teams import is_team_agent
 
         if is_team_agent(self._agent_manager.get_row(command.agent_id)):
@@ -257,6 +279,7 @@ class CronDeliveryService:
         command: CronDeliveryCommand,
         session: SessionRow,
     ) -> None:
+        assert command.agent_id is not None
         user_row = self._repos.user_repo.get(session.user_id)
         is_admin = str(getattr(user_row, "role", "") or "") == "admin"
         knowledge_repo = self._repos.knowledge_repo

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -105,9 +106,14 @@ class Gateway:
         repos: RepoBundle,
         trajectory_service: Any | None = None,
         history_archive: Any | None = None,
+        services: Any | None = None,
+        task_worker: Any | None = None,
     ) -> None:
         self._agent_manager = agent_manager
         self._repos = repos
+        self._task_services = services
+        self._task_worker = task_worker
+        self._task_cron_delivery: Any | None = None
         self._trajectory_service = trajectory_service
         self._history_archive = history_archive
         self._thread_registry = ThreadRegistry(
@@ -224,6 +230,8 @@ class Gateway:
 
         install_channel_thinking_clean()
         self._processor = GlobalProcessor(
+            services=self._task_services,
+            task_worker=self._task_worker,
             agent_manager=self._agent_manager,
             thread_registry=self._thread_registry,
             audit_repo=self._repos.audit_repo,
@@ -278,7 +286,9 @@ class Gateway:
             channel = self._channel_manager.get_channel(row.channel_id)
             if channel is None:
                 continue
-            backend = media_backend_for_agent(self._agent_manager, row.agent_id)
+            backend = (
+                media_backend_for_agent(self._agent_manager, row.agent_id) if row.agent_id else None
+            )
             if backend is not None:
                 channel.set_media_backend(backend)
 
@@ -387,6 +397,17 @@ class Gateway:
         self._repos.channel_repo.delete(channel_id)
         await self._unregister(channel_id)
         self._runtime_status.pop(channel_id, None)
+
+    async def reload_channel(self, channel_id: str) -> None:
+        """Apply an already validated binding without repeating its persistence."""
+        await self._unregister(channel_id)
+        row = self._repos.channel_repo.get(channel_id)
+        if row is not None and row.enabled:
+            await self._safe_register_channel(row)
+        elif row is not None:
+            self._set_runtime_status(channel_id, connected=False, reason="disabled")
+        else:
+            self._runtime_status.pop(channel_id, None)
 
     def require_session(self, agent_id: str, session_key: str) -> SessionRow:
         """Return a session after validating its owning agent."""
@@ -519,6 +540,15 @@ class Gateway:
         if cmd is None or cmd.name not in ("stop", "cancel"):
             return
 
+        if self._task_services is not None and message.channel_type != "dashboard":
+            from octop.infra.gateway.process.task_adapter import TaskChannelAdapter
+
+            with contextlib.suppress(OctopError):
+                await TaskChannelAdapter(self._task_services, self._task_worker, self).submit(
+                    message
+                )
+            return
+
         agent_id = getattr(message, "tenant_id", None) or ""
         if not isinstance(agent_id, str) or not agent_id.strip():
             return
@@ -570,6 +600,12 @@ class Gateway:
         if not cleaned:
             return
         await manager.push_text(channel_id, subject, cleaned)
+
+    async def push_content(
+        self, channel_id: str, subject: ChannelSubject, parts: list[Any]
+    ) -> None:
+        """Forward immutable Task artifacts through the channel's media contract."""
+        await self._require_channel_manager().push_content(channel_id, subject, parts)
 
     async def probe_channel(
         self, channel_id: str, *, locale: Locale = DEFAULT_LOCALE
@@ -687,7 +723,7 @@ class Gateway:
         from octop.infra.agents.teams.service import is_team_agent  # noqa: PLC0415
 
         team_host = False
-        if self._agent_manager is not None:
+        if self._agent_manager is not None and row.agent_id is not None:
             try:
                 team_host = is_team_agent(self._agent_manager.get_row(row.agent_id))
             except Exception:
@@ -705,13 +741,29 @@ class Gateway:
         await manager.add_channel(
             row.kind,
             config,
-            tenant_id=row.agent_id,
+            tenant_id=row.agent_id or "general",
             channel_id=row.channel_id,
             processor=processor,
         )
         registered = manager.get_channel(row.channel_id)
         if registered is not None:
-            backend = media_backend_for_agent(self._agent_manager, row.agent_id)
+            backend: Any
+            if self._task_services is not None:
+                from octop.infra.gateway.media.source_store import SourceMediaBackend
+
+                backend = SourceMediaBackend(
+                    self._task_services.paths.root
+                    / "source-media"
+                    / str(row.user_id)
+                    / row.channel_id,
+                    self._task_services.config.max_upload_bytes,
+                )
+            else:
+                backend = (
+                    media_backend_for_agent(self._agent_manager, row.agent_id)
+                    if row.agent_id
+                    else None
+                )
             if backend is not None:
                 registered.set_media_backend(backend)
         self._set_runtime_status(row.channel_id, connected=True)
@@ -730,6 +782,7 @@ class Gateway:
                 ErrorCode.CHANNEL_INVALID_CREDENTIALS,
                 f"channel {row.channel_id} config must be a JSON object",
             )
+        raw.pop("_octop_task", None)
         return raw
 
     async def _unregister(self, channel_id: str) -> None:

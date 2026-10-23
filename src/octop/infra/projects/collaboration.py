@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -56,13 +57,15 @@ def guard_subagents(cfg: HarnessAgentConfig) -> None:
         spec["system_prompt"] = f"{cfg.system_prompt}\n\n{spec['system_prompt']}"
         spec["skills"] = [f"/{cfg.system_files_path}/skills"]
         chain: list[Any] = [
-            *(cfg.middleware or []),
+            *(item for item in cfg.middleware or [] if not isinstance(item, SubagentCommandGate)),
             FilesystemGuardMiddleware(
                 list(cfg.permissions or []),
                 root_dir=str(cfg.workspace_dir),
                 workspace_dir=cfg.workspace_dir,
             ),
-            ToolsFilterMiddleware(config=cfg),
+            ToolsFilterMiddleware(
+                config=replace(cfg, tools_disabled=cfg.tools_disabled | {"browser_use"})
+            ),
         ]
         if cfg.tool_guard_enabled:
             chain.insert(
@@ -84,6 +87,7 @@ class TaskTeam:
         self.owner_id = owner_id
         self.registry = AgentRegistry()
         self.manager = TeamManager(self.registry)
+        self.profiles: dict[str, dict[str, Any]] = {}
 
     def register(self, agent_id: str, agent: HarnessAgent, description: str = "") -> None:
         self.registry.add(
@@ -124,7 +128,7 @@ class TaskTeam:
                     *(
                         item
                         for item in cfg.middleware or []
-                        if not isinstance(item, TaskHumanInTheLoopMiddleware)
+                        if not isinstance(item, (TaskHumanInTheLoopMiddleware, SubagentCommandGate))
                     ),
                 ],
                 # Root task checkpoints own the durable client handoff. Peer
@@ -135,7 +139,7 @@ class TaskTeam:
                     if not name.startswith("client__") and name != "execute"
                 },
                 subagents=[],
-                tools_disabled=cfg.tools_disabled | {"task"},
+                tools_disabled=cfg.tools_disabled | {"task", "browser_use"},
             )
             await asyncio.to_thread(
                 (runtime_dir / "team" / slug).mkdir, parents=True, exist_ok=True
@@ -146,6 +150,65 @@ class TaskTeam:
             if tools:
                 member.inject_mcp_tools(tools)
             await prepare(member)
+
+    def speaker(self, agent_id: str) -> tuple[str | None, str | None]:
+        profile = self.profiles.get(agent_id)
+        if profile is None:
+            return None, None
+        return str(profile["expert_id"]), str(profile["name"])
+
+    async def load_experts(
+        self,
+        factory: Callable[..., HarnessAgent],
+        cfg: HarnessAgentConfig,
+        profiles: list[dict[str, Any]],
+        task_id: str,
+        runtime_dir: Path,
+        *,
+        configure: Callable[[dict[str, Any], str], Awaitable[HarnessAgentConfig]],
+        prepare: Callable[[HarnessAgent, dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        """Load persisted members with their own abilities in the task directory."""
+        for profile in profiles:
+            token = hashlib.sha256(str(profile["expert_id"]).encode()).hexdigest()[:20]
+            agent_id = f"{task_id}:expert:{token}"
+            member_cfg = await configure(profile, agent_id)
+            member_cfg = replace(
+                member_cfg,
+                workspace_dir=cfg.workspace_dir,
+                backend=cfg.backend,
+                permissions=cfg.permissions,
+                system_files_path=f"{cfg.system_files_path}/team/{token}",
+                memory=(),
+                memory_enabled=False,
+                memory_capture_enabled=False,
+                memory_namespace=f"{task_id}:expert:{token}",
+                memory_backend_config={
+                    "db_path": str(runtime_dir / "team" / token / "memory.sqlite")
+                },
+                checkpointer=False,
+                team_enabled=False,
+                middleware=[
+                    SubagentCommandGate(cfg.language),
+                    *(
+                        item
+                        for item in member_cfg.middleware or []
+                        if not isinstance(item, (TaskHumanInTheLoopMiddleware, SubagentCommandGate))
+                    ),
+                ],
+                interrupt_on={
+                    name: value
+                    for name, value in (member_cfg.interrupt_on or {}).items()
+                    if not name.startswith("client__") and name != "execute"
+                },
+            )
+            await asyncio.to_thread(
+                (runtime_dir / "team" / token).mkdir, parents=True, exist_ok=True
+            )
+            member = await asyncio.to_thread(factory, member_cfg, agent_id=agent_id)
+            self.register(agent_id, member, str(profile.get("description") or profile["name"]))
+            self.profiles[agent_id] = profile
+            await prepare(member, profile)
 
     async def close(self) -> None:
         await self.manager.aclose()

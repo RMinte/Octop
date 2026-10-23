@@ -15,6 +15,18 @@ const adminUser = {
 } as OctopUser;
 
 describe("sidebarNav", () => {
+  it("leads with unified records and names the retained chat entry explicitly", () => {
+    const items = buildNavSections(adminUser)[0].items;
+    expect(items[0]).toMatchObject({
+      key: "box-projects",
+      path: "/conversations",
+      labelKey: "nav.boxProjects",
+    });
+    expect(items.find((item) => item.key === "chat")).toMatchObject({
+      path: "/chat",
+      labelKey: "nav.legacyChat",
+    });
+  });
   it("marks catalog keys as grouped", () => {
     for (const key of SIDEBAR_GROUPED_NAV_KEYS) {
       expect(isGroupedNavKey(key)).toBe(true);

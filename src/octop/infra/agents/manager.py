@@ -923,6 +923,10 @@ class AgentManager:
 
         affected_teams: list[str] = []
         workspace_dir = self.resolve_workspace_dir(agent_id, persist_if_missing=False)
+        # Check and delete atomically before removing any workspace content. A
+        # concurrent task selection must either retain this identity or fail its FK.
+        if not await asyncio.to_thread(self._repos.agent_repo.delete_if_unreferenced, agent_id):
+            raise OctopError.localized(ErrorCode.EXPERT_IN_USE)
         async with self._lock:
             if not is_team_agent(row):
                 try:
@@ -937,7 +941,6 @@ class AgentManager:
                 await asyncio.to_thread(shutil.rmtree, workspace_dir)
         except OSError:
             logger.exception("rmtree failed for %s; agent removed from DB anyway", workspace_dir)
-        self._repos.agent_repo.delete(agent_id)
         if self._proactive_scheduler is not None:
             self._proactive_scheduler.cancel(agent_id)
         self._repos.audit_repo.write(actor=ACTOR_SYSTEM, action="agent.delete", target=agent_id)

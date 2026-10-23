@@ -1,4 +1,5 @@
 import i18n from "../../i18n";
+import { taskSocketPath } from "../taskTransport";
 import { getWsUrl } from "../config";
 import { getAuthToken, isSessionOnlyAuth, setAuthToken } from "../request";
 import type { TaskApprovalPolicy, TaskEvent } from "./projects";
@@ -30,6 +31,10 @@ const disconnected = () => new Error(i18n.t("projects.tasks.reconnecting"));
 
 /** One connection per browser tab/account, shared by task commands and readers. */
 export class ProjectTaskSocket {
+  private readonly hostID: string | null;
+  constructor(hostID: string | null = null) {
+    this.hostID = hostID;
+  }
   private socket: WebSocket | null = null;
   private ready: Promise<void> | null = null;
   private token = "";
@@ -85,7 +90,7 @@ export class ProjectTaskSocket {
       this.fail(disconnected(), this.socket);
     if (this.ready) return this.ready;
     if (!token) return Promise.reject(new Error("Unauthorized"));
-    const socket = new WebSocket(getWsUrl("/project-tasks/ws"));
+    const socket = new WebSocket(getWsUrl(taskSocketPath(this.hostID)));
     this.socket = socket;
     this.token = token;
     this.ready = new Promise<void>((resolve, reject) => {
@@ -132,7 +137,11 @@ export class ProjectTaskSocket {
           }
           this.rejectReady = null;
           resolve();
-        } else if (frame.type === "session" && frame.access_token) {
+        } else if (
+          frame.type === "session" &&
+          frame.access_token &&
+          !this.hostID
+        ) {
           setAuthToken(frame.access_token, !isSessionOnlyAuth());
           this.token = frame.access_token;
         } else if (frame.type === "result" && frame.id) {
@@ -302,3 +311,13 @@ export class ProjectTaskSocket {
 }
 
 export const projectTaskSocket = new ProjectTaskSocket();
+const remoteSockets = new Map<string, ProjectTaskSocket>();
+export function getProjectTaskSocket(hostID: string | null = null) {
+  if (!hostID) return projectTaskSocket;
+  let socket = remoteSockets.get(hostID);
+  if (!socket) {
+    socket = new ProjectTaskSocket(hostID);
+    remoteSockets.set(hostID, socket);
+  }
+  return socket;
+}

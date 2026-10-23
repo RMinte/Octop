@@ -142,6 +142,9 @@ class BridgeManager:
         self._client_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_waiters: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._browser_waiters: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        from octop.infra.bridge.task_streams import TaskStreamRelay
+
+        self.task_streams = TaskStreamRelay(self)
         self._browser_peer_clients: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._asgi_app: Any | None = None
         self._peer_turn_runner: PeerTurnRunner | None = None
@@ -455,6 +458,7 @@ class BridgeManager:
         raise OctopError(ErrorCode.BRIDGE_PEER_UNREACHABLE, "bridge connect timeout")
 
     async def disconnect(self, connection_id: str) -> None:
+        await self.task_streams.disconnect(connection_id)
         self._user_stopped.add(connection_id)
         task = self._client_tasks.pop(connection_id, None)
         if task is not None:
@@ -797,6 +801,7 @@ class BridgeManager:
                     on_tunnel_request=lambda p: self._handle_inbound_tunnel(connection_id, p),
                     on_turn_frame=lambda p: self._handle_inbound_turn(connection_id, p),
                     on_browser_frame=lambda p: self._handle_inbound_browser(connection_id, p),
+                    on_raw=lambda p: self.task_streams.handle(connection_id, p),
                 )
                 await self._register_session(connection_id, session)
                 if self._repo.get(connection_id) is not None:
@@ -886,6 +891,7 @@ class BridgeManager:
             on_tunnel_request=lambda p: self._handle_inbound_tunnel(connection_id, p),
             on_turn_frame=lambda p: self._handle_inbound_turn(connection_id, p),
             on_browser_frame=lambda p: self._handle_inbound_browser(connection_id, p),
+            on_raw=lambda p: self.task_streams.handle(connection_id, p),
         )
         await self._register_session(connection_id, session)
         await session.send_json(
@@ -911,10 +917,12 @@ class BridgeManager:
     async def _register_session(self, connection_id: str, session: BridgeSession) -> None:
         old = self._sessions.get(connection_id)
         if old is not None and old is not session:
+            await self.task_streams.disconnect(connection_id)
             await old.close()
         self._sessions[connection_id] = session
 
     async def _unregister_session(self, connection_id: str) -> None:
+        await self.task_streams.disconnect(connection_id)
         sess = self._sessions.pop(connection_id, None)
         if sess is not None:
             await sess.close()

@@ -1,5 +1,5 @@
-import { request, requestBlob, requestUpload } from "../request";
-import { projectTaskSocket } from "./projectTaskSocket";
+import { taskTransport } from "../taskTransport";
+import { getProjectTaskSocket } from "./projectTaskSocket";
 import type { ReasoningCapability } from "../types/provider";
 
 export interface PackageProjectSkill {
@@ -67,44 +67,50 @@ const query = (values: Record<string, string | null | undefined>) => {
   const text = params.toString();
   return text ? `?${text}` : "";
 };
-export const projectsApi = {
-  archive: (id: string, archived: boolean, expectedRevision: number) =>
-    request<Project>(`/projects/${encodeURIComponent(id)}/archive`, {
-      method: "PATCH",
-      body: JSON.stringify({ archived, expected_revision: expectedRevision }),
-    }),
-  sync: (syncCursor?: string | null, pageCursor?: string | null) =>
-    request<ProjectSyncPage>(
-      `/projects/sync${query({
-        sync_cursor: syncCursor,
-        page_cursor: pageCursor,
-      })}`,
-      { cache: "no-store" },
-    ),
-  list: () => request<Project[]>("/projects", { cache: "no-store" }),
-  get: (id: string) =>
-    request<Project>(`/projects/${encodeURIComponent(id)}`, {
-      cache: "no-store",
-    }),
-  resources: () =>
-    request<ProjectResources>("/projects/resources", { cache: "no-store" }),
-  create: (body: ProjectFields, idempotencyKey: string) =>
-    request<Project>("/projects", {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify(body),
-    }),
-  update: (
-    id: string,
-    body: Partial<ProjectFields> & { expected_revision: number },
-  ) =>
-    request<Project>(`/projects/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-  delete: (id: string) =>
-    request<void>(`/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
-};
+export function createProjectsApi(hostID: string | null = null) {
+  const { request } = taskTransport(hostID);
+  return {
+    archive: (id: string, archived: boolean, expectedRevision: number) =>
+      request<Project>(`/projects/${encodeURIComponent(id)}/archive`, {
+        method: "PATCH",
+        body: JSON.stringify({ archived, expected_revision: expectedRevision }),
+      }),
+    sync: (syncCursor?: string | null, pageCursor?: string | null) =>
+      request<ProjectSyncPage>(
+        `/projects/sync${query({
+          sync_cursor: syncCursor,
+          page_cursor: pageCursor,
+        })}`,
+        { cache: "no-store" },
+      ),
+    list: () => request<Project[]>("/projects", { cache: "no-store" }),
+    get: (id: string) =>
+      request<Project>(`/projects/${encodeURIComponent(id)}`, {
+        cache: "no-store",
+      }),
+    resources: () =>
+      request<ProjectResources>("/projects/resources", { cache: "no-store" }),
+    create: (body: ProjectFields, idempotencyKey: string) =>
+      request<Project>("/projects", {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(body),
+      }),
+    update: (
+      id: string,
+      body: Partial<ProjectFields> & { expected_revision: number },
+    ) =>
+      request<Project>(`/projects/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    delete: (id: string) =>
+      request<void>(`/projects/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
+  };
+}
+export const projectsApi = createProjectsApi();
 
 export type TaskStatus =
   | "queued"
@@ -139,6 +145,10 @@ export interface TaskSummary {
   status: TaskStatus;
   active_turn_id: string | null;
   list_revision: number;
+  selected_expert_id?: string | null;
+  configuration_revision?: number;
+  action_mode?: TaskActionMode;
+  pinned?: boolean;
   approval_policy: TaskApprovalPolicy;
   web_search_enabled: boolean;
   created_at: string;
@@ -199,6 +209,8 @@ export interface TaskContentBlock {
   tool_call_id: string | null;
   tool_name: string | null;
   tool_label?: string | null;
+  speaker_agent_id?: string | null;
+  speaker_name?: string | null;
   brief?: string | null;
   plan?: TaskPlan | null;
   plan_id?: string | null;
@@ -278,7 +290,27 @@ export interface TaskFileChange {
   deletions: number | null;
   diff: string | null;
 }
+export interface TaskSourceEvent {
+  source_event_id?: string | number;
+  source_sequence?: number;
+  source_turn_id?: string | null;
+  source_agent_id?: string | null;
+  kind: string;
+  created_at?: string | number | null;
+  summary?: string;
+  payload?: unknown;
+  speaker?: unknown;
+  source_status: "recorded" | "incomplete" | "redacted";
+  mapping?: "tool_call" | "message" | "source_thread";
+  history_only: true;
+  restorable: false;
+}
 export interface TaskTurn {
+  source_trajectory?: TaskSourceEvent[];
+  history_only?: boolean;
+  source_task_id?: string | null;
+  source_turn_id?: string | null;
+  source_status?: TaskStatus | null;
   sequence: number;
   turn_id: string;
   request_id: string;
@@ -302,6 +334,12 @@ export interface TaskTurn {
   options: TaskExecutionOptions;
   web_search_enabled: boolean;
   project_revision: number | null;
+  server_directory?: string | null;
+  client_directory?: string | null;
+  selected_expert_id?: string | null;
+  expert_name?: string | null;
+  expert_config_revision?: number | null;
+  action_mode?: TaskActionMode;
   approval_policy_at_start: TaskApprovalPolicy;
   retry_of_turn_id: string | null;
   cancel_requested: boolean;
@@ -315,6 +353,15 @@ export interface TaskDetail extends TaskSummary {
   turns: TaskTurn[];
   next_page_cursor: string | null;
   event_cursor: string | null;
+  configuration_events?: {
+    event_id: string;
+    previous_expert_id: string | null;
+    selected_expert_id: string | null;
+    previous_action_mode: TaskActionMode;
+    action_mode: TaskActionMode;
+    configuration_revision: number;
+    created_at: string;
+  }[];
 }
 export interface TaskUpdate {
   task: TaskSummary;
@@ -336,9 +383,20 @@ export interface TaskExecutionOptions {
   subagents?: string[];
   knowledge_base_ids?: string[] | null;
   memory_enabled?: boolean;
+  expert_memory_enabled?: boolean;
   team_enabled?: boolean;
 }
 export interface TaskResources extends ProjectResources {
+  experts?: {
+    expert_id: string;
+    name: string;
+    description: string;
+    config_revision: number;
+    kind?: "expert" | "team";
+    is_shared?: boolean;
+    is_owner?: boolean;
+    member_ids?: string[];
+  }[];
   approval: TaskApprovalCapabilities;
   models: {
     model_ref: string;
@@ -354,15 +412,38 @@ export interface TaskMessage {
   prompt: string;
   attachment_ids?: string[];
   options?: TaskExecutionOptions;
+  expected_configuration_revision?: number;
+  expected_project_revision?: number | null;
 }
+export type TaskActionMode = "ask" | "plan" | "craft";
 export interface TaskCreate extends TaskMessage {
   web_search_enabled?: boolean;
+  selected_expert_id?: string | null;
+  action_mode?: TaskActionMode;
 }
 export interface TaskPatch {
   expected_revision: number;
   title?: string;
   archived?: boolean;
   web_search_enabled?: boolean;
+  selected_expert_id?: string | null;
+  action_mode?: TaskActionMode;
+  pinned?: boolean;
+  expected_configuration_revision?: number;
+}
+export interface TaskListFilters {
+  scope?: "all" | "standalone";
+  expert_id?: string;
+  status?: TaskStatus;
+  q?: string;
+}
+export interface TaskFork {
+  request_id: string;
+  turn_id?: string;
+  operation: "fork" | "edit" | "regenerate";
+  prompt?: string;
+  project_id?: string | null;
+  selected_expert_id?: string | null;
 }
 export interface TaskApprovalUpdate {
   request_id: string;
@@ -411,136 +492,166 @@ export interface TaskContextUsage {
   source: "model_request" | "empty";
   estimated: boolean;
 }
-export const projectTasksApi = {
-  approvalPolicy: () =>
-    request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
-      cache: "no-store",
-    }),
-  updateApprovalPolicy: (body: TaskApprovalUpdate) =>
-    request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
-      method: "PUT",
-      body: JSON.stringify(body),
-    }),
-  approvalEvents: projectTaskSocket.approvalEvents.bind(projectTaskSocket),
-  settings: () => request<TaskPresentationSettings>("/project-tasks/settings"),
-  contextUsage: (id: string, signal?: AbortSignal) =>
-    request<TaskContextUsage>(`${taskPath(id)}/context-usage`, {
-      signal,
-      cache: "no-store",
-    }),
-  uploadAttachment: (file: File, signal?: AbortSignal) => {
-    const body = new FormData();
-    body.append("file", file);
-    return requestUpload<TaskInputAttachment>(
-      "/project-tasks/attachments",
-      body,
-      { signal },
-    );
-  },
-  attachmentPreview: (id: string, signal?: AbortSignal) =>
-    requestBlob(`/project-tasks/attachments/${encodeURIComponent(id)}`, {
-      signal,
-      cache: "no-store",
-    }),
-  setApproval: (id: string, body: TaskApprovalUpdate) =>
-    projectTaskSocket.command<TaskDetail>("task.approval.set", {
-      task_id: id,
-      data: body,
-    }),
-  respond: (
-    id: string,
-    turnID: string,
-    interactionID: string,
-    body: InteractionResponse,
-  ) =>
-    projectTaskSocket.command<TaskDetail>("task.interaction.respond", {
-      task_id: id,
-      turn_id: turnID,
-      interaction_id: interactionID,
-      data: body,
-    }),
-  control: (id: string, turnID: string, paused: boolean, requestID: string) =>
-    projectTaskSocket.command<TaskDetail>(
-      paused ? "task.pause" : "task.resume",
-      {
+export function createProjectTasksApi(hostID: string | null = null) {
+  const { request, requestBlob, requestUpload } = taskTransport(hostID);
+  const projectTaskSocket = getProjectTaskSocket(hostID);
+  return {
+    fromThread: (body: {
+      request_id: string;
+      agent_id: string;
+      thread_id: string;
+      project_id: string | null;
+      selected_expert_id?: string | null;
+    }) =>
+      request<TaskDetail>("/project-tasks/from-thread", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    fork: (id: string, body: TaskFork) =>
+      request<TaskDetail>(`${taskPath(id)}/forks`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    approvalPolicy: () =>
+      request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
+        cache: "no-store",
+      }),
+    updateApprovalPolicy: (body: TaskApprovalUpdate) =>
+      request<TaskApprovalPolicy>("/project-tasks/approval-policy", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    approvalEvents: projectTaskSocket.approvalEvents.bind(projectTaskSocket),
+    settings: () =>
+      request<TaskPresentationSettings>("/project-tasks/settings"),
+    contextUsage: (id: string, signal?: AbortSignal) =>
+      request<TaskContextUsage>(`${taskPath(id)}/context-usage`, {
+        signal,
+        cache: "no-store",
+      }),
+    uploadAttachment: (file: File, signal?: AbortSignal) => {
+      const body = new FormData();
+      body.append("file", file);
+      return requestUpload<TaskInputAttachment>(
+        "/project-tasks/attachments",
+        body,
+        { signal },
+      );
+    },
+    attachmentPreview: (id: string, signal?: AbortSignal) =>
+      requestBlob(`/project-tasks/attachments/${encodeURIComponent(id)}`, {
+        signal,
+        cache: "no-store",
+      }),
+    setApproval: (id: string, body: TaskApprovalUpdate) =>
+      projectTaskSocket.command<TaskDetail>("task.approval.set", {
         task_id: id,
-        data: { turn_id: turnID, request_id: requestID },
-      },
-    ),
-  delete: (id: string) =>
-    request<void>(taskPath(id), {
-      method: "DELETE",
-    }),
-  downloadArtifact: (taskID: string, artifactID: string) =>
-    requestBlob(
-      `${taskPath(taskID)}/artifacts/${encodeURIComponent(
-        artifactID,
-      )}/download`,
-    ),
-  resources: () =>
-    request<TaskResources>("/project-tasks/resources", { cache: "no-store" }),
-  update: (id: string, body: TaskPatch) =>
-    request<TaskDetail>(taskPath(id), {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-  list: (
-    projectID: string | null,
-    pageCursor?: string | null,
-    archived = false,
-  ) =>
-    request<TaskListPage>(
-      `${taskListPath(projectID)}${query({
-        page_cursor: pageCursor,
-        archived: archived ? "true" : undefined,
-      })}`,
-      { cache: "no-store" },
-    ),
-  sync: (
-    projectID: string | null,
-    syncCursor: string,
-    pageCursor?: string | null,
-    archived = false,
-  ) =>
-    request<TaskSyncPage>(
-      `${taskListPath(projectID)}/sync${query({
-        sync_cursor: syncCursor,
-        page_cursor: pageCursor,
-        archived: archived ? "true" : undefined,
-      })}`,
-      { cache: "no-store" },
-    ),
-  get: (id: string, pageCursor?: string | null) =>
-    request<TaskDetail>(
-      `${taskPath(id)}${query({ page_cursor: pageCursor })}`,
-      { cache: "no-store" },
-    ),
-  open: (id: string) =>
-    projectTaskSocket.command<TaskDetail>("task.open", { task_id: id }),
-  events: projectTaskSocket.events.bind(projectTaskSocket),
-  create: (projectID: string | null, body: TaskCreate) =>
-    projectTaskSocket.command<TaskDetail>("task.create", {
-      data: { ...body, project_id: projectID },
-    }),
-  send: (id: string, body: TaskMessage) =>
-    projectTaskSocket.command<TaskDetail>("task.message", {
-      task_id: id,
-      data: body,
-    }),
-  cancel: (id: string, turnID: string) =>
-    projectTaskSocket.command<TaskDetail>("task.cancel", {
-      task_id: id,
-      data: { turn_id: turnID },
-    }),
-  retry: (
-    id: string,
-    turnID: string,
-    requestID: string,
-    options?: TaskExecutionOptions,
-  ) =>
-    projectTaskSocket.command<TaskDetail>("task.retry", {
-      task_id: id,
-      turn_id: turnID,
-      data: { request_id: requestID, options },
-    }),
-};
+        data: body,
+      }),
+    respond: (
+      id: string,
+      turnID: string,
+      interactionID: string,
+      body: InteractionResponse,
+    ) =>
+      projectTaskSocket.command<TaskDetail>("task.interaction.respond", {
+        task_id: id,
+        turn_id: turnID,
+        interaction_id: interactionID,
+        data: body,
+      }),
+    control: (id: string, turnID: string, paused: boolean, requestID: string) =>
+      projectTaskSocket.command<TaskDetail>(
+        paused ? "task.pause" : "task.resume",
+        {
+          task_id: id,
+          data: { turn_id: turnID, request_id: requestID },
+        },
+      ),
+    delete: (id: string) =>
+      request<void>(taskPath(id), {
+        method: "DELETE",
+      }),
+    downloadArtifact: (taskID: string, artifactID: string) =>
+      requestBlob(
+        `${taskPath(taskID)}/artifacts/${encodeURIComponent(
+          artifactID,
+        )}/download`,
+      ),
+    resources: () =>
+      request<TaskResources>("/project-tasks/resources", { cache: "no-store" }),
+    update: (id: string, body: TaskPatch) =>
+      request<TaskDetail>(taskPath(id), {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    list: (
+      projectID: string | null,
+      pageCursor?: string | null,
+      archived = false,
+      filters?: TaskListFilters,
+    ) =>
+      request<TaskListPage>(
+        `${taskListPath(projectID)}${query({
+          page_cursor: pageCursor,
+          archived: archived ? "true" : undefined,
+          ...filters,
+        })}`,
+        { cache: "no-store" },
+      ),
+    sync: (
+      projectID: string | null,
+      syncCursor: string,
+      pageCursor?: string | null,
+      archived = false,
+      filters?: TaskListFilters,
+    ) =>
+      request<TaskSyncPage>(
+        `${taskListPath(projectID)}/sync${query({
+          sync_cursor: syncCursor,
+          page_cursor: pageCursor,
+          archived: archived ? "true" : undefined,
+          ...filters,
+        })}`,
+        { cache: "no-store" },
+      ),
+    get: (id: string, pageCursor?: string | null) =>
+      request<TaskDetail>(
+        `${taskPath(id)}${query({ page_cursor: pageCursor })}`,
+        { cache: "no-store" },
+      ),
+    open: (id: string) =>
+      projectTaskSocket.command<TaskDetail>("task.open", { task_id: id }),
+    events: projectTaskSocket.events.bind(projectTaskSocket),
+    create: (projectID: string | null, body: TaskCreate) =>
+      projectTaskSocket.command<TaskDetail>("task.create", {
+        data: { ...body, project_id: projectID },
+      }),
+    send: (id: string, body: TaskMessage) =>
+      projectTaskSocket.command<TaskDetail>("task.message", {
+        task_id: id,
+        data: body,
+      }),
+    cancel: (id: string, turnID: string) =>
+      projectTaskSocket.command<TaskDetail>("task.cancel", {
+        task_id: id,
+        data: { turn_id: turnID },
+      }),
+    retry: (
+      id: string,
+      turnID: string,
+      requestID: string,
+      options?: TaskExecutionOptions,
+      revisions?: Pick<
+        TaskMessage,
+        "expected_configuration_revision" | "expected_project_revision"
+      >,
+    ) =>
+      projectTaskSocket.command<TaskDetail>("task.retry", {
+        task_id: id,
+        turn_id: turnID,
+        data: { request_id: requestID, options, ...revisions },
+      }),
+  };
+}
+export const projectTasksApi = createProjectTasksApi();

@@ -19,6 +19,24 @@ export interface BridgeConnection {
   /** Peer-dialed reverse row: no stored password, this side cannot redial. */
   inbound?: boolean;
 }
+export interface BridgeTaskCapabilities {
+  host_id: string;
+  available: boolean;
+  protocol_version: number;
+  peer_identity?: string | null;
+  capabilities: Record<
+    | "tasks"
+    | "projects"
+    | "task_ws"
+    | "files"
+    | "browser"
+    | "terminal"
+    | "recording"
+    | "tool_ui"
+    | "memory",
+    boolean
+  >;
+}
 
 export interface BridgeRemoteAgent {
   id: string;
@@ -57,6 +75,25 @@ export interface BridgeProbeResult {
 }
 
 export const bridgeApi = {
+  taskCapabilities: (id: string) =>
+    request<BridgeTaskCapabilities>(
+      `/bridge/connections/${encodeURIComponent(id)}/task-capabilities`,
+      { cache: "no-store" },
+    ),
+  taskReferences: (id: string) =>
+    request<{
+      host_id: string;
+      peer_identity: string | null;
+      cached: true;
+      items: {
+        host_id: string;
+        task_id: string;
+        summary: import("./projects").TaskSummary;
+        observed_at: number;
+      }[];
+    }>(`/bridge/connections/${encodeURIComponent(id)}/task-references`, {
+      cache: "no-store",
+    }),
   list: () => request<BridgeConnection[]>("/bridge/connections"),
 
   probe: (body: {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  expertConversationUrl,
   groupExpertsByConnection,
   isBridgeAgentId,
   rewritePeerSpeakerId,
@@ -139,4 +140,14 @@ describe("retainDisconnectedBridgeAgents", () => {
     expect(merged.map((a) => a.agent_id)).toEqual(["bridge:c1:new"]);
     expect(merged[0]?.bridge_disconnected).toBe(false);
   });
+});
+
+it("routes remote ordinary and team experts to their host-scoped unified entry", () => {
+  expect(expertConversationUrl("bridge:peer:expert", "expert")).toBe(
+    "/conversations?expert_id=expert&host_id=peer",
+  );
+  expect(expertConversationUrl("bridge:peer:team", "team")).toBe(
+    "/conversations?expert_id=team&host_id=peer",
+  );
+  expect(expertConversationUrl("private", "resident")).toBe("/chat/private");
 });

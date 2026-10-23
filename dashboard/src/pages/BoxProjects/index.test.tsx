@@ -87,6 +87,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   rows = [{ ...initial }];
   api.mockImplementation(async (url, init) => {
+    if (url === "/bridge/connections") return [];
     if (url.startsWith("/skills/hub/rankings"))
       return {
         rankings: Object.fromEntries(
@@ -248,6 +249,7 @@ describe("独立项目正式页面", () => {
     const normal = api.getMockImplementation()!;
     let fail = true;
     api.mockImplementation(async (url, init) => {
+      if (url === "/bridge/connections") return [];
       if (init?.method === "DELETE" && fail) {
         fail = false;
         throw new Error('409 - {"error":{"code":"PROJECT_TASKS_BUSY"}}');
@@ -306,6 +308,7 @@ describe("独立项目正式页面", () => {
   it("saves project plugins, roles, memory and team settings", async () => {
     const normal = api.getMockImplementation()!;
     api.mockImplementation(async (url, init) => {
+      if (url === "/bridge/connections") return [];
       if (url === "/projects/resources")
         return {
           skills: [],
@@ -358,7 +361,7 @@ describe("独立项目正式页面", () => {
     expect(screen.getByRole("heading", { name: "项目和任务" })).toBeTruthy();
     expect(
       api.mock.calls.some(
-        ([url]) => url.includes("agentcomputer") || url.includes("bridge"),
+        ([url]) => url.includes("agentcomputer") || url.includes("/task-api/"),
       ),
     ).toBe(false);
   });
@@ -397,6 +400,7 @@ describe("独立项目正式页面", () => {
     const normal = api.getMockImplementation()!;
     let lost = true;
     api.mockImplementation(async (url, init) => {
+      if (url === "/bridge/connections") return [];
       if (url === "/projects" && init?.method === "POST" && lost) {
         lost = false;
         throw new Error("response lost");

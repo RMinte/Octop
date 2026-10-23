@@ -14,6 +14,7 @@ from octop.infra.projects import runtime as task_runtime
 from tests.integration.test_project_tasks_ws import command, connected, until
 from tests.integration.test_resident_conversations import _base, _binding, _turn
 from tests.support.auth import create_user, resolve_user_id
+from tests.support.harness import patch_resident_stream, patch_task_stream
 
 
 @pytest.fixture
@@ -51,7 +52,7 @@ async def resident_delivery(env_with_provider, monkeypatch):
             raise
 
     monkeypatch.setattr(resident, "watch_updates", watch)
-    monkeypatch.setattr(server.app_runtime.gateway.processor, "iter_turn_chunks", stream)
+    patch_resident_stream(monkeypatch, stream)
     monkeypatch.setattr(project_tasks_ws, "_UPDATE_SECONDS", 3600)
     yield SimpleNamespace(
         client=client,
@@ -205,7 +206,7 @@ async def test_one_socket_keeps_task_and_resident_updates_independent(
         while (chunk := await task_queue.get()) is not None:
             yield chunk
 
-    monkeypatch.setattr(task_runtime, "run_turn", task_stream)
+    patch_task_stream(monkeypatch, task_stream)
     session, ws = await connected(env.client, env.auth)
     try:
         await subscribe(ws, env.binding, "shared-resident")
@@ -332,7 +333,7 @@ async def test_resident_subscription_error_is_scoped_and_task_keeps_streaming(
         while (chunk := await task_queue.get()) is not None:
             yield chunk
 
-    monkeypatch.setattr(task_runtime, "run_turn", task_stream)
+    patch_task_stream(monkeypatch, task_stream)
     session, ws = await connected(env.client, env.auth)
     try:
         await subscribe(ws, env.binding, "resident-before-revocation")

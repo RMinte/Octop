@@ -101,6 +101,11 @@ async def test_ws_rebind_after_disconnect_receives_later_chunks(env: Any) -> Non
     frames = await _turn_then_rebind(c, aid, alice_auth, tid, gate)
 
     cancel_spy.assert_not_called()
+    # Legacy dashboard transport remains a thread stream. Unified Task pages
+    # and IM have their own admission path and must not consume this request.
+    with srv.services.db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM unified_source_inbox").fetchone()["n"] == 0
+        assert conn.execute("SELECT COUNT(*) AS n FROM project_tasks").fetchone()["n"] == 0
     assert frames[0] == {"type": "turn_status", "thread_id": tid, "active": True}
     contents = [f.get("content") for f in frames if f.get("type") == "token"]
     assert "second" in contents

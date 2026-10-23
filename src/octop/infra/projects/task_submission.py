@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import messages_from_dict
 
@@ -30,6 +31,8 @@ from octop.infra.projects.routing_classifier import (
     classify_difficulty,
 )
 from octop.infra.usage.model_calls import model_call_scope
+
+AdmissionHook = Callable[[Any, str | None, str | None], None]
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,24 @@ def _prepare_in_transaction(
         assert task is not None
         return task.task_id
     configuration = tasks._base_configuration(
-        services, owner_id, task.project_id if task else project_id, message.options
+        services,
+        owner_id,
+        task.project_id if task else project_id,
+        message.options,
+        selected_expert_id=task.selected_expert_id
+        if task
+        else message.selected_expert_id
+        if isinstance(message, tasks.ProjectTaskCreate)
+        else None,
+        action_mode=cast(
+            tasks.ActionMode,
+            task.action_mode
+            if task
+            else message.action_mode
+            if isinstance(message, tasks.ProjectTaskCreate)
+            else "craft",
+        ),
+        configuration_revision=task.configuration_revision if task else 1,
     )
     assert message.options.routing is not None
     settings = load_settings(services)
@@ -158,9 +178,12 @@ def _prepare(
     services: SharedServices,
     owner_id: int,
     body: tasks.TaskMessage | tasks.TaskRetry,
+    admission_hook: AdmissionHook | None = None,
     **identity: Any,
 ) -> _PreparedRouting | str:
     with services.db.transaction() as conn:
+        if admission_hook is not None:
+            admission_hook(conn, None, None)
         return _prepare_in_transaction(services, conn, owner_id, body, **identity)
 
 
@@ -170,9 +193,12 @@ def _admit(
     body: tasks.TaskMessage | tasks.TaskRetry,
     prepared: _PreparedRouting,
     decision: ModelRoutingDecision,
+    admission_hook: AdmissionHook | None = None,
     **identity: Any,
 ) -> tasks.TaskDetail:
     with services.db.transaction() as conn:
+        if admission_hook is not None:
+            admission_hook(conn, None, None)
         current = _prepare_in_transaction(services, conn, owner_id, body, **identity)
         if isinstance(current, str):
             task_id = current
@@ -182,6 +208,25 @@ def _admit(
             task_id, _ = tasks.send_in_transaction(
                 services, conn, owner_id, body, routing_decision=decision, **identity
             )
+        if admission_hook is not None:
+            _, turn_id = tasks.send_in_transaction(
+                services, conn, owner_id, body, routing_decision=decision, **identity
+            )
+            admission_hook(conn, task_id, turn_id)
+    return tasks.detail(services, owner_id, task_id)
+
+
+def _send_with_hook(
+    services: SharedServices,
+    owner_id: int,
+    body: tasks.TaskMessage | tasks.TaskRetry,
+    hook: AdmissionHook,
+    **identity: Any,
+) -> tasks.TaskDetail:
+    with services.db.transaction() as conn:
+        hook(conn, None, None)
+        task_id, turn_id = tasks.send_in_transaction(services, conn, owner_id, body, **identity)
+        hook(conn, task_id, turn_id)
     return tasks.detail(services, owner_id, task_id)
 
 
@@ -193,6 +238,7 @@ async def submit(
     task_id: str | None = None,
     project_id: str | None = None,
     retry_of_turn_id: str | None = None,
+    admission_hook: AdmissionHook | None = None,
 ) -> tasks.TaskDetail:
     identity = {
         "task_id": task_id,
@@ -200,9 +246,19 @@ async def submit(
         "retry_of_turn_id": retry_of_turn_id,
     }
     if body.options.routing is None or body.options.model_ref:
+        if admission_hook is not None:
+            return await asyncio.to_thread(
+                _send_with_hook, services, owner_id, body, admission_hook, **identity
+            )
         return await asyncio.to_thread(tasks.send, services, owner_id, body, **identity)
-    prepared = await asyncio.to_thread(_prepare, services, owner_id, body, **identity)
+    prepared = await asyncio.to_thread(
+        _prepare, services, owner_id, body, admission_hook, **identity
+    )
     if isinstance(prepared, str):
+        if admission_hook is not None:
+            return await asyncio.to_thread(
+                _send_with_hook, services, owner_id, body, admission_hook, **identity
+            )
         return await asyncio.to_thread(tasks.detail, services, owner_id, prepared)
     providers = ProviderStore(services.provider_repo)
     decision = await asyncio.to_thread(
@@ -256,4 +312,6 @@ async def submit(
             }
         )
     decision = decision.model_copy(update={"input_digest": prepared.digest})
-    return await asyncio.to_thread(_admit, services, owner_id, body, prepared, decision, **identity)
+    return await asyncio.to_thread(
+        _admit, services, owner_id, body, prepared, decision, admission_hook, **identity
+    )

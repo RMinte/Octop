@@ -10,18 +10,25 @@ from octop.infra.agents.providers.probe import probe_provider_row
 from octop.infra.errors import ErrorCode, OctopError
 
 
-async def cron_run_now_async(agent_id: str, cron_id: str) -> None:
+async def cron_run_now_async(
+    agent_id: str | None, cron_id: str, *, user_id: int | None = None
+) -> None:
     async with embedded_runtime() as server:
         assert server.app_runtime is not None
         mgr = server.app_runtime.cron_manager
         row = mgr.get(cron_id)
-        if row is None or row.agent_id != agent_id:
+        if (
+            row is None
+            or (agent_id is not None and row.agent_id != agent_id)
+            or (user_id is not None and row.user_id != user_id)
+            or (agent_id is None and user_id is None)
+        ):
             raise OctopError(ErrorCode.NOT_FOUND, "cron job not found")
         await mgr.run_now(cron_id, wait=True)
 
 
-def cron_run_now(agent_id: str, cron_id: str) -> None:
-    asyncio.run(cron_run_now_async(agent_id, cron_id))
+def cron_run_now(agent_id: str | None, cron_id: str, *, user_id: int | None = None) -> None:
+    asyncio.run(cron_run_now_async(agent_id, cron_id, user_id=user_id))
 
 
 async def agent_action_async(agent_id: str, action: str) -> None:

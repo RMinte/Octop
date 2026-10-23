@@ -11,3 +11,6 @@ class ChatTurnResult:
     text: str = ""
     actions: list[dict[str, Any]] = field(default_factory=list)
     elapsed: float = 0.0
+    task_id: str | None = None
+    turn_id: str | None = None
+    status: str = ""

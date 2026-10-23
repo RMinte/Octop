@@ -27,3 +27,7 @@ export function useVoiceOutputContext(): VoiceOutputValue {
   }
   return ctx;
 }
+
+export function useOptionalVoiceOutputContext(): VoiceOutputValue | null {
+  return useContext(VoiceOutputContext);
+}

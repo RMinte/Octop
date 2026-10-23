@@ -1,3 +1,4 @@
+import TaskSourceTrajectory from "./TaskSourceTrajectory";
 import { Button, Tag, Typography } from "antd";
 import {
   Circle,
@@ -301,11 +302,13 @@ function TaskActions({
   blocks,
   timeZone,
   structured,
+  onOpenToolUI,
 }: {
   turn: TaskTurn;
   blocks: TaskContentBlock[];
   timeZone: string;
   structured: boolean;
+  onOpenToolUI?: (id: string) => void;
 }) {
   const { t } = useTranslation();
   const label = t(
@@ -345,6 +348,17 @@ function TaskActions({
                       )}
                     </Tag>
                   </summary>
+                  {block.speaker_name && <Tag>{block.speaker_name}</Tag>}
+                  {onOpenToolUI && (
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        onOpenToolUI(block.tool_call_id ?? block.block_id)
+                      }
+                    >
+                      {t("projects.tasks.workbench.openTool")}
+                    </Button>
+                  )}
                   <TaskTiming
                     startedAt={block.started_at}
                     finishedAt={block.finished_at}
@@ -422,10 +436,12 @@ export default function TaskTurnContent({
   turn,
   settings = DEFAULT_TASK_PRESENTATION_SETTINGS,
   onOpenArtifacts,
+  onOpenToolUI,
 }: {
   turn: TaskTurn;
   settings?: TaskPresentationSettings;
   onOpenArtifacts?: () => void;
+  onOpenToolUI?: (id: string) => void;
 }) {
   const timeZone = useServerTimezone();
   const showPlan = settings.step_panel_enabled && turn.plan != null;
@@ -487,16 +503,23 @@ export default function TaskTurnContent({
           blocks={process}
           timeZone={timeZone}
           structured={settings.action_timeline_enabled}
+          onOpenToolUI={onOpenToolUI}
         />
       ) : null}
       {answers.map((answer) => (
-        <LazyMarkdown
-          key={answer.block_id}
-          content={parseKnowledgeCitations(answer.text).text}
-          isStreaming={
-            turn.status === "running" && answer.status === "streaming"
-          }
-        />
+        <div key={answer.block_id}>
+          {answer.speaker_name && (
+            <Typography.Text type="secondary">
+              {answer.speaker_name}
+            </Typography.Text>
+          )}
+          <LazyMarkdown
+            content={parseKnowledgeCitations(answer.text).text}
+            isStreaming={
+              turn.status === "running" && answer.status === "streaming"
+            }
+          />
+        </div>
       ))}
       {!answers.length && turn.reply && (
         <LazyMarkdown
@@ -506,6 +529,7 @@ export default function TaskTurnContent({
       )}
       <TaskKnowledgeCitations citations={citations} />
       <TaskFileChanges key={turn.turn_id} changes={turn.file_changes ?? []} />
+      <TaskSourceTrajectory items={turn.source_trajectory ?? []} />
     </>
   );
 }

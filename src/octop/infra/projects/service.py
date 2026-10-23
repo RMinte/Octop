@@ -90,14 +90,19 @@ def resources(
 
 
 def _validate(
-    services: SharedServices, owner_id: int, fields: ProjectFields, *, cached_skills: bool = False
+    services: SharedServices,
+    owner_id: int,
+    fields: ProjectFields,
+    *,
+    cached_skills: bool = False,
+    allow_expert_team: bool = False,
 ) -> str | None:
     available = (
         resources(services, owner_id, include_skills=False)
         if cached_skills
         else resources(services, owner_id)
     )
-    if fields.team_enabled and not fields.subagents:
+    if fields.team_enabled and not fields.subagents and not allow_expert_team:
         raise OctopError.localized(ErrorCode.PROJECT_RESOURCE_INVALID, status=422)
     if not set(fields.plugins) <= {
         p.plugin_id for p in available.plugins if p.available
@@ -166,8 +171,8 @@ def delete_project(services: SharedServices, owner_id: int, project_id: str) -> 
         tasks = services.project_task_repo.for_project(conn, project_id, owner_id)
         if any(task.active_turn_id for task in tasks):
             raise OctopError.localized(ErrorCode.PROJECT_TASKS_BUSY)
-        for task in tasks:
-            services.project_task_repo.delete(conn, task)
+        if tasks:
+            raise OctopError.localized(ErrorCode.PROJECT_HAS_TASKS)
         repo.delete(conn, row)
 
 

@@ -21,6 +21,20 @@ export function parseBridgeAgentId(
   if (!connectionId || !remoteAgentId) return null;
   return { connectionId, remoteAgentId };
 }
+/** Unified Task routes keep peer-local expert IDs inside their host scope. */
+export function expertConversationUrl(
+  agentID: string,
+  kind?: string | null,
+): string {
+  if (kind && kind !== "expert" && kind !== "team")
+    return `/chat/${encodeURIComponent(agentID)}`;
+  const peer = parseBridgeAgentId(agentID);
+  const params = new URLSearchParams({
+    expert_id: peer?.remoteAgentId ?? agentID,
+  });
+  if (peer) params.set("host_id", peer.connectionId);
+  return `/conversations?${params}`;
+}
 
 /** Map a peer-local agent id onto the local Bridge shadow id. */
 export function toBridgeShadowAgentId(

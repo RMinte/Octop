@@ -1,3 +1,4 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import {
   lazy,
   Suspense,
@@ -9,10 +10,7 @@ import {
 import { Alert, Button, Drawer, Space, Spin, Typography } from "antd";
 import { FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import {
-  knowledgeBasesApi,
-  type KnowledgeDocument,
-} from "../../api/modules/knowledgeBases";
+import { type KnowledgeDocument } from "../../api/modules/knowledgeBases";
 import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { getDocKind } from "../../utils/docKind";
 import { knowledgeCitationTooltip } from "../../utils/knowledgeCitationDisplay";
@@ -34,6 +32,7 @@ const validCitation = (citation: KnowledgeCitation) =>
   /^[A-Za-z0-9_-]+$/.test(citation.docId);
 
 function TaskKnowledgePreview({ citation }: { citation: KnowledgeCitation }) {
+  const { knowledgeBasesApi } = useTaskHost();
   const { t } = useTranslation();
   const [document, setDocument] = useState<KnowledgeDocument | null>(null);
   const [text, setText] = useState("");
@@ -98,7 +97,7 @@ function TaskKnowledgePreview({ citation }: { citation: KnowledgeCitation }) {
     return () => {
       disposed = true;
     };
-  }, [citation.kbId, citation.docId, t]);
+  }, [citation.kbId, citation.docId, t, knowledgeBasesApi]);
 
   const fetchBlob = useCallback(
     async (
@@ -119,7 +118,7 @@ function TaskKnowledgePreview({ citation }: { citation: KnowledgeCitation }) {
         throw err;
       }
     },
-    [citation.kbId, citation.docId, t],
+    [knowledgeBasesApi, citation.kbId, citation.docId, t],
   );
 
   const download = async () => {

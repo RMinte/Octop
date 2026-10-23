@@ -7,8 +7,50 @@ import base64
 import json
 from typing import Any
 
+from langchain_core.messages import BaseMessage, messages_to_dict
+
 from octop.infra.history.legacy import checkpoint_snapshot, checkpoint_wires
 from octop.infra.history.service import HistoryArchive
+
+
+def resident_page(
+    messages: list[BaseMessage],
+    thread_id: str,
+    *,
+    limit: int,
+    offset: int = 0,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Page an authorized private Task timeline without reading a legacy graph."""
+    stop = max(0, len(messages) - max(0, offset))
+    if cursor:
+        try:
+            if not cursor.startswith("resident:"):
+                raise ValueError("Invalid resident history cursor")
+            boundary = json.loads(base64.urlsafe_b64decode(cursor[9:]))
+            if (
+                boundary["thread"] != thread_id
+                or type(boundary["before"]) is not int
+                or boundary["before"] < 0
+            ):
+                raise ValueError("Invalid resident history cursor")
+            stop = min(len(messages), boundary["before"])
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError("Invalid resident history cursor") from exc
+    start = max(0, stop - limit)
+    next_cursor = None
+    if start:
+        next_cursor = (
+            "resident:"
+            + base64.urlsafe_b64encode(
+                json.dumps({"thread": thread_id, "before": start}).encode()
+            ).decode()
+        )
+    return {
+        "messages": messages_to_dict(messages[start:stop]),
+        "has_more": start > 0,
+        "next_cursor": next_cursor,
+    }
 
 
 async def read_page(

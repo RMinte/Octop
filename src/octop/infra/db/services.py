@@ -13,8 +13,11 @@ from octop.infra.db.repos.bridge_connections import BridgeConnectionRepo
 from octop.infra.db.repos.care_push import CarePushRepo
 from octop.infra.db.repos.channels import ChannelRepo
 from octop.infra.db.repos.connectors import ConnectorRepo
+from octop.infra.db.repos.conversation_migrations import ConversationMigrationRepo
 from octop.infra.db.repos.cron import CronJobRepo
+from octop.infra.db.repos.expert_memory_jobs import ExpertMemoryJobRepo
 from octop.infra.db.repos.external_imports import ExternalImportRepo
+from octop.infra.db.repos.federated_tasks import FederatedTaskRepo
 from octop.infra.db.repos.invites import InviteRepo
 from octop.infra.db.repos.knowledge import KnowledgeRepo
 from octop.infra.db.repos.model_calls import ModelCallRepo
@@ -22,7 +25,9 @@ from octop.infra.db.repos.proactive_care_config import ProactiveCareConfigRepo
 from octop.infra.db.repos.project_sync import ProjectSyncRepo
 from octop.infra.db.repos.project_task_artifacts import ProjectTaskArtifactRepo
 from octop.infra.db.repos.project_task_attachments import ProjectTaskAttachmentRepo
+from octop.infra.db.repos.project_task_branches import ProjectTaskBranchRepo
 from octop.infra.db.repos.project_task_execution_receipts import ProjectTaskExecutionReceiptRepo
+from octop.infra.db.repos.project_task_legacy_sources import LegacyConversationSourceRepo
 from octop.infra.db.repos.project_task_reviews import ProjectTaskReviewRepo
 from octop.infra.db.repos.project_task_titles import ProjectTaskTitleRepo
 from octop.infra.db.repos.project_task_tool_calls import ProjectTaskToolCallRepo
@@ -48,6 +53,12 @@ from octop.infra.db.repos.sso import SsoRepo
 from octop.infra.db.repos.thread_messages import ThreadMessageRepo
 from octop.infra.db.repos.threads import ThreadRepo
 from octop.infra.db.repos.trajectory_events import TrajectoryEventRepo
+from octop.infra.db.repos.unified_sources import (
+    CronOccurrenceRepo,
+    UnifiedDeliveryRepo,
+    UnifiedSourceInboxRepo,
+    UnifiedSourceRouteRepo,
+)
 from octop.infra.db.repos.usage import UsageRepo
 from octop.infra.db.repos.user_policies import UserPolicyRepo
 from octop.infra.db.repos.user_task_approval_policies import UserTaskApprovalPolicyRepo
@@ -60,8 +71,18 @@ from octop.infra.utils.paths import PathLayout
 class RepoBundle:
     db: DatabasePool
 
+    conversation_migration_repo: ConversationMigrationRepo
+    unified_source_route_repo: UnifiedSourceRouteRepo
+    unified_source_inbox_repo: UnifiedSourceInboxRepo
+    unified_delivery_repo: UnifiedDeliveryRepo
+    cron_occurrence_repo: CronOccurrenceRepo
+    federated_task_repo: FederatedTaskRepo
+
+    expert_memory_job_repo: ExpertMemoryJobRepo
     project_sync_repo: ProjectSyncRepo
     project_task_repo: ProjectTaskRepo
+    project_task_branch_repo: ProjectTaskBranchRepo
+    project_task_legacy_source_repo: LegacyConversationSourceRepo
     user_task_approval_policy_repo: UserTaskApprovalPolicyRepo
     project_task_title_repo: ProjectTaskTitleRepo
     project_task_review_repo: ProjectTaskReviewRepo
@@ -113,8 +134,17 @@ class RepoBundle:
     def from_pool(cls, db: DatabasePool) -> RepoBundle:
         return cls(
             db=db,
+            conversation_migration_repo=ConversationMigrationRepo(db),
+            unified_source_route_repo=UnifiedSourceRouteRepo(),
+            unified_source_inbox_repo=UnifiedSourceInboxRepo(),
+            unified_delivery_repo=UnifiedDeliveryRepo(),
+            cron_occurrence_repo=CronOccurrenceRepo(),
+            federated_task_repo=FederatedTaskRepo(db),
+            expert_memory_job_repo=ExpertMemoryJobRepo(db),
             project_sync_repo=ProjectSyncRepo(),
             project_task_repo=ProjectTaskRepo(db),
+            project_task_branch_repo=ProjectTaskBranchRepo(),
+            project_task_legacy_source_repo=LegacyConversationSourceRepo(),
             user_task_approval_policy_repo=UserTaskApprovalPolicyRepo(),
             project_task_title_repo=ProjectTaskTitleRepo(db),
             project_task_review_repo=ProjectTaskReviewRepo(db),
@@ -175,12 +205,48 @@ class SharedServices:
         return self.repos.db
 
     @property
+    def conversation_migration_repo(self) -> ConversationMigrationRepo:
+        return self.repos.conversation_migration_repo
+
+    @property
+    def unified_source_route_repo(self) -> UnifiedSourceRouteRepo:
+        return self.repos.unified_source_route_repo
+
+    @property
+    def unified_source_inbox_repo(self) -> UnifiedSourceInboxRepo:
+        return self.repos.unified_source_inbox_repo
+
+    @property
+    def unified_delivery_repo(self) -> UnifiedDeliveryRepo:
+        return self.repos.unified_delivery_repo
+
+    @property
+    def cron_occurrence_repo(self) -> CronOccurrenceRepo:
+        return self.repos.cron_occurrence_repo
+
+    @property
+    def federated_task_repo(self) -> FederatedTaskRepo:
+        return self.repos.federated_task_repo
+
+    @property
+    def expert_memory_job_repo(self) -> ExpertMemoryJobRepo:
+        return self.repos.expert_memory_job_repo
+
+    @property
     def project_sync_repo(self) -> ProjectSyncRepo:
         return self.repos.project_sync_repo
 
     @property
     def project_task_repo(self) -> ProjectTaskRepo:
         return self.repos.project_task_repo
+
+    @property
+    def project_task_branch_repo(self) -> ProjectTaskBranchRepo:
+        return self.repos.project_task_branch_repo
+
+    @property
+    def project_task_legacy_source_repo(self) -> LegacyConversationSourceRepo:
+        return self.repos.project_task_legacy_source_repo
 
     @property
     def user_task_approval_policy_repo(self) -> UserTaskApprovalPolicyRepo:

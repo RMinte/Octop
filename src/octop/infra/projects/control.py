@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -25,6 +26,7 @@ from octop.infra.projects.file_changes import recorded_file_changes
 from octop.infra.projects.interaction_models import ApprovalPayload, AskQuestions
 from octop.infra.projects.planning import PLANNING
 from octop.infra.projects.receipts import TaskReceipts
+from octop.infra.projects.source_access import external_requires_human, external_unverified
 
 ASK_USER = "ask_user_question"
 
@@ -50,8 +52,10 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
         locale: str,
         execution: TaskExecution | None = None,
         checkpoint_sink: Callable[[], Awaitable[None]] | None = None,
+        readonly_tools: set[str] | None = None,
     ):
         self.services, self.owner, self.turn, self.locale = services, owner, turn, locale
+        self.readonly_tools = readonly_tools or set()
         self.execution = execution
         self.checkpoint_sink = checkpoint_sink
         self.receipts = TaskReceipts(services, owner, turn)
@@ -110,6 +114,10 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                 allowed = (
                     call["name"] != "execute" and call["name"] not in settings.require_human_tools
                 )
+                if external_unverified(
+                    json.loads(self.turn.configuration_json)
+                ) and external_requires_human(call["name"], self.readonly_tools):
+                    allowed = False
                 if (
                     allowed
                     and self.execution is not None
@@ -130,9 +138,9 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                     or item.resolution.outcome != "allow_once"
                 ):
                     return False
-                if (
-                    item.resolution.source in {"auto_reviewer", "full_access_mode"}
-                    and payload.tool_name in settings.require_human_tools
+                if item.resolution.source in {"auto_reviewer", "full_access_mode"} and (
+                    payload.tool_name in settings.require_human_tools
+                    or external_unverified(json.loads(self.turn.configuration_json))
                 ):
                     return False
             for item in approvals:

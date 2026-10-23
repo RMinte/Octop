@@ -59,6 +59,10 @@ def freeze_server(
     payload = item.payload
     assert isinstance(payload, ApprovalPayload)
     policy = approval_policy.snapshot(conn, services, turn.task_id, owner)
+    from octop.infra.projects.source_access import external_unverified
+
+    if external_unverified(json.loads(turn.configuration_json)):
+        policy = policy.model_copy(update={"mode": "ask_for_approval"})
     settings = approval_policy.settings(services)
     payload.approval_mode = policy.mode
     payload.approval_revision = policy.revision
@@ -202,7 +206,11 @@ def advance(
             continue
         payload = item.payload
         assert isinstance(payload, ApprovalPayload)
-        allowed = payload.tool_name not in settings.require_human_tools
+        from octop.infra.projects.source_access import external_unverified
+
+        allowed = payload.tool_name not in settings.require_human_tools and not external_unverified(
+            json.loads(turn.configuration_json)
+        )
         if row.action_digest != payload.action_digest:
             item.status = "pending"
             item.revision += 1

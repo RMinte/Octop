@@ -1,8 +1,8 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Modal, Select, Space, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import {
-  projectTasksApi,
   type TaskApprovalPolicy,
   type TaskApprovalMode,
   type TaskApprovalUpdate,
@@ -22,6 +22,7 @@ export default function TaskApprovalModePicker({
   onBusyChange: (busy: boolean) => void;
   disabled: boolean;
 }) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [policy, setPolicy] = useState<TaskApprovalPolicy | null>(null);
   const confirmed = useRef<TaskApprovalPolicy | null>(null);
@@ -109,7 +110,7 @@ export default function TaskApprovalModePicker({
       window.removeEventListener("online", resume);
       document.removeEventListener("visibilitychange", resume);
     };
-  }, [t, reload, accept]);
+  }, [t, reload, accept, projectTasksApi]);
   const save = async (body: TaskApprovalUpdate) => {
     if (inFlight.current) return;
     inFlight.current = true;

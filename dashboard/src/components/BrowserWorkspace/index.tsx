@@ -16,6 +16,10 @@ import {
   User,
 } from "lucide-react";
 import { api } from "../../api";
+import {
+  taskWorkbenchApi,
+  createTaskWorkbenchApi,
+} from "../../api/modules/taskWorkbench";
 import { bridgeApi } from "../../api/modules/bridge";
 import type {
   BrowserSession,
@@ -42,6 +46,9 @@ export type PanelMode = "hidden" | "bottom" | "right" | "popup";
 const DEFAULT_URL = "https://cloud.tencent.com";
 
 interface BrowserWorkspaceProps {
+  taskHostID?: string | null;
+  taskID?: string;
+  scopeRevision?: string;
   /** Harness profile for the current user. Server enforces the same mapping. */
   sessionId?: string | null;
   environment?: DisplayEnvironment;
@@ -66,8 +73,15 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
   hideHeaderRefresh = false,
   onRefreshReady,
   bridgeConnectionId = null,
+  taskID,
+  scopeRevision,
+  taskHostID,
 }) => {
   const { t } = useTranslation();
+  const taskApi = useMemo(
+    () => (taskHostID ? createTaskWorkbenchApi(taskHostID) : taskWorkbenchApi),
+    [taskHostID],
+  );
   // Viewport defaults to a fixed 1280×800 — suitable when the view is small
   // and ``auto`` would render most desktop sites too small to read.
   const {
@@ -119,6 +133,9 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
     defaultViewport: { width: 1440, height: 900 },
     onError: (msg) => showApiError(msg, t("browserViewer.connectFailed"), t),
     bridgeConnectionId,
+    taskID,
+    taskHostID,
+    scopeRevision,
   });
 
   // Connect on mount and whenever the attached session or viewport mode
@@ -131,7 +148,14 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
       disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, vpMode, bridgeConnectionId]);
+  }, [
+    sessionId,
+    vpMode,
+    bridgeConnectionId,
+    taskID,
+    scopeRevision,
+    taskHostID,
+  ]);
 
   // Keep the URL bar in sync with the active tab — but never stomp while typing.
   useEffect(() => {
@@ -199,7 +223,9 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
     let cancelled = false;
     (async () => {
       try {
-        const resp = bridgeConnectionId
+        const resp = taskID
+          ? await taskApi.browserSessions(taskID, scopeRevision ?? "")
+          : bridgeConnectionId
           ? await bridgeApi.getBrowserSessions(bridgeConnectionId)
           : await api.getSessions();
         if (cancelled) return;
@@ -221,7 +247,7 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, bridgeConnectionId]);
+  }, [sessionId, bridgeConnectionId, taskID, scopeRevision, taskApi]);
 
   const controlOwner: "agent" | "user" = session?.control_owner ?? "agent";
   const stateLabel = session?.state ?? "idle";
@@ -269,7 +295,14 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
       const sid = sessionId ?? sessionInfo?.session_id ?? session?.session_id;
       if (!sid) return;
       try {
-        const resp = bridgeConnectionId
+        const resp = taskID
+          ? await taskApi.browserHandoff(
+              taskID,
+              target,
+              "user_button",
+              scopeRevision ?? "",
+            )
+          : bridgeConnectionId
           ? await bridgeApi.browserHandoff(
               bridgeConnectionId,
               sid,
@@ -283,7 +316,16 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
         showApiError(err, t("browserWorkspace.handoffFailed"), t);
       }
     },
-    [sessionId, sessionInfo, session, bridgeConnectionId, t],
+    [
+      sessionId,
+      sessionInfo?.session_id,
+      session?.session_id,
+      taskID,
+      taskApi,
+      scopeRevision,
+      bridgeConnectionId,
+      t,
+    ],
   );
 
   const handleRetry = useCallback(() => {
@@ -447,7 +489,7 @@ const BrowserWorkspace: React.FC<BrowserWorkspaceProps> = ({
                   {t("browserWorkspace.takeover")}
                 </Button>
               )}
-              {environment === "desktop" && (
+              {environment === "desktop" && !taskID && (
                 <Tooltip title={t("browserWorkspace.openDesktopChrome")}>
                   <Button size="small" icon={<Monitor size={14} />}>
                     {t("browserWorkspace.openBrowserWindow")}

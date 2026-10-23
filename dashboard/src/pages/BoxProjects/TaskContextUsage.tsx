@@ -1,8 +1,8 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useState } from "react";
 import { Button, Popover, Space, Spin, Typography } from "antd";
 import { useTranslation } from "react-i18next";
 import {
-  projectTasksApi,
   type TaskContextUsage as ContextUsage,
   type TaskTurn,
 } from "../../api/modules/projects";
@@ -61,6 +61,7 @@ export default function TaskContextUsage({
   active: boolean;
   turns: UsageTurn[];
 }) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<{
@@ -99,7 +100,7 @@ export default function TaskContextUsage({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [taskID, active, refreshKey, attempt]);
+  }, [taskID, active, refreshKey, attempt, projectTasksApi]);
 
   const usage = state.taskID === taskID ? state.usage : null;
   const error = state.taskID === taskID ? state.error : null;

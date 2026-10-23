@@ -17,7 +17,8 @@ const currentUser = vi.hoisted(() => ({ id: 7 as number | null }));
 vi.mock("../../api/modules/knowledgeBases", () => ({
   knowledgeBasesApi: { getCapability: vi.fn(), list: vi.fn() },
 }));
-vi.mock("../../api/modules/projects", () => ({
+vi.mock("../../api/modules/projects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/modules/projects")>()),
   projectTasksApi: { resources: vi.fn() },
 }));
 vi.mock("../../hooks/useCurrentUser", () => ({

@@ -186,34 +186,51 @@ async def _ensure_dashboard_session(
     )
 
 
-def list_cron_offline(agent_id: str, *, home: Path | None = None) -> list[dict[str, Any]]:
+def list_cron_offline(
+    agent_id: str | None, *, user_id: int | None = None, home: Path | None = None
+) -> list[dict[str, Any]]:
     with open_cli_services(home) as svc:
-        rows = svc.cron_repo.list_by_agent(agent_id, include_disabled=True)
+        rows = (
+            svc.cron_repo.list_by_agent(agent_id, include_disabled=True, user_id=user_id)
+            if agent_id is not None
+            else [
+                row
+                for row in svc.cron_repo.list_all(include_disabled=True)
+                if row.user_id == user_id
+            ]
+        )
         return [r.to_public_dict(include_agent=True) for r in rows]
 
 
 def create_cron_offline(
     *,
-    agent_id: str,
+    agent_id: str | None,
     user_id: int,
     trigger: str,
     prompt: str,
     fresh_thread: bool = False,
     task_type: str = "agent",
+    conversation_policy: str = "per_job",
+    target_task_id: str | None = None,
+    project_id: str | None = None,
+    model: str | None = None,
     home: Path | None = None,
 ) -> dict[str, Any]:
-    build_trigger(trigger)
     cleaned_prompt = require_cron_prompt(prompt)
-    session_key = ThreadRegistry.dashboard_key(agent_id=agent_id, user_id=user_id)
+    cron_id = new_cron_id()
+    session_key = "cron:" + cron_id
     with open_cli_services(home) as svc:
-        if svc.agent_repo.get(agent_id) is None:
-            raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
-        asyncio.run(
-            _ensure_dashboard_session(
-                svc, agent_id=agent_id, user_id=user_id, session_key=session_key
-            )
+        from octop.infra.cron.configuration import validate_task_selection
+
+        build_trigger(trigger, timezone=svc.config.default_timezone)
+        validate_task_selection(
+            svc,
+            user_id,
+            conversation_policy=conversation_policy,
+            target_task_id=target_task_id,
+            project_id=project_id,
+            selected_expert_id=agent_id,
         )
-        cron_id = new_cron_id()
         svc.cron_repo.create(
             cron_id=cron_id,
             agent_id=agent_id,
@@ -222,8 +239,12 @@ def create_cron_offline(
             prompt=cleaned_prompt,
             session_key=session_key,
             fresh_thread=fresh_thread,
-            model=None,
+            model=model,
             task_type=normalize_cron_task_type(task_type),
+            conversation_policy=conversation_policy,
+            target_task_id=target_task_id,
+            project_id=project_id,
+            selected_expert_id=agent_id,
         )
         row = svc.cron_repo.get(cron_id)
         assert row is not None
@@ -238,15 +259,24 @@ def create_cron_offline(
         return row.to_public_dict(include_agent=True)
 
 
-def delete_cron_offline(agent_id: str, cron_id: str, *, home: Path | None = None) -> None:
+def delete_cron_offline(
+    agent_id: str | None, cron_id: str, *, user_id: int | None = None, home: Path | None = None
+) -> None:
     with open_cli_services(home) as svc:
         row = svc.cron_repo.get(cron_id)
-        if row is None or row.agent_id != agent_id:
+        if (
+            row is None
+            or (agent_id is not None and row.agent_id != agent_id)
+            or (user_id is not None and row.user_id != user_id)
+            or (agent_id is None and user_id is None)
+        ):
             raise OctopError(ErrorCode.NOT_FOUND, "cron job not found")
         svc.cron_repo.delete(cron_id)
 
 
-def resolve_cron_user_id(agent_id: str, as_user: str | None, *, home: Path | None = None) -> int:
+def resolve_cron_user_id(
+    agent_id: str | None, as_user: str | None, *, home: Path | None = None
+) -> int:
     from octop.cli.support.acting import resolve_cli_acting_user_id
 
     return resolve_cli_acting_user_id(agent_id, as_user, home=home)
@@ -269,12 +299,13 @@ def delete_agent_offline(agent_id: str, *, home: Path | None = None) -> None:
         workspace_dir = workspace_dir_from_config_json(
             row.config_json, paths=svc.paths, agent_id=agent_id
         )
+        if not svc.agent_repo.delete_if_unreferenced(agent_id):
+            raise OctopError.localized(ErrorCode.EXPERT_IN_USE)
         try:
             if workspace_dir.exists():
                 shutil.rmtree(workspace_dir)
         except OSError:
             logger.exception("rmtree failed for %s; agent removed from DB anyway", workspace_dir)
-        svc.agent_repo.delete(agent_id)
 
 
 def list_experts_offline() -> list[dict[str, Any]]:

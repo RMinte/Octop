@@ -1,12 +1,12 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getApiUrl } from "../../api/config";
 import {
-  projectsApi,
-  projectTasksApi,
   type Project,
   type ProjectSyncPage,
   type TaskSummary,
   type TaskSyncPage,
+  type TaskListFilters,
 } from "../../api/modules/projects";
 import { useCurrentUser } from "../../hooks/useCurrentUser";
 import { parseApiError } from "../../utils/apiError";
@@ -80,11 +80,12 @@ function reset<T>(cache: Cache<T>) {
 }
 
 function useCache<T>(scope: string) {
+  const { hostID, identity: hostIdentity } = useTaskHost();
   const user = useCurrentUser();
   const key = user
-    ? `octop:project-lists:v3:${getApiUrl("/")}:${user.id}:${
-        user.username
-      }:${scope}`
+    ? `octop:project-lists:v3:${getApiUrl("/")}:${user.id}:${user.username}:${
+        hostID ?? "local"
+      }:${hostIdentity}:${scope}`
     : null;
   const identity = key ?? `memory:${scope}`;
   const cache = useMemo(
@@ -115,18 +116,21 @@ function mergeTasks(
 ): TaskSummary[] {
   const rows = new Map(existing.map((item) => [item.task_id, item]));
   for (const item of incoming) {
-    if (deleted[item.task_id] !== undefined) continue;
+    if ((deleted[item.task_id] ?? -1) >= item.list_revision) continue;
+    delete deleted[item.task_id];
     if ((rows.get(item.task_id)?.list_revision ?? 0) <= item.list_revision)
       rows.set(item.task_id, item);
   }
   return [...rows.values()].sort(
     (a, b) =>
+      Number(!!b.pinned) - Number(!!a.pinned) ||
       Date.parse(b.updated_at) - Date.parse(a.updated_at) ||
       b.task_id.localeCompare(a.task_id),
   );
 }
 
 export function useProjectList() {
+  const { projectsApi } = useTaskHost();
   const { cache, publish, current } = useCache<Project>("projects");
   const refresh = useCallback((): Promise<void> => {
     if (cache.pending) return cache.pending;
@@ -177,7 +181,7 @@ export function useProjectList() {
       cache.pending = undefined;
     });
     return cache.pending;
-  }, [cache, current, publish]);
+  }, [cache, current, projectsApi, publish]);
   const upsert = useCallback(
     (item: Project) => {
       cache.writes++;
@@ -204,18 +208,30 @@ export function useProjectList() {
   return { items: cache.items, refresh, upsert, remove };
 }
 
-export function useTaskList(projectID: string | null, archived = false) {
+export function useTaskList(
+  projectID: string | null,
+  archived = false,
+  filters?: TaskListFilters,
+) {
+  const { projectTasksApi } = useTaskHost();
+  const filterKey = JSON.stringify(filters ?? {});
+  const stableFilters = useMemo<TaskListFilters | undefined>(
+    () => JSON.parse(filterKey),
+    [filterKey],
+  );
   const { cache, publish, current } = useCache<TaskSummary>(
-    `tasks:status-v1:${projectID ?? ""}:${archived}`,
+    `tasks:unified-v1:${projectID ?? ""}:${archived}:${filterKey}`,
   );
   const listPage = useCallback(
     (page?: string | null) =>
-      archived
+      stableFilters && Object.keys(stableFilters).length
+        ? projectTasksApi.list(projectID, page, archived, stableFilters)
+        : archived
         ? projectTasksApi.list(projectID, page, true)
         : page
         ? projectTasksApi.list(projectID, page)
         : projectTasksApi.list(projectID),
-    [projectID, archived],
+    [stableFilters, projectTasksApi, projectID, archived],
   );
   const refresh = useCallback((): Promise<void> => {
     if (cache.pending) return cache.pending;
@@ -235,7 +251,16 @@ export function useTaskList(projectID: string | null, archived = false) {
             let next: string | null = null;
             const incoming: TaskSyncPage["changes"] = [];
             do {
-              const result: TaskSyncPage = await (archived
+              const result: TaskSyncPage = await (stableFilters &&
+              Object.keys(stableFilters).length
+                ? projectTasksApi.sync(
+                    projectID,
+                    cache.cursor,
+                    page,
+                    archived,
+                    stableFilters,
+                  )
+                : archived
                 ? projectTasksApi.sync(projectID, cache.cursor, page, true)
                 : projectTasksApi.sync(projectID, cache.cursor, page));
               incoming.push(...result.changes);
@@ -270,7 +295,16 @@ export function useTaskList(projectID: string | null, archived = false) {
       cache.pending = undefined;
     });
     return cache.pending;
-  }, [cache, projectID, current, publish, listPage, archived]);
+  }, [
+    cache,
+    publish,
+    listPage,
+    current,
+    stableFilters,
+    projectTasksApi,
+    projectID,
+    archived,
+  ]);
   const loadMore = useCallback((): Promise<void> => {
     if (cache.paging) return cache.paging;
     if (!cache.page) return Promise.resolve();
@@ -300,42 +334,23 @@ export function useTaskList(projectID: string | null, archived = false) {
   }, [cache, current, publish, refresh, listPage]);
   const upsert = useCallback(
     (item: TaskSummary) => {
-      if (item.project_id !== projectID) return;
-      const {
-        task_id,
-        project_id,
-        title,
-        archived,
-        status,
-        active_turn_id,
-        list_revision,
-        approval_policy,
-        web_search_enabled,
-        created_at,
-        updated_at,
-      } = item;
+      const matches =
+        (stableFilters?.scope === "all" || item.project_id === projectID) &&
+        (!stableFilters?.expert_id ||
+          item.selected_expert_id === stableFilters.expert_id) &&
+        (!stableFilters?.status || item.status === stableFilters.status) &&
+        (!stableFilters?.q ||
+          item.title
+            .toLocaleLowerCase()
+            .includes(stableFilters.q.toLocaleLowerCase()));
       cache.items = mergeTasks(
-        cache.items,
-        [
-          {
-            task_id,
-            project_id,
-            title,
-            archived,
-            status,
-            active_turn_id,
-            list_revision,
-            approval_policy,
-            web_search_enabled,
-            created_at,
-            updated_at,
-          },
-        ],
+        cache.items.filter((row) => matches || row.task_id !== item.task_id),
+        matches ? [item] : [],
         cache.deleted,
       );
       publish();
     },
-    [cache, projectID, publish],
+    [cache, projectID, publish, stableFilters],
   );
   const remove = useCallback(
     (id: string, revision: number) => {
@@ -353,6 +368,10 @@ export function useTaskList(projectID: string | null, archived = false) {
     loadMore,
     upsert,
     remove,
-    isDeleted: (id: string) => cache.deleted[id] !== undefined,
+    isDeleted: (id: string) =>
+      !stableFilters?.q &&
+      !stableFilters?.expert_id &&
+      !stableFilters?.status &&
+      cache.deleted[id] !== undefined,
   };
 }

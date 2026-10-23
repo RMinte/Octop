@@ -34,12 +34,18 @@ type ConnectStreamFn = (
     onError?: (message: string) => void;
   },
   options?: {
+    taskHostID?: string | null;
+    taskID?: string;
+    scopeRevision?: string;
     sessionId?: string | null;
     bridgeConnectionId?: string | null;
   },
 ) => void;
 
 interface UseBrowserViewControllerOptions {
+  taskHostID?: string | null;
+  taskID?: string;
+  scopeRevision?: string;
   containerRef: RefObject<HTMLDivElement | null>;
   viewerRef: RefObject<BrowserViewerHandle | null>;
   connect: ConnectStreamFn;
@@ -80,6 +86,9 @@ export function useBrowserViewController({
   onBeforeConnect,
   onAfterConnect,
   bridgeConnectionId = null,
+  taskHostID,
+  taskID,
+  scopeRevision,
 }: UseBrowserViewControllerOptions) {
   // Hold the caller-provided callbacks/flags in a ref so ``startStream`` keeps
   // a stable identity even when those inline functions are recreated each
@@ -92,6 +101,9 @@ export function useBrowserViewController({
     onBeforeConnect,
     onAfterConnect,
     bridgeConnectionId,
+    taskHostID,
+    taskID,
+    scopeRevision,
   });
   cfgRef.current = {
     isMobile,
@@ -100,6 +112,9 @@ export function useBrowserViewController({
     onBeforeConnect,
     onAfterConnect,
     bridgeConnectionId,
+    taskHostID,
+    taskID,
+    scopeRevision,
   };
 
   const startStream = useCallback(
@@ -111,6 +126,9 @@ export function useBrowserViewController({
         onBeforeConnect: before,
         onAfterConnect: after,
         bridgeConnectionId: bridgeId,
+        taskHostID: host,
+        taskID: task,
+        scopeRevision: scope,
       } = cfgRef.current;
       const containerEl = containerRef.current;
       const cw = containerEl?.clientWidth ?? 0;
@@ -136,7 +154,10 @@ export function useBrowserViewController({
           onError: err,
         },
         {
-          sessionId: sessionId || undefined,
+          taskHostID: host,
+          taskID: task,
+          scopeRevision: scope,
+          sessionId: task ? undefined : sessionId || undefined,
           bridgeConnectionId: bridgeId || undefined,
         },
       );

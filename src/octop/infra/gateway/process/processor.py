@@ -154,8 +154,12 @@ class GlobalProcessor:
         hitl: HitlChannelCoordinator | None = None,
         trajectory_service: Any | None = None,
         history_archive: Any | None = None,
+        services: Any | None = None,
+        task_worker: Any | None = None,
     ) -> None:
         self._agent_manager = agent_manager
+        self._task_services = services
+        self._task_worker = task_worker
         self._thread_registry = thread_registry
         self._audit_repo = audit_repo
         self._agent_repo = agent_repo
@@ -607,6 +611,37 @@ class GlobalProcessor:
     # -- IM channel entry (MessageEvent stream) --------------------------------
 
     async def __call__(self, msg: InboundMessage) -> AsyncIterator[MessageEvent]:
+        if self._task_services is not None and msg.channel_type != "dashboard":
+            from octop.i18n import tr
+            from octop.infra.gateway.process.task_adapter import TaskChannelAdapter
+
+            try:
+                async for event in TaskChannelAdapter(
+                    self._task_services, self._task_worker, self._gateway
+                ).process(msg):
+                    yield event
+            except OctopError as exc:
+                channel = await asyncio.to_thread(
+                    self._task_services.channel_repo.get, msg.channel_id
+                )
+                locale = resolve_user_locale(
+                    user_repo=self._task_services.user_repo,
+                    user_id=channel.user_id if channel else 0,
+                    channel_type=msg.channel_type,
+                    metadata=msg.metadata,
+                )
+                text = (
+                    tr(
+                        "channel.task_command_unsupported",
+                        locale,
+                        command=exc.details["unsupported_command"],
+                    )
+                    if exc.details.get("unsupported_command")
+                    else exc.localized_message(locale)
+                )
+                yield MessageEvent.error_event(text)
+                yield MessageEvent.completed()
+            return
         from octop.infra.metrics import METRICS  # noqa: PLC0415
 
         METRICS.inc("messages_total")
@@ -904,6 +939,21 @@ class GlobalProcessor:
         IM channels use :meth:`__call__` → ``project_stream`` → ``MessageEvent``
         (e.g. DingTalk ``BaseChannel.handle_inbound``).
         """
+        # Legacy dashboard WS has a separate thread protocol. Task pages use
+        # their own socket; feeding these old empty threads to migration would
+        # leave the client waiting forever for a first frame.
+        if (
+            self._task_services is not None
+            and msg.channel_type != "dashboard"
+            and not (msg.metadata or {}).get("_resident_request_id")
+        ):
+            from octop.infra.gateway.process.task_adapter import TaskChannelAdapter
+
+            async for chunk in TaskChannelAdapter(
+                self._task_services, self._task_worker, self._gateway
+            ).chunks(msg):
+                yield chunk
+            return
         from octop.infra.metrics import METRICS  # noqa: PLC0415
 
         METRICS.inc("messages_total")

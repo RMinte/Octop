@@ -1,9 +1,7 @@
+import { useTaskHost } from "../../context/TaskHostContext";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  projectTasksApi,
-  type TaskInputAttachment,
-} from "../../api/modules/projects";
+import { type TaskInputAttachment } from "../../api/modules/projects";
 import { apiErrorMessage } from "../../utils/apiError";
 
 const IMAGE_TYPES = new Set([
@@ -30,6 +28,7 @@ export interface TaskDraftImage {
 }
 
 export function useTaskImages(scope: string) {
+  const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [items, setItems] = useState<TaskDraftImage[]>([]);
   const [error, setError] = useState("");
