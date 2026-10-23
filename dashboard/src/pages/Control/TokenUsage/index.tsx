@@ -39,6 +39,7 @@ import { useTranslation } from "react-i18next";
 import PageShell from "../../../layouts/PageShell";
 import { useIsMobile } from "../../../hooks/useIsMobile";
 import { UsageStats, type UsageStatItem } from "./UsageStats";
+import TaskSourceUsage from "./TaskSourceUsage";
 import { useUserRole } from "../../../hooks/useUserRole";
 import { request, requestBlob } from "../../../api/request";
 import { useAgent } from "../../../context/AgentContext";
@@ -1207,7 +1208,11 @@ export default function TokenUsagePage() {
           </div>
         </div>
 
-        <div className={styles.content}>
+        <div
+          className={`${styles.content}${
+            view === "by_task" ? ` ${styles.taskContent}` : ""
+          }`}
+        >
           {error && (
             <Card
               size="small"
@@ -1239,6 +1244,12 @@ export default function TokenUsagePage() {
               />
             )
           ) : null}
+          {view === "by_task" && role !== null && (
+            <TaskSourceUsage
+              windowKey={windowKey}
+              adminUserFilter={adminUserFilter}
+            />
+          )}
         </div>
       </div>
     </PageShell>

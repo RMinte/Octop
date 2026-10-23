@@ -136,6 +136,16 @@ class ModelCallRow:
         )
 
 
+@dataclass(frozen=True)
+class AttributedTaskModelCall:
+    row: ModelCallRow
+    task_id: str
+    task_title: str
+    project_id: str
+    project_name: str
+    attribution: Literal["direct", "submission", "unassigned"]
+
+
 def _validated(row: ModelCallRow) -> ModelCallRow:
     if not row.call_id or len(row.call_id) > 256:
         raise ValueError("Invalid model call id")
@@ -242,6 +252,84 @@ class ModelCallRepo:
         with self._db.connect() as conn:
             row = conn.execute(f"SELECT * FROM model_calls WHERE {where}", values).fetchone()
         return ModelCallRow.from_row(row) if row is not None else None
+
+    def list_task_usage(
+        self,
+        *,
+        user_id: int | None,
+        range_start: int,
+        range_end: int,
+        task_id: str | None = None,
+        project_id: str | None = None,
+    ) -> list[AttributedTaskModelCall]:
+        """Read task usage calls by start time in the millisecond [start, end) range.
+
+        Direct task IDs survive resource deletion. Calls without one can use an
+        accepted submission only when it identifies one task for the same user.
+        Project snapshots win; absent snapshots fall back to the current task.
+        Without resource filters, unmatched calls remain explicitly unassigned.
+        Callers enforce whether an unscoped user read is allowed.
+        """
+        call_scope = ["c.started_at>=?", "c.started_at<?"]
+        params: list[Any] = [range_start, range_end]
+        if user_id is not None:
+            call_scope.append("c.user_id=?")
+            params.append(user_id)
+        resource_scope: list[str] = []
+        if task_id is not None or project_id is not None:
+            resource_scope.append("c.effective_task_id<>''")
+        for column, value in (("effective_task_id", task_id), ("effective_project_id", project_id)):
+            if value is not None:
+                resource_scope.append(f"c.{column}=?")
+                params.append(value)
+        resource_clause = " AND ".join(resource_scope) if resource_scope else "1=1"
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                f"""
+                WITH accepted_submissions AS (
+                    SELECT t.owner_id, r.request_id, MIN(t.task_id) AS task_id
+                    FROM project_task_turns r
+                    JOIN project_tasks t ON t.task_id=r.task_id
+                    WHERE r.request_id<>''
+                    GROUP BY t.owner_id, r.request_id
+                    HAVING COUNT(DISTINCT t.task_id)=1
+                ), attributed AS (
+                    SELECT c.*,
+                        COALESCE(NULLIF(c.task_id, ''), s.task_id, '') AS effective_task_id,
+                        CASE WHEN c.task_id<>'' THEN 'direct'
+                            WHEN s.task_id IS NOT NULL THEN 'submission'
+                            ELSE 'unassigned' END AS attribution
+                    FROM model_calls c
+                    LEFT JOIN accepted_submissions s ON c.task_id=''
+                        AND c.user_id=s.owner_id AND c.submission_id=s.request_id
+                    WHERE {" AND ".join(call_scope)}
+                ), task_calls AS (
+                    SELECT c.*, COALESCE(t.title, '') AS task_title,
+                        COALESCE(NULLIF(c.project_id, ''), t.project_id, '') AS effective_project_id
+                    FROM attributed c
+                    LEFT JOIN project_tasks t ON t.task_id=c.effective_task_id
+                        AND t.owner_id=c.user_id
+                )
+                SELECT c.*, COALESCE(p.name, '') AS project_name
+                FROM task_calls c
+                LEFT JOIN projects p ON p.project_id=c.effective_project_id AND p.owner_id=c.user_id
+                    AND c.effective_task_id<>''
+                WHERE {resource_clause}
+                ORDER BY c.started_at, c.id
+                """,
+                params,
+            ).fetchall()
+        return [
+            AttributedTaskModelCall(
+                row=ModelCallRow.from_row(row),
+                task_id=str(row["effective_task_id"]),
+                task_title=str(row["task_title"]),
+                project_id=str(row["effective_project_id"]),
+                project_name=str(row["project_name"]),
+                attribution=cast(Literal["direct", "submission", "unassigned"], row["attribution"]),
+            )
+            for row in rows
+        ]
 
     def list_page(
         self,

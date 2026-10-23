@@ -96,6 +96,14 @@ function summaryRequests(granularity: string) {
     .filter((url) => url.searchParams.get("granularity") === granularity);
 }
 
+function emptySourceSummary() {
+  return {
+    total_tasks: 0,
+    items: [],
+    unassigned_call_usage: { calls: 0 },
+  };
+}
+
 async function selectExpert() {
   fireEvent.mouseDown(screen.getByRole("combobox", { name: "专家" }));
   await userEvent.click(screen.getAllByText("写作专家").at(-1)!);
@@ -131,6 +139,9 @@ beforeEach(() => {
       return [{ id: 7, username: "alice", display_name: "Alice" }] as never;
     }
     const url = new URL(String(path), "http://localhost");
+    if (url.pathname.endsWith("/task-summary")) {
+      return emptySourceSummary() as never;
+    }
     return summary(url.searchParams.get("granularity") ?? "total") as never;
   });
   vi.mocked(requestBlob).mockResolvedValue(new Blob(["xlsx"]));
@@ -213,6 +224,14 @@ describe("TokenUsagePage project and task dimensions", () => {
     expect(summaryRequests("by_task")[0].searchParams.has("agent_id")).toBe(
       false,
     );
+    expect(await screen.findByText("任务来源统计")).toBeInTheDocument();
+    const sourceRequest = vi
+      .mocked(request)
+      .mock.calls.map(([path]) => new URL(String(path), "http://localhost"))
+      .find((url) => url.pathname === "/usage/task-summary")!;
+    expect(sourceRequest.searchParams.get("window")).toBe(
+      summaryRequests("by_task")[0].searchParams.get("window"),
+    );
     const taskTable = await screen.findByRole("table");
     expect(
       await within(taskTable).findByText(LONG_TASK_TITLE),
@@ -244,6 +263,17 @@ describe("TokenUsagePage project and task dimensions", () => {
     expect(taskRequest.pathname).toBe("/admin/usage/summary");
     expect(taskRequest.searchParams.get("user_id")).toBe("7");
     expect(taskRequest.searchParams.has("agent_id")).toBe(false);
+    await waitFor(() =>
+      expect(
+        vi.mocked(request).mock.calls.some(([path]) => {
+          const url = new URL(String(path), "http://localhost");
+          return (
+            url.pathname === "/admin/usage/task-summary" &&
+            url.searchParams.get("user_id") === "7"
+          );
+        }),
+      ).toBe(true),
+    );
     await userEvent.click(screen.getByRole("button", { name: "导出全部维度" }));
     await waitFor(() => expect(requestBlob).toHaveBeenCalledOnce());
     const exportUrl = new URL(
@@ -278,6 +308,9 @@ describe("TokenUsagePage project and task dimensions", () => {
       resolve: (value: ReturnType<typeof summary>) => void;
     }[] = [];
     vi.mocked(request).mockImplementation((path) => {
+      if (String(path).includes("/task-summary?")) {
+        return Promise.resolve(emptySourceSummary()) as never;
+      }
       const granularity = new URL(
         String(path),
         "http://localhost",
@@ -322,6 +355,9 @@ describe("TokenUsagePage project and task dimensions", () => {
     let rejectProject: (reason: Error) => void = () => {};
     let resolveTask: (value: ReturnType<typeof summary>) => void = () => {};
     vi.mocked(request).mockImplementation((path) => {
+      if (String(path).includes("/task-summary?")) {
+        return Promise.resolve(emptySourceSummary()) as never;
+      }
       const granularity = new URL(
         String(path),
         "http://localhost",

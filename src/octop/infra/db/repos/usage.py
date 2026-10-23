@@ -103,6 +103,35 @@ def _usage_coverage(row: Any) -> dict[str, str]:
 
 
 @dataclass(frozen=True)
+class RetainedTaskUsageEntry:
+    """One retained journal row with optional current-provider evidence."""
+
+    task_id: str
+    model_ref: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    ts: int
+    provider_kind: str | None
+
+
+@dataclass(frozen=True)
+class RetainedTaskUsage:
+    """Retained task journals, independent of the model call ledger."""
+
+    task_id: str
+    task_title: str
+    project_id: str
+    project_name: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    turns: int
+    usage_records: int
+    last_usage_at: int
+
+
+@dataclass(frozen=True)
 class UsageRow:
     id: int
     ts: int
@@ -278,6 +307,127 @@ class UsageRepo:
             )
 
     # --- read / aggregate ------------------------------------------------
+
+    def read_retained_task_usage(
+        self,
+        *,
+        user_id: int | None,
+        range_start: int,
+        range_end: int,
+        task_id: str | None = None,
+        project_id: str | None = None,
+    ) -> tuple[list[RetainedTaskUsage], list[RetainedTaskUsageEntry]]:
+        """Read retained totals and their entries from one SQL statement.
+
+        A current provider cannot identify an older, deleted provider with the
+        same name. Missing or ambiguous matches leave the kind unknown. Window
+        aggregates keep totals consistent with entries during concurrent updates.
+        These records may overlap model call receipts and must not be added to
+        ledger totals; no summary bucket cap applies.
+        """
+        where = ["task_id <> ''", "ts >= ?", "ts < ?"]
+        params: list[Any] = [range_start, range_end]
+        for column, value in (
+            ("user_id", user_id),
+            ("task_id", task_id),
+            ("project_id", project_id),
+        ):
+            if value is not None:
+                where.append(f"{column} = ?")
+                params.append(value)
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT usage.task_id, usage.model AS model_ref,
+                    usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.ts,
+                    MAX(usage.task_title) OVER task_usage AS task_title,
+                    MAX(usage.project_id) OVER task_usage AS project_id,
+                    MAX(usage.project_name) OVER task_usage AS project_name,
+                    SUM(usage.input_tokens) OVER task_usage AS task_input_tokens,
+                    SUM(usage.output_tokens) OVER task_usage AS task_output_tokens,
+                    SUM(usage.total_tokens) OVER task_usage AS task_total_tokens,
+                    SUM(usage.usage_turns) OVER task_usage AS turns,
+                    COUNT(*) OVER task_usage AS usage_records,
+                    MAX(usage.ts) OVER task_usage AS last_usage_at,
+                    (SELECT CASE WHEN COUNT(*) = 1 AND MIN(p.created_at) <= usage.ts
+                            THEN MAX(p.kind) END
+                        FROM providers p
+                        WHERE SUBSTR(usage.model, 1, LENGTH(p.name) + 1) = p.name || '/'
+                            AND LENGTH(usage.model) > LENGTH(p.name) + 1
+                    ) AS provider_kind
+                FROM ({_USAGE_SQL}) AS usage WHERE {" AND ".join(where)}
+                WINDOW task_usage AS (PARTITION BY usage.task_id)
+                ORDER BY usage.ts, usage.source, usage.id
+                """,
+                params,
+            ).fetchall()
+        entries = [
+            RetainedTaskUsageEntry(
+                task_id=str(row["task_id"]),
+                model_ref=str(row["model_ref"]),
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                total_tokens=int(row["total_tokens"]),
+                ts=int(row["ts"]),
+                provider_kind=str(row["provider_kind"])
+                if row["provider_kind"] is not None
+                else None,
+            )
+            for row in rows
+        ]
+        totals: dict[str, RetainedTaskUsage] = {}
+        for row in rows:
+            key = str(row["task_id"])
+            if key not in totals:
+                totals[key] = RetainedTaskUsage(
+                    task_id=key,
+                    task_title=str(row["task_title"]),
+                    project_id=str(row["project_id"]),
+                    project_name=str(row["project_name"]),
+                    input_tokens=int(row["task_input_tokens"]),
+                    output_tokens=int(row["task_output_tokens"]),
+                    total_tokens=int(row["task_total_tokens"]),
+                    turns=int(row["turns"]),
+                    usage_records=int(row["usage_records"]),
+                    last_usage_at=int(row["last_usage_at"]),
+                )
+        return [totals[key] for key in sorted(totals)], entries
+
+    def list_retained_task_entries(
+        self,
+        *,
+        user_id: int | None,
+        range_start: int,
+        range_end: int,
+        task_id: str | None = None,
+        project_id: str | None = None,
+    ) -> list[RetainedTaskUsageEntry]:
+        """Read retained entries with optional current provider evidence."""
+        return self.read_retained_task_usage(
+            user_id=user_id,
+            range_start=range_start,
+            range_end=range_end,
+            task_id=task_id,
+            project_id=project_id,
+        )[1]
+
+    def list_retained_tasks(
+        self,
+        *,
+        user_id: int | None,
+        range_start: int,
+        range_end: int,
+        task_id: str | None = None,
+        project_id: str | None = None,
+    ) -> list[RetainedTaskUsage]:
+        """Read all retained task totals in a half-open Unix-second range."""
+        return self.read_retained_task_usage(
+            user_id=user_id,
+            range_start=range_start,
+            range_end=range_end,
+            task_id=task_id,
+            project_id=project_id,
+        )[0]
 
     @staticmethod
     def _day_buckets(

@@ -1033,6 +1033,8 @@ endpoint (public, mounted directly in `api/app.py`).
 
 ## Usage & admin
 
+App 的任务来源与参考费用接入使用新增的 `GET /api/usage/task-summary` 和管理员对应接口；支持盒子／三方拆分、历史配置来源推断、缺失值计数，以及统一 GPT-6 Astra 对标估算。完整字段、分页、价格假设与两套数据不相加的规则见[任务 Token 与参考费用接入](task-token-usage-client.md)。
+
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | `GET`    | `/usage/summary` | user | 当前用户的 token 用量；管理员可用 `as_user` 查看指定用户 |

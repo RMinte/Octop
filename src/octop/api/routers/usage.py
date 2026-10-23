@@ -32,9 +32,54 @@ from octop.api.deps import current_user, get_server
 from octop.i18n import tr
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.usage.query import ModelCallFilters, ModelCallPage, list_model_calls
+from octop.infra.usage.task_summary import TaskUsageFilters, TaskUsagePage, task_usage_summary
 from octop.infra.utils.locale import normalize_locale, resolve_request_locale
 
 router = APIRouter()
+
+
+@router.get(
+    "/usage/task-summary",
+    response_model=TaskUsagePage,
+    summary="按任务查看盒子、三方 Token 与参考费用",
+    description="仅本人。按服务端时区和调用开始时间汇总新流水；唯一已受理请求关联判难消耗。缺失用量为 null 并返回缺失调用数。历史业务记录单列，不与流水相加。费用统一按 GPT-6 Astra 官方标准价快照对标估算，不是供应商账单。",
+)
+async def user_task_usage_summary(
+    filters: TaskUsageFilters = Depends(),
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> TaskUsagePage:
+    try:
+        return await task_usage_summary(
+            server.services,
+            user_id=int(user.id),
+            filters=filters,
+            timezone=_server_timezone(server),
+        )
+    except ValueError as exc:
+        raise OctopError(ErrorCode.INTERNAL_ERROR, str(exc), status=400) from exc
+
+
+@router.get(
+    "/admin/usage/task-summary",
+    response_model=TaskUsagePage,
+    summary="按任务查看全局来源用量与参考费用",
+    description="仅管理员，可通过 user_id 筛选。支持 window、task_id、project_id 和 offset/limit；顶层 totals 覆盖全部匹配任务，未归属调用另列。所有金额为 GPT-6 Astra 对标估算，取消但未报告的用量保持未知。",
+)
+async def admin_task_usage_summary(
+    user_id: int | None = Query(default=None, gt=0),
+    filters: TaskUsageFilters = Depends(),
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> TaskUsagePage:
+    if not user.is_admin:
+        raise OctopError.localized(ErrorCode.FORBIDDEN)
+    try:
+        return await task_usage_summary(
+            server.services, user_id=user_id, filters=filters, timezone=_server_timezone(server)
+        )
+    except ValueError as exc:
+        raise OctopError(ErrorCode.INTERNAL_ERROR, str(exc), status=400) from exc
 
 
 @router.get(
