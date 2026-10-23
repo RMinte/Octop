@@ -1,10 +1,12 @@
 # API Reference
 
+客户端本轮接线先读[统一 Task 客户端接口交接](agentcomputer-unified-conversations-handoff.md)，接口参考基线为 `feature/agentcomputer-foundation @ 4cd685b7`，Bridge 发送前令牌过滤随本次文档收尾提交交付。准确交付提交及复验结果见资料包 manifest 与部署记录。REST 完整模型见运行服务的 `/api/openapi.json`，Task WS 报文见[协议与 JSON Schema](project-task-websocket.md)。交接文档明确区分已实现接口、当前传输限制及安全修复的版本边界。
+
 ## 统一会话与可选专家（2026-10-23）
 
 普通网页问答与任务使用同一 `project_tasks` 记录和 `/api/project-tasks` 执行链路。首条消息创建 Task，后续消息沿用同一 ID；新网页详情地址为 `/conversations/{task_id}`。项目持有工作目录和项目规则；专家持有人设、默认能力和长期记忆。创建项目或任务不会创建专家。
 
-创建请求可带 `selected_expert_id`（已有专家或本人团队的 `agent_id`，省略/null 为通用助手）与 `action_mode=ask|plan|craft`（默认 craft）。支持本人启用的普通专家、本人团队和已共享的普通专家；私人常驻智能体、远程专家仍沿用专属入口。资源目录返回 `kind`、`is_shared`、`is_owner`、`member_ids`。ask/plan 在服务端执行边界限制写工具，craft 沿用审批策略；行动模式不替代审批模式或推理配置。
+创建请求可带 `selected_expert_id`（已有专家或本人团队的 `agent_id`，省略/null 为通用助手）与 `action_mode=ask|plan|craft`（默认 craft）。支持本人启用的普通专家、本人团队和已共享的普通专家；私人常驻智能体保留专属协议，远程专家通过 Bridge 统一 Task transport 在来源主机执行。资源目录返回 `kind`、`is_shared`、`is_owner`、`member_ids`。ask/plan 在服务端执行边界限制写工具，craft 沿用审批策略；行动模式不替代审批模式或推理配置。
 
 Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`pinned`；每轮返回实际专家名称/版本、模式、服务端/客户端目录快照。空闲时用 PATCH 同时提供 `expected_revision` 和 `expected_configuration_revision` 切换专家/模式，显式 `selected_expert_id:null` 切回通用助手；历史身份不变。消息与重试提交 `expected_configuration_revision` 和项目的 `expected_project_revision`，陈旧草稿返回 `TASK_REVISION_CONFLICT`，不能静默改配置执行。幂等重发保留原请求版本。
 
@@ -15,7 +17,7 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 | `POST /api/project-tasks/from-thread` | `{request_id,agent_id,thread_id,project_id,selected_expert_id?}`；显式接入本人有权使用的普通/共享专家或本人团队的空闲旧网页会话，来源 thread 必须属于当前用户；返回 201 TaskDetail，不运行模型。 |
 | `GET /api/project-tasks/{task_id}/expert-memory` | `source=scope\|general\|legacy`、`q`、`path`、`limit`；按当前专家和项目/任务范围读取。 |
 | `POST /api/project-tasks/{task_id}/expert-memory` | `{request_id,source:scope\|general,content,topic?,expected_expert_id?}`；显式保存。completed 可同 ID 重放；uncertain 须核对，不能自动另发。 |
-| `GET/PATCH /api/project-tasks/{task_id}/expert-memory/policy` | 策略修改携带专家 `expected_revision`、`expected_expert_id`；可修改 `legacy_recall_enabled`、`capture_enabled`、`auto_extract_enabled`、`general_promotion_enabled`。共享使用者 `policy_editable=false`。 |
+| `GET/PATCH /api/project-tasks/{task_id}/expert-memory/policy` | PATCH 必填专家 `expected_revision`、`legacy_recall_enabled`，建议同时传 `expected_expert_id`；另可修改 `capture_enabled`、`auto_extract_enabled`、`general_promotion_enabled`。共享使用者 `policy_editable=false`。 |
 
 分支历史标记 `history_only` 和来源 ID；只复制公开历史、经校验的任务附件及成果，不复制检查点、审批和执行授权。旧 thread 续接保留来源 thread/agent 以及原附件鉴权链接，缺失资源标记 unavailable，不移动文件、不同步旧会话。旧会话链接继续可读，普通本地旧会话网页通过明确续接入口继续工作。
 
@@ -27,7 +29,7 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 
 工作台从 `GET /api/project-tasks/{task_id}/workbench` 读取真实服务端目录、仅保存的客户端目录、`scope_revision`、`read_only` 和当前权限能力。运行中使用本轮冻结目录，空闲时跟随当前项目；没有项目目录时使用 Task 自己的目录。工作台不会连接专家原目录。
 
-以下接口均以前缀 `/api/project-tasks/{task_id}` 定位；变更必须携带 `expected_scope_revision`，旧范围返回 409。HTTP 媒体链接使用 `access_token`；WebSocket 使用 `token`。
+以下接口均以前缀 `/api/project-tasks/{task_id}` 定位；工作台变更须携带 `expected_scope_revision`，旧范围返回 409。终端 DELETE 是显式清理旧会话的例外，不要求 scope。HTTP 媒体链接使用 `access_token`；本机工作台 WebSocket 使用 `token`，主 Task 与 Bridge 的认证方式另见统一交接。
 
 | 接口 | 行为 |
 | --- | --- |
@@ -38,11 +40,11 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 | `WS /terminal/ws`、`DELETE /terminal/sessions/{session_id}` | 终端使用 Task 当前服务端目录和独立 scope 会话键；输入前及连接期间重查权限。DELETE 允许本人显式清理本 Task 旧范围会话，不允许重连旧目录。 |
 | `GET /browser/record-replay/status`、`POST /browser/record-replay/start`、`POST /browser/record-replay/stop-and-generate-skill` | 只处理当前 Task 的录制，停止生成草稿，不自动应用。 |
 | `GET /browser/record-replay/skill-content`、`POST /recordings/{recording_id}/apply` | 恢复草稿；用户审阅后以 `{request_id,name,content,expected_scope_revision}` 明确应用，幂等回放。同名不同内容冲突，技能写入 Task 工作区，下轮及团队成员快照生效；改项目目录不复制技能。 |
-| `POST /tool-ui/{turn_id}/{call_id}/request` | 校验本 Task 已保存工具来源，只允许本工作区文件/列表白名单；历史续接工具只读，旧配置不可发起写入，拒绝任意代理接口代理。 |
+| `POST /tool-ui/{turn_id}/{call_id}/request` | 校验本 Task 已保存工具来源，只允许本工作区文件/列表白名单；history_only 工具只展示已保存参数与结果，不能调用本宿主接口。旧配置不可发起写入，拒绝任意接口代理。 |
 
-网页语音输入/朗读复用账号已有 STT/TTS 服务，识别结果进入当前 Task 草稿。普通旧会话、团队和共享旧会话保留只读历史和显式续接入口，新工作写入统一 Task；私人常驻及远程能力沿用各自入口。
+网页语音输入/朗读复用账号已有 STT/TTS 服务，识别结果进入当前 Task 草稿。普通旧会话、团队和共享旧会话保留只读历史和显式续接入口，普通来源也支持 `/api/project-task-migrations` 后台批迁；新工作写入统一 Task。私人常驻保留专属入口，远程 Task 使用 Bridge 统一协议；跨桥迁移白名单尚未开放。
 
-删除仍有历史记录的项目返回 `PROJECT_HAS_TASKS`，建议归档；被当前选择、配置历史或旧续接来源引用的专家返回 `EXPERT_IN_USE`。这些操作不级联误删会话。升级使用 SQLite/PostgreSQL 成对的 schema 56；本轮未在真实用户库执行迁移，未进行 PostgreSQL 实机验收。
+删除仍有历史记录的项目返回 `PROJECT_HAS_TASKS`，建议归档；被当前选择、配置历史或旧续接来源引用的专家返回 `EXPERT_IN_USE`。这些操作不级联误删会话。升级使用 SQLite/PostgreSQL 成对的 schema 56；本机已完成真实 SQLite 库 v55→v56 结构升级并核对原记录完整，未执行旧 thread 批量迁移，未进行 PostgreSQL 实机验收。
 
 ## 私人智能体常驻会话（2026-10-20）
 
@@ -105,7 +107,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | GET | `/api/projects/{project_id}/tasks` | 列出该项目的任务，按最近活动排序 |
 | POST | `/api/projects/{project_id}/tasks` | 在项目中发送首条消息，原子创建任务和首轮，返回 202 |
 | GET | `/api/project-tasks` | 分页列出无项目任务；archived=true 查看归档任务 |
-| GET | `/api/project-tasks/resources` | 本轮可用的模型、Skill 和 MCP 引用 |
+| GET | `/api/project-tasks/resources` | 本轮可用的模型、专家/团队、Skill、MCP、路由与审批能力 |
 | GET / PUT | `/api/project-tasks/routing/settings` | 读取部署模型路由配置；修改需要 `providers` 管理权限 |
 | POST | `/api/project-tasks/attachments` | multipart 的 file 上传本人任务输入附件，返回 201 和附件元数据 |
 | GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入附件的鉴权读取，图片预览、其他文件下载 |
@@ -113,7 +115,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | GET | `/api/project-tasks/artifacts/{artifact_id}` | 本人成果的元数据及当前来源任务和项目信息 |
 | WS | `/api/project-tasks/ws` | Task 与 Resident 共用认证连接；Task 创建、追问、停止、重试和两类会话实时订阅；见[客户端接入指南](project-task-websocket.md) |
 | GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
-| PATCH | `/api/project-tasks/{task_id}` | 修改名称、网络搜索开关、归档或恢复，校验 expected_revision |
+| PATCH | `/api/project-tasks/{task_id}` | 修改名称、置顶、网络搜索、归档或恢复；空闲时更换专家/行动模式，校验对应版本 |
 | DELETE | `/api/project-tasks/{task_id}` | 按 ID 永久删除任务及会话、附件和工具记录，无需版本参数；成功返回 204 |
 | POST | `/api/project-tasks` | 创建任务并发送首条消息，`project_id` 可省略或为 null |
 | GET | `/api/project-tasks/{task_id}` | 分页读取会话轮次，默认最近 50 轮，最多 100 轮 |
@@ -126,7 +128,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 每轮采用发送时项目配置的快照：行动指南进入系统提示；服务端目录作为实际工作目录；所选已安装技能和 SkillHub 包通过 Harness 工作区加载；仅装配所选 MCP 和插件能力，凭据沿用连接管理。子代理角色、长期记忆和团队协作配置同样按轮保存。项目修改在下一轮生效，已保存轮次的 `project_revision` 保留原值。客户端目录仍然只记录路径。无项目任务使用服务端自动分配的独立工作区。
 
-未显式选择本轮模型且未开启路由时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。有当前或历史图片输入时，所选模型须支持图片；普通显式或默认选择不会自动切换模型，混合路由的能力选择规则见[任务模型路由接入](project-task-model-routing.md)。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字、图片和通用文件对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器和桌面未接入。
+未显式选择本轮模型且未开启路由时，按当前所选专家默认模型、服务端默认文本模型的顺序解析；无专家时使用服务端默认文本模型。解析出的明确引用不可用时返回错误，不静默改用其他模型。未配置模型不创建空任务。有当前或历史图片输入时，所选模型须支持图片；普通显式或默认选择不会自动切换模型，混合路由的能力选择规则见[任务模型路由接入](project-task-model-routing.md)。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字、图片和通用文件对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器按 Task 工作台能力开放；当前未声明原生桌面工作台能力。
 
 状态为 `queued/running/waiting_approval/waiting_answer/waiting_client_tool/paused/completed/failed/cancelled`。任务运行时约每 100ms 合并保存增量正文，提交后唤醒 WebSocket 推送；约 500ms 的数据库检查作为其他进程写入等情况的兜底。网页约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的模型消息、工具调用和结果用作后续上下文；历史仅有问答文本的记录继续保留文本；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
 
@@ -546,10 +548,12 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 409 / `PROJECT_NAME_TAKEN` | 同账号下项目重名 | 提示更换名称 |
 | 409 / `PROJECT_REQUEST_CONFLICT` | 创建 key 被用于不同内容 | 先核对原创建结果；新的创建使用新 key |
 | 409 / `PROJECT_REVISION_CONFLICT` | 项目版本已变化 | 读取最新详情，处理冲突后再提交 |
+| 409 / `PROJECT_HAS_TASKS` | 项目仍有保留的任务或历史 | 引导归档，不提示或尝试级联删除任务 |
+| 409 / `PROJECT_TASKS_BUSY` | 项目内有活动任务 | 保留项目与记录，待任务停止后再操作 |
 | 422 / `PROJECT_DIRECTORY_INVALID` | 服务端目录不存在或不可访问 | 重新选择有权限的服务端目录 |
 | 422 / `PROJECT_RESOURCE_INVALID` | Skill/MCP 引用不存在或无权使用 | 刷新资源目录后重新选择 |
 | 409 / `TASK_BUSY` | 任务已有活动轮次 | 读取当前任务，等待结束或由用户停止 |
-| 409 / `TASK_REVISION_CONFLICT` | 任务摘要版本已变化 | 刷新后重新编辑 |
+| 409 / `TASK_REVISION_CONFLICT` | 当前操作使用的任务摘要或会话配置版本已变化 | 刷新后核对原草稿；不自动替换未知提交的请求体或版本 |
 | 409 / `TASK_RETRY_UNAVAILABLE` | 指定轮次不是最后一个失败/取消轮次 | 刷新会话，不重试旧轮次 |
 | 409 / `TASK_REQUEST_CONFLICT` | 消息标识已用于不同内容或作用域 | 核对原发送结果，禁止换内容复用标识 |
 | 409 / `TASK_MODEL_UNAVAILABLE` | 显式模型不可用，或没有可用默认模型 | 保留草稿，刷新可选模型或配置默认模型后重新发送；不会创建空任务或静默换模型 |
@@ -563,14 +567,14 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | --- | --- |
 | 项目创建/读取/修改、PATCH 保留未提交字段、空值规则、版本冲突 | 服务端定向自动化通过 |
 | 同 key 并发创建、不同内容冲突、用户隔离、首次响应回放、失败不消耗 key | 服务端定向自动化通过；创建回执持久化在数据库 |
-| 专用协议和项目任务 Bridge | 已从代码移除，当前只提供本机项目和任务接口；已有数据保留 |
+| 旧专用协议与新 Bridge Task | `/api/agentcomputer/v1` 及对应专用 Bridge 转发已移除；新 Bridge 通过统一 Task REST/WS 提供远端能力，范围见统一会话交接；已有数据保留 |
 | 项目与无项目任务、首轮和追问、幂等发送、历史恢复、取消基础行为 | 定向自动化通过；包含指定轮次取消、迟到取消不影响下一轮、手动重试和未完成上下文 |
 | 正式网页创建重试复用 key、改用 PATCH、保存后增量同步 | 前端自动化通过 |
-| 本机 8088 | 已更新到 schema 33 并重启后端；升级前已备份，2 个项目、5 个任务、6 个轮次和历史 ac_* 数据逐表摘要一致，数据库完整性及新同步接口验证通过；真实 GLM 双轮记录来自前一轮 |
+| 本机 8088 | 2026-10-23 已部署统一 Task 并升级 schema 56；升级前已备份，17 个项目、181 个任务、785 个轮次及其他核心表记录逐表校验一致，数据库完整性、外键及新接口 OpenAPI 检查通过。本次安全修复的提交与重启结果另附资料包 |
 | 当前原生 AgentComputer App | 本轮未修改，尚未验收新独立接口适配 |
 | PostgreSQL、目标 Ubuntu 盒子、真实 MCP 供应商 | 迁移文件/接口实现不等于实机验证，目前未验收 |
 
-此前专用协议和 Bridge 的验证记录仅反映历史实现，不代表现行可用接口。当前路由契约验证覆盖标准项目/任务入口，以及已移除地址不可用、不触发转发的边界。完整 `make all` 按约定后置。
+早期专用协议的验证记录仅反映历史实现，不代表旧地址恢复可用。当前路由契约验证同时覆盖标准项目/任务、新统一 Bridge Task，以及已移除地址不可用的边界。`4cd685b7` 已通过正常提交门禁；本次安全修复的定向回归和提交门禁结果以随包验证记录为准，不将 change-aware 提交测试等同于完整 `make all`。
 
 本轮已补齐会话历史分页、可续接轮次状态流、精确取消和失败/取消后的继续及手动重试。任务列表分页和摘要同步已有实现。本轮继续补齐任务改名、归档/恢复和逐轮模型、Skill/MCP 选择。已提供服务端附件产物、任务审批模式与独立 Reviewer；客户端接入见专门交接文档。旧能力声明不再提供，历史 Run/文档/审批协议不可用。
 

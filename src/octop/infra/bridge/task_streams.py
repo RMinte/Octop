@@ -31,6 +31,9 @@ _MAIN_COMMANDS = frozenset(
         "tool.review",
     }
 )
+_STREAM_QUERY_KEYS = frozenset(
+    {"expected_scope_revision", "session_id", "listen_only", "width", "height"}
+)
 
 
 def allows_task_stream_frame(path: str, frame: dict[str, Any]) -> bool:
@@ -125,11 +128,7 @@ class TaskStreamRelay:
         if not isinstance(query, dict):
             query = {}
         # Never accept caller-supplied authentication or a generic profile/path.
-        query = {
-            str(k): str(v)
-            for k, v in query.items()
-            if k in {"expected_scope_revision", "session_id", "listen_only", "width", "height"}
-        }
+        query = {str(k): str(v) for k, v in query.items() if k in _STREAM_QUERY_KEYS}
         query["token"] = token
         scope = {
             "type": "websocket",
@@ -216,6 +215,9 @@ class TaskStreamRelay:
 
         tasks: list[asyncio.Task[None]] = []
         try:
+            # Local authentication and unknown parameters must not cross the
+            # Bridge, even though the receiving side also filters this query.
+            query = {key: value for key, value in query.items() if key in _STREAM_QUERY_KEYS}
             await session.send_json(
                 {"type": "task-stream.open", "request_id": request_id, "path": path, "query": query}
             )

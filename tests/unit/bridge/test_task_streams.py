@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -34,8 +36,17 @@ def test_unified_task_proxy_has_explicit_method_and_path_policy(method, path, al
     assert is_task_tunnel_path_allowed(method, path) is allowed
 
 
-async def test_task_socket_relay_routes_to_peer_asgi_and_strips_session_token():
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/project-tasks/ws",
+        "/api/project-tasks/task_same/browser-stream/ws",
+        "/api/project-tasks/task_same/terminal/ws",
+    ],
+)
+async def test_task_socket_relay_routes_to_peer_asgi_and_strips_session_token(path):
     scopes = []
+    outbound = []
 
     async def peer_app(scope, receive, send):
         scopes.append(scope)
@@ -68,6 +79,7 @@ async def test_task_socket_relay_routes_to_peer_asgi_and_strips_session_token():
     local, remote = Manager(), Manager()
 
     async def to_remote(raw):
+        outbound.append(json.loads(raw))
         await remote.session.handle_message(raw)
 
     async def to_local(raw):
@@ -102,17 +114,50 @@ async def test_task_socket_relay_routes_to_peer_asgi_and_strips_session_token():
     await socket.inputs.put(
         {"type": "task.subscribe", "task_id": "task_same", "id": "subscribe-unique"}
     )
+    allowed_query = {
+        "expected_scope_revision": "scope-revision",
+        "session_id": "terminal-session",
+        "listen_only": "true",
+        "width": "1024",
+        "height": "768",
+    }
     await asyncio.wait_for(
         local.task_streams.relay(
-            "connection", 7, "/api/project-tasks/ws", {"token": "forged"}, socket
+            "connection",
+            7,
+            path,
+            {
+                **allowed_query,
+                "token": "local-auth-secret",
+                "access_token": "local-access-secret",
+                "arbitrary": "private-parameter",
+                "profile_id": "private-profile",
+                "path": "private-path",
+            },
+            socket,
         ),
         3,
     )
     assert [frame["type"] for frame in socket.frames] == ["ready", "task.subscribe"]
     assert "peer-secret" not in str(socket.frames)
-    assert scopes[0]["path"] == "/api/project-tasks/ws"
+    opened = [frame for frame in outbound if frame["type"] == "task-stream.open"]
+    assert len(opened) == 1 and opened[0]["query"] == allowed_query
+    assert not any(
+        secret in str(outbound)
+        for secret in (
+            "local-auth-secret",
+            "local-access-secret",
+            "private-parameter",
+            "private-profile",
+            "private-path",
+        )
+    )
+    assert scopes[0]["path"] == path
     assert (b"authorization", b"Bearer peer-owner-auth") in scopes[0]["headers"]
-    assert b"forged" not in scopes[0]["query_string"]
+    assert parse_qs(scopes[0]["query_string"].decode()) == {
+        **{key: [value] for key, value in allowed_query.items()},
+        "token": ["peer-owner-auth"],
+    }
     await local.task_streams.disconnect("connection")
     await remote.task_streams.disconnect("connection")
     assert not local.task_streams.waiters and not remote.task_streams.runners
