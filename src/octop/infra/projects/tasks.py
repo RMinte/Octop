@@ -224,6 +224,13 @@ class TaskExpertOption(ProjectModel):
     is_shared: bool = False
     is_owner: bool = True
     member_ids: list[str] = Field(default_factory=list)
+    default_skills: list[SkillBinding] = Field(
+        default_factory=list, description="专家默认挂载的已安装 Skill 引用；不含文件内容。"
+    )
+    has_workspace_skills: bool = Field(
+        default=False,
+        description="专家另有不能用本轮 Skill 引用表达的工作区技能；显式自定义 Skill 会替换这些默认技能。",
+    )
 
 
 class TaskResources(ProjectResources):
@@ -1221,7 +1228,11 @@ def cancel(services: SharedServices, owner_id: int, task_id: str, turn_id: str) 
 
 
 def resources(services: SharedServices, owner_id: int) -> TaskResources:
-    from octop.infra.projects.expert_profiles import _workspace, expert_profile_supported
+    from octop.infra.projects.expert_profiles import (
+        _workspace,
+        composer_skill_defaults,
+        expert_profile_supported,
+    )
     from octop.infra.projects.expert_teams import member_ids as team_member_ids
 
     available = project_resources(services, owner_id)
@@ -1260,11 +1271,11 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
             config = json.loads(row.config_json or "{}")
             if not isinstance(config, dict) or not expert_profile_supported(config):
                 continue
-            roster = (
-                team_member_ids(services, owner_id, _workspace(services, row, config))
-                if row.kind == "team"
-                else []
+            workspace = _workspace(services, row, config)
+            default_skills, has_workspace_skills = composer_skill_defaults(
+                row, config, workspace, available.skills
             )
+            roster = team_member_ids(services, owner_id, workspace) if row.kind == "team" else []
         except (OctopError, ValueError, OSError):
             continue
         experts.append(
@@ -1277,6 +1288,8 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
                 is_shared=bool(row.is_shared),
                 is_owner=row.user_id == owner_id,
                 member_ids=roster,
+                default_skills=[SkillBinding.model_validate(skill) for skill in default_skills],
+                has_workspace_skills=has_workspace_skills,
             )
         )
     return TaskResources(

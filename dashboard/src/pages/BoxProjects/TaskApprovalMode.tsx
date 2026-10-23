@@ -1,6 +1,7 @@
 import { useTaskHost } from "../../context/TaskHostContext";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Modal, Select, Space, Typography } from "antd";
+import { Alert, Button, Modal, Popover, Select, Space, Typography } from "antd";
+import { ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   type TaskApprovalPolicy,
@@ -18,9 +19,11 @@ const modes: TaskApprovalMode[] = [
 export default function TaskApprovalModePicker({
   onBusyChange,
   disabled,
+  compact = false,
 }: {
   onBusyChange: (busy: boolean) => void;
   disabled: boolean;
+  compact?: boolean;
 }) {
   const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
@@ -190,7 +193,7 @@ export default function TaskApprovalModePicker({
     }
   };
   const mode = policy?.mode ?? "ask_for_approval";
-  return (
+  const body = (
     <Space
       direction="vertical"
       style={{ width: "100%", marginBottom: 10 }}
@@ -286,5 +289,35 @@ export default function TaskApprovalModePicker({
         </Typography.Paragraph>
       </Modal>
     </Space>
+  );
+  return compact ? (
+    <Popover
+      trigger="click"
+      placement="topRight"
+      title={t("projects.composer.accountApproval")}
+      content={
+        <div
+          style={{
+            width: "min(340px, calc(100vw - 48px))",
+            maxHeight: "60dvh",
+            overflow: "auto",
+          }}
+        >
+          {body}
+        </div>
+      }
+    >
+      <Button
+        type="text"
+        size="small"
+        icon={<ShieldCheck size={14} />}
+        aria-label={t("projects.composer.accountApproval")}
+        danger={!!error}
+      >
+        {t("projects.composer.accountApproval")}
+      </Button>
+    </Popover>
+  ) : (
+    body
   );
 }

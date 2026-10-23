@@ -97,6 +97,8 @@ def is_task_tunnel_path_allowed(method: str, path: str) -> bool:
         return verb in {"GET", "POST"}
     if re.fullmatch(rf"/api/projects/{_RESOURCE_ID}/tasks/sync", path):
         return verb == "GET"
+    if re.fullmatch(rf"/api/projects/{_RESOURCE_ID}/workspace/tree-children", path):
+        return verb == "GET"
     if re.fullmatch(rf"/api/project-tasks/{_RESOURCE_ID}", path):
         return verb in {"GET", "PATCH", "DELETE"}
     tail = path.removeprefix("/api/project-tasks/")

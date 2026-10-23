@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -18,6 +18,9 @@ vi.mock("../../api/modules/projects", async (importOriginal) => ({
 vi.mock("../../layouts/PageShell", () => ({
   default: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
+vi.mock("../../hooks/useServerTimezone", () => ({
+  useServerTimezone: () => "Asia/Shanghai",
+}));
 vi.mock("react-i18next", () => {
   const t = (key: string) => key;
   return { useTranslation: () => ({ t }) };
@@ -30,14 +33,25 @@ vi.mock("./TaskConversations", () => ({
     projectID,
     allTasks,
     onSelectTask,
+    navigation,
+    overview,
+    listScope,
+    onWorkbenchDirtyChange,
   }: {
     selectedTaskID: string | null;
     defaultExpertID: string | null;
     projectID: string | null;
     allTasks: boolean;
     onSelectTask: (id: string | null) => void;
+    navigation?: ReactNode;
+    overview?: ReactNode;
+    listScope?: object;
+    onWorkbenchDirtyChange?: (dirty: boolean) => void;
   }) => (
     <div>
+      {navigation}
+      {overview}
+      <output data-testid="list-scope">{JSON.stringify(listScope)}</output>
       <output data-testid="selection">
         {JSON.stringify({
           selectedTaskID,
@@ -47,6 +61,19 @@ vi.mock("./TaskConversations", () => ({
         })}
       </output>
       <button onClick={() => onSelectTask("next_task")}>Open next</button>
+      <button onClick={() => onSelectTask(null)}>New conversation</button>
+      <button onClick={() => onWorkbenchDirtyChange?.(true)}>
+        Unsaved workbench
+      </button>
+      <button
+        onClick={() => {
+          onWorkbenchDirtyChange?.(false);
+          onSelectTask(null);
+        }}
+      >
+        Confirmed task deletion
+      </button>
+      <input aria-label="Local composer state" />
     </div>
   ),
 }));
@@ -131,4 +158,199 @@ it("starts without a Task or expert and keeps the project optional", async () =>
   expect(
     screen.getByRole("combobox", { name: "projects.tasks.project" }),
   ).toBeEnabled();
+});
+
+it("keeps project navigation reachable and opens its overview inside the workspace", async () => {
+  const user = userEvent.setup();
+  mount("/conversations");
+  await screen.findByTestId("selection");
+  await user.click(
+    screen.getByRole("button", { name: "projects.workspace.projectMenu" }),
+  );
+  await user.click(
+    screen.getAllByRole("button", { name: "A", exact: true }).at(-1)!,
+  );
+  expect(
+    await screen.findByRole("region", { name: "projects.workspace.overview" }),
+  ).toBeTruthy();
+  expect(JSON.parse(screen.getByTestId("list-scope").textContent!)).toEqual({
+    projectID: "project_a",
+  });
+  expect(
+    screen.getByRole("combobox", { name: "projects.tasks.project" }),
+  ).toBeDisabled();
+  await user.click(
+    screen.getByRole("button", { name: "projects.workspace.newInProject" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("region", { name: "projects.workspace.overview" }),
+    ).toBeNull(),
+  );
+  expect(
+    JSON.parse(screen.getByTestId("selection").textContent!),
+  ).toMatchObject({ selectedTaskID: null, projectID: "project_a" });
+  expect(
+    screen.getByRole("combobox", { name: "projects.tasks.project" }),
+  ).toBeEnabled();
+});
+
+it("changes only the list scope when browsing pinned and standalone conversations", async () => {
+  api.get.mockResolvedValue({ project_id: "project_a" } as Awaited<
+    ReturnType<typeof projectTasksApi.get>
+  >);
+  const user = userEvent.setup();
+  mount("/conversations/task_a");
+  await screen.findByTestId("selection");
+  await user.click(
+    screen.getByRole("button", { name: "projects.workspace.pinned" }),
+  );
+  await waitFor(() =>
+    expect(JSON.parse(screen.getByTestId("list-scope").textContent!)).toEqual({
+      pinned: true,
+    }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "projects.workspace.standalone" }),
+  );
+  await waitFor(() =>
+    expect(JSON.parse(screen.getByTestId("list-scope").textContent!)).toEqual({
+      projectID: null,
+    }),
+  );
+  expect(
+    JSON.parse(screen.getByTestId("selection").textContent!),
+  ).toMatchObject({ selectedTaskID: "task_a", projectID: "project_a" });
+});
+
+it.each(["all", "standalone", "active", "pinned"])(
+  "starts a project-free draft from the %s scope despite the selected Task project",
+  async (scope) => {
+    api.get.mockResolvedValue({ project_id: "project_a" } as Awaited<
+      ReturnType<typeof projectTasksApi.get>
+    >);
+    const user = userEvent.setup();
+    mount("/conversations/task_a?workspace_scope=" + scope);
+    await screen.findByTestId("selection");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() =>
+      expect(
+        JSON.parse(screen.getByTestId("selection").textContent!),
+      ).toMatchObject({ selectedTaskID: null, projectID: null }),
+    );
+  },
+);
+
+it("clears the project overview context when entering a global scope", async () => {
+  const user = userEvent.setup();
+  mount(
+    "/conversations?workspace_scope=project&scope_project=project_a&project_id=project_a&view=project",
+  );
+  await screen.findByRole("region", { name: "projects.workspace.overview" });
+  await user.click(
+    screen.getByRole("button", { name: "projects.workspace.all" }),
+  );
+  await waitFor(() =>
+    expect(
+      JSON.parse(screen.getByTestId("selection").textContent!),
+    ).toMatchObject({ selectedTaskID: null, projectID: null }),
+  );
+  expect(
+    screen.queryByRole("region", { name: "projects.workspace.overview" }),
+  ).toBeNull();
+});
+
+it("keeps the conversation mounted and inert while resolving the next Task project", async () => {
+  let resolveNext!: (
+    value: Awaited<ReturnType<typeof projectTasksApi.get>>,
+  ) => void;
+  api.get.mockImplementation(async (id) =>
+    id === "next_task"
+      ? new Promise((resolve) => {
+          resolveNext = resolve;
+        })
+      : ({ project_id: "project_a" } as Awaited<
+          ReturnType<typeof projectTasksApi.get>
+        >),
+  );
+  const user = userEvent.setup();
+  mount("/conversations/task_a");
+  const localInput = await screen.findByRole("textbox", {
+    name: "Local composer state",
+  });
+  await user.type(localInput, "keep mounted");
+  await user.click(screen.getByRole("button", { name: "Open next" }));
+  await waitFor(() => expect(api.get).toHaveBeenCalledWith("next_task"));
+  expect(screen.getByLabelText("Local composer state")).toBe(localInput);
+  expect(localInput).not.toBeVisible();
+  expect(
+    JSON.parse(screen.getByTestId("selection").textContent!),
+  ).toMatchObject({ selectedTaskID: "task_a", projectID: "project_a" });
+  await act(async () =>
+    resolveNext({ project_id: null } as Awaited<
+      ReturnType<typeof projectTasksApi.get>
+    >),
+  );
+  await waitFor(() => expect(localInput).toBeVisible());
+  expect(screen.getByLabelText("Local composer state")).toBe(localInput);
+  expect(localInput).toHaveValue("keep mounted");
+  expect(
+    JSON.parse(screen.getByTestId("selection").textContent!),
+  ).toMatchObject({ selectedTaskID: "next_task", projectID: null });
+});
+
+it("confirms discarding unsaved workbench edits before changing the Task", async () => {
+  api.get.mockResolvedValue({ project_id: "project_a" } as Awaited<
+    ReturnType<typeof projectTasksApi.get>
+  >);
+  const user = userEvent.setup();
+  mount("/conversations/task_a");
+  await screen.findByTestId("selection");
+  await user.click(screen.getByRole("button", { name: "Unsaved workbench" }));
+  await user.click(screen.getByRole("button", { name: "Open next" }));
+  let dialog = await screen.findByRole("dialog", {
+    name: "projects.tasks.workbench.unsaved",
+  });
+  expect(api.get).not.toHaveBeenCalledWith("next_task");
+  await user.click(
+    within(dialog).getByRole("button", { name: "common.cancel" }),
+  );
+  expect(
+    JSON.parse(screen.getByTestId("selection").textContent!),
+  ).toMatchObject({ selectedTaskID: "task_a" });
+  await user.click(screen.getByRole("button", { name: "Open next" }));
+  dialog = await screen.findByRole("dialog", {
+    name: "projects.tasks.workbench.unsaved",
+  });
+  await user.click(
+    within(dialog).getByRole("button", {
+      name: "projects.tasks.workbench.discard",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      JSON.parse(screen.getByTestId("selection").textContent!),
+    ).toMatchObject({ selectedTaskID: "next_task" }),
+  );
+});
+
+it("does not ask to leave again after confirmed deletion clears dirty state", async () => {
+  api.get.mockResolvedValue({ project_id: "project_a" } as Awaited<
+    ReturnType<typeof projectTasksApi.get>
+  >);
+  const user = userEvent.setup();
+  mount("/conversations/task_a");
+  await screen.findByTestId("selection");
+  await user.click(screen.getByRole("button", { name: "Unsaved workbench" }));
+  await user.click(
+    screen.getByRole("button", { name: "Confirmed task deletion" }),
+  );
+  await waitFor(() =>
+    expect(
+      JSON.parse(screen.getByTestId("selection").textContent!),
+    ).toMatchObject({ selectedTaskID: null, projectID: null }),
+  );
+  expect(
+    screen.queryByRole("dialog", { name: "projects.tasks.workbench.unsaved" }),
+  ).toBeNull();
 });

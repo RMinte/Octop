@@ -1,0 +1,237 @@
+.composer {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.status {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inputBox {
+  min-width: 0;
+  padding: 8px 9px 6px;
+  border: 1px solid var(--fn-border-primary, #d9d9d9);
+  border-radius: 12px;
+  background: var(--fn-bg-primary, transparent);
+  transition: border-color 0.15s;
+
+  &:focus-within {
+    border-color: var(--fn-color-brand, #e85d75);
+  }
+
+  > :global(textarea:is(.ant-input, .octop-input)) {
+    padding: 3px 2px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    outline: none;
+    background: transparent;
+    resize: none;
+
+    &:focus,
+    &:focus-visible {
+      border: 0;
+      box-shadow: none;
+      outline: none;
+    }
+  }
+}
+
+.actions {
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.actionTools {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+
+  > :global(:is(.ant-btn, .octop-btn)) {
+    font-size: 12px;
+    padding-inline: 6px;
+  }
+}
+
+.send {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.settings {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+
+  > :global(:is(.ant-select, .octop-select)) {
+    min-width: 0;
+    max-width: 170px;
+  }
+
+  > :global(:is(.ant-btn, .octop-btn)) {
+    font-size: 12px;
+    padding-inline: 5px;
+  }
+
+  :global(:is(.ant-segmented, .octop-segmented)) {
+    font-size: 12px;
+  }
+}
+
+.modelCompact {
+  flex: 0 1 190px;
+  min-width: 100px;
+  max-width: 190px;
+}
+
+.modelFull {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.modelSelect {
+  width: 100%;
+  min-width: 0;
+}
+
+.resourceChips {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 1px 0 5px;
+  max-height: 110px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.resourceChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  gap: 3px;
+  padding: 1px 2px 1px 6px;
+  border-radius: 5px;
+  background: var(--ant-color-fill-tertiary, rgba(127, 127, 127, 0.12));
+  font-size: 12px;
+  line-height: 1.5;
+
+  > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  > :global(:is(.ant-btn, .octop-btn)) {
+    width: 20px;
+    height: 20px;
+    flex: 0 0 auto;
+    padding: 2px;
+  }
+}
+
+.inheritedMark,
+.inheritedResource {
+  font-size: 11px;
+  color: var(--fn-text-secondary, #888);
+}
+
+.inheritedResource {
+  overflow-wrap: anywhere;
+}
+
+.optionsPopover {
+  max-width: calc(100vw - 24px);
+
+  :global(:is(.ant-popover-inner, .octop-popover-inner)) {
+    padding: 12px;
+  }
+}
+
+.optionsPanel {
+  width: min(350px, calc(100vw - 48px));
+  max-height: min(480px, 65dvh);
+  overflow: auto;
+  overscroll-behavior: contain;
+
+  :global(:is(.ant-form-item, .octop-form-item)) {
+    margin-bottom: 12px;
+  }
+
+  :global(:is(.ant-form-item-label, .octop-form-item-label)) {
+    padding-bottom: 4px;
+    white-space: normal;
+  }
+
+  :global(:is(.ant-collapse-content-box, .octop-collapse-content-box)) {
+    padding: 4px 0 8px !important;
+  }
+
+  :global(:is(.ant-collapse-header, .octop-collapse-header)) {
+    padding-inline: 0 !important;
+  }
+
+  :global(:is(.ant-select, .octop-select)) {
+    width: 100%;
+  }
+}
+
+.optionsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  > :global(:is(.ant-btn, .octop-btn)) {
+    flex: 0 0 auto;
+  }
+}
+
+.optionsHint {
+  margin: 5px 0 10px !important;
+  font-size: 12px;
+}
+
+@media (max-width: 600px) {
+  .modelCompact {
+    flex-basis: 130px;
+    max-width: 150px;
+  }
+
+  .settings {
+    gap: 3px 4px;
+
+    > :global(:is(.ant-select, .octop-select)) {
+      max-width: 145px;
+    }
+  }
+}
+
+.modelDropdown {
+  max-width: calc(100vw - 24px);
+
+  :global(
+      :is(.ant-select-item-option-content, .octop-select-item-option-content)
+    ) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}

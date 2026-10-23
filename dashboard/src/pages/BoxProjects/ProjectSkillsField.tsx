@@ -35,6 +35,7 @@ interface Props {
   disabled?: boolean;
   active: boolean;
   id?: string;
+  onPickerOpenChange?: (open: boolean) => void;
 }
 const EMPTY: ProjectSkill[] = [];
 
@@ -45,11 +46,16 @@ export default function ProjectSkillsField({
   disabled,
   active,
   id,
+  onPickerOpenChange,
 }: Props) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<"hub" | "installed">("hub");
   const [query, setQuery] = useState("");
+  const changeOpen = (next: boolean) => {
+    setOpen(next);
+    onPickerOpenChange?.(next);
+  };
   const keys = new Set(value.map(projectSkillKey));
   const pickedSlugs = useMemo(
     () =>
@@ -121,7 +127,7 @@ export default function ProjectSkillsField({
         disabled={disabled || value.length >= 64}
         onClick={() => {
           setTab("hub");
-          setOpen(true);
+          changeOpen(true);
         }}
       >
         {t("projects.addSkill")}
@@ -129,7 +135,7 @@ export default function ProjectSkillsField({
       <CatalogDrawer
         title={t("projects.skillPickerTitle")}
         open={active && open}
-        onClose={() => setOpen(false)}
+        onClose={() => changeOpen(false)}
       >
         <Segmented
           block
@@ -203,7 +209,7 @@ export default function ProjectSkillsField({
             {t("projects.selectedSkills", { count: value.length })}
           </Typography.Text>
           <Space>
-            <Button type="primary" onClick={() => setOpen(false)}>
+            <Button type="primary" onClick={() => changeOpen(false)}>
               {t("projects.finishSkillSelection")}
             </Button>
           </Space>

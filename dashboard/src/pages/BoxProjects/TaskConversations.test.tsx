@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -61,6 +62,53 @@ vi.mock("react-i18next", () => {
   return { useTranslation: () => ({ t }) };
 });
 const api = vi.mocked(projectTasksApi, true);
+
+async function conversationTool(name: string) {
+  if (!screen.queryByRole("button", { name, exact: true }))
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: zh.projects.workspace.conversationTools,
+      }),
+    );
+  return screen.findByRole("button", { name, exact: true });
+}
+
+async function approvalSelector() {
+  if (
+    !screen.queryByRole("combobox", {
+      name: zh.projects.tasks.approvalMode.label,
+    })
+  )
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: zh.projects.composer.accountApproval,
+      }),
+    );
+  return screen.findByRole("combobox", {
+    name: zh.projects.tasks.approvalMode.label,
+  });
+}
+
+async function turnSettings(group?: string) {
+  if (
+    !screen.queryByRole("dialog", { name: zh.projects.tasks.executionOptions })
+  )
+    await userEvent.click(
+      screen.getByRole("button", { name: zh.projects.tasks.executionOptions }),
+    );
+  const panel = await screen.findByRole("dialog", {
+    name: zh.projects.tasks.executionOptions,
+  });
+  if (group) {
+    const heading = within(panel).getByRole("button", {
+      name: new RegExp(group + "$"),
+    });
+    if (heading.getAttribute("aria-expanded") === "false")
+      await userEvent.click(heading);
+  }
+  return panel;
+}
+
 afterEach(() => vi.useRealTimers());
 const fixture: TaskDetail = {
   task_id: "task_a",
@@ -857,9 +905,7 @@ describe("项目任务对话", () => {
     mount();
     expect(screen.queryByRole("button", { name: "压缩记忆" })).toBeNull();
     await user.click(await screen.findByRole("button", { name: /第一项任务/ }));
-    expect(
-      await screen.findByRole("button", { name: "压缩记忆" }),
-    ).toBeEnabled();
+    expect(await conversationTool("压缩记忆")).toBeEnabled();
   });
   it("手动压缩只发送控制命令，保留草稿和待发附件并阻止重复点击", async () => {
     let finishSend!: (value: TaskDetail) => void;
@@ -870,7 +916,7 @@ describe("项目任务对话", () => {
     );
     const user = userEvent.setup();
     mount("?task=task_a");
-    const compact = await screen.findByRole("button", { name: "压缩记忆" });
+    await conversationTool("压缩记忆");
     const composer = screen.getByRole("textbox", { name: "任务消息" });
     await user.type(composer, "保留这段追问");
     await user.upload(
@@ -880,6 +926,8 @@ describe("项目任务对话", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "发送" })).toBeEnabled(),
     );
+    await conversationTool("压缩记忆");
+    const compact = await conversationTool("压缩记忆");
     fireEvent.click(compact);
     fireEvent.click(compact);
     expect(api.send).toHaveBeenCalledTimes(1);
@@ -906,16 +954,16 @@ describe("项目任务对话", () => {
     api.send.mockRejectedValueOnce(new Error("network unavailable"));
     const user = userEvent.setup();
     mount("?task=task_a");
-    const compact = await screen.findByRole("button", { name: "压缩记忆" });
+    await conversationTool("压缩记忆");
     const composer = screen.getByRole("textbox", { name: "任务消息" });
     await user.type(composer, "尚未发送的追问");
-    await user.click(compact);
+    await user.click(await conversationTool("压缩记忆"));
     await screen.findByText("network unavailable");
     expect(composer).toHaveValue("尚未发送的追问");
-    await user.click(compact);
+    await user.click(await conversationTool("压缩记忆"));
     await waitFor(() => expect(api.send).toHaveBeenCalledTimes(2));
     expect(api.send.mock.calls[0][1]).toEqual(api.send.mock.calls[1][1]);
-    await user.click(compact);
+    await user.click(await conversationTool("压缩记忆"));
     await waitFor(() => expect(api.send).toHaveBeenCalledTimes(3));
     expect(api.send.mock.calls[2][1].request_id).not.toBe(
       api.send.mock.calls[0][1].request_id,
@@ -926,8 +974,8 @@ describe("项目任务对话", () => {
     api.send.mockRejectedValueOnce(new Error("network unavailable"));
     const user = userEvent.setup();
     mount("?task=task_a");
-    const compact = await screen.findByRole("button", { name: "压缩记忆" });
-    await user.click(compact);
+    await conversationTool("压缩记忆");
+    await user.click(await conversationTool("压缩记忆"));
     await screen.findByText("network unavailable");
     const requestID = api.send.mock.calls[0][1].request_id;
     const compactTurn = {
@@ -971,7 +1019,7 @@ describe("项目任务对话", () => {
     );
     await user.click(screen.getByRole("button", { name: "发送" }));
     await screen.findByText("已补充结果");
-    await user.click(compact);
+    await user.click(await conversationTool("压缩记忆"));
     expect(api.send.mock.calls[2][1]).toEqual({
       request_id: expect.any(String),
       prompt: "/compact",
@@ -1001,14 +1049,17 @@ describe("项目任务对话", () => {
     api.send.mockRejectedValueOnce(new Error("network unavailable"));
     const user = userEvent.setup();
     mount("?task=task_a");
-    const compact = await screen.findByRole("button", { name: "压缩记忆" });
-    await user.click(screen.getByText("本轮设置"));
+    await conversationTool("压缩记忆");
+    await user.click(
+      screen.getByRole("button", { name: zh.projects.tasks.executionOptions }),
+    );
     const model = await screen.findByRole("combobox", { name: "本轮模型" });
     await user.click(model);
     await user.click(await screen.findByText("GLM · glm/glm"));
+    await turnSettings();
     await user.click(screen.getByRole("switch", { name: "自定义本轮 Skill" }));
     await user.click(screen.getByRole("switch", { name: "自定义本轮 MCP" }));
-    await user.click(compact);
+    await user.click(await conversationTool("压缩记忆"));
     await screen.findByText("network unavailable");
     expect(api.send.mock.calls[0][1]).toEqual({
       request_id: expect.any(String),
@@ -1019,9 +1070,9 @@ describe("项目任务对话", () => {
     });
     await user.click(model);
     await user.click(await screen.findByText("Other · other/model"));
-    await user.click(compact);
+    await user.click(await conversationTool("压缩记忆"));
     expect(api.send.mock.calls[1][1]).toEqual(api.send.mock.calls[0][1]);
-    await user.click(compact);
+    await user.click(await conversationTool("压缩记忆"));
     expect(api.send.mock.calls[2][1].options).toEqual({
       model_ref: "other/model",
     });
@@ -1032,9 +1083,7 @@ describe("项目任务对话", () => {
   ])("任务$state时禁用手动压缩", async (changes) => {
     api.open.mockResolvedValue({ ...fixture, ...changes });
     mount("?task=task_a");
-    expect(
-      await screen.findByRole("button", { name: "压缩记忆" }),
-    ).toBeDisabled();
+    expect(await conversationTool("压缩记忆")).toBeDisabled();
     expect(api.send).not.toHaveBeenCalled();
   });
   it.each([
@@ -1538,10 +1587,8 @@ it("归档保留会话并关闭发送，恢复后仍可继续", async () => {
   });
   const user = userEvent.setup();
   mount("?task=task_a");
-  await user.click(await screen.findByRole("button", { name: "归档" }));
-  expect(
-    await screen.findByRole("button", { name: "恢复任务" }),
-  ).toBeInTheDocument();
+  await user.click(await conversationTool("归档"));
+  expect(await conversationTool("恢复任务")).toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "任务消息" })).toBeDisabled();
   expect(screen.getByText("已记住蓝鸟")).toBeInTheDocument();
   await waitFor(() =>
@@ -1607,11 +1654,11 @@ it.each(["proj_a", null])(
     api.open.mockResolvedValue(task);
     const user = userEvent.setup();
     mount("?task=task_a", projectID);
-    await user.click(await screen.findByRole("button", { name: "删除任务" }));
+    await user.click(await conversationTool("删除任务"));
     expect(screen.getByText(zh.projects.tasks.deleteConfirm)).toBeTruthy();
     expect(api.delete).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: /取\s*消/ }));
-    await user.click(screen.getByRole("button", { name: "删除任务" }));
+    await user.click(await conversationTool("删除任务"));
     await user.click(screen.getByRole("button", { name: "确认删除" }));
     await waitFor(() => expect(api.delete).toHaveBeenCalledWith("task_a"));
     await waitFor(() =>
@@ -1625,7 +1672,7 @@ it("删除失败保留任务和对话，可重试", async () => {
   api.delete.mockRejectedValueOnce(new Error("offline"));
   const user = userEvent.setup();
   mount("?task=task_a");
-  await user.click(await screen.findByRole("button", { name: "删除任务" }));
+  await user.click(await conversationTool("删除任务"));
   await user.click(screen.getByRole("button", { name: "确认删除" }));
   expect(await screen.findByText("offline")).toBeTruthy();
   expect(screen.getByText("已记住蓝鸟")).toBeTruthy();
@@ -1640,7 +1687,7 @@ it("删除时服务端发现任务忙，显示具体原因并保留任务和对�
   );
   const user = userEvent.setup();
   mount("?task=task_a");
-  await user.click(await screen.findByRole("button", { name: "删除任务" }));
+  await user.click(await conversationTool("删除任务"));
   await user.click(screen.getByRole("button", { name: "确认删除" }));
   expect(await screen.findByText(zh.apiErrors.TASK_BUSY)).toBeTruthy();
   expect(screen.getByText("已记住蓝鸟")).toBeTruthy();
@@ -1656,10 +1703,11 @@ it.each(["queued", "running"] as const)(
       status,
     });
     mount("?task=task_a");
-    expect(
-      await screen.findByRole("button", { name: "删除任务" }),
-    ).toBeDisabled();
-    expect(screen.getByText(zh.projects.tasks.deleteBusy)).toBeTruthy();
+    expect(await conversationTool("删除任务")).toBeDisabled();
+    expect(await conversationTool("删除任务")).toHaveAttribute(
+      "title",
+      zh.projects.tasks.deleteBusy,
+    );
     expect(api.delete).not.toHaveBeenCalled();
   },
 );
@@ -1730,9 +1778,12 @@ it("本轮选择模型并清空 Skill/MCP，通过消息发送而不修改项目
   });
   const user = userEvent.setup();
   mount();
-  await user.click(screen.getByText("本轮设置"));
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.executionOptions }),
+  );
   await user.click(await screen.findByRole("combobox", { name: "本轮模型" }));
   await user.click(await screen.findByText("Other model · other/model"));
+  await turnSettings();
   await user.click(screen.getByRole("switch", { name: "自定义本轮 Skill" }));
   await user.click(screen.getByRole("switch", { name: "自定义本轮 MCP" }));
   await user.type(
@@ -1839,7 +1890,9 @@ it("常驻模型选择用于重试，跟随默认和切换任务不会沿用另�
   await user.click(await screen.findByText("RM-01 VLM · box/RM-01 VLM"));
   await user.click(screen.getByRole("button", { name: /另一任务/ }));
   await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_b"));
-  expect(selector.closest(".ant-select")).toHaveTextContent("跟随默认");
+  expect(
+    screen.getByRole("combobox", { name: "本轮模型" }).closest(".ant-select"),
+  ).toHaveTextContent("跟随默认");
 });
 
 it("独立展示思考内容并合并实时更新，迟到内容不截断已收到的思考", async () => {
@@ -2044,7 +2097,10 @@ it("模型支持时发送本轮思考模式与强度，切换模型后清除旧�
   });
   const user = userEvent.setup();
   mount();
-  await user.click(screen.getByText("本轮设置"));
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.executionOptions }),
+  );
+  await turnSettings(zh.projects.composer.groups.reasoning);
   await user.click(await screen.findByRole("combobox", { name: "思考模式" }));
   await user.click(await screen.findByText("开启"));
   await user.click(screen.getByRole("combobox", { name: "思考强度" }));
@@ -2065,6 +2121,7 @@ it("模型支持时发送本轮思考模式与强度，切换模型后清除旧�
       }),
     ),
   );
+  await turnSettings(zh.projects.composer.groups.reasoning);
   await user.click(screen.getByRole("combobox", { name: "思考模式" }));
   await user.click(await screen.findByText("开启"));
   await user.click(screen.getByRole("combobox", { name: "思考强度" }));
@@ -2551,9 +2608,7 @@ it("任务模式切换丢回执后显式重试原请求，确认前保留远端�
   api.updateApprovalPolicy.mockResolvedValueOnce(approved.approval_policy);
   const user = userEvent.setup();
   mount("?task=task_a");
-  const selector = await screen.findByRole("combobox", {
-    name: zh.projects.tasks.approvalMode.label,
-  });
+  const selector = await approvalSelector();
   await waitFor(() => expect(selector).toBeEnabled());
   await user.click(selector);
   await user.click(
@@ -2601,9 +2656,7 @@ it("任务模式切换丢回执后显式重试原请求，确认前保留远端�
 it("新任务完全访问先确认真实范围，全局保存后创建继承而不发送任务模式", async () => {
   const user = userEvent.setup();
   mount();
-  const selector = await screen.findByRole("combobox", {
-    name: zh.projects.tasks.approvalMode.label,
-  });
+  const selector = await approvalSelector();
   await waitFor(() => expect(selector).toBeEnabled());
   await user.click(selector);
   await user.click(
@@ -2742,9 +2795,7 @@ it.each([
     });
     const user = userEvent.setup();
     mount();
-    const selector = await screen.findByRole("combobox", {
-      name: zh.projects.tasks.approvalMode.label,
-    });
+    const selector = await approvalSelector();
     await waitFor(() => expect(selector).toBeEnabled());
     await user.click(selector);
     for (const mode of [
@@ -2902,9 +2953,7 @@ it("账号审批在任务之间共享，迟到任务摘要和低版本推送不�
   );
   const user = userEvent.setup();
   mount("?task=task_a");
-  const selector = await screen.findByRole("combobox", {
-    name: zh.projects.tasks.approvalMode.label,
-  });
+  const selector = await approvalSelector();
   await waitFor(() => expect(selector).toBeEnabled());
   await user.click(selector);
   await user.click(
@@ -2917,17 +2966,16 @@ it("账号审批在任务之间共享，迟到任务摘要和低版本推送不�
   );
   await user.click(screen.getByRole("button", { name: /另一任务/ }));
   await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_b"));
-  expect(
-    screen
-      .getByRole("combobox", { name: zh.projects.tasks.approvalMode.label })
-      .closest(".ant-select"),
-  ).toHaveTextContent(zh.projects.tasks.approvalMode.approve_for_me);
+  const otherSelector = await approvalSelector();
+  expect(otherSelector.closest(".ant-select")).toHaveTextContent(
+    zh.projects.tasks.approvalMode.approve_for_me,
+  );
   const push = api.approvalEvents.mock.calls[0][0];
   await act(async () =>
     push({ ...fixture.approval_policy, mode: "full_access", revision: 3 }),
   );
   await act(async () => push(fixture.approval_policy));
-  expect(selector.closest(".ant-select")).toHaveTextContent(
+  expect(otherSelector.closest(".ant-select")).toHaveTextContent(
     zh.projects.tasks.approvalMode.full_access,
   );
   expect(api.updateApprovalPolicy).toHaveBeenCalledTimes(1);
@@ -2943,9 +2991,7 @@ it("审批未知回执在只读刷新后仍保留可见重试，确认较新全�
   );
   const user = userEvent.setup();
   mount();
-  const selector = await screen.findByRole("combobox", {
-    name: zh.projects.tasks.approvalMode.label,
-  });
+  const selector = await approvalSelector();
   await waitFor(() => expect(selector).toBeEnabled());
   await user.click(selector);
   await user.click(
@@ -2981,9 +3027,7 @@ it("审批未知回执在只读刷新后仍保留可见重试，确认较新全�
 it("新任务接收独立账号推送，无任务正文和旧资源门禁也能同步审批模式", async () => {
   api.resources.mockRejectedValue(new Error("Legacy resources unavailable"));
   mount();
-  const selector = await screen.findByRole("combobox", {
-    name: zh.projects.tasks.approvalMode.label,
-  });
+  const selector = await approvalSelector();
   await waitFor(() => expect(selector).toBeEnabled());
   await act(async () =>
     api.approvalEvents.mock.calls[0][0]({

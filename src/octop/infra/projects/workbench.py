@@ -253,6 +253,11 @@ async def tree(scope: WorkbenchScope, path: str) -> list[WorkspaceEntry]:
         if not name or name.casefold() == ".octop":
             continue
         child = name if relative == "." else f"{relative}/{name}"
+        try:
+            await public_path(scope, child)
+        except OctopError:
+            # Do not offer a symlink target outside the workspace as a file reference.
+            continue
         rows.append(
             WorkspaceEntry(
                 path=child,

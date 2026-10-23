@@ -30,13 +30,15 @@ function catalog() {
 }
 
 describe("sidebarNavLayout", () => {
-  it("keeps the default catalog when no layout is saved", () => {
+  it("defaults to one conversation entry while retaining legacy chat in the customizer", () => {
     const sections = catalog();
-    expect(sectionsFromLayout(sections, null)).toBe(sections);
+    expect(
+      sectionsFromLayout(sections, null)[0].items.map((item) => item.key),
+    ).toEqual(["box-projects", "experts", "tasks", "token-usage"]);
+    expect(sections[0].items.some((item) => item.key === "chat")).toBe(true);
     const editor = editorFromCatalog(sections, null);
     expect(editor.ungrouped).toEqual([
       "box-projects",
-      "chat",
       "experts",
       "tasks",
       "token-usage",
@@ -46,7 +48,7 @@ describe("sidebarNavLayout", () => {
       "control",
       "admin",
     ]);
-    expect(editor.hidden).toEqual([]);
+    expect(editor.hidden).toEqual(["chat"]);
   });
 
   it("omits empty groups and hidden items from the sidebar", () => {
@@ -121,16 +123,16 @@ describe("sidebarNavLayout", () => {
     const next = deleteGroup(editor, "settings");
     expect(next.groups.map((group) => group.id)).toEqual(["control", "admin"]);
     expect(next.ungrouped.slice(0, 2)).toEqual(["personalization", "channels"]);
-    expect(next.ungrouped).toContain("chat");
+    expect(next.hidden).toContain("chat");
   });
 
   it("places an item before another and can hide it", () => {
     const editor = editorFromCatalog(catalog(), null);
-    const moved = placeItem(editor, "tasks", { kind: "ungrouped" }, "chat");
+    const moved = placeItem(editor, "tasks", { kind: "ungrouped" }, "experts");
     expect(moved.ungrouped.slice(0, 3)).toEqual([
       "box-projects",
       "tasks",
-      "chat",
+      "experts",
     ]);
     const hidden = placeItem(moved, "tasks", { kind: "hidden" }, null);
     expect(hidden.ungrouped).not.toContain("tasks");
@@ -139,6 +141,21 @@ describe("sidebarNavLayout", () => {
     expect(layout.items.find((item) => item.key === "tasks")?.hidden).toBe(
       true,
     );
+  });
+
+  it("can restore the default-hidden legacy entry without losing its route", () => {
+    const sections = catalog();
+    const editor = placeItem(
+      editorFromCatalog(sections, null),
+      "chat",
+      { kind: "ungrouped" },
+      "experts",
+    );
+    const restored = sectionsFromLayout(sections, layoutFromEditor(editor));
+    expect(restored[0].items.find((item) => item.key === "chat")).toMatchObject(
+      { path: "/chat", labelKey: "nav.legacyChat" },
+    );
+    expect(editor.hidden).not.toContain("chat");
   });
 
   it("omits nav items and built-in groups the user cannot access", () => {

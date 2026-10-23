@@ -370,6 +370,7 @@
   }
 }
 .conversation {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -530,4 +531,244 @@
 .taskKnowledgePreviewRich {
   height: calc(100vh - 240px);
   min-height: 320px;
+}
+
+.workspaceTasks {
+  --task-workbench-width: clamp(310px, 28vw, 440px);
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr);
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+
+  .taskSidebar {
+    gap: 0;
+    padding: 12px 9px 8px;
+    border-right: 1px solid var(--fn-border-secondary);
+    background: var(--fn-bg-secondary);
+    max-height: none;
+    overflow: hidden;
+  }
+  .conversation {
+    position: relative;
+    height: 100%;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    background: var(--fn-bg-container);
+    &:has([data-task-workbench-docked]:not([hidden])) {
+      padding-right: var(--task-workbench-width);
+      .workbenchLauncher {
+        right: calc(var(--task-workbench-width) + 55px);
+      }
+    }
+  }
+  .messages {
+    padding: 18px 24px;
+    min-height: 80px;
+  }
+  .turn {
+    max-width: 880px;
+    margin: 0 auto 26px;
+  }
+  .userMessage {
+    max-width: 85%;
+    padding: 9px 13px;
+    border-radius: 12px;
+  }
+  .composer {
+    padding: 10px 18px 12px;
+    border-top: 0;
+  }
+  .taskItem {
+    gap: 0;
+    padding: 10px;
+    border-radius: 7px;
+    strong {
+      font-size: 13px;
+    }
+    small {
+      font-size: 12px;
+      margin-top: 4px;
+    }
+  }
+}
+.taskListHeading {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 5px 7px;
+  > span {
+    flex: 1;
+  }
+}
+.taskSearchRow {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  padding: 0 2px 10px;
+  min-width: 0;
+  > :first-child {
+    flex: 1;
+    min-width: 0;
+  }
+}
+.taskFilterPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(270px, calc(100vw - 50px));
+}
+.taskRows {
+  min-height: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.conversationNavigation {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 18px;
+  color: var(--fn-text-secondary);
+  font-size: 12px;
+  border-bottom: 1px solid var(--fn-border-secondary);
+}
+.conversationBody {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  &[hidden] {
+    display: none;
+  }
+}
+.conversationHeader {
+  position: sticky;
+  top: -18px;
+  z-index: 2;
+  background: var(--fn-bg-container);
+  padding: 10px 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--fn-border-secondary);
+  align-items: center !important;
+  > :first-child {
+    min-width: 0;
+    flex: 1;
+  }
+  h5 {
+    margin: 0 !important;
+    font-size: 14px;
+  }
+}
+.headerActions {
+  margin-left: 90px;
+  flex-shrink: 0;
+}
+.workbenchLauncher {
+  position: absolute;
+  top: 40px;
+  right: 55px;
+  z-index: 4;
+}
+@media (max-width: 1280px) {
+  .workspaceTasks
+    .conversation:has([data-task-workbench-docked]:not([hidden])) {
+    padding-right: 0;
+    .workbenchLauncher {
+      right: 55px;
+    }
+  }
+}
+.conversationTools {
+  max-width: min(340px, calc(100vw - 48px));
+  max-height: 65dvh;
+  overflow: auto;
+  > div {
+    width: 100%;
+  }
+}
+.mobileListButton {
+  display: none;
+}
+.composerRuntime {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  &:empty {
+    display: none;
+  }
+  :global(:is(.ant-btn, .octop-btn)) {
+    font-size: 12px;
+    height: 26px;
+  }
+}
+.composerAdd {
+  display: inline-flex;
+  align-items: center;
+}
+.queuePopover {
+  width: min(350px, calc(100vw - 48px));
+  max-height: 45dvh;
+  overflow: auto;
+}
+@media (max-width: 1100px) {
+  .workspaceTasks {
+    grid-template-columns: 220px minmax(0, 1fr);
+    height: 100%;
+    .conversation {
+      height: 100%;
+      min-height: 0;
+    }
+    .messages {
+      padding: 14px 16px;
+    }
+    .composer {
+      padding: 8px 12px 10px;
+    }
+  }
+}
+@media (max-width: 700px) {
+  .mobileListButton {
+    display: inline-flex;
+  }
+  .workspaceTasks {
+    display: flex;
+    flex-direction: column;
+    .taskSidebar {
+      display: none;
+    }
+    .conversation {
+      flex: 1;
+      width: 100%;
+    }
+    &[data-list-open="true"] {
+      .taskSidebar {
+        display: flex;
+        flex: 1;
+        width: 100%;
+        border-right: 0;
+      }
+      .conversation {
+        display: none;
+      }
+    }
+    .composer {
+      padding: 8px;
+    }
+    .messages {
+      padding: 12px;
+    }
+  }
+  .conversationNavigation {
+    padding: 4px 8px;
+  }
+  .headerActions {
+    max-width: 42%;
+  }
 }

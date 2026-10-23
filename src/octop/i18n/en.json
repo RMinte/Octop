@@ -1058,7 +1058,7 @@
     "expert_memory_search_description": "Search the current expert memory within the authorized general and current work scopes.",
     "expert_memory_get_description": "Read a memory returned by the current expert memory search.",
     "task_team_prompt": "Use this task’s frozen team synchronously. Every member works only in the task’s project directory with the current user’s authorized capabilities. Do not use expert directories or launch or message legacy expert conversations. Delegate using the current roster and preserve member identity. The host coordinates commands and human approval.",
-    "task_file_paths": "File tools use / as the virtual root of the current Task workspace, for example /notes.txt. Use the server host directory for terminal or execute commands; do not prepend that host directory to file-tool paths. The client directory is a saved reference, not a host filesystem location."
+    "task_file_paths": "File tools use / as the virtual root of the current Task workspace, for example /notes.txt. Use the server host directory for terminal or execute commands; do not prepend that host directory to file-tool paths. The client directory is a saved reference, not a host filesystem location. An @relative/path reference (or @\"path with spaces\") in a user message names a file in this Task's server workspace. Read it with file tools when needed; the reference does not upload or execute a file or grant access to the client directory."
   },
   "cli": {
     "unified_tasks": {

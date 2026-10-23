@@ -1,6 +1,7 @@
 import { taskTransport } from "../taskTransport";
 import { getProjectTaskSocket } from "./projectTaskSocket";
 import type { ReasoningCapability } from "../types/provider";
+import type { FileTreeNode } from "../types";
 
 export interface PackageProjectSkill {
   package_id: string;
@@ -90,6 +91,19 @@ export function createProjectsApi(hostID: string | null = null) {
       }),
     resources: () =>
       request<ProjectResources>("/projects/resources", { cache: "no-store" }),
+    workspaceTree: (
+      id: string,
+      directory: string,
+      revision: number,
+      signal?: AbortSignal,
+    ) =>
+      request<FileTreeNode[]>(
+        `/projects/${encodeURIComponent(id)}/workspace/tree-children?${query({
+          path: directory,
+          expected_project_revision: String(revision),
+        })}`,
+        { cache: "no-store", signal },
+      ),
     create: (body: ProjectFields, idempotencyKey: string) =>
       request<Project>("/projects", {
         method: "POST",
@@ -396,6 +410,8 @@ export interface TaskResources extends ProjectResources {
     is_shared?: boolean;
     is_owner?: boolean;
     member_ids?: string[];
+    default_skills?: ProjectSkill[];
+    has_workspace_skills?: boolean;
   }[];
   approval: TaskApprovalCapabilities;
   models: {

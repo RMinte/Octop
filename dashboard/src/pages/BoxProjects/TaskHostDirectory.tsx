@@ -39,11 +39,14 @@ const supported = (value?: BridgeTaskCapabilities) =>
   value.capabilities.task_ws;
 export default function TaskHostDirectory({
   hostID,
+  onNavigate,
 }: {
   hostID: string | null;
+  onNavigate?: (url: string) => void;
 }) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
+  const routerNavigate = useNavigate();
+  const navigate = onNavigate ?? routerNavigate;
   const [hosts, setHosts] = useState<BridgeConnection[]>([]);
   const [capabilities, setCapabilities] = useState<
     Record<string, BridgeTaskCapabilities>

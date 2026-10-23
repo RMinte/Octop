@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Input, Modal } from "antd";
+import { WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { apiErrorMessage } from "../../utils/apiError";
@@ -11,6 +12,7 @@ export default function TaskPromptPolish({
   modelRef,
   disabled,
   onApply,
+  compact = false,
 }: {
   text: string;
   taskID?: string;
@@ -18,6 +20,7 @@ export default function TaskPromptPolish({
   modelRef?: string;
   disabled: boolean;
   onApply: (text: string) => void;
+  compact?: boolean;
 }) {
   const { t } = useTranslation();
   const { taskExtrasApi } = useTaskHost();
@@ -58,11 +61,15 @@ export default function TaskPromptPolish({
     <>
       <Button
         size="small"
+        type={compact ? "text" : "default"}
+        icon={compact ? <WandSparkles size={14} /> : undefined}
         disabled={disabled || !text.trim()}
         loading={busy}
         onClick={() => void polish()}
       >
-        {t("projects.tasks.polish.title")}
+        {t(
+          compact ? "projects.composer.polish" : "projects.tasks.polish.title",
+        )}
       </Button>
       {error && (
         <Alert

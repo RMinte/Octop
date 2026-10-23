@@ -48,6 +48,32 @@ def _array(value: Any) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def composer_skill_defaults(
+    row: Any, config: dict[str, Any], workspace: BackendWorkspace, available: list[Any]
+) -> tuple[list[dict[str, str]], bool]:
+    """Expose public Skill references, without reading persona or Skill content."""
+    packages = set(_array(row.skill_package_ids or config.get("skill_package_ids")))
+    disabled = set(_array(config.get("skills_disabled")))
+    skills = [
+        {"package_id": skill.package_id, "slug": skill.slug}
+        for skill in available
+        if skill.package_id in packages and skill.slug not in disabled
+    ]
+    mounted = {skill["slug"] for skill in skills}
+    for root in dict.fromkeys([workspace.system_rel("skills"), "skills"]):
+        for entry in workspace.list_dir(root) or []:
+            path = str(entry.get("path", ""))
+            slug = PurePosixPath(path).name
+            if (
+                entry.get("is_dir")
+                and slug not in disabled
+                and slug not in mounted
+                and workspace.exists(f"{path}/SKILL.md")
+            ):
+                return skills, True
+    return skills, False
+
+
 def expert_configuration(
     services: SharedServices, owner_id: int, expert_id: str
 ) -> tuple[Any, dict[str, Any]]:

@@ -102,6 +102,14 @@ def test_denies_retired_agentcomputer_protocol() -> None:
             assert not is_tunnel_path_allowed(method, "/api/agentcomputer/v1" + path)
 
 
+def test_project_composer_file_picker_is_read_only() -> None:
+    path = "/api/projects/project_01/workspace/tree-children"
+    assert is_tunnel_path_allowed("GET", path)
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        assert not is_tunnel_path_allowed(method, path)
+    assert not is_tunnel_path_allowed("GET", path.replace("tree-children", "file"))
+
+
 def test_unified_projects_and_tasks_have_product_operation_allowlist() -> None:
     for method, path in (
         ("GET", "/api/projects/resources"),

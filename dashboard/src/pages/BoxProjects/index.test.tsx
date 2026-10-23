@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import zh from "../../locales/zh.json";
 
@@ -58,7 +58,7 @@ vi.mock("../Experts/components/RootDirSelect", () => ({
 vi.mock("../../utils/antdMessage", () => ({ message: { success: vi.fn() } }));
 
 import { request } from "../../api/request";
-import BoxProjectsPage from "./index";
+import BoxProjectsPage, { ProjectsManager } from "./index";
 import type { Project } from "../../api/modules/projects";
 
 const api = vi.mocked(request, true);
@@ -208,6 +208,52 @@ function mount(path: string) {
     </MemoryRouter>,
   );
 }
+
+function CurrentLocation() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname}</output>;
+}
+
+it("creates a project with the complete embedded editor without leaving the conversation route", async () => {
+  const user = userEvent.setup();
+  const onChanged = vi.fn();
+  render(
+    <MemoryRouter initialEntries={["/conversations/task_a"]}>
+      <CurrentLocation />
+      <ProjectsManager
+        embedded
+        editorRequest={{ project: "new", revision: 1 }}
+        onChanged={onChanged}
+      />
+    </MemoryRouter>,
+  );
+  const field = await screen.findByLabelText("项目名称");
+  await user.type(field, "工作空间项目");
+  await user.click(screen.getByRole("tab", { name: "行动指南" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "行动指南" }),
+    "保留原有项目配置",
+  );
+  await user.click(screen.getByRole("button", { name: "保存项目" }));
+  expect(
+    await screen.findByRole("heading", { name: "工作空间项目" }),
+  ).toBeTruthy();
+  expect(screen.getByTestId("location").textContent).toBe(
+    "/conversations/task_a",
+  );
+  expect(onChanged).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("textbox", { name: "任务消息" })).toBeNull();
+  const sent = api.mock.calls.find(
+    ([url, init]) => url === "/projects" && init?.method === "POST",
+  );
+  expect(JSON.parse(sent![1]!.body as string)).toMatchObject({
+    instructions: "保留原有项目配置",
+    memory_enabled: true,
+    team_enabled: false,
+  });
+  expect(screen.getByRole("button", { name: "归档项目" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "删除项目" })).toBeTruthy();
+});
 
 describe("独立项目正式页面", () => {
   it("项目可归档和恢复，归档期间禁止新任务及输入", async () => {

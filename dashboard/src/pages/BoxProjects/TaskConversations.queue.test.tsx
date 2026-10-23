@@ -7,8 +7,9 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Modal } from "antd";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   projectTasksApi,
   type TaskDetail,
@@ -74,6 +75,7 @@ vi.mock("react-i18next", () => {
 });
 
 const api = vi.mocked(projectTasksApi, true);
+afterEach(() => act(() => Modal.destroyAll()));
 const timestamp = "2026-10-15T00:00:00Z";
 const policy = {
   mode: "ask_for_approval" as const,
@@ -310,11 +312,31 @@ async function mount() {
 }
 
 const composer = () => screen.getByRole("textbox", { name: "任务消息" });
-const queue = () => screen.getByLabelText("排队中的消息");
-async function enqueue(text: string) {
+const queue = () => screen.getByRole("list", { name: "排队中的消息" });
+async function openQueue() {
+  await userEvent.click(composer());
+  await waitFor(() =>
+    expect(screen.queryByRole("list", { name: "排队中的消息" })).toBeNull(),
+  );
+  await userEvent.click(
+    await screen.findByRole("button", { name: /^待发送 \d+$/ }),
+  );
+  await screen.findByRole("list", { name: "排队中的消息" });
+}
+async function reclaimDialog() {
+  // Antd's test IDs are fixed; the open Popover otherwise shares the Modal's labelledby ID.
+  const title = await screen.findByText("替换当前草稿？", {
+    selector: ".ant-modal-title",
+  });
+  const modal = title.closest<HTMLElement>('[role="dialog"]');
+  expect(modal).toHaveAttribute("aria-modal", "true");
+  return modal!;
+}
+async function enqueue(text: string, showQueue = true) {
   fireEvent.change(composer(), { target: { value: text } });
   await userEvent.click(screen.getByRole("button", { name: "排队" }));
   await waitFor(() => expect(composer()).toHaveValue(""));
+  if (showQueue) await openQueue();
 }
 
 describe("项目任务消息队列", () => {
@@ -369,10 +391,18 @@ describe("项目任务消息队列", () => {
     await mount();
     expect(screen.getByRole("button", { name: "排队" })).toBeDisabled();
     await enqueue("先整理结果");
-    expect(screen.getByRole("button", { name: "压缩记忆" })).toBeDisabled();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: zh.projects.workspace.conversationTools,
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "压缩记忆" }),
+    ).toBeDisabled();
     fireEvent.change(composer(), { target: { value: "然后补充结论" } });
     fireEvent.keyDown(composer(), { key: "Enter", code: "Enter" });
     await waitFor(() => expect(composer()).toHaveValue(""));
+    await openQueue();
     expect(within(queue()).getByText("先整理结果")).toBeInTheDocument();
     expect(within(queue()).getByText("然后补充结论")).toBeInTheDocument();
     expect(api.send).not.toHaveBeenCalled();
@@ -391,6 +421,7 @@ describe("项目任务消息队列", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "排队" }));
     expect(screen.queryByAltText(image.name)).not.toBeInTheDocument();
+    await openQueue();
     await userEvent.click(within(queue()).getByTitle("取回编辑"));
     expect(screen.getByAltText(image.name)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "下载" })).toHaveAttribute(
@@ -460,10 +491,11 @@ describe("项目任务消息队列", () => {
   it("最多排队十条，超过上限时保留当前草稿", async () => {
     await mount();
     for (let index = 1; index <= 10; index += 1)
-      await enqueue(`排队第${index}条`);
+      await enqueue(`排队第${index}条`, false);
     fireEvent.change(composer(), { target: { value: "第十一条草稿" } });
     await userEvent.click(screen.getByRole("button", { name: "排队" }));
     expect(composer()).toHaveValue("第十一条草稿");
+    await openQueue();
     expect(within(queue()).getAllByTitle("取回编辑")).toHaveLength(10);
     expect(await screen.findByText(zh.chat.queue.full)).toBeInTheDocument();
     expect(api.send).not.toHaveBeenCalled();
@@ -479,8 +511,8 @@ describe("项目任务消息队列", () => {
     expect(within(queue()).queryByText("可以移除")).not.toBeInTheDocument();
     fireEvent.change(composer(), { target: { value: "未完成草稿" } });
     await userEvent.click(within(queue()).getByTitle("取回编辑"));
-    const modal = await screen.findByRole("dialog");
-    expect(modal).toHaveAccessibleName("替换当前草稿？");
+    const modal = await reclaimDialog();
+    expect(modal).toHaveTextContent("替换当前草稿？");
     expect(composer()).toHaveValue("未完成草稿");
     await userEvent.click(
       within(modal).getByRole("button", { name: /确\s*认/ }),
@@ -494,7 +526,7 @@ describe("项目任务消息队列", () => {
     await mount();
     await enqueue("需要重试的追问");
     await publish("task_a", "failed");
-    const retry = await screen.findByRole("button", { name: "重试发送" });
+    await screen.findByRole("button", { name: "重试发送" });
     expect(within(queue()).getByText("需要重试的追问")).toBeInTheDocument();
     expect(api.send).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "重新尝试" })).toBeDisabled();
@@ -504,7 +536,9 @@ describe("项目任务消息队列", () => {
     const requestID = api.send.mock.calls[0][1].request_id;
     await publish("task_a", "completed");
     expect(api.send).toHaveBeenCalledTimes(1);
-    await userEvent.click(retry);
+    await userEvent.click(
+      within(queue()).getByRole("button", { name: "重试发送" }),
+    );
     await waitFor(() => expect(api.send).toHaveBeenCalledTimes(2));
     expect(api.send.mock.calls[1][1].request_id).toBe(requestID);
     await waitFor(() =>
@@ -524,6 +558,7 @@ describe("项目任务消息队列", () => {
     await userEvent.click(screen.getByRole("button", { name: "停止回复" }));
     expect(api.cancel).toHaveBeenCalledWith("task_a", "turn_task_a_1");
     expect(api.send).not.toHaveBeenCalled();
+    await openQueue();
     expect(within(queue()).getByText("停止后继续")).toBeInTheDocument();
     await publish("task_a", "cancelled");
     await waitFor(() => expect(api.send).toHaveBeenCalledTimes(1));
@@ -574,7 +609,7 @@ describe("项目任务消息队列", () => {
     await enqueue("原任务待取回消息");
     fireEvent.change(composer(), { target: { value: "原任务草稿" } });
     await userEvent.click(within(queue()).getByTitle("取回编辑"));
-    const modal = await screen.findByRole("dialog");
+    const modal = await reclaimDialog();
     await userEvent.click(screen.getByRole("button", { name: /另一项任务/ }));
     await waitFor(() => expect(api.open).toHaveBeenCalledWith("task_b"));
     await waitFor(() => expect(composer()).toBeEnabled());
@@ -584,6 +619,7 @@ describe("项目任务消息队列", () => {
     );
     expect(composer()).toHaveValue("新任务草稿");
     await userEvent.click(screen.getByRole("button", { name: /第一项任务/ }));
+    await openQueue();
     await waitFor(() =>
       expect(within(queue()).getByText("原任务待取回消息")).toBeInTheDocument(),
     );

@@ -25,6 +25,14 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 
 本人团队固定本轮 roster，主持人和每个成员分别装配人设、能力及记忆，均使用当前 Task 的项目工作区。成员公开结果保留 `speaker_agent_id`、`speaker_name`，不混入主持人 reply；实际成员模型用量计入本轮。每次模型和工具调用重查当前专家授权。成员命令和人工审批由主持人协调，保持现有同步团队边界。
 
+### 正式网页工作区与输入快捷入口
+
+`/conversations` 的「项目和任务」工作区集中提供全部会话、项目导航与配置、会话正文和 Task 工作台；窄窗口从顶部项目导航进入。原 `/box-projects` 项目入口仍可用，旧历史、迁移及私人常驻入口保留在更多菜单。此次页面功能对照、真实模型验证与保留边界见[功能保留与验收清单](task-workspace-feature-parity.md)。
+
+新任务草稿的文件选择使用 `GET /api/projects/{project_id}/workspace/tree-children?path=.&expected_project_revision=N`，返回 `WorkspaceEntry[]`，响应禁止缓存。接口仅列出本人项目允许的服务端目录；项目版本过期返回 `PROJECT_REVISION_CONFLICT`，归档或删除中的项目拒绝访问。不创建 Task/Thread，不读取文件正文、客户端目录或专家工作区。已有 Task 使用其工作台 scope/tree 接口；无项目新草稿或项目未关联服务端目录时禁用文件选择，附件仍可使用。`@相对路径` 是模型提示，不代表文件已读取或获得额外权限。
+
+`GET /api/project-tasks/resources` 的 `experts[]` 增加 `default_skills` 和 `has_workspace_skills`，仅包含默认 Skill 引用和额外工作区技能的存在标记。`/Skill` 快捷选择提交完整 `options.skills`：省略/null 继承，空数组明确禁用；相同 slug 的不同来源不能合并。专家工作区技能无法用引用列表表示时，自定义前须确认替换；默认元数据未知时不能用项目列表冒充完整默认配置。
+
 ### Task 高级工作台
 
 工作台从 `GET /api/project-tasks/{task_id}/workbench` 读取真实服务端目录、仅保存的客户端目录、`scope_revision`、`read_only` 和当前权限能力。运行中使用本轮冻结目录，空闲时跟随当前项目；没有项目目录时使用 Task 自己的目录。工作台不会连接专家原目录。
@@ -76,6 +84,7 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 | `DELETE /api/projects/{project_id}` | 停止并确认活动轮次退出后，永久删除项目及全部 Task；停止未确认返回 PROJECT_TASKS_BUSY 并保留数据，可重试；成功返回 204 | 定向验证覆盖以本次删除改造记录为准 |
 | `PATCH /api/projects/{project_id}/archive` | 以 archived 和 expected_revision 归档或恢复项目，保留全部任务及其归档状态 | 定向自动化覆盖 |
 | `GET /api/projects/resources` | 获取可选 Skill、当前用户 MCP 连接和目录浏览范围 | 服务端自动化通过 |
+| `GET /api/projects/{project_id}/workspace/tree-children` | 新任务草稿只读文件选择；必填 expected_project_revision，path 默认为相对目录 `.`，不创建任务 | 定向 HTTP/SQLite 验证通过 |
 
 以上接口均需登录，响应 `Cache-Control: no-store`。其他账号的项目返回 404。项目名称在账号内唯一，重名或编辑版本冲突返回 409。新建与修改仅保存配置；发送任务消息时才实际加载项目选定的 Skill/MCP。
 
@@ -89,7 +98,7 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 
 项目通过“添加技能”打开与专家复用的技能目录：提供为你推荐、近期飙升、下载热榜、最近上新、搜索、详情和已安装技能选择。榜单复用 `GET /api/skills/hub/rankings?type=all`，搜索复用 `GET /api/skills/hub/search`。SkillHub 选择项以 `{source: "skillhub", slug, name, description}` 保存，已安装项使用 `{package_id, slug}`。两种来源可多选并回显；失败显示重试入口。保存 SkillHub 引用不会下载或执行技能，也不会创建专家。
 
-页面每次进入先展示当前账号在本标签页保存的列表缓存，再通过项目独立同步游标获取变化；恢复前台、恢复网络和手动刷新也会同步。创建或修改成功后先应用写入响应，再同步补齐其他变化，不重复获取完整列表和详情。项目详情默认打开任务会话，可直接输入需求创建任务、在同一任务内追问、打开历史和停止回复。项目配置保留在同名页签中。
+页面每次进入先展示当前账号在本标签页保存的列表缓存，再通过项目独立同步游标获取变化；恢复前台、恢复网络和手动刷新也会同步。创建或修改成功后先应用写入响应，再同步补齐其他变化，不重复获取完整列表和详情。正式工作区通过项目导航打开项目概览、筛选项目会话或在该项目中新建会话；完整配置表单提供基本信息、能力与协作、行动指南三组设置。已有 Task 继续同一会话，保留历史、停止和恢复操作。
 
 
 项目响应包含 `archived`，新项目默认为 false。项目归档入口为 `PATCH /api/projects/{project_id}/archive`，请求体例如 `{"archived":true,"expected_revision":3}`；恢复时传 false。归档前须停止项目内所有排队或运行中的任务，否则返回 `409 PROJECT_TASKS_BUSY`；归档项目中的任务仍可读取历史，新的任务、追问及重试返回 `409 PROJECT_ARCHIVED`。项目及任务各自的归档状态独立，项目恢复后仍需单独恢复已归档任务才能继续对应会话。归档/恢复与项目版本递增和同步记录原子提交；不删除任务或工作目录文件。SQLite 和 PostgreSQL schema 40 为项目增加归档字段，现有项目默认未归档，不修改旧任务归档状态。

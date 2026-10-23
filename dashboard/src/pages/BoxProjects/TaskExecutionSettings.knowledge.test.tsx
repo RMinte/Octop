@@ -112,7 +112,7 @@ describe("任务本轮知识库设置", () => {
       <Settings changed={changed} initial={{ plugins: [] }} />,
     );
     expect(knowledge.list).not.toHaveBeenCalled();
-    await user.click(screen.getByText("本轮设置"));
+    await user.click(screen.getByRole("button", { name: "本轮设置" }));
     await screen.findByText(/发送时使用我默认开启的知识库/);
     await waitFor(() => expect(knowledge.list).toHaveBeenCalledWith());
     expect(knowledge.getCapability).toHaveBeenCalledWith();
@@ -136,7 +136,7 @@ describe("任务本轮知识库设置", () => {
       knowledge_base_ids: ["owned-default", "shared-default"],
     });
     await user.keyboard("{Escape}");
-    const clear = view.container.querySelector(".ant-select-clear");
+    const clear = screen.getByRole("dialog").querySelector(".ant-select-clear");
     expect(clear).not.toBeNull();
     fireEvent.mouseDown(clear!);
     expect(changed).toHaveBeenLastCalledWith({
@@ -149,7 +149,7 @@ describe("任务本轮知识库设置", () => {
     view.unmount();
 
     render(<Settings initial={saved} changed={changed} />);
-    await user.click(screen.getByText("本轮设置"));
+    await user.click(screen.getByRole("button", { name: "本轮设置" }));
     await waitFor(() =>
       expect(
         screen.getByRole("switch", { name: "为本轮选择知识库" }),
@@ -176,8 +176,10 @@ describe("任务本轮知识库设置", () => {
         changed={changed}
       />,
     );
-    await user.click(screen.getByText("本轮设置"));
-    expect(await screen.findByText("知识库暂不可读取")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "本轮设置" }));
+    await waitFor(() =>
+      expect(screen.getByText("知识库暂不可读取")).toBeVisible(),
+    );
     expect(
       screen.getByRole("switch", { name: "为本轮选择知识库" }),
     ).toBeDisabled();
@@ -189,7 +191,7 @@ describe("任务本轮知识库设置", () => {
     const user = userEvent.setup();
     const changed = vi.fn();
     render(<Settings changed={changed} />);
-    await user.click(screen.getByText("本轮设置"));
+    await user.click(screen.getByRole("button", { name: "本轮设置" }));
     await waitFor(() =>
       expect(
         screen.getByRole("switch", { name: "为本轮选择知识库" }),

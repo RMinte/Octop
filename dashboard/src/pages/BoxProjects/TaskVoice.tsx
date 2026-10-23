@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Button } from "antd";
+import { Button, Tooltip } from "antd";
 import { Mic, Square, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { isSttAvailable, useVoiceInput } from "../../hooks/useVoiceInput";
@@ -9,26 +9,36 @@ import { useOptionalVoiceOutputContext } from "../../context/VoiceOutputContext"
 export function TaskVoiceInput({
   disabled,
   onText,
+  compact = false,
 }: {
   disabled: boolean;
   onText: (text: string) => void;
+  compact?: boolean;
 }) {
   const { t } = useTranslation();
   const { recording, transcribing, toggle } = useVoiceInput(onText);
+  const label = t(
+    transcribing
+      ? "voice.transcribing"
+      : recording
+      ? "projects.tasks.workbench.stopVoice"
+      : "projects.tasks.workbench.voiceInput",
+  );
   return (
-    <Button
-      icon={recording ? <Square size={15} /> : <Mic size={15} />}
-      danger={recording}
-      loading={transcribing}
-      disabled={(disabled && !recording) || !isSttAvailable()}
-      onClick={toggle}
-    >
-      {t(
-        recording
-          ? "projects.tasks.workbench.stopVoice"
-          : "projects.tasks.workbench.voiceInput",
-      )}
-    </Button>
+    <Tooltip title={compact ? label : undefined}>
+      <Button
+        size={compact ? "small" : "middle"}
+        type={compact ? "text" : "default"}
+        aria-label={label}
+        icon={recording ? <Square size={15} /> : <Mic size={15} />}
+        danger={recording}
+        loading={transcribing}
+        disabled={(disabled && !recording) || !isSttAvailable()}
+        onClick={toggle}
+      >
+        {(!compact || recording) && label}
+      </Button>
+    </Tooltip>
   );
 }
 export function TaskVoiceRead({ id, text }: { id: string; text: string }) {

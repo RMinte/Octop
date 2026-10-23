@@ -1,7 +1,13 @@
 import TaskHostBoundary from "./TaskHostBoundary";
 import { useTaskHost } from "../../context/TaskHostContext";
 import TaskHostDirectory from "./TaskHostDirectory";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Alert,
   Button,
@@ -47,7 +53,9 @@ import styles from "./index.module.less";
 import TaskConversations from "./TaskConversations";
 import { useProjectList } from "./useProjectLists";
 import { useTaskMessageQueue } from "./useTaskMessageQueue";
+import type { TaskMessageQueue } from "./useTaskMessageQueue";
 import ProjectSkillsField, { projectSkillKey } from "./ProjectSkillsField";
+import workspaceStyles from "./Workspace.module.less";
 
 const EMPTY: ProjectFields = {
   name: "",
@@ -69,17 +77,86 @@ export default function BoxProjectsPage() {
   const hostID = params.get("host_id");
   return (
     <TaskHostBoundary key={hostID ?? "local"} hostID={hostID}>
-      <ProjectsBody />
+      <ProjectsManager />
     </TaskHostBoundary>
   );
 }
-function ProjectsBody() {
+interface ProjectManagerProps {
+  embedded?: boolean;
+  initialProjectID?: string | null;
+  editorRequest?: { project: Project | "new"; revision: number };
+  queue?: TaskMessageQueue;
+  onChanged?: () => void;
+  onRemoved?: (projectID: string) => void;
+  onOpenConversation?: (
+    taskID: string | null,
+    projectID: string | null,
+  ) => void;
+}
+
+function EmbeddedProjectShell({
+  title,
+  actions,
+  children,
+}: {
+  title: string;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className={workspaceStyles.manager}>
+      <div className={workspaceStyles.managerHeading}>
+        <strong>{title}</strong>
+        {actions}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** Reuse the complete project editor in the conversation workspace. */
+export function ProjectsManager({
+  embedded = false,
+  initialProjectID = null,
+  editorRequest,
+  queue: sharedQueue,
+  onChanged,
+  onRemoved,
+  onOpenConversation,
+}: ProjectManagerProps = {}) {
   const { projectsApi, hostID } = useTaskHost();
   const { t } = useTranslation();
-  const taskQueue = useTaskMessageQueue();
+  const localQueue = useTaskMessageQueue();
+  const taskQueue = sharedQueue ?? localQueue;
+  const { projectID: routeProjectID } = useParams<{ projectID: string }>();
+  const [managedProjectID, setManagedProjectID] = useState(initialProjectID);
+  const [managedArchived, setManagedArchived] = useState(false);
+  const projectID = embedded ? managedProjectID : routeProjectID;
+  useEffect(() => {
+    if (embedded) setManagedProjectID(initialProjectID);
+  }, [embedded, initialProjectID]);
   const rawNavigate = useNavigate();
   const navigate = useCallback(
     (url: string) => {
+      if (embedded) {
+        const target = new URL(url, window.location.origin);
+        if (target.pathname.startsWith("/conversations")) {
+          const id = target.pathname.split("/")[2];
+          onOpenConversation?.(
+            id ? decodeURIComponent(id) : null,
+            target.searchParams.get("project_id"),
+          );
+          return;
+        }
+        if (target.pathname.startsWith("/box-projects")) {
+          const id = target.pathname.split("/")[2];
+          setManagedProjectID(id ? decodeURIComponent(id) : null);
+          setManagedArchived(
+            target.searchParams.get("project_archived") === "true",
+          );
+          return;
+        }
+      }
       if (!hostID) {
         rawNavigate(url);
         return;
@@ -88,13 +165,15 @@ function ProjectsBody() {
       target.searchParams.set("host_id", hostID);
       rawNavigate(`${target.pathname}${target.search}`);
     },
-    [rawNavigate, hostID],
+    [rawNavigate, hostID, embedded, onOpenConversation],
   );
-  const { projectID } = useParams<{ projectID: string }>();
   const timeZone = useServerTimezone();
   const [searchParams, setSearchParams] = useSearchParams();
-  const archivedView = searchParams.get("project_archived") === "true";
-  const standalone = !projectID && searchParams.get("view") === "tasks";
+  const archivedView = embedded
+    ? managedArchived
+    : searchParams.get("project_archived") === "true";
+  const standalone =
+    !embedded && !projectID && searchParams.get("view") === "tasks";
   const {
     items: projects,
     refresh: refreshProjects,
@@ -124,11 +203,15 @@ function ProjectsBody() {
 
   useEffect(() => {
     if (!selected || !!selected.archived === archivedView) return;
+    if (embedded) {
+      setManagedArchived(!!selected.archived);
+      return;
+    }
     const next = new URLSearchParams(searchParams);
     if (selected.archived) next.set("project_archived", "true");
     else next.delete("project_archived");
     setSearchParams(next, { replace: true });
-  }, [selected, archivedView, searchParams, setSearchParams]);
+  }, [selected, archivedView, searchParams, setSearchParams, embedded]);
 
   const refresh = useCallback(async () => {
     const current = ++generation.current.version;
@@ -183,6 +266,20 @@ function ProjectsBody() {
     void loadResources();
   }
 
+  const lastEditorRequest = useRef<number>();
+  useEffect(() => {
+    if (!editorRequest || lastEditorRequest.current === editorRequest.revision)
+      return;
+    lastEditorRequest.current = editorRequest.revision;
+    creation.current = null;
+    setEditing(editorRequest.project);
+    setSaveError("");
+    setDetailTab("general");
+    form.setFieldsValue(
+      editorRequest.project === "new" ? EMPTY : editorRequest.project,
+    );
+  }, [editorRequest, form]);
+
   async function save() {
     if (saving || editing === null) return;
     let values: FormValues;
@@ -221,6 +318,7 @@ function ProjectsBody() {
               expected_revision: editing.revision,
             });
       upsertProject(result);
+      onChanged?.();
       setEditing(null);
       void message.success(t("projects.saved"));
       if (projectID === result.project_id) await refresh();
@@ -243,6 +341,7 @@ function ProjectsBody() {
         selected.revision,
       );
       upsertProject(result);
+      onChanged?.();
     } catch (cause) {
       setError(apiErrorMessage(cause, t("projects.archiveFailed"), t));
     } finally {
@@ -261,6 +360,8 @@ function ProjectsBody() {
           taskQueue.clear(taskID);
       }
       removeProject(deleteTarget.project_id);
+      onRemoved?.(deleteTarget.project_id);
+      onChanged?.();
       setDeleteTarget(null);
       void message.success(t("projects.deleted"));
       navigate("/box-projects");
@@ -287,8 +388,9 @@ function ProjectsBody() {
           (entry) => projectSkillKey(entry) === projectSkillKey(skill),
         )?.name ?? skill.slug;
 
+  const Shell = embedded ? EmbeddedProjectShell : PageShell;
   return (
-    <PageShell
+    <Shell
       title={t("projects.title")}
       subtitle={t("projects.subtitle")}
       actions={
@@ -310,11 +412,15 @@ function ProjectsBody() {
         </Space>
       }
     >
-      <TaskHostDirectory hostID={hostID} />
+      {!embedded && <TaskHostDirectory hostID={hostID} />}
       {error && (
         <Alert type="error" showIcon message={error} className={styles.alert} />
       )}
-      <div className={styles.layout}>
+      <div
+        className={`${styles.layout} ${
+          embedded ? workspaceStyles.managerLayout : ""
+        }`}
+      >
         <aside className={styles.list} aria-label={t("projects.list")}>
           <Button
             type={standalone ? "primary" : "default"}
@@ -411,7 +517,11 @@ function ProjectsBody() {
             </Empty>
           ) : (
             <>
-              <div className={styles.projectHeader}>
+              <div
+                className={`${styles.projectHeader} ${
+                  embedded ? workspaceStyles.managerProjectHeader : ""
+                }`}
+              >
                 <div>
                   <Typography.Title level={3}>{selected.name}</Typography.Title>
                   {selected.description && (
@@ -468,7 +578,7 @@ function ProjectsBody() {
                 <Alert type="info" message={t("projects.archivedHint")} />
               )}
               <Tabs
-                defaultActiveKey="tasks"
+                defaultActiveKey={embedded ? "configuration" : "tasks"}
                 key={selected.project_id}
                 items={[
                   {
@@ -600,7 +710,7 @@ function ProjectsBody() {
                       </div>
                     ),
                   },
-                ]}
+                ].filter((item) => !embedded || item.key !== "tasks")}
               />
             </>
           )}
@@ -858,6 +968,6 @@ function ProjectsBody() {
           />
         </Form>
       </Modal>
-    </PageShell>
+    </Shell>
   );
 }

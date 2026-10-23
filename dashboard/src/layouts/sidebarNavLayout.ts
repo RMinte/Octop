@@ -84,7 +84,12 @@ export function editorFromCatalog(
   layout: SidebarNavLayout | null,
 ): SidebarNavEditorState {
   const base = defaultEditor(sections);
-  if (!layout) return base;
+  if (!layout)
+    return {
+      ...base,
+      ungrouped: base.ungrouped.filter((key) => key !== "chat"),
+      hidden: base.ungrouped.includes("chat") ? ["chat"] : [],
+    };
 
   const catalogKeys = new Set(defaultKeyOrder(base));
   const groups: SidebarNavGroup[] = [];
@@ -196,12 +201,18 @@ function sectionForGroup(
   return null;
 }
 
-/** Sidebar sections. Empty groups are omitted. `null` layout keeps the catalog. */
+/** Sidebar sections. The default keeps legacy chat in the customizer's hidden list. */
 export function sectionsFromLayout(
   sections: NavSection[],
   layout: SidebarNavLayout | null,
 ): NavSection[] {
-  if (!layout) return sections;
+  if (!layout)
+    return sections
+      .map((section) => ({
+        ...section,
+        items: section.items.filter((item) => item.key !== "chat"),
+      }))
+      .filter((section) => section.items.length > 0);
   const byKey = catalogItems(sections);
   const editor = editorFromCatalog(sections, layout);
   const result: NavSection[] = [];

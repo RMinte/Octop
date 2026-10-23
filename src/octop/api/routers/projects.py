@@ -24,6 +24,7 @@ from octop.infra.projects import (
     artifact_library,
     artifacts,
     branches,
+    composer_resources,
     deletion,
     expert_memory_management,
     input_attachments,
@@ -59,6 +60,7 @@ from octop.infra.projects.models import (
 from octop.infra.projects.runtime import ProjectTaskWorker
 from octop.infra.projects.settings import TaskSettings, load_settings
 from octop.infra.projects.usage import TaskContextUsage, read_usage
+from octop.infra.projects.workbench import WorkspaceEntry
 from octop.infra.server import OctopServer
 from octop.infra.users.identity import User
 from octop.infra.utils.locale import resolve_request_locale
@@ -102,6 +104,26 @@ async def project_resources(
 ) -> ProjectResources:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(service.resources, _services(server), user.id)
+
+
+@router.get(
+    "/{project_id}/workspace/tree-children",
+    response_model=list[WorkspaceEntry],
+    summary="列出新任务草稿可引用的项目文件",
+    description="仅列出本人项目的服务端目录，按项目版本校验；不创建任务，不读取客户端目录或专家工作区。path 为项目内相对目录。",
+)
+async def composer_project_files(
+    project_id: str,
+    response: Response,
+    expected_project_revision: int = Query(ge=1),
+    path: str = Query(default=".", max_length=4096),
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> list[WorkspaceEntry]:
+    response.headers["Cache-Control"] = "no-store"
+    return await composer_resources.project_tree(
+        _services(server), user.id, project_id, expected_project_revision, path
+    )
 
 
 @router.post(
