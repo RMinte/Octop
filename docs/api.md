@@ -500,7 +500,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 {"type":"task.create","id":"command-create-001","data":{"project_id":null,"request_id":"message-first-001","prompt":"请概括下一步工作"}}
 ```
 
-命令成功返回 `{"type":"result","id":"command-create-001","data":{...TaskDetail}}`。这表示消息已经保存和排队，不表示生成完成。创建、追问和重试复用当前任务服务，每轮使用最新项目配置及 options。后台仍按原 worker 串行执行，订阅多个任务不会开启并行推理，也不会创建专家。
+命令成功返回 `{"type":"result","id":"command-create-001","data":{...TaskDetail}}`。这表示消息已经保存和排队，不表示生成完成。创建、追问和重试复用当前任务服务，每轮使用最新项目配置及 options。后台最多使用 4 个并发执行槽处理不同 Task，同一 Task 只允许一个活动轮次；等待客户端工具时保存检查点并释放执行槽。订阅多个任务只增加观察范围，不改变执行并发上限，也不会创建专家。
 
 取到 task_id 后订阅；可直接使用创建响应或 REST 首页的 event_cursor：
 
@@ -512,7 +512,7 @@ options 还接受 reasoning_mode（auto/enabled/disabled）和 reasoning_effort�
 
 每条连接最多订阅 32 个不同任务，客户端发往服务端的单帧上限 512 KiB；超限帧以 1009 关闭。客户端只订阅当前打开的正文，其他任务的侧栏摘要仍通过列表增量同步。无关任务不会自动把全部正文发到连接。
 
-服务端沿用约 0.5 秒保存一次的正文/活动状态，检查订阅变化后推送；中间片段可以合并，纯租约心跳不推正文。空闲连接约每 10 秒发送 `{"type":"heartbeat"}`。正文是实时状态推送，不是逐 token 的不可变事件账本。客户端工具通过同一连接下发 tool.call，领取后回传结果，模型继续当前轮次，见接入指南第 12 节。
+生成中的正文按约 100ms 的窗口合并保存，提交后立即唤醒本进程的订阅推送；约 500ms 的数据库检查用于其他进程写入或未发通知变化的兜底。中间片段可以合并，纯租约心跳不推正文；上述窗口不保证固定的客户端接收间隔。空闲连接约每 10 秒发送 `{"type":"heartbeat"}`。正文是实时状态推送，不是逐 token 的不可变事件账本。客户端工具通过同一连接下发 tool.call，领取后回传结果，模型继续当前轮次，见接入指南第 12 节。
 
 ### 断线续接和错误
 

@@ -1,5 +1,20 @@
 # AgentComputer 与 Octop 集成
 
+## 当前接入导航（2026-10-23）
+
+APP 的普通会话统一使用多轮 Task，项目和专家均可选。REST 使用 `/api/projects`、`/api/project-tasks`，消息提交与实时观察使用主连接 `WS /api/project-tasks/ws`。私人 Resident 保留独立身份、会话和 REST 接口，通过同一主连接订阅正文。
+
+远程项目和 Task 已通过 Bridge 复用统一 REST/WS 协议；接入前须核对目标主机的能力与身份，按能力协商结果开放功能。服务端接口已实现不代表运行服务已经升级或 APP 已完成接线与设备验收。旧 `/api/agentcomputer/v1` 及其专用 Bridge 转发已移除。
+
+- [APP 统一会话接线](agentcomputer-unified-conversations-handoff.md)：当前接入范围、REST/WS、TaskRef、工作台与远程 Bridge 接线。
+- [当前接口契约](api.md)、[任务 WebSocket 指南](project-task-websocket.md)与 [WS JSON Schema](project-task-websocket.schema.json)：接口及报文；REST 机器契约和在线文档分别为 `GET /api/openapi.json`、`/api/docs`。
+- [Resident 共用正文流交接](agentcomputer-conversation-stream-handoff.md)：`resident.subscribe/unsubscribe`、正文快照及恢复规则。
+- [外围入口与旧数据方案](unified-task-all-entrypoints-plan.md)：IM/CLI/cron、批迁和远程 Task 的实施与验证范围。
+
+## 历史记录（以下保留历次交付与验证）
+
+> 以下全部章节为历史过程，原有内容、标题与链接保留以便追溯。其中“当前”“最新”“尚未开放”等措辞仅指对应记录日期和当轮范围；“继续使用 `/api/agentcomputer/v1`”“暂不提供远程项目和任务访问”等旧结论均已被上方当前接入契约取代，不作为 APP 接线或能力判断依据。
+
 > 2026-10-23 最新交接：任务/会话统一、可选专家和高级工作台的当前协议见 [APP 统一会话接线](agentcomputer-unified-conversations-handoff.md)。本轮已接批迁工具、IM/CLI/cron 与远程 Task，实现及验证范围见 [外围入口与旧数据方案](unified-task-all-entrypoints-plan.md)。APP 本次仅更新文档，未修改原生源码；真实主库尚未切换。以下历次“当前”状态按其记录日期理解，不恢复 `/api/agentcomputer/v1`。
 
 > 2026-10-15 当前接口收敛：用户确认当前客户端没有使用专用协议，移除 `/api/agentcomputer/v1` 及项目/任务 Bridge 转发，暂不提供远程项目和任务访问。项目与多轮任务仅使用 `/api/projects`、`/api/project-tasks`；已有数据保留。下文专用协议及旧转发的交付记录仅为历史过程，以 [当前接口契约](api.md) 为准。

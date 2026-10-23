@@ -60,6 +60,8 @@ def is_task_tunnel_path_allowed(method: str, path: str) -> bool:
         return False
     if path in {"/api/projects", "/api/project-tasks"}:
         return verb in {"GET", "POST"}
+    if path == "/api/project-tasks/approval-policy":
+        return verb in {"GET", "PUT"}
     if path in {
         "/api/projects/resources",
         "/api/projects/sync",
@@ -120,7 +122,9 @@ def is_task_tunnel_path_allowed(method: str, path: str) -> bool:
         return (
             verb in {"GET", "POST", "DELETE"} if operation == "memory" else verb in {"GET", "POST"}
         )
-    if operation in {"approval-policy", "expert-memory/policy"}:
+    if operation == "approval-policy":
+        return verb == "PUT"
+    if operation == "expert-memory/policy":
         return verb in {"GET", "PATCH"}
     if operation in {
         "messages",

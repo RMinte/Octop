@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from octop.infra.bridge.tunnel_policy import is_tunnel_path_allowed
+import pytest
+
+from octop.infra.bridge.tunnel_policy import is_task_tunnel_path_allowed, is_tunnel_path_allowed
 
 
 def test_allows_agent_list_get() -> None:
@@ -114,3 +116,18 @@ def test_unified_projects_and_tasks_have_product_operation_allowlist() -> None:
         assert is_tunnel_path_allowed(method, path)
     assert not is_tunnel_path_allowed("DELETE", "/api/projects/resources")
     assert not is_tunnel_path_allowed("POST", "/api/project-tasks/task_01DEF/resident/subscribe")
+
+
+@pytest.mark.parametrize(
+    ("path", "allowed_methods"),
+    [
+        ("/api/project-tasks/approval-policy", {"GET", "PUT"}),
+        ("/api/project-tasks/task_01DEF/approval-policy", {"PUT"}),
+        ("/api/project-tasks/task_01DEF/expert-memory/policy", {"GET", "PATCH"}),
+    ],
+)
+def test_policy_methods_match_their_http_contract(path: str, allowed_methods: set[str]) -> None:
+    for method in ("GET", "POST", "PATCH", "PUT", "DELETE", "HEAD"):
+        expected = method in allowed_methods
+        assert is_task_tunnel_path_allowed(method, path) is expected, (method, path)
+        assert is_tunnel_path_allowed(method, path) is expected, (method, path)

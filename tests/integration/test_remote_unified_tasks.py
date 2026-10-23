@@ -13,8 +13,119 @@ from octop.infra.bridge.task_streams import TaskStreamRelay
 from octop.infra.bridge.tasks import RemoteTasks
 from octop.infra.bridge.transport import BridgeSession
 from octop.infra.errors import OctopError
-from tests.support.auth import resolve_user_id
+from tests.support.app import octop_client
+from tests.support.auth import auth_header, bootstrap_admin, resolve_user_id
 from tests.support.http import ws_connect, ws_token
+
+
+async def test_remote_approval_policy_http_updates_only_peer_and_preserves_retries(env, tmp_path):
+    from octop.infra.db.repos.project_tasks import ProjectTaskRow
+    from octop.infra.projects.tasks import now_ms
+
+    client, server, auth = env
+    owner = await resolve_user_id(client, auth, "admin")
+    peer_home = tmp_path / "peer"
+    async with octop_client(peer_home) as (peer_client, peer_server):
+        await bootstrap_admin(peer_client, peer_home, username="peer-owner")
+        peer_auth = await auth_header(peer_client, username="peer-owner")
+        peer_owner = await resolve_user_id(peer_client, peer_auth, "peer-owner")
+        task_id = "remote-policy-task"
+        with peer_server.services.db.transaction() as conn:
+            peer_server.services.project_task_repo.insert(
+                conn,
+                ProjectTaskRow(
+                    task_id,
+                    peer_owner,
+                    None,
+                    "Policy task",
+                    "remote-policy-create",
+                    None,
+                    now_ms(),
+                    now_ms(),
+                    status="completed",
+                ),
+            )
+        connection_id = "approval-peer"
+        for services, uid, username in (
+            (server.services, owner, "peer-owner"),
+            (peer_server.services, peer_owner, "admin"),
+        ):
+            services.bridge_connection_repo.create(
+                connection_id=connection_id,
+                owner_user_id=uid,
+                peer_base_url="http://peer.invalid",
+                peer_username=username,
+                display_name="Policy peer",
+            )
+        local, peer = server.app_runtime.bridge_manager, peer_server.app_runtime.bridge_manager
+
+        async def to_peer(raw):
+            await peer_session.handle_message(raw)
+
+        async def to_local(raw):
+            await local_session.handle_message(raw)
+
+        local_session = BridgeSession(connection_id=connection_id, send_text=to_peer)
+        peer_session = BridgeSession(
+            connection_id=connection_id,
+            send_text=to_local,
+            on_tunnel_request=lambda payload: peer._handle_inbound_tunnel(connection_id, payload),
+        )
+        await local._register_session(connection_id, local_session)
+        await peer._register_session(connection_id, peer_session)
+        policy_path = "/api/project-tasks/approval-policy"
+        proxy_prefix = f"/api/bridge/connections/{connection_id}/task-api"
+        global_url = proxy_prefix + "/project-tasks/approval-policy"
+        task_url = proxy_prefix + f"/project-tasks/{task_id}/approval-policy"
+        initial = (await client.get(policy_path, headers=auth)).json()
+        try:
+            remote_initial = await client.get(global_url, headers=auth)
+            assert remote_initial.status_code == 200, remote_initial.text
+            assert remote_initial.json()["mode"] == "ask_for_approval"
+            body = {
+                "request_id": "remote-global-policy",
+                "expected_revision": remote_initial.json()["revision"],
+                "mode": "full_access",
+            }
+            changed = await client.put(global_url, headers=auth, json=body)
+            assert changed.status_code == 200, changed.text
+            policy = changed.json()
+            assert policy["mode"] == "full_access"
+            assert policy["revision"] == body["expected_revision"] + 1
+            assert (await peer_client.get(policy_path, headers=peer_auth)).json() == policy
+            # The original business request remains idempotent across both HTTP entry points.
+            replay = await client.put(task_url, headers=auth, json=body)
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["approval_policy"] == policy
+            for update, code in (
+                ({**body, "mode": "approve_for_me"}, "TASK_REQUEST_CONFLICT"),
+                ({**body, "request_id": "remote-stale-policy"}, "TASK_APPROVAL_POLICY_CONFLICT"),
+            ):
+                conflict = await client.put(task_url, headers=auth, json=update)
+                assert conflict.status_code == 409, conflict.text
+                assert conflict.json()["error"]["code"] == code
+            task_body = {
+                "request_id": "remote-task-policy",
+                "expected_revision": policy["revision"],
+                "mode": "approve_for_me",
+            }
+            task_changed = await client.put(task_url, headers=auth, json=task_body)
+            assert task_changed.status_code == 200, task_changed.text
+            policy = task_changed.json()["approval_policy"]
+            assert policy["mode"] == "approve_for_me"
+            assert policy["revision"] == task_body["expected_revision"] + 1
+            assert (await client.get(global_url, headers=auth)).json() == policy
+            assert (await peer_client.get(policy_path, headers=peer_auth)).json() == policy
+            for url in (global_url, task_url):
+                unsupported = await client.patch(url, headers=auth, json=task_body)
+                assert unsupported.status_code == 403, unsupported.text
+                assert unsupported.json()["error"]["code"] == "BRIDGE_REMOTE_UNSUPPORTED"
+            assert (await peer_client.get(policy_path, headers=peer_auth)).json() == policy
+            assert (await client.get(policy_path, headers=auth)).json() == initial
+            assert server.services.project_task_repo.get(task_id, owner) is None
+        finally:
+            await local._unregister_session(connection_id)
+            await peer._unregister_session(connection_id)
 
 
 async def test_remote_proxy_pins_peer_identity_caches_only_headers_and_scrubs_auth(env):
