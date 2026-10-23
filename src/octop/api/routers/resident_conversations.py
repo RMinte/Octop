@@ -85,7 +85,7 @@ async def ensure_binding(
     _THREAD + "/conversation",
     response_model=ResidentSnapshot,
     summary="Read a bounded resident conversation snapshot",
-    description="Includes partial replies and durable status. Poll after reconnecting; no execution is started.",
+    description="Includes partial replies and durable versions. Read for initial load or recovery; subscribe to resident.snapshot on /api/project-tasks/ws for live updates. No execution is started.",
 )
 async def conversation(
     agent_id: str,

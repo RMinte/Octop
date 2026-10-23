@@ -165,8 +165,8 @@ async def test_wait_releases_execution_slot_and_resumes_after_worker_restart(nat
         final = await settled(client, auth, task["task_id"])
         assert final["status"] == "completed", final
         assert len(final["turns"]) == 1 and final["turns"][0]["turn_id"] == turn.turn_id
-        assert final["turns"][0]["reply"] == "After waiting."
-        assert final["turns"][0]["reasoning"].count("Before waiting. ") == 1
+        assert final["turns"][0]["reply"] == "Before waiting. After waiting."
+        assert final["turns"][0]["reasoning"] == ""
         assert final["turns"][0]["input_tokens"] == 14
         assert final["turns"][0]["output_tokens"] == 6
         assert len(agents) == 3
@@ -219,8 +219,8 @@ async def test_stop_parked_turn_closes_calls_and_rejects_late_result(native_wait
         assert late["error"]["code"] == "TASK_CLIENT_TOOL_CLOSED"
         assert len(generations) == 1
         final = await settled(client, auth, task["task_id"])
-        assert final["turns"][0]["reply"] == ""
-        assert final["turns"][0]["reasoning"].count("Before waiting. ") == 1
+        assert final["turns"][0]["reply"] == "Before waiting. "
+        assert final["turns"][0]["reasoning"] == ""
     finally:
         await session.__aexit__(None, None, None)
 
@@ -275,9 +275,8 @@ async def test_same_turn_can_wait_again_without_duplicating_prior_results(native
         final = await settled(client, auth, task["task_id"])
         assert final["status"] == "completed", final
         assert len(final["turns"]) == 1
-        assert final["turns"][0]["reply"] == "After waiting."
-        assert final["turns"][0]["reasoning"].count("Before waiting. ") == 1
-        assert final["turns"][0]["reasoning"].count("Between waits. ") == 1
+        assert final["turns"][0]["reply"] == "Before waiting. Between waits. After waiting."
+        assert final["turns"][0]["reasoning"] == ""
         assert final["turns"][0]["input_tokens"] == 21
         assert len(generations) == 3
         results = [m for m in generations[-1] if isinstance(m, ToolMessage)]

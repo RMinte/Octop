@@ -21,6 +21,7 @@ class ResidentHistoryRow:
     created_at: int
     updated_at: int
     status: str
+    revision: int
     prompt: str
     reply: str
     error_code: str
@@ -46,6 +47,7 @@ class ResidentHistoryRow:
             created_at=strict_int(row["created_at"]),
             updated_at=strict_int(row["updated_at"]),
             status=str(row["status"]),
+            revision=strict_int(row["revision"]),
             prompt=str(row["prompt"]),
             reply=str(row["reply"]),
             error_code=str(row["error_code"]),
@@ -65,17 +67,17 @@ class ResidentHistoryRow:
 # Each branch applies scope, keyset and LIMIT before the bounded windows are
 # merged. A long thread never materializes all old message bodies for page 1.
 _TURN = """SELECT 'turn:' || turn_id AS item_id,'turn' AS kind,turn_id AS source_id,
-day_key,timezone,created_at,updated_at,status,prompt,reply,error_code,request_id,
+day_key,timezone,created_at,updated_at,status,revision,prompt,reply,error_code,request_id,
 '' AS task_id,'' AS task_turn_id,'' AS message_id,'[]' AS artifacts_json,
 '' AS delivery_status,'' AS followup_id,'' AS notification_kind,'{}' AS payload_json,input_json
 FROM resident_requests WHERE owner_id=? AND thread_id=?"""
 _REPORT = """SELECT 'report:' || report_id AS item_id,'task_report' AS kind,report_id AS source_id,
-day_key,timezone,captured_at AS created_at,updated_at,status,'' AS prompt,text AS reply,
+day_key,timezone,captured_at AS created_at,updated_at,status,0 AS revision,'' AS prompt,text AS reply,
 error_code,'' AS request_id,task_id,task_turn_id,message_id,artifacts_json,delivery_status,
 '' AS followup_id,'' AS notification_kind,'{}' AS payload_json,'{}' AS input_json
 FROM resident_task_reports WHERE owner_id=? AND thread_id=?"""
 _NOTIFICATION = """SELECT 'notification:' || notification_id AS item_id,'notification' AS kind,
-notification_id AS source_id,day_key,timezone,created_at,updated_at,status,'' AS prompt,
+notification_id AS source_id,day_key,timezone,created_at,updated_at,status,0 AS revision,'' AS prompt,
 text AS reply,'' AS error_code,'' AS request_id,'' AS task_id,'' AS task_turn_id,
 message_id,'[]' AS artifacts_json,status AS delivery_status,followup_id,
 kind AS notification_kind,payload_json,'{}' AS input_json FROM resident_notifications

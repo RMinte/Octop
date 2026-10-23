@@ -181,8 +181,8 @@ async def test_parallel_approvals_release_slot_and_survive_restart(interaction_e
     assert final["status"] == "completed", final
     assert sorted(effects) == ["0", "1"]
     assert len(final["turns"]) == 1 and final["turns"][0]["turn_id"] == turn["turn_id"]
-    assert final["turns"][0]["reply"] == "After waiting."
-    assert final["turns"][0]["reasoning"].count("Before approval. ") == 1
+    assert final["turns"][0]["reply"] == "Before approval. After waiting."
+    assert final["turns"][0]["reasoning"] == ""
     assert all(item["dispatch_started"] for item in final["turns"][0]["interactions"])
     assert (await respond(env, task, items[0], first)).status_code == 200
     assert len(generations) == 3

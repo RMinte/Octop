@@ -177,6 +177,76 @@ async def test_opening_narration_is_visible_while_main_model_is_still_waiting(
         gates[0][1].set()
 
 
+async def test_late_opening_is_discarded_while_public_body_is_still_running(
+    env_with_provider, monkeypatch
+):
+    client, server, auth = env_with_provider
+    entered, opening_release, body_release, published = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    body, late = "这是已经开始显示的公开正文。", "正文开始后不能迟到替换开场进展。"
+
+    async def narrate(self, snapshot):
+        assert snapshot.key == "opening"
+        entered.set()
+        await opening_release.wait()
+        return late
+
+    original_narrator = runtime.TaskProgressNarrator
+
+    def observed_narrator(generate, publish):
+        async def observe(snapshot, text):
+            await publish(snapshot, text)
+            published.set()
+
+        return original_narrator(generate, observe)
+
+    original_run = runtime.run_turn
+
+    async def hold_after_body(services, owner, turn, history):
+        stream = original_run(services, owner, turn, history)
+        try:
+            async for event in stream:
+                yield event
+                if event["type"] == "token":
+                    await body_release.wait()
+        finally:
+            await stream.aclose()
+
+    monkeypatch.setattr(runtime.TaskProgressAgent, "generate", narrate)
+    monkeypatch.setattr(runtime, "TaskProgressNarrator", observed_narrator)
+    monkeypatch.setattr(runtime, "run_turn", hold_after_body)
+    _, gates = hold_models(monkeypatch, [AIMessage(content=body)], 0)
+    task = await create(env_with_provider)
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        before = await visible(
+            env_with_provider, task["task_id"], lambda turn: bool(progress(turn))
+        )
+        opening = deepcopy(progress(before["turns"][0]))
+        gates[0][1].set()
+        live = await visible(env_with_provider, task["task_id"], lambda turn: turn["reply"] == body)
+        assert live["status"] == "running" and not body_release.is_set()
+        opening_release.set()
+        await asyncio.wait_for(published.wait(), 3)
+        after = (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()
+        assert after["status"] == "running" and after["turns"][0]["reply"] == body
+        assert progress(after["turns"][0]) == opening
+        saved = server.services.project_task_turn_repo.get(task["active_turn_id"])
+        assert late not in saved.content_blocks_json
+        body_release.set()
+        final = await settled(client, auth, task["task_id"])
+        assert final["status"] == "completed" and final["turns"][0]["reply"] == body
+        assert progress(final["turns"][0]) == opening
+    finally:
+        opening_release.set()
+        body_release.set()
+        gates[0][1].set()
+
+
 async def test_plan_progress_precedes_work_and_tool_narration_updates_only_its_brief(
     env_with_provider, monkeypatch
 ):
@@ -184,6 +254,17 @@ async def test_plan_progress_precedes_work_and_tool_narration_updates_only_its_b
     plan_entered, plan_release = asyncio.Event(), asyncio.Event()
     tool_entered, tool_release = asyncio.Event(), asyncio.Event()
     plan_text, brief = "先核对当前步骤，再生成验证附件。", "生成验证附件，保留实际返回结果供核对。"
+    plan_body, tool_body = "我会先建立验证计划。", "现在生成计划中的验证附件。"
+    plan_response = tool_call(
+        "planning",
+        "plan-create",
+        command="create",
+        title="生成验证附件",
+        steps=["核对实际结果"],
+    )
+    plan_response.content = plan_body
+    tool_response = tool_call("create_artifact", "proof", name="proof.txt", content="actual-proof")
+    tool_response.content = tool_body
 
     async def narrate(self, snapshot):
         if snapshot.facts["stage"] == "plan_update":
@@ -210,14 +291,8 @@ async def test_plan_progress_precedes_work_and_tool_narration_updates_only_its_b
     observed, gates = hold_models(
         monkeypatch,
         [
-            tool_call(
-                "planning",
-                "plan-create",
-                command="create",
-                title="生成验证附件",
-                steps=["核对实际结果"],
-            ),
-            tool_call("create_artifact", "proof", name="proof.txt", content="actual-proof"),
+            plan_response,
+            tool_response,
             step_command(
                 "mark_step", "step-finished", status="completed", result="已核对附件实际返回结果。"
             ),
@@ -239,6 +314,11 @@ async def test_plan_progress_precedes_work_and_tool_narration_updates_only_its_b
             ),
         )
         turn = prepared["turns"][0]
+        assert prepared["status"] == "running" and turn["reply"] == plan_body
+        assert turn["reasoning"] == ""
+        assert [block["text"] for block in turn["content_blocks"] if block["type"] == "text"] == [
+            plan_body
+        ]
         step_id, plan_id = turn["plan"]["active_step_id"], turn["plan"]["plan_id"]
         host_plan = next(block for block in progress(turn) if block["step_id"] == step_id)
         assert host_plan["text"] and "核对实际结果" in host_plan["text"]
@@ -266,6 +346,9 @@ async def test_plan_progress_precedes_work_and_tool_narration_updates_only_its_b
             ),
         )
         original = deepcopy(action(executed["turns"][0]))
+        assert executed["status"] == "running"
+        assert executed["turns"][0]["reply"] == plan_body + tool_body
+        assert executed["turns"][0]["reasoning"] == ""
         assert original["tool_call_id"] == "proof" and original["tool_label"]
         assert original["plan_id"] == plan_id and original["step_id"] == step_id
         assert original["arguments"] == {"name": "proof.txt", "content": "actual-proof"}
@@ -290,7 +373,13 @@ async def test_plan_progress_precedes_work_and_tool_narration_updates_only_its_b
         )
         gates[2][1].set()
         final = await settled(client, auth, task["task_id"])
-        assert final["status"] == "completed" and final["turns"][0]["reply"] == "验证附件已交付。"
+        assert final["status"] == "completed"
+        assert final["turns"][0]["reply"] == plan_body + tool_body + "验证附件已交付。"
+        assert [
+            block["text"]
+            for block in final["turns"][0]["content_blocks"]
+            if block["type"] == "text"
+        ] == [plan_body, tool_body, "验证附件已交付。"]
         assert len(observed) == 4
     finally:
         plan_release.set()
@@ -718,8 +807,9 @@ async def test_main_and_narrator_usage_accumulate_even_when_late_summary_is_unus
         gates[0][1].set()
 
 
+@pytest.mark.parametrize("saved_opening", [True, False])
 async def test_approval_resume_does_not_redispatch_opening_or_repeat_real_work(
-    env_with_provider, monkeypatch
+    env_with_provider, monkeypatch, saved_opening
 ):
     from deepagents.backends.protocol import ExecuteResponse
     from octop_harness.backends.bwrap_shell import BubbledLocalShellBackend
@@ -727,9 +817,15 @@ async def test_approval_resume_does_not_redispatch_opening_or_repeat_real_work(
 
     client, server, auth = env_with_provider
     keys, effects = [], []
+    public_body, completed_brief = (
+        "我先核对这条命令的执行权限。",
+        "已核对恢复后的工具实际返回结果。",
+    )
 
     async def narrate(self, snapshot):
         keys.append(snapshot.key)
+        if snapshot.tool_call_id == "approved-work" and snapshot.facts["stage"] == "tool_end":
+            return completed_brief
         return "正在核对本轮的实际执行进展。"
 
     def execute(self, command, *, timeout=None):
@@ -739,34 +835,69 @@ async def test_approval_resume_does_not_redispatch_opening_or_repeat_real_work(
     monkeypatch.setattr(runtime.TaskProgressAgent, "generate", narrate)
     monkeypatch.setattr(HarnessLocalShellBackend, "execute", execute)
     monkeypatch.setattr(BubbledLocalShellBackend, "execute", execute)
-    observed, _ = planning_models(
+    command_response = tool_call("execute", "approved-work", command="echo actual-proof")
+    command_response.content = public_body
+    observed, gates = hold_models(
         monkeypatch,
         [
-            tool_call("execute", "approved-work", command="echo actual-proof"),
+            command_response,
             AIMessage(content="已核对审批后的实际结果。"),
         ],
+        1,
     )
     task = await create(env_with_provider)
     await parked(server, task["active_turn_id"])
     waiting = (await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)).json()
     assert waiting["status"] == "waiting_approval" and effects == []
+    assert waiting["turns"][0]["reply"] == public_body
+    assert waiting["turns"][0]["reasoning"] == ""
     opening = next(
         block for block in progress(waiting["turns"][0]) if block["introduction"] is True
     )
     assert keys.count("opening") == 1
     await server.project_task_worker.close()
+    if not saved_opening:
+        # A saved public body is sufficient to suppress a new opening, even if
+        # the checkpoint came from a runtime that did not save an opening block.
+        blocks = [
+            block
+            for block in waiting["turns"][0]["content_blocks"]
+            if block["block_id"] != opening["block_id"]
+        ]
+        with server.services.db.transaction() as conn:
+            conn.execute(
+                "UPDATE project_task_turns SET content_blocks_json=?,"
+                "content_revision=content_revision+1 WHERE turn_id=?",
+                (json.dumps(blocks), task["active_turn_id"]),
+            )
     item = waiting["turns"][0]["interactions"][0]
     accepted = await respond(env_with_provider, waiting, item, approval(item))
     assert accepted.status_code == 200, accepted.text
     server.project_task_worker = runtime.ProjectTaskWorker(server.services)
     await server.project_task_worker.start()
-    final = await settled(client, auth, task["task_id"])
-    assert final["status"] == "completed", final
-    assert final["turns"][0]["reply"] == "已核对审批后的实际结果。"
-    assert effects == ["echo actual-proof"] and len(observed) == 2
-    assert keys.count("opening") == 1
-    assert len(keys) == len(set(keys))
-    introductions = [
-        block for block in progress(final["turns"][0]) if block["introduction"] is True
-    ]
-    assert len(introductions) == 1 and introductions[0]["block_id"] == opening["block_id"]
+    try:
+        await asyncio.wait_for(gates[1][0].wait(), 3)
+        resumed = await visible(
+            env_with_provider,
+            task["task_id"],
+            lambda turn: action(turn)["brief"] == completed_brief,
+        )
+        assert resumed["status"] == "running" and resumed["turns"][0]["reply"] == public_body
+        assert effects == ["echo actual-proof"]
+        gates[1][1].set()
+        final = await settled(client, auth, task["task_id"])
+        assert final["status"] == "completed", final
+        assert final["turns"][0]["reply"] == public_body + "已核对审批后的实际结果。"
+        assert effects == ["echo actual-proof"] and len(observed) == 2
+        assert keys.count("opening") == 1
+        assert len(keys) == len(set(keys))
+        assert action(final["turns"][0])["brief"] == completed_brief
+        introductions = [
+            block for block in progress(final["turns"][0]) if block["introduction"] is True
+        ]
+        if saved_opening:
+            assert len(introductions) == 1 and introductions[0]["block_id"] == opening["block_id"]
+        else:
+            assert introductions == []
+    finally:
+        gates[1][1].set()

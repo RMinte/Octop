@@ -32,6 +32,7 @@ from octop.infra.agents.resident_tools import (
     resident_tools_scope,
 )
 from octop.infra.agents.resident_worker_lock import ResidentWorkerLock
+from octop.infra.conversations.updates import CommittedUpdates
 from octop.infra.db.repos.resident_conversations import ResidentConversationRow
 from octop.infra.db.repos.resident_delegations import ResidentTaskReportRow
 from octop.infra.db.repos.resident_notifications import ResidentNotificationRow
@@ -94,6 +95,12 @@ class ResidentBinding(ResidentModel):
     error_code: str | None = None
 
 
+class ResidentConversationStream(ResidentModel):
+    transport: Literal["websocket"] = "websocket"
+    path: Literal["/api/project-tasks/ws"] = "/api/project-tasks/ws"
+    protocol_version: Literal[3] = 3
+
+
 class ResidentCapabilities(ResidentModel):
     api_version: Literal[1] = 1
     identity: Literal["private_agent_and_thread"] = "private_agent_and_thread"
@@ -101,6 +108,10 @@ class ResidentCapabilities(ResidentModel):
     assistant_role: Literal["life_work_steward"] = "life_work_steward"
     professional_work: Literal["delegated_tasks"] = "delegated_tasks"
     conversation_transport: Literal["rest_polling"] = "rest_polling"
+    conversation_stream: ResidentConversationStream = Field(
+        default_factory=ResidentConversationStream,
+        description="Preferred live observation. REST snapshots and command receipts remain available; this declaration does not mean a client has subscribed.",
+    )
     message_types: list[Literal["text"]] = ["text"]
     history_days_search_location: bool = True
     memory_management: bool = True
@@ -140,6 +151,10 @@ class ResidentCancel(ResidentModel):
 
 class ResidentTurn(ResidentModel):
     turn_id: str
+    revision: int = Field(
+        ge=1,
+        description="Monotonic version of this durable turn, shared by REST and live snapshots.",
+    )
     request_id: str
     user_message_id: str
     assistant_message_id: str = Field(
@@ -180,6 +195,7 @@ def turn_view(row: ResidentRequestRow, locale: str) -> ResidentTurn:
     code = _known_error_code(row.error_code) if row.error_code else None
     return ResidentTurn(
         turn_id=row.turn_id,
+        revision=row.revision,
         request_id=row.request_id,
         user_message_id=f"resident:{row.turn_id}:user",
         assistant_message_id=f"resident:{row.turn_id}:assistant",
@@ -232,6 +248,7 @@ class ResidentConversationRuntime:
         self.gateway = gateway
         self.worker_id = new_ulid()
         self._wake = asyncio.Event()
+        self._updates = CommittedUpdates[str]()
         self._loop_task: asyncio.Task[None] | None = None
         self._active: dict[str, asyncio.Task[None]] = {}
         self._active_threads: set[str] = set()
@@ -273,6 +290,9 @@ class ResidentConversationRuntime:
 
     def wake(self) -> None:
         self._wake.set()
+
+    def watch_updates(self, thread_id: str, wake: Callable[[], None]) -> Callable[[], None]:
+        return self._updates.watch(thread_id, wake)
 
     def replace_services(self, services: SharedServices) -> None:
         if self._active:
@@ -406,6 +426,7 @@ class ResidentConversationRuntime:
             raise OctopError.localized(ErrorCode.RESIDENT_PROFILE_ARCHIVED) from exc
         except ResidentRequestBusy as exc:
             raise OctopError.localized(ErrorCode.AGENT_BUSY) from exc
+        self._updates.notify(thread_id)
         self.wake()
         return row
 
@@ -452,6 +473,7 @@ class ResidentConversationRuntime:
             with resident_execution_scope(owner_id, thread_id):
                 self.registry.cancel_stream(agent_id, thread_id)
             task.cancel()
+        self._updates.notify(thread_id)
         self.wake()
         return row
 
@@ -632,6 +654,7 @@ class ResidentConversationRuntime:
             claimed = await asyncio.shield(claim)
             if not claimed:
                 return
+            self._updates.notify(queued.thread_id)
             parent = asyncio.current_task()
             assert parent is not None
             heartbeat = asyncio.create_task(
@@ -704,6 +727,7 @@ class ResidentConversationRuntime:
                                     now_ms(),
                                 ):
                                     raise OctopError.localized(ErrorCode.RESIDENT_INTERRUPTED)
+                                self._updates.notify(queued.thread_id)
                         elif kind == "error":
                             status, code = (
                                 "failed",
@@ -730,9 +754,18 @@ class ResidentConversationRuntime:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
             if claimed:
-                await _settled_io(
-                    repo.finish, queued.turn_id, self.worker_id, status, reply, code or "", now_ms()
-                )
+                try:
+                    await _settled_io(
+                        repo.finish,
+                        queued.turn_id,
+                        self.worker_id,
+                        status,
+                        reply,
+                        code or "",
+                        now_ms(),
+                    )
+                finally:
+                    self._updates.notify(queued.thread_id)
             self.wake()
 
     def _finished(self, turn_id: str, thread_id: str, task: asyncio.Task[None]) -> None:

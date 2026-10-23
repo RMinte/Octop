@@ -96,4 +96,4 @@
 5. 关注事项的明确授权、暂停、取消，以及通知历史与共享已读水位。
 6. 模型上下文用量与显式整理。
 
-REST 轮询是当前正式传输。系统推送 APNs、客户端缓存和界面仍属于后续客户端接入工作；服务端会话通知不等于系统后台推送。私人工作区不自动取得项目目录或电脑执行权限，所有实际工作继续由普通 Task 的权限、设备声明与审批约束。
+正文实时观察已支持共享 WebSocket，能力响应新增 `conversation_stream={transport:"websocket",path:"/api/project-tasks/ws",protocol_version:3}`；`resident.subscribe` 推送有界累计正文和状态，原 REST 接口继续用于受理、恢复与历史读取。旧 `conversation_transport` 字段保留，避免尚未接线的 App 因能力门禁失效；新客户端应依据新增声明接入。客户端本轮未改动，具体协议和验收见 [App 共用正文 WebSocket 交接](agentcomputer-conversation-stream-handoff.md)。系统推送 APNs 仍属于后续工作；会话 WebSocket 不等于系统后台推送。私人工作区不自动取得项目目录或电脑执行权限，实际工作继续由普通 Task 的权限、设备声明与审批约束。

@@ -689,15 +689,10 @@ async def test_final_answer_cannot_complete_an_unfinished_plan(env_with_provider
     assert done["status"] == "failed", done
     turn = done["turns"][0]
     assert turn["error_code"] == "TASK_PLAN_UNFINISHED"
-    assert turn["reply"] == ""
-    assert not any(block["type"] == "text" for block in turn["content_blocks"])
-    assert turn["reasoning"] == "这句话不能代替步骤结果。"
+    assert turn["reply"] == "这句话不能代替步骤结果。"
+    assert turn["reasoning"] == ""
     assert (
-        "".join(
-            block["text"]
-            for block in turn["content_blocks"]
-            if block["type"] in {"reasoning", "reasoning_summary"}
-        )
+        "".join(block["text"] for block in turn["content_blocks"] if block["type"] == "text")
         == "这句话不能代替步骤结果。"
     )
     assert turn["plan"]["steps"][0]["status"] == "in_progress"

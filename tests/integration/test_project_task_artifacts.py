@@ -48,7 +48,7 @@ def real_model(monkeypatch):
     from octop_harness import HarnessAgent
     from octop_harness.llm.factory import ChatModelFactory
 
-    def configure(responses, gate=None):
+    def configure(responses, gate=None, *, gate_after=1, waiting=None):
         observed, names = [], set()
 
         class Model(FakeMessagesListChatModel):
@@ -67,7 +67,9 @@ def real_model(monkeypatch):
                 return super()._generate(messages, stop, run_manager, **kwargs)
 
             async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-                if observed and gate is not None:
+                if len(observed) >= gate_after and gate is not None:
+                    if waiting is not None:
+                        waiting.set()
                     await gate.wait()
                 return self._generate(messages, stop, run_manager, **kwargs)
 
@@ -341,7 +343,7 @@ async def test_standalone_plan_cannot_finish_before_publishing_generated_applica
         assert {name: archive.read(name).decode() for name in archive.namelist()} == files
 
 
-async def test_unplanned_file_task_gets_delivery_correction_before_final_answer(
+async def test_unplanned_file_task_keeps_public_text_while_correcting_missing_delivery(
     env_with_provider, monkeypatch
 ):
     from langchain_core.messages import AIMessage, HumanMessage
@@ -377,11 +379,97 @@ async def test_unplanned_file_task_gets_delivery_correction_before_final_answer(
     final = await settled(client, auth, response.json()["task_id"])
     assert final["status"] == "completed", final
     turn = final["turns"][0]
-    assert turn["reply"] == "应用文件已附加，可直接下载。" and len(observed) == 4
-    assert premature not in turn["reply"] and turn["reasoning"].count(premature) == 1
+    assert turn["reply"] == premature + "应用文件已附加，可直接下载。" and len(observed) == 4
+    assert turn["reply"].count(premature) == 1 and premature not in turn["reasoning"]
+    texts = [block for block in turn["content_blocks"] if block["type"] == "text"]
+    assert [block["text"] for block in texts] == [premature, "应用文件已附加，可直接下载。"]
+    assert len({block["block_id"] for block in texts}) == 2
+    assert all(block["status"] == "completed" for block in texts)
     assert len(turn["artifacts"]) == 1 and turn["artifacts"][0]["name"] == "app.html"
     downloaded = await client.get(turn["artifacts"][0]["download_url"], headers=auth)
     assert downloaded.content == b"<h1>Ready</h1>"
+
+
+async def test_public_text_is_live_before_delivery_correction_and_does_not_prove_delivery(
+    env_with_provider, real_model
+):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    client, server, auth = env_with_provider
+    release, correction_waiting = asyncio.Event(), asyncio.Event()
+    premature = "服务端文件已写好，接下来交付。"
+    observed, _ = real_model(
+        [
+            tool_call("write_file", "write-app", file_path="/app.html", content="<h1>Ready</h1>"),
+            AIMessage(content=premature),
+            tool_call("publish_workspace_file", "deliver-file", path="app.html"),
+            AIMessage(content="附件已交付。"),
+        ],
+        release,
+        gate_after=2,
+        waiting=correction_waiting,
+    )
+    session, ws = await connected(client, auth)
+    try:
+        created = (
+            await command(
+                ws,
+                "task.create",
+                "create-corrected-delivery",
+                data={
+                    "request_id": str(uuid4()),
+                    "prompt": "生成一个网页文件。",
+                    "options": {"action_timeline_enabled": False},
+                },
+            )
+        )["data"]
+        await ws.send_json(
+            {
+                "type": "task.subscribe",
+                "id": "watch-corrected-delivery",
+                "task_id": created["task_id"],
+            }
+        )
+        await asyncio.wait_for(correction_waiting.wait(), 5)
+        live = await until(
+            ws,
+            lambda frame: (
+                frame["type"] in {"snapshot", "turn"}
+                and (
+                    frame["data"]["turns"][0]["reply"]
+                    if frame["type"] == "snapshot"
+                    else frame["data"]["turn"]["reply"]
+                )
+                == premature
+            ),
+        )
+        live_turn = live["data"]["turns"][0] if live["type"] == "snapshot" else live["data"]["turn"]
+        assert live_turn["status"] == "running"
+        assert live_turn["reasoning"] == "" and live_turn["artifacts"] == []
+        detail = (await client.get(f"/api/project-tasks/{created['task_id']}", headers=auth)).json()
+        assert detail["turns"][0]["reply"] == premature
+        row = await asyncio.get_running_loop().run_in_executor(
+            None, server.services.project_task_turn_repo.get, live_turn["turn_id"]
+        )
+        assert row is not None and row.reply == premature and row.status == "running"
+        original_block = next(
+            block for block in live_turn["content_blocks"] if block["type"] == "text"
+        )
+        release.set()
+        final = await settled(client, auth, created["task_id"])
+        turn = final["turns"][0]
+        assert turn["status"] == "completed" and turn["reply"] == premature + "附件已交付。"
+        assert turn["reasoning"] == "" and len(turn["artifacts"]) == 1
+        texts = [block for block in turn["content_blocks"] if block["type"] == "text"]
+        assert [block["text"] for block in texts] == [premature, "附件已交付。"]
+        assert texts[0]["block_id"] == original_block["block_id"]
+        assert len(observed) == 4
+        assert isinstance(observed[2][-1], HumanMessage)
+        assert observed[2][-2].content == premature
+        assert "publish_workspace_file" in observed[2][-1].content
+    finally:
+        release.set()
+        await session.__aexit__(None, None, None)
 
 
 async def test_repeated_path_only_answers_cannot_complete_a_standalone_file_task(
@@ -410,7 +498,15 @@ async def test_repeated_path_only_answers_cannot_complete_a_standalone_file_task
     assert response.status_code == 202, response.text
     final = await settled(client, auth, response.json()["task_id"])
     assert final["status"] == "failed", final
-    assert final["turns"][0]["reply"] == "" and final["turns"][0]["artifacts"] == []
+    turn = final["turns"][0]
+    assert turn["reply"] == "文件在服务端 app.html，之后可以打包。仍然只提供服务端路径。"
+    assert turn["reasoning"] == "" and turn["artifacts"] == []
+    texts = [block for block in turn["content_blocks"] if block["type"] == "text"]
+    assert [block["text"] for block in texts] == [
+        "文件在服务端 app.html，之后可以打包。",
+        "仍然只提供服务端路径。",
+    ]
+    assert [block["status"] for block in texts] == ["completed", "interrupted"]
     assert len(observed) == 3
 
 

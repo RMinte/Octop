@@ -128,6 +128,7 @@ def _item(row: ResidentHistoryRow, locale: str) -> ResidentHistoryItem:
     if row.kind == "turn":
         result.turn = ResidentTurn(
             turn_id=row.source_id,
+            revision=row.revision,
             request_id=row.request_id,
             user_message_id=f"resident:{row.source_id}:user",
             assistant_message_id=f"resident:{row.source_id}:assistant",

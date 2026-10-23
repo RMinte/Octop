@@ -2,7 +2,7 @@
 
 ## 私人智能体常驻会话（2026-10-20）
 
-每个用户的统一生活工作管家沿用唯一私人 Agent 与稳定 thread，使用六个 REST 接口：`GET/PUT /api/agents/resident-conversation`，以及绑定 thread 下的 `/conversation`、`POST /messages`、`GET /requests/{request_id}`、`POST /cancel`。首期支持普通文字、持久受理、整份快照轮询和定向取消；专业工作通过普通 Task 委派，成果回到同一管家会话，不创建或切换不同专业助手，也不把项目或 Task 绑定到专家，未修改 AgentComputer 客户端。字段、幂等、模型选择、恢复边界和验证范围见 [私人智能体服务端接入说明](resident-agent-conversation.md)。
+每个用户的统一生活工作管家沿用唯一私人 Agent 与稳定 thread，使用六个 REST 接口：`GET/PUT /api/agents/resident-conversation`，以及绑定 thread 下的 `/conversation`、`POST /messages`、`GET /requests/{request_id}`、`POST /cancel`。正文实时观察另通过共享 `/api/project-tasks/ws` 的 `resident.subscribe` 接收 `resident.snapshot`；新能力声明、轮次 revision、重连和客户端接线见 [共用正文 WebSocket 交接](agentcomputer-conversation-stream-handoff.md)。支持普通文字、持久受理、有界快照和定向取消；专业工作通过普通 Task 委派，成果回到同一管家会话，不创建或切换不同专业助手，也不把项目或 Task 绑定到专家，未修改 AgentComputer 客户端。字段、幂等、模型选择、恢复边界和验证范围见 [私人智能体服务端接入说明](resident-agent-conversation.md)。
 
 管家由服务端自动准备，无需用户创建或配置，也无需客户端先调用 PUT。`UserManager` 启动为已有启用用户补齐唯一绑定，新用户创建、邀请注册、SSO/LDAP 接入、用户启用及成功登录时均幂等准备，不调用模型或增加执行授权。客户端使用只读 `GET /api/agents/resident-conversation` 获取绑定并检查状态；自动准备失败仍返回 `failed`，不保证每次读取均为 `ready`。`PUT` 保留为显式重试或修复用途；修复后服务启动、成功登录或显式重试均复用原身份及历史。
 
@@ -66,7 +66,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入附件的鉴权读取，图片预览、其他文件下载 |
 | GET | `/api/project-tasks/artifacts` | 跨任务成果资料库，按文件发布时间倒序分页，支持项目、任务、类型、文件名及归档筛选 |
 | GET | `/api/project-tasks/artifacts/{artifact_id}` | 本人成果的元数据及当前来源任务和项目信息 |
-| WS | `/api/project-tasks/ws` | 多任务共用连接，创建、追问、停止、重试和实时状态；见[客户端接入指南](project-task-websocket.md) |
+| WS | `/api/project-tasks/ws` | Task 与 Resident 共用认证连接；Task 创建、追问、停止、重试和两类会话实时订阅；见[客户端接入指南](project-task-websocket.md) |
 | GET | `/api/project-tasks/{task_id}/artifacts/{artifact_id}/download` | 本人任务已发布的不可变附件；鉴权下载，支持中文文件名 |
 | PATCH | `/api/project-tasks/{task_id}` | 修改名称、网络搜索开关、归档或恢复，校验 expected_revision |
 | DELETE | `/api/project-tasks/{task_id}` | 按 ID 永久删除任务及会话、附件和工具记录，无需版本参数；成功返回 204 |
@@ -83,7 +83,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。有当前或历史图片输入时，所选模型须支持图片，不能用纯文字模型继续，也不会自动切换模型。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字、图片和通用文件对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器和桌面未接入。
 
-状态为 `queued/running/waiting_approval/waiting_answer/waiting_client_tool/paused/completed/failed/cancelled`。运行时约每 0.5 秒保存增量正文；网页通过 WebSocket 接收已保存的轮次状态，约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的模型消息、工具调用和结果用作后续上下文；历史仅有问答文本的记录继续保留文本；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
+状态为 `queued/running/waiting_approval/waiting_answer/waiting_client_tool/paused/completed/failed/cancelled`。任务运行时约每 100ms 合并保存增量正文，提交后唤醒 WebSocket 推送；约 500ms 的数据库检查作为其他进程写入等情况的兜底。网页约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的模型消息、工具调用和结果用作后续上下文；历史仅有问答文本的记录继续保留文本；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
 
 主 Task 已接入原生暂停恢复：审批、提问和客户端工具等待时保存检查点并释放执行槽，全部结果到齐后继续同一轮，Worker 重建不重复派发已登记调用。协议版本为 3，合法等待不按运行心跳过期处理；手动暂停在安全边界生效，继续不替代审批。嵌套人工中断恢复尚未支持。
 
@@ -546,9 +546,9 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 
 2026 年 10 月 19 日后续公开进展方案：动作生成开启时，宿主立即保存已收到请求的开场及计划当前步骤的意图进展，首条带 `introduction=true`。独立异步模型只根据用户目标、已保存计划和真实工具事实补充文案，主执行不等待通知或宿主 brief。工具 `tool_label` 立即可用，`brief` 可缺失/null，生成后最多 240 字符，按原 call_id 更新同一工具块；不修改业务 schema、计划、审批或执行事实。主模型新请求隐藏 `message_notify_user`，注册表只保留已有调用的正常结束路径；生成文案不进入 reply，也不回灌模型。
 
-每轮旁路最多一个模型请求在途和一个可替换的最新待处理快照，同身份去重、过期结果丢弃。复用该轮 model_ref，但独立使用 8 秒超时、最多 512 个输出 token 和支持的关闭思考/低 effort 参数，不新增模型开关或修改全局配置。主回答开始、暂停或等待、取消及终态时关闭旁路，迟到内容丢弃；已收到的 usage 仍原子加到原 turn，与主模型计量互不覆盖。恢复不重跑旧开场或补跑旧说明。旁路 progress 的 tool_call_id 使用稳定 `narration:...` 身份，不是真实工具调用；协议与现有字段保持不变，无新 API 字段、迁移或 Swift/UI 修改。此前开场/必填 brief 门控的交付和客户端实测只保留为历史记录，当前规则见[独立异步公开进展](project-task-planning-and-progress.md#独立异步公开进展)。
+每轮旁路最多一个模型请求在途和一个可替换的最新待处理快照，同身份去重、过期结果丢弃。复用该轮 model_ref，但独立使用 8 秒超时、最多 512 个输出 token 和支持的关闭思考/低 effort 参数，不新增模型开关或修改全局配置。公开正文不结束旁路，后续真实工具说明和计划进展仍可更新；正文开始后丢弃尚未返回的开场改写。暂停或等待、取消及终态时关闭旁路，迟到内容丢弃；已收到的 usage 仍原子加到原 turn，与主模型计量互不覆盖。恢复即使已有正文也可处理后续真实事实，不重跑旧开场或补跑旧说明。旁路 progress 的 tool_call_id 使用稳定 `narration:...` 身份，不是真实工具调用；协议与现有字段保持不变，无新 API 字段、迁移或 Swift/UI 修改。此前开场/必填 brief 门控的交付和客户端实测只保留为历史记录，当前规则见[独立异步公开进展](project-task-planning-and-progress.md#独立异步公开进展)。
 
-TaskTurn 的 `started_at/finished_at/processing_duration_ms` 分别为首次实际开始、终态及其墙钟毫秒跨度，包含审批/暂停等待、排除首次排队；历史或运行中的未知值为 null。带工具响应的普通正文归过程，只有确认无工具且未处于计划执行中的正文进入答案。计划完成或受阻后，已禁用工具的最终请求直接流式写入答案，不等待整段响应分类。
+TaskTurn 的 `started_at/finished_at/processing_duration_ms` 分别为首次实际开始、终态及其墙钟毫秒跨度，包含审批/暂停等待、排除首次排队；历史或运行中的未知值为 null。主模型公开正文收到即增量进入 text/reply，不等待工具意图，也不因计划执行而改成思考；reasoning/reasoning_summary 保留模型原始类型。累计正文不代表最终结论或交付成功，交付纠正保留此前正文并建立新消息边界；真实附件收据、计划未完成/受阻约束和轮次状态继续决定结果。
 
 当前实现为 [`projects` 路由](../src/octop/api/routers/projects.py)、[项目请求模型](../src/octop/infra/projects/models.py)、[项目服务](../src/octop/infra/projects/service.py)、[任务服务](../src/octop/infra/projects/tasks.py)；验证依据为[项目集成用例](../tests/integration/test_projects.py)、[任务集成用例](../tests/integration/test_project_tasks.py)、[公开路由契约用例](../tests/integration/test_project_api_contract.py)。
 

@@ -75,14 +75,14 @@ Authorization: Bearer <access token>
 
 ## 服务端生成规则与参考差异
 
-下表保留此前对比依据并注明当前状态。服务端已补齐规划独占提示、开场通知门控、带工具正文分类和适用工作工具必填 brief；APP 原组件接线也已完成。brief 的适用范围和长度合同仍与参考版不同，不能声称完全一致。
+下表保留此前对比依据并注明当前状态。服务端曾补齐规划独占提示、开场通知门控、带工具正文分类和适用工作工具必填 brief；开场/brief 已由异步旁路替代，2026 年 10 月 22 日正文合同改为保留模型原始类型并立即增量发布。APP 原组件接线已完成，历史验收与当前合同分别记录。
 
 | 位置 | 原版 | 当前 Octop 与影响 |
 | --- | --- | --- |
 | [PlanningFlow.swift](/Users/fangyuan/Desktop/code/AgentComputer2/AgentComputer/Services/AI/PlanningFlow.swift:132) / [中文提示](../src/octop/i18n/zh.json:950) | create 与 mark_step 的提示都明确要求独占工具响应，宿主也拒绝混批 | 已补齐独占提示与混批拒绝，不再仅依赖失败反馈 |
 | [AgentRuntime.swift](/Users/fangyuan/Desktop/code/AgentComputer2/AgentComputer/Services/AI/AgentRuntime.swift:1130) / [execution.py](../src/octop/infra/projects/execution.py:234) | 公开动作模式下，宿主要求有效开场通知先保存，规划 create/get 和提问有明确豁免 | 已要求本轮开场先持久化，并在下一模型响应才放行业务；同批通知、旧轮通知或失败通知均不授权工作 |
 | [AgentProgress.swift](/Users/fangyuan/Desktop/code/AgentComputer2/AgentComputer/Domain/AgentRuntime/AgentProgress.swift:84) / [execution.py](../src/octop/infra/projects/execution.py:61) | 仅对指定的 19 个自有内置工作工具收紧已有 brief | 动作生成开启时，有无计划均要求适用工作工具的宿主 brief；还向 MCP 等无同名业务字段的工作工具投影元数据。保留本项目 240 字符合同，不引入参考版单行或 2048 字节规则 |
-| [原版正文缓冲](/Users/fangyuan/Desktop/code/AgentComputer2/AgentComputer/Services/AI/AgentRuntime.swift:875) / [response_text.py](../src/octop/infra/projects/response_text.py) | 建计划前的正文先缓冲，确定同一响应带工具后归过程；计划执行中普通正文也归过程 | 已按本次响应工具意图分类，带工具说明及计划执行正文归过程，异常前未定正文也保留为过程；APP 不再自行猜来源 |
+| [原版正文缓冲](/Users/fangyuan/Desktop/code/AgentComputer2/AgentComputer/Services/AI/AgentRuntime.swift:875) / [Octop 主模型事件投影](../src/octop/infra/projects/runtime.py) | 建计划前的正文先缓冲，确定同一响应带工具后归过程；计划执行中普通正文也归过程 | Octop 已撤销这项分类：主模型公开正文收到即进入 text/reply，工具前、建计划前及计划内均保留原类型；APP 不按文字猜来源 |
 
 此前截图核对曾找到候选轮 `task_01M59C7F0AFV101TYS38KVZW85 / turn_01M59C7F0AFV101TYS38KVZW86`。检查点首批为 `planning(create) + ls`，两条失败属于 mixed_batch，均无执行起止时间；随后单独建计划成功，并已有实际完成的工作工具。采样时该轮没有 progress/notify 记录；两段建计划前的带工具正文被存为 text，后续计划内正文被存为 reasoning。截图未给轮次 ID，因此不将候选身份描述为已经由截图独立确认，也不把后续等待工具当作已执行失败。当时混批调用带 brief，其红色失败不由 brief 缺失导致；这些历史记录不被新合同重写。
 
@@ -94,7 +94,7 @@ Authorization: Bearer <access token>
 - 动作生成开启时，适用工作工具新注入的宿主 brief 必填、非空且最多 240 字符，有无计划均适用；planning、通知和提问缺失 brief 豁免，显式非法参数仍校验。业务同名字段保留原合同，关闭动作生成时不注入、不要求宿主 brief。每次工作调用都校验，不按曾开始的 call_id 豁免；已派发客户端结果仍按原 call_id 消费，原生 respond 恢复不重新调用 handler。
 - HITL 中的宿主准入错误使用内部 octop_host_error 分支，保留原调用身份、工具名、本地化原因及 ToolMessage status=error；不添加用户拒绝前缀或套旧 JSON 错误包。真实用户 deny 仍走 native reject，客户端实际 result_json 仍走原 respond；这些都是服务端内部恢复语义，不新增 APP 命令或公开审批选项。
 - progress.introduction 是可空严格布尔值，来自宿主：本轮首条成功保存通知为 true，后续通知为 false，旧数据为 null。通知先持久化再返回工具成功；同调用重放不重复追加，旧轮开场不会授权新轮，历史缺标记不按文字补造。
-- 模型普通正文等待本次响应工具意图确定；带工具正文、计划执行中的正文归入过程，确认无工具且不在执行计划时才进入 text/reply。异常和取消前已收到的未定正文、摘要保留为过程。APP 不应再次按内容文字修正来源。
+- 主模型投影后的 token 收到即进入 text/reply，不等待工具意图或完整响应，工具前、建计划前及计划执行阶段均保持公开正文。reasoning/reasoning_summary 只保留模型实际返回的对应类型，progress 使用独立公开进展来源。异常、取消和暂停保留已收到的部分正文；完整响应不重复追加，APP 不按内容文字修正来源。
 - TaskTurn.started_at 为首次实际开始时间，finished_at 为完成/失败/取消时间；processing_duration_ms 为两者间墙钟毫秒数，包含审批、暂停和恢复等待、排除首次排队。运行中或任一边界未知时为 null。恢复不重置开始时间，旧轮不回填，不能将该字段冒充单个工具执行耗时。
 - 数据库升级至 44，仅为 project_task_turns 增加两列可空时间；历史原列不重写。WebSocket 仍为 v3，新增字段可空，完整 Schema 和示例已同步。APP 已接新标记与整轮耗时，现有工具 duration_ms 及步骤时间继续独立。
 
@@ -128,7 +128,7 @@ WebSocket 仍为 v3，连接 `/api/project-tasks/ws`，沿用 `task.create/messa
 
 先选择各自最新快照，再做终态保护；合并成功后将完整正文与 cursor 一起保存。终态新结果仍需刷新。旧计划快照、退役步骤和未关联记录继续保存；切换面板不修改这些数据。普通追问与手动重试创建新轮，计划不继承；暂停恢复同轮保留计划、身份和工具回执。
 
-内容块仍为 `text / reasoning / reasoning_summary / tool / plan / progress`。计划执行阶段的普通正文归入公开 reasoning 过程，只有计划结束后的最终回答进入 text/reply；提前终稿而未 mark 当前步骤仍报 TASK_PLAN_UNFINISHED。成功规划与通知不重复显示为普通工具；失败保留失败工具块。`progress` 不进入累计回复或答案复制。
+内容块仍为 `text / reasoning / reasoning_summary / tool / plan / progress`。公开正文可以与工具、思考交错，保留消息边界、顺序和固定的计划/步骤关联，始终独立于 Process 与计划面板。`reply` 包含本轮全部公开正文及交付纠正前已发布的文字，不表示最终结论或任务成功；未 mark 当前步骤就结束仍报 TASK_PLAN_UNFINISHED，受阻仍报 TASK_PLAN_BLOCKED，文件交付必须有实际附件发布收据。成功规划与通知不重复显示为普通工具；失败保留失败工具块。`progress` 不进入累计回复或答案复制。
 
 | 工具字段 | 客户端处理 |
 | --- | --- |

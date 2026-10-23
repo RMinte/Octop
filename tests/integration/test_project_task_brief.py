@@ -50,7 +50,10 @@ async def test_display_brief_does_not_gate_work_or_cold_handoff(opening_harness,
             await parked(server, created.json()["active_turn_id"])
             waiting = (await client.get(f"/api/project-tasks/{task_id}", headers=auth)).json()
             turn = waiting["turns"][0]
-            assert effects == [] and turn["reply"] == ""
+            assert effects == [] and turn["reply"] == "先核对真实返回。"
+            assert turn["reasoning"] == ""
+            before = next(block for block in turn["content_blocks"] if block["type"] == "text")
+            assert before["text"] == "先核对真实返回。"
             assert tool_block(turn, "work")["started_at"] is None
             await server.project_task_worker.close()
             if kind == "approval":
@@ -82,8 +85,12 @@ async def test_display_brief_does_not_gate_work_or_cold_handoff(opening_harness,
         turn = done["turns"][0]
         assert effects == ([] if kind == "client" else ["proof"])
         assert len(agents) == (1 if kind == "server" else 2)
-        assert turn["reply"] == "真实结果已核对。"
-        assert turn["reasoning"] == "先核对真实返回。"
+        assert turn["reply"] == "先核对真实返回。真实结果已核对。"
+        assert turn["reasoning"] == ""
+        text = [block for block in turn["content_blocks"] if block["type"] == "text"]
+        assert [block["text"] for block in text] == ["先核对真实返回。", "真实结果已核对。"]
+        if kind != "server":
+            assert text[0]["block_id"] == before["block_id"]
         block = tool_block(turn, "work")
         assert block["status"] == "completed" and block["arguments"] == business
         assert block["brief"] == (

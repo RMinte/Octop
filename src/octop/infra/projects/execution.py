@@ -289,7 +289,6 @@ class TaskExecution(AgentMiddleware[Any, Any]):
                 "type": "task_step_context",
                 "plan_id": plan_id,
                 "step_id": step_id,
-                "tools_disabled": tools_disabled,
             }
         )
         description = tr("projects.task_step_metadata", self.locale)
@@ -321,14 +320,13 @@ class TaskExecution(AgentMiddleware[Any, Any]):
             if delivery_only:
                 await self.require_delivery()
             elif await self.delivery_pending():
-                # The first answer is still buffered by TaskResponseText. Start a new
-                # response so it becomes process text before asking for a real delivery.
+                # Keep already published text and start a separate model response.
+                # Public text is not proof that the requested file was delivered.
                 get_stream_writer()(
                     {
                         "type": "task_step_context",
                         "plan_id": plan_id,
                         "step_id": step_id,
-                        "tools_disabled": False,
                     }
                 )
                 response = await handler(

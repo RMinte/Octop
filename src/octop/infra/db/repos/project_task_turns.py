@@ -271,14 +271,10 @@ class ProjectTaskTurnRepo:
         require_active: bool = False,
     ) -> bool:
         with self._db.connect() as conn:
-            active = (
-                " AND cancel_requested=0 AND pause_requested=0 AND reply=''"
-                if require_active
-                else ""
-            )
+            active = " AND cancel_requested=0 AND pause_requested=0" if require_active else ""
             revision_args: tuple[int, ...] = ()
             if require_active and content_revision is not None:
-                active += " AND content_revision<=?"
+                active += " AND content_revision<?"
                 revision_args = (content_revision,)
             r = conn.execute(
                 "UPDATE project_task_turns SET reply=?, activity=?, updated_at=?, reasoning=COALESCE(?,reasoning), "

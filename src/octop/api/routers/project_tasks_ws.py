@@ -1,4 +1,4 @@
-"""Multiplexed task conversations over one authenticated WebSocket."""
+"""Task and resident conversations over one authenticated WebSocket."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import json
 import time
+from collections.abc import Callable
+from functools import partial
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -14,6 +16,8 @@ from pydantic import Field, StringConstraints, TypeAdapter, ValidationError
 from octop.api.common.task_websocket_logging import Scope, TaskWebSocketLog
 from octop.api.deps import extract_raw_token, maybe_sliding_renew_token, resolve_user_from_token
 from octop.api.routers.projects import _services, _task_worker
+from octop.api.routers.resident_conversations import _runtime as _resident_runtime
+from octop.infra.conversations.updates import PendingUpdates
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import (
     approval_policy,
@@ -112,6 +116,18 @@ class UnsubscribeFrame(CommandFrame):
     task_id: Reference
 
 
+class ResidentSubscribeFrame(CommandFrame):
+    type: Literal["resident.subscribe"]
+    agent_id: Reference
+    thread_id: Reference
+
+
+class ResidentUnsubscribeFrame(CommandFrame):
+    type: Literal["resident.unsubscribe"]
+    agent_id: Reference
+    thread_id: Reference
+
+
 class PingFrame(CommandFrame):
     type: Literal["ping"]
 
@@ -146,7 +162,7 @@ class ToolReviewFrame(ToolIdentityFrame):
     data: ClientToolReviewRequest
 
 
-TaskCommand = Annotated[
+ConversationCommand = Annotated[
     CreateFrame
     | MessageFrame
     | RetryFrame
@@ -157,6 +173,8 @@ TaskCommand = Annotated[
     | OpenFrame
     | SubscribeFrame
     | UnsubscribeFrame
+    | ResidentSubscribeFrame
+    | ResidentUnsubscribeFrame
     | PingFrame
     | AttachFrame
     | ToolGetFrame
@@ -165,13 +183,13 @@ TaskCommand = Annotated[
     | ToolReviewFrame,
     Field(discriminator="type"),
 ]
-_command: TypeAdapter[TaskCommand] = TypeAdapter(TaskCommand)
+_command: TypeAdapter[ConversationCommand] = TypeAdapter(ConversationCommand)
 _command_id: TypeAdapter[tasks.RequestID] = TypeAdapter(tasks.RequestID)
 
 
 @router.websocket("/ws")
 async def task_websocket(websocket: WebSocket) -> None:
-    """Task commands and resumable state pushes, independent of worker lifetime."""
+    """Shared commands and conversation snapshots, independent of worker lifetime."""
     diagnostics = TaskWebSocketLog(websocket.headers)
     diagnostics.record("connection_received")
     try:
@@ -267,9 +285,31 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
         return
     token = extract_raw_token(authorization=websocket.headers.get("authorization"))
     subscriptions: dict[str, str] = {}
+    update_watches: dict[str, Callable[[], None]] = {}
+    resident_subscriptions: dict[tuple[str, str], int] = {}
+    resident_watches: dict[tuple[str, str], Callable[[], None]] = {}
+    pending_updates = PendingUpdates[tuple[str, ...]]()
     client_id: str | None = None
     delivered_calls: dict[str, ClientToolCall] = {}
     pump: asyncio.Task[None] | None = None
+
+    def queue_update(task_id: str) -> None:
+        pending_updates.add(("task", task_id))
+
+    def stop_watching(task_id: str) -> None:
+        stop = update_watches.pop(task_id, None)
+        if stop is not None:
+            stop()
+        pending_updates.discard(("task", task_id))
+
+    def queue_resident_update(scope: tuple[str, str]) -> None:
+        pending_updates.add(("resident", *scope))
+
+    def stop_resident_watch(scope: tuple[str, str]) -> None:
+        stop = resident_watches.pop(scope, None)
+        if stop is not None:
+            stop()
+        pending_updates.discard(("resident", *scope))
 
     async def authenticate(stage: str) -> None:
         nonlocal token
@@ -292,11 +332,15 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
 
     async def push_updates() -> None:
         checked = time.monotonic()
+        next_poll = checked + _UPDATE_SECONDS
         delivered_policy = None
         stage = "idle"
         try:
             while True:
-                await asyncio.sleep(_UPDATE_SECONDS)
+                await pending_updates.wait(max(0, next_poll - time.monotonic()))
+                # Clear before reading: commits during a read must wake the next pass.
+                changed = pending_updates.take()
+                poll = time.monotonic() >= next_poll
                 async with lock:
                     if closing:
                         return
@@ -305,14 +349,17 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
                         await authenticate(stage)
                         await websocket.send_json({"type": "heartbeat"})
                         checked = time.monotonic()
-                    stage = "approval_policy"
-                    policy = await asyncio.to_thread(approval_policy.current, services, user.id)
-                    if policy != delivered_policy:
-                        await websocket.send_json(
-                            {"type": "approval.policy", "data": policy.model_dump(mode="json")}
-                        )
-                        delivered_policy = policy
+                    if poll:
+                        stage = "approval_policy"
+                        policy = await asyncio.to_thread(approval_policy.current, services, user.id)
+                        if policy != delivered_policy:
+                            await websocket.send_json(
+                                {"type": "approval.policy", "data": policy.model_dump(mode="json")}
+                            )
+                            delivered_policy = policy
                     for task_id, cursor in list(subscriptions.items()):
+                        if not poll and ("task", task_id) not in changed:
+                            continue
                         stage = "subscription_updates"
                         try:
                             updates = await asyncio.to_thread(
@@ -320,6 +367,7 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
                             )
                         except OctopError as exc:
                             subscriptions.pop(task_id, None)
+                            stop_watching(task_id)
                             await error(exc, stage=stage, scope="subscription", task_id=task_id)
                             continue
                         for update in updates:
@@ -327,7 +375,35 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
                                 {"type": "turn", "data": update.model_dump(mode="json")}
                             )
                             subscriptions[task_id] = update.cursor
-                    if client_id is not None:
+                    for scope, revision in list(resident_subscriptions.items()):
+                        if not poll and ("resident", *scope) not in changed:
+                            continue
+                        stage = "resident_subscription_updates"
+                        agent_id, thread_id = scope
+                        try:
+                            snapshot = await _resident_runtime(server).snapshot(
+                                user.id, agent_id, thread_id, 50, locale
+                            )
+                        except OctopError as exc:
+                            resident_subscriptions.pop(scope, None)
+                            stop_resident_watch(scope)
+                            await error(
+                                exc,
+                                stage=stage,
+                                scope="subscription",
+                                agent_id=agent_id,
+                                thread_id=thread_id,
+                            )
+                            continue
+                        if snapshot.revision != revision:
+                            await websocket.send_json(
+                                {
+                                    "type": "resident.snapshot",
+                                    "data": snapshot.model_dump(mode="json"),
+                                }
+                            )
+                            resident_subscriptions[scope] = snapshot.revision
+                    if poll and client_id is not None:
                         stage = "client_tools"
                         calls = await asyncio.to_thread(
                             client_tools.open_calls, services, user.id, client_id
@@ -360,6 +436,8 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
                                 delivered_calls[call.call_id] = call
                             else:
                                 delivered_calls.pop(call.call_id, None)
+                    if poll:
+                        next_poll = time.monotonic() + _UPDATE_SECONDS
         except OctopError as exc:
             await close_with_error(exc, stage=stage)
         except (WebSocketDisconnect, OSError) as exc:
@@ -465,7 +543,8 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
                     elif isinstance(frame, SubscribeFrame):
                         if (
                             frame.task_id not in subscriptions
-                            and len(subscriptions) >= _MAX_SUBSCRIPTIONS
+                            and len(subscriptions) + len(resident_subscriptions)
+                            >= _MAX_SUBSCRIPTIONS
                         ):
                             raise OctopError.localized(ErrorCode.TASK_FRAME_INVALID)
                         cursor = frame.cursor
@@ -487,8 +566,45 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
                             )
                             cursor = update.cursor
                         subscriptions[frame.task_id] = cursor
+                        stop_watching(frame.task_id)
+                        worker = server.project_task_worker
+                        if worker is not None:
+                            update_watches[frame.task_id] = worker.watch_updates(
+                                frame.task_id, partial(queue_update, frame.task_id)
+                            )
+                        # Cover commits between the initial read and registering the watch.
+                        queue_update(frame.task_id)
                     elif isinstance(frame, UnsubscribeFrame):
                         subscriptions.pop(frame.task_id, None)
+                        stop_watching(frame.task_id)
+                    elif isinstance(frame, ResidentSubscribeFrame):
+                        resident_scope = (frame.agent_id, frame.thread_id)
+                        if (
+                            resident_scope not in resident_subscriptions
+                            and len(subscriptions) + len(resident_subscriptions)
+                            >= _MAX_SUBSCRIPTIONS
+                        ):
+                            raise OctopError.localized(ErrorCode.TASK_FRAME_INVALID)
+                        resident = _resident_runtime(server)
+                        resident_snapshot = await resident.snapshot(
+                            user.id, frame.agent_id, frame.thread_id, 50, locale
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "resident.snapshot",
+                                "data": resident_snapshot.model_dump(mode="json"),
+                            }
+                        )
+                        resident_subscriptions[resident_scope] = resident_snapshot.revision
+                        stop_resident_watch(resident_scope)
+                        resident_watches[resident_scope] = resident.watch_updates(
+                            frame.thread_id, partial(queue_resident_update, resident_scope)
+                        )
+                        queue_resident_update(resident_scope)
+                    elif isinstance(frame, ResidentUnsubscribeFrame):
+                        resident_scope = (frame.agent_id, frame.thread_id)
+                        resident_subscriptions.pop(resident_scope, None)
+                        stop_resident_watch(resident_scope)
                     elif isinstance(frame, ApprovalPolicyFrame):
                         detail = await asyncio.to_thread(
                             approval_policy.set_policy,
@@ -559,7 +675,11 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
     except Exception as exc:
         await unexpected_error(exc, stage=stage)
     finally:
-        diagnostics.subscription_count = len(subscriptions)
+        diagnostics.subscription_count = len(subscriptions) + len(resident_subscriptions)
+        for task_id in list(update_watches):
+            stop_watching(task_id)
+        for resident_scope in list(resident_watches):
+            stop_resident_watch(resident_scope)
         if pump is not None:
             pump.cancel()
             with contextlib.suppress(asyncio.CancelledError):

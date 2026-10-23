@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool, ToolException
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -107,7 +107,6 @@ async def test_model_only_schema_and_context_are_copies(captured):
             "type": "task_step_context",
             "plan_id": "plan",
             "step_id": "step-a",
-            "tools_disabled": False,
         }
     ]
 
@@ -543,7 +542,6 @@ async def test_finished_plan_withdraws_tools_and_rejects_dispatch(captured, phas
             "type": "task_step_context",
             "plan_id": "plan",
             "step_id": None,
-            "tools_disabled": True,
         }
     ]
     events.clear()
@@ -571,6 +569,62 @@ async def test_delivery_guard_requires_a_successful_write_and_current_turn_attac
         await middleware.require_delivery()
     publisher.has_artifacts.return_value = True
     await middleware.require_delivery()
+
+
+@pytest.mark.parametrize("publishes", [False, True])
+async def test_delivery_correction_keeps_public_message_and_new_response_boundary(
+    captured, publishes
+):
+    events, _ = captured
+    planning = Planning()
+    planning.phase, planning.active = "unplanned", None
+    publisher = SimpleNamespace(has_artifacts=AsyncMock(return_value=False))
+    middleware = TaskExecution(planning, "zh", "root", artifact_publisher=publisher)
+    middleware.restore(
+        [
+            {
+                "type": "tool",
+                "tool_name": "write_file",
+                "tool_call_id": "saved-write",
+                "status": "completed",
+                "started_at": datetime.now(UTC).isoformat(),
+                "arguments": {"file_path": "/app.html"},
+            }
+        ]
+    )
+    first = AIMessage(content="已写入 app.html。", id="public-before-correction")
+    corrected = AIMessage(
+        content="现在发布附件。" if publishes else "仍然只提供路径。",
+        tool_calls=[{"name": "create_artifact", "args": {}, "id": "publish"}] if publishes else [],
+    )
+    requests = []
+
+    async def model_handler(actual):
+        requests.append(actual)
+        assert len(events) == len(requests)
+        return ModelResponse(result=[first if len(requests) == 1 else corrected])
+
+    if publishes:
+        result = await middleware.awrap_model_call(
+            model_request([note_tool("create_artifact")]), model_handler
+        )
+        assert result.result == [corrected]
+    else:
+        with pytest.raises(ToolException, match="publish_workspace_file"):
+            await middleware.awrap_model_call(
+                model_request([note_tool("create_artifact")]), model_handler
+            )
+    assert len(requests) == 2
+    assert requests[0].messages == []
+    assert requests[1].messages[0] is first
+    assert isinstance(requests[1].messages[1], HumanMessage)
+    assert requests[1].messages[1].content == tr("projects.artifacts_delivery_required", "zh")
+    assert requests[1].tool_choice == "required"
+    assert first.content == "已写入 app.html。"
+    assert events == [
+        {"type": "task_step_context", "plan_id": "plan", "step_id": None},
+        {"type": "task_step_context", "plan_id": "plan", "step_id": None},
+    ]
 
 
 @pytest.mark.parametrize(

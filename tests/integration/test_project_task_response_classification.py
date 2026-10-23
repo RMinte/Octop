@@ -1,10 +1,9 @@
-"""Classify each model response before publishing prose as a final answer."""
+"""Public model text keeps its source through tools, plans and recovery."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import aclosing
 from copy import deepcopy
 from uuid import uuid4
 
@@ -30,23 +29,20 @@ def action_response(text, tool_name, call_id, **arguments):
     )
 
 
-def observe_output(monkeypatch):
-    original = runtime.run_turn
-    emitted = []
-
-    async def observed(services, owner, turn, history):
-        async with aclosing(original(services, owner, turn, history)) as events:
-            async for event in events:
-                if event["type"] in {"token", "reasoning", "reasoning_summary"}:
-                    emitted.append((turn.turn_id, event["type"], event["content"]))
-                yield event
-
-    monkeypatch.setattr(runtime, "run_turn", observed)
-    return emitted
-
-
 def text_content(turn):
     return "".join(block["text"] for block in turn["content_blocks"] if block["type"] == "text")
+
+
+async def visible_output(client, auth, task_id, reply, *, reasoning=None):
+    async with asyncio.timeout(5):
+        while True:
+            response = await client.get(f"/api/project-tasks/{task_id}", headers=auth)
+            assert response.status_code == 200, response.text
+            detail = response.json()
+            turn = detail["turns"][-1]
+            if turn["reply"] == reply and (reasoning is None or turn["reasoning"] == reasoning):
+                return detail
+            await asyncio.sleep(0.01)
 
 
 async def test_direct_question_preserves_final_text_and_durable_answer(
@@ -55,7 +51,6 @@ async def test_direct_question_preserves_final_text_and_durable_answer(
     client, server, auth = env_with_provider
     answer = "这是普通问答的直接答案。"
     harness_models(monkeypatch, [AIMessage(content=answer)])
-    emitted = observe_output(monkeypatch)
     response = await client.post(
         "/api/project-tasks",
         headers=auth,
@@ -71,14 +66,13 @@ async def test_direct_question_preserves_final_text_and_durable_answer(
     turn = task["turns"][0]
     assert turn["reply"] == text_content(turn) == answer
     assert turn["reasoning"] == "" and turn["plan"] is None
-    assert "".join(text for _, kind, text in emitted if kind == "token") == answer
     saved = server.services.project_task_turn_repo.get(turn["turn_id"])
     assert saved.reply == answer
     assert json.loads(saved.content_blocks_json) == turn["content_blocks"]
 
 
 @pytest.mark.parametrize("mode", ["tool", "planning", "mixed-planning"])
-async def test_tool_response_prose_never_enters_answer_even_before_plan_creation(
+async def test_tool_and_plan_response_prose_stays_public_even_before_plan_creation(
     env_with_provider, monkeypatch, mode
 ):
     client, server, auth = env_with_provider
@@ -91,7 +85,7 @@ async def test_tool_response_prose_never_enters_answer_even_before_plan_creation
     work = action_response(
         tool_prose, "create_artifact", "publish-proof", name="proof.txt", content="actual-proof"
     )
-    expected_process = [tool_prose]
+    expected_public = [tool_prose]
     responses = []
     if mode != "tool":
         if mode == "mixed-planning":
@@ -116,9 +110,9 @@ async def test_tool_response_prose_never_enters_answer_even_before_plan_creation
                     ],
                 )
             )
-            expected_process = [mixed_prose, correction_prose, tool_prose, step_prose]
+            expected_public = [mixed_prose, correction_prose, tool_prose, step_prose]
         else:
-            expected_process = [plan_prose, tool_prose, step_prose]
+            expected_public = [plan_prose, tool_prose, step_prose]
         responses.append(
             action_response(
                 correction_prose if mode == "mixed-planning" else plan_prose,
@@ -146,7 +140,6 @@ async def test_tool_response_prose_never_enters_answer_even_before_plan_creation
         responses.append(finish_response)
     responses.append(AIMessage(content=final_answer))
     planning_models(monkeypatch, responses)
-    emitted = observe_output(monkeypatch)
     created = await client.post(
         "/api/project-tasks",
         headers=auth,
@@ -160,19 +153,16 @@ async def test_tool_response_prose_never_enters_answer_even_before_plan_creation
     task = await settled(client, auth, created.json()["task_id"])
     assert task["status"] == "completed", task
     turn = task["turns"][0]
-    assert turn["reply"] == final_answer
-    assert text_content(turn) == final_answer
-    streamed_answer = "".join(text for _, kind, text in emitted if kind == "token")
-    assert streamed_answer == final_answer
+    expected_answer = "".join([*expected_public, final_answer])
+    assert turn["reply"] == text_content(turn) == expected_answer
     process = "".join(
         block["text"]
         for block in turn["content_blocks"]
         if block["type"] in {"reasoning", "reasoning_summary"}
     )
-    for prose in expected_process:
-        assert process.count(prose) == turn["reasoning"].count(prose) == 1
-        assert prose not in streamed_answer
-    assert final_answer not in process
+    assert process == turn["reasoning"] == ""
+    for prose in [*expected_public, final_answer]:
+        assert turn["reply"].count(prose) == 1
     assert [artifact["name"] for artifact in turn["artifacts"]] == ["proof.txt"]
     if mode == "tool":
         assert turn["plan"] is None
@@ -186,7 +176,7 @@ async def test_tool_response_prose_never_enters_answer_even_before_plan_creation
             }
             assert {"mixed-plan", "mixed-work"} <= failed
     saved = server.services.project_task_turn_repo.get(turn["turn_id"])
-    assert saved.reply == final_answer
+    assert saved.reply == expected_answer
     assert json.loads(saved.content_blocks_json) == turn["content_blocks"]
 
 
@@ -277,7 +267,6 @@ async def test_terminal_plan_streams_answer_before_model_finishes(
         "HarnessAgent",
         lambda cfg, **kwargs: HarnessAgent(cfg, model_factory=Factory(cfg.providers), **kwargs),
     )
-    emitted = observe_output(monkeypatch)
     created = await client.post(
         "/api/project-tasks",
         headers=auth,
@@ -291,28 +280,17 @@ async def test_terminal_plan_streams_answer_before_model_finishes(
     task_id = created.json()["task_id"]
     base = f"/api/project-tasks/{task_id}"
 
-    async def visible_partial_answer():
-        while True:
-            live = (await client.get(base, headers=auth)).json()
-            if live["turns"][0]["reply"] == first:
-                return live
-            await asyncio.sleep(0.01)
-
     try:
         await asyncio.wait_for(paused.wait(), timeout=3)
-        live = await asyncio.wait_for(visible_partial_answer(), timeout=3)
+        public_prefix = plan_prose + step_prose
+        live = await visible_output(client, auth, task_id, public_prefix + first)
         turn = live["turns"][0]
         assert live["status"] == "running" and not stopped.is_set()
-        assert text_content(turn) == first
+        assert text_content(turn) == public_prefix + first
         assert turn["plan"]["steps"][0]["status"] == plan_status
-        assert turn["reasoning"] == plan_prose + step_prose
+        assert turn["reasoning"] == ""
         assert requests[:2] and all("planning" in tools for tools in requests[:2])
         assert requests[-1] == set()
-        assert [(kind, text) for _, kind, text in emitted] == [
-            ("reasoning", plan_prose),
-            ("reasoning", step_prose),
-            ("token", first),
-        ]
         if outcome == "cancelled":
             cancelled = await client.post(
                 base + "/cancel", headers=auth, json={"turn_id": turn["turn_id"]}
@@ -326,9 +304,9 @@ async def test_terminal_plan_streams_answer_before_model_finishes(
             expected_status = "cancelled"
         assert task["status"] == expected_status, task
         turn = task["turns"][0]
-        expected_answer = first + last if outcome == "completed" else first
+        expected_answer = public_prefix + first + (last if outcome == "completed" else "")
         assert turn["reply"] == text_content(turn) == expected_answer
-        assert turn["reasoning"] == plan_prose + step_prose
+        assert turn["reasoning"] == ""
         assert all(block["status"] != "streaming" for block in turn["content_blocks"])
         assert len(requests) == 3 and stopped.is_set()
         saved = server.services.project_task_turn_repo.get(turn["turn_id"])
@@ -338,8 +316,9 @@ async def test_terminal_plan_streams_answer_before_model_finishes(
         release.set()
 
 
-async def test_same_prompt_followup_and_approval_resume_preserve_answer_classification(
-    env_with_provider, monkeypatch
+@pytest.mark.parametrize("pause_before_restart", [False, True])
+async def test_same_prompt_followup_and_approval_resume_preserve_public_text(
+    env_with_provider, monkeypatch, pause_before_restart
 ):
     from deepagents.backends.protocol import ExecuteResponse
     from octop_harness.backends.bwrap_shell import BubbledLocalShellBackend
@@ -366,7 +345,6 @@ async def test_same_prompt_followup_and_approval_resume_preserve_answer_classifi
             AIMessage(content=second_answer),
         ],
     )
-    emitted = observe_output(monkeypatch)
     created = await client.post(
         "/api/project-tasks",
         headers=auth,
@@ -398,31 +376,45 @@ async def test_same_prompt_followup_and_approval_resume_preserve_answer_classifi
     assert waiting["status"] == "waiting_approval" and effects == []
     assert waiting["turns"][0] == old_turn
     current = waiting["turns"][-1]
-    assert current["reply"] == text_content(current) == ""
-    assert current["reasoning"].count(prelude) == 1
+    assert current["reply"] == text_content(current) == prelude
+    assert current["reasoning"] == ""
     item = current["interactions"][0]
+    if pause_before_restart:
+        paused = await client.post(
+            base + "/pause",
+            headers=auth,
+            json={"turn_id": turn_id, "request_id": "pause-public-prelude"},
+        )
+        assert paused.status_code == 200, paused.text
+        snapshot = (await client.get(base, headers=auth)).json()
+        assert snapshot["status"] == "paused" and effects == []
+        assert snapshot["turns"][0] == old_turn
+        assert snapshot["turns"][-1]["reply"] == prelude
     await server.project_task_worker.close()
     accepted = await respond(env_with_provider, waiting, item, approval(item))
     assert accepted.status_code == 200, accepted.text
     server.project_task_worker = runtime.ProjectTaskWorker(server.services)
     await server.project_task_worker.start()
+    if pause_before_restart:
+        snapshot = (await client.get(base, headers=auth)).json()
+        assert snapshot["status"] == "paused" and effects == []
+        assert snapshot["turns"][-1]["reply"] == prelude
+        resumed = await client.post(
+            base + "/resume",
+            headers=auth,
+            json={"turn_id": turn_id, "request_id": "resume-public-prelude"},
+        )
+        assert resumed.status_code == 200, resumed.text
     final = await settled(client, auth, first["task_id"])
     assert final["status"] == "completed", final
     assert final["turns"][0] == old_turn
     current = final["turns"][-1]
-    assert current["reply"] == text_content(current) == second_answer
-    assert current["reasoning"].count(prelude) == 1
+    assert current["reply"] == text_content(current) == prelude + second_answer
+    assert current["reasoning"] == ""
     assert effects == [command]
-    assert (
-        "".join(
-            text
-            for emitted_turn, kind, text in emitted
-            if emitted_turn == turn_id and kind == "token"
-        )
-        == second_answer
-    )
+    assert current["reply"].count(prelude) == current["reply"].count(second_answer) == 1
     saved = server.services.project_task_turn_repo.get(turn_id)
-    assert saved.reply == second_answer
+    assert saved.reply == prelude + second_answer
     assert json.loads(saved.content_blocks_json) == current["content_blocks"]
     server.project_task_worker.wake()
     await asyncio.sleep(0.05)
@@ -431,24 +423,13 @@ async def test_same_prompt_followup_and_approval_resume_preserve_answer_classifi
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
-async def test_interrupted_provider_preserves_received_prose_and_later_summary_as_process(
+async def test_interrupted_provider_preserves_public_prose_and_separate_summary(
     env_with_provider, monkeypatch, status
 ):
     client, server, auth = env_with_provider
     prose, summary = "我先核对当前输入。", "已收到输入，尚未形成结论。"
-    received, requests = [], []
-    buffered, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    append = runtime.TaskResponseText.append
-
-    def observe_buffer(response, event):
-        output = append(response, event)
-        if event["type"] in {"token", "reasoning_summary"}:
-            received.append((event["type"], event["content"]))
-            if event["type"] == "reasoning_summary":
-                buffered.set()
-        return output
-
-    monkeypatch.setattr(runtime.TaskResponseText, "append", observe_buffer)
+    requests = []
+    paused, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class Model(FakeMessagesListChatModel):
         def bind_tools(self, tools, **kwargs):
@@ -472,6 +453,7 @@ async def test_interrupted_provider_preserves_received_prose_and_later_summary_a
                         ],
                     )
                 )
+                paused.set()
                 await release.wait()
                 raise RuntimeError("simulated provider interruption")
             finally:
@@ -488,7 +470,6 @@ async def test_interrupted_provider_preserves_received_prose_and_later_summary_a
         "HarnessAgent",
         lambda cfg, **kwargs: HarnessAgent(cfg, model_factory=Factory(cfg.providers), **kwargs),
     )
-    emitted = observe_output(monkeypatch)
     created = await client.post(
         "/api/project-tasks",
         headers=auth,
@@ -501,10 +482,9 @@ async def test_interrupted_provider_preserves_received_prose_and_later_summary_a
     assert created.status_code == 202, created.text
     task_id = created.json()["task_id"]
     try:
-        await asyncio.wait_for(buffered.wait(), timeout=3)
-        assert received == [("token", prose), ("reasoning_summary", summary)]
-        live = (await client.get(f"/api/project-tasks/{task_id}", headers=auth)).json()
-        assert live["status"] == "running" and live["turns"][0]["reply"] == ""
+        await asyncio.wait_for(paused.wait(), timeout=3)
+        live = await visible_output(client, auth, task_id, prose, reasoning=summary)
+        assert live["status"] == "running" and not stopped.is_set()
         if status == "failed":
             release.set()
         else:
@@ -517,20 +497,16 @@ async def test_interrupted_provider_preserves_received_prose_and_later_summary_a
         task = await settled(client, auth, task_id)
         assert task["status"] == status, task
         turn = task["turns"][0]
-        assert turn["reply"] == text_content(turn) == ""
-        assert turn["reasoning"] == prose + summary
+        assert turn["reply"] == text_content(turn) == prose
+        assert turn["reasoning"] == summary
         assert [(block["type"], block["text"]) for block in turn["content_blocks"]] == [
-            ("reasoning", prose),
+            ("text", prose),
             ("reasoning_summary", summary),
         ]
         assert all(block["status"] != "streaming" for block in turn["content_blocks"])
-        assert [(kind, text) for _, kind, text in emitted] == [
-            ("reasoning", prose),
-            ("reasoning_summary", summary),
-        ]
         assert len(requests) == 1 and stopped.is_set()
         saved = server.services.project_task_turn_repo.get(turn["turn_id"])
-        assert saved.reply == "" and saved.reasoning == prose + summary
+        assert saved.reply == prose and saved.reasoning == summary
         assert json.loads(saved.content_blocks_json) == turn["content_blocks"]
         reopened = (await client.get(f"/api/project-tasks/{task_id}", headers=auth)).json()
         assert reopened["turns"][0] == turn

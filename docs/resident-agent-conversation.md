@@ -6,6 +6,8 @@
 
 首版闭环现已追加[历史与基本记忆接口](resident-history-memory.md)和[任务委派与成果回流](resident-delegation-results.md)。下列六个接口继续保留原职责；新 primary 消息默认支持自然语言任务委派，统一历史使用新增 `/conversation/history`，显式委派与记忆管理仍保留各自入口。
 
+2026-10-23 增加正文实时观察：`GET /api/agents/resident-capabilities` 的 `conversation_stream` 声明共享 `/api/project-tasks/ws` 和协议版本 3。通过 `resident.subscribe` 订阅已保存的累计正文和状态，使用 `resident.snapshot` 建立、更新及恢复最近 50 轮快照；发送、原请求查询和取消仍使用以下 REST 接口。`ResidentTurn` 的 `revision` 统一出现在 REST 回执、快照和历史，用于阻止迟到旧状态覆盖新正文。完整接入与验收见 [App 共用正文 WebSocket 交接](agentcomputer-conversation-stream-handoff.md)，本轮未修改客户端。
+
 ## 领域关系与本期范围
 
 | 对象 | 职责与关系 |
@@ -104,6 +106,7 @@ Content-Type: application/json
 ```json
 {
   "turn_id": "01RESIDENTTURNEXAMPLE",
+  "revision": 1,
   "request_id": "e1842840-23a6-4015-a60b-97b53d9698a0",
   "user_message_id": "resident:01RESIDENTTURNEXAMPLE:user",
   "assistant_message_id": "resident:01RESIDENTTURNEXAMPLE:assistant",
@@ -120,6 +123,7 @@ Content-Type: application/json
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `turn_id` | string | 服务端受理轮次的稳定身份。 |
+| `revision` | integer，≥1 | 此轮单调递增的持久版本；REST 回执、WebSocket 快照和历史共用，用于拒绝迟到旧状态。 |
 | `request_id` | string | 原用户发送请求身份。 |
 | `user_message_id` | string | 宿主分配的稳定用户消息 ID，也写入正式聊天历史。 |
 | `assistant_message_id` | string | 受理记录的稳定展示 ID，用于客户端合并本轮回复；不等同于 Provider/Harness 产生的正式 AI 消息 ID。 |

@@ -68,7 +68,7 @@ def pause(db, repo, *, now=2_000, wait_kind="approval"):
         )
 
 
-def test_narration_write_cannot_replace_newer_content_or_started_answer(turns):
+def test_narration_write_requires_new_revision_and_preserves_public_body(turns):
     _db, repo = turns
     repo.claim("worker-one", 1_000)
     assert not repo.progress(
@@ -98,21 +98,82 @@ def test_narration_write_cannot_replace_newer_content_or_started_answer(turns):
         "",
         1_300,
         content_blocks_json='[{"text":"answer"}]',
-        content_revision=5,
+        content_revision=6,
     )
+    for revision in (5, 6):
+        assert repo.progress(
+            "timing-turn",
+            "worker-one",
+            "",
+            "",
+            1_400,
+            content_blocks_json='[{"text":"late narration"}]',
+            content_revision=revision,
+            require_active=True,
+        )
+    saved = repo.get("timing-turn")
+    assert saved.reply == "First answer token" and saved.content_revision == 6
+    assert saved.content_blocks_json == '[{"text":"answer"}]'
+    refined = '[{"text":"answer"},{"brief":"latest actual tool result"}]'
+    assert not repo.progress(
+        "timing-turn",
+        "worker-one",
+        "First answer token",
+        "",
+        1_500,
+        content_blocks_json=refined,
+        content_revision=7,
+        require_active=True,
+    )
+    updated = repo.get("timing-turn")
+    assert updated.reply == "First answer token" and updated.content_revision == 7
+    assert updated.content_blocks_json == refined
+
+
+@pytest.mark.parametrize("guard", ["worker", "cancel", "pause", "waiting", "completed"])
+def test_narration_after_public_body_keeps_active_worker_and_lifecycle_guards(turns, guard):
+    db, repo = turns
+    repo.claim("worker-one", 1_000)
+    assert not repo.progress(
+        "timing-turn", "worker-one", "Public body", "", 1_100, content_revision=1
+    )
+    with db.transaction() as conn:
+        if guard == "worker":
+            conn.execute("UPDATE project_task_turns SET worker_id='worker-two'")
+        elif guard == "cancel":
+            conn.execute("UPDATE project_task_turns SET cancel_requested=1")
+        elif guard == "pause":
+            conn.execute("UPDATE project_task_turns SET pause_requested=1")
+        elif guard == "waiting":
+            assert repo.pause(
+                conn,
+                "timing-turn",
+                "worker-one",
+                "saved-checkpoint",
+                '{"calls":[]}',
+                "Public body",
+                "",
+                "[]",
+                1,
+                1_200,
+                "approval",
+            )
+        else:
+            assert repo.finish(
+                conn, "timing-turn", "worker-one", "completed", "Public body", "", 1_200
+            )
+    before = repo.get("timing-turn")
     assert repo.progress(
         "timing-turn",
         "worker-one",
+        "Public body",
         "",
-        "",
-        1_400,
-        content_blocks_json='[{"text":"late narration"}]',
-        content_revision=5,
+        1_300,
+        content_blocks_json='[{"brief":"must not be saved"}]',
+        content_revision=2,
         require_active=True,
     )
-    saved = repo.get("timing-turn")
-    assert saved.reply == "First answer token" and saved.content_revision == 5
-    assert saved.content_blocks_json == '[{"text":"answer"}]'
+    assert repo.get("timing-turn") == before
 
 
 @pytest.mark.parametrize("wait_kind", ["approval", "question", "client_tool", "user"])
@@ -295,7 +356,7 @@ def test_v43_migration_adds_null_timing_and_preserves_every_original_turn_column
         after = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
         assert after.pop("started_at") is None and after.pop("finished_at") is None
         assert after == before
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 53
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 55
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
