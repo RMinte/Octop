@@ -62,6 +62,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | POST | `/api/projects/{project_id}/tasks` | 在项目中发送首条消息，原子创建任务和首轮，返回 202 |
 | GET | `/api/project-tasks` | 分页列出无项目任务；archived=true 查看归档任务 |
 | GET | `/api/project-tasks/resources` | 本轮可用的模型、Skill 和 MCP 引用 |
+| GET / PUT | `/api/project-tasks/routing/settings` | 读取部署模型路由配置；修改需要 `providers` 管理权限 |
 | POST | `/api/project-tasks/attachments` | multipart 的 file 上传本人任务输入附件，返回 201 和附件元数据 |
 | GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入附件的鉴权读取，图片预览、其他文件下载 |
 | GET | `/api/project-tasks/artifacts` | 跨任务成果资料库，按文件发布时间倒序分页，支持项目、任务、类型、文件名及归档筛选 |
@@ -81,7 +82,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 
 每轮采用发送时项目配置的快照：行动指南进入系统提示；服务端目录作为实际工作目录；所选已安装技能和 SkillHub 包通过 Harness 工作区加载；仅装配所选 MCP 和插件能力，凭据沿用连接管理。子代理角色、长期记忆和团队协作配置同样按轮保存。项目修改在下一轮生效，已保存轮次的 `project_revision` 保留原值。客户端目录仍然只记录路径。无项目任务使用服务端自动分配的独立工作区。
 
-未显式选择本轮模型时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。有当前或历史图片输入时，所选模型须支持图片，不能用纯文字模型继续，也不会自动切换模型。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字、图片和通用文件对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器和桌面未接入。
+未显式选择本轮模型且未开启路由时，使用全局已配置的可用对话模型（优先启用的全局默认模型，未设时采用已有文本执行模型配置，最后回退到第一个可用模型）。未配置模型不创建空任务。有当前或历史图片输入时，所选模型须支持图片；普通显式或默认选择不会自动切换模型，混合路由的能力选择规则见[任务模型路由接入](project-task-model-routing.md)。执行遵循现有全局安全策略和 Token 配额；模型用量直接记在任务轮次的 `input_tokens/output_tokens` 中，并纳入用户累计配额；原专家 Token 统计页面暂未合并这部分展示。主 Task 需要审批的工具保存交互及原生断点，收到决定后续跑；任务提供文字、图片和通用文件对话、项目文件/脚本、Skill、所选 MCP 和插件、子代理、任务独立记忆及同步团队协作；浏览器和桌面未接入。
 
 状态为 `queued/running/waiting_approval/waiting_answer/waiting_client_tool/paused/completed/failed/cancelled`。任务运行时约每 100ms 合并保存增量正文，提交后唤醒 WebSocket 推送；约 500ms 的数据库检查作为其他进程写入等情况的兜底。网页约每 30 秒同步任务列表摘要。会话断线后从最后应用的游标续接，恢复前台或网络时重新连接。已完成轮次以及失败/取消轮次的模型消息、工具调用和结果用作后续上下文；历史仅有问答文本的记录继续保留文本；未完成轮次附加明确标记，提醒模型核对已发生的操作，不自动重放工具调用。取消不会回滚已发生的工具副作用；优雅停服标记中断，进程异常退出后约 90 秒释放失效执行，不自动重试。回复失败不向客户端返回原始模型/MCP 异常或凭据。
 
@@ -369,7 +370,9 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-`options.model_ref` 省略或为 null 时，每一轮都使用本轮入队时的当前默认选择，不隐式继承上一轮模型；希望连续追问沿用同一模型时，客户端须在每次请求中再次携带同一个完整 `model_ref`。显式指定不可用模型返回 HTTP 409 / `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。入队后模型随本轮固定，`turns[].model_ref` 返回该轮实际模型，客户端应据此展示执行结果，不以输入框当前选择反推历史。skills、mcp_servers 省略或 null 继承项目配置；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。无项目任务同样可以选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
+`options.model_ref` 省略或为 null 且未开启路由时，每一轮都使用本轮入队时的当前默认选择，不隐式继承上一轮模型；希望连续追问沿用同一模型时，客户端须在每次请求中再次携带同一个完整 `model_ref`。显式指定不可用模型返回 HTTP 409 / `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。入队后模型随本轮固定，`turns[].model_ref` 返回该轮实际模型，客户端应据此展示执行结果，不以输入框当前选择反推历史。skills、mcp_servers 省略或 null 继承项目配置；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。无项目任务同样可以选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
+
+客户端可在同一 `options` 中显式提交 `routing`：`{"mode":"box"}` 固定盒子，`{"mode":"hybrid","level":60}` 由盒子根据本轮消息、有效历史及项目行动指南判难。仅支持 `box/hybrid`；混合档位严格接受整数 `0/20/40/60/80/100`，不是调用比例或任务占比。0 档始终盒子，不要求远端配置；20/40/60/80/100 档的远端难度阈值分别为 80/60/40/20/10，因此 100 档的 0–9 基础工作仍走盒子。省略 `level` 使用部署默认档位；省略或为 null 的 `routing` 保持原有默认模型语义，非空 `model_ref` 始终优先并跳过判难。希望下一轮沿用策略时须再次携带 `routing`。部署配置由 `GET/PUT /api/project-tasks/routing/settings` 读取和保存，不改变项目或全局默认模型；资源接口的 `routing` 返回安全能力声明，`turns[].routing` 返回本轮实际来源、档位、难度和原因快照。判难失败保守使用盒子；真实取消不入队；同一已受理请求的幂等重传不重新判难。完整 REST/WS 示例、图片约束与用量边界见[任务模型路由接入](project-task-model-routing.md)。
 
 options 也接受 plugins、subagents、memory_enabled、team_enabled。省略或 null 继承发送时的项目值；无项目任务默认 plugins/subagents=[]、memory_enabled=true、team_enabled=false。列表 [] 清空本轮选择，布尔值 false 仅关闭本轮能力。资源接口增加 plugins（plugin_id/name/description/available）和 subagents（slug/name/description）；全局禁用或未成功加载的插件不可选择。turns[].options 返回全部实际选择。保存项目只保存引用，不安装插件、执行工具或创建专家。
 

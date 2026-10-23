@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from octop.api.common.content_disposition import content_disposition
 from octop.api.common.upload_limit import read_upload_capped
-from octop.api.deps import current_user, get_server, require_database
+from octop.api.deps import current_user, get_server, require_database, require_permission
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import (
@@ -23,8 +23,10 @@ from octop.infra.projects import (
     artifacts,
     input_attachments,
     interactions,
+    model_routing,
     service,
     sync,
+    task_submission,
     tasks,
 )
 from octop.infra.projects.approval_models import ApprovalPolicyUpdate, TaskApprovalPolicy
@@ -324,9 +326,7 @@ async def create_project_task(
 ) -> tasks.TaskDetail:
     worker = _task_worker(server)
     response.headers["Cache-Control"] = "no-store"
-    result = await asyncio.to_thread(
-        tasks.send, _services(server), user.id, body, project_id=project_id
-    )
+    result = await task_submission.submit(_services(server), user.id, body, project_id=project_id)
     worker.wake()
     return result
 
@@ -562,8 +562,8 @@ async def create_task(
 ) -> tasks.TaskDetail:
     worker = _task_worker(server)
     response.headers["Cache-Control"] = "no-store"
-    result = await asyncio.to_thread(
-        tasks.send, _services(server), user.id, body, project_id=body.project_id
+    result = await task_submission.submit(
+        _services(server), user.id, body, project_id=body.project_id
     )
     worker.wake()
     return result
@@ -666,6 +666,37 @@ async def task_resources(
 ) -> tasks.TaskResources:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(tasks.resources, _services(server), user.id)
+
+
+@task_router.get(
+    "/routing/settings",
+    response_model=model_routing.ModelRoutingSettings,
+    summary="读取盒子与混合模式配置",
+    description="登录用户可读取两侧模型引用及默认难度档位；不返回服务地址或凭据，不改变现有默认模型。",
+)
+async def read_model_routing_settings(
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> model_routing.ModelRoutingSettings:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(model_routing.load_settings, _services(server))
+
+
+@task_router.put(
+    "/routing/settings",
+    response_model=model_routing.ModelRoutingSettings,
+    summary="配置盒子和混合模式使用的模型",
+    description="需要模型配置权限，完整替换两侧模型引用及默认档位；仅影响之后受理的显式路由请求，已有轮次、项目和全局默认模型保持原值。",
+)
+async def update_model_routing_settings(
+    body: model_routing.ModelRoutingSettings,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(require_permission("providers")),
+) -> model_routing.ModelRoutingSettings:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(model_routing.save_settings, _services(server), body)
 
 
 @task_router.patch(
@@ -787,7 +818,7 @@ async def send_task_message(
 ) -> tasks.TaskDetail:
     worker = _task_worker(server)
     response.headers["Cache-Control"] = "no-store"
-    result = await asyncio.to_thread(tasks.send, _services(server), user.id, body, task_id=task_id)
+    result = await task_submission.submit(_services(server), user.id, body, task_id=task_id)
     worker.wake()
     return result
 
@@ -894,8 +925,8 @@ async def retry_task_turn(
 ) -> tasks.TaskDetail:
     worker = _task_worker(server)
     response.headers["Cache-Control"] = "no-store"
-    result = await asyncio.to_thread(
-        tasks.send, _services(server), user.id, body, task_id=task_id, retry_of_turn_id=turn_id
+    result = await task_submission.submit(
+        _services(server), user.id, body, task_id=task_id, retry_of_turn_id=turn_id
     )
     worker.wake()
     return result

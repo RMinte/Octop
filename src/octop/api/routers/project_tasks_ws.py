@@ -24,6 +24,7 @@ from octop.infra.projects import (
     client_reviews,
     client_tools,
     interactions,
+    task_submission,
     tasks,
     title,
 )
@@ -654,8 +655,8 @@ async def _task_websocket(websocket: WebSocket, diagnostics: TaskWebSocketLog) -
                             kwargs["task_id"] = frame.task_id
                         if isinstance(frame, RetryFrame):
                             kwargs["retry_of_turn_id"] = frame.turn_id
-                        detail = await asyncio.to_thread(
-                            tasks.send, services, user.id, frame.data, **kwargs
+                        detail = await task_submission.submit(
+                            services, user.id, frame.data, **kwargs
                         )
                         worker.wake()
                         result = detail.model_dump(mode="json")

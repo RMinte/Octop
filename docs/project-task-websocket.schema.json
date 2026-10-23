@@ -701,6 +701,45 @@
       "title": "RetryFrame",
       "type": "object"
     },
+    "RoutingRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "box",
+            "hybrid"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "enum": [
+                0,
+                20,
+                40,
+                60,
+                80,
+                100
+              ],
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "混合模式难度档位；省略使用服务端默认档位。盒子模式仅允许 0。",
+          "title": "Level"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "RoutingRequest",
+      "type": "object"
+    },
     "SkillBinding": {
       "additionalProperties": false,
       "properties": {
@@ -974,11 +1013,23 @@
             }
           ],
           "default": null,
-          "description": "本轮模型引用，原样使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传；省略或 null 使用发送时的服务端默认模型，不继承上一轮选择。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
+          "description": "本轮模型引用，原样使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传，优先于 routing；省略或 null 且未启用 routing 时使用发送时的服务端默认模型，不继承上一轮选择。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
           "examples": [
             "Box/RM-01 VLM"
           ],
           "title": "Model Ref"
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮盒子或混合模式；省略保持现有默认模型行为。显式 model_ref 优先。混合档位是难度门槛，100 也保留基础任务在盒子。"
         },
         "skills": {
           "anyOf": [
@@ -2004,6 +2055,115 @@
         "name"
       ],
       "title": "MissingImportAttachment",
+      "type": "object"
+    },
+    "ModelRoutingDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "box",
+            "hybrid"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            0,
+            20,
+            40,
+            60,
+            80,
+            100
+          ],
+          "title": "Level",
+          "type": "integer"
+        },
+        "target": {
+          "enum": [
+            "box",
+            "remote",
+            "explicit"
+          ],
+          "title": "Target",
+          "type": "string"
+        },
+        "model_ref": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Model Ref",
+          "type": "string"
+        },
+        "difficulty": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Difficulty"
+        },
+        "reason_code": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "policy_version": {
+          "const": "difficulty-v1",
+          "default": "difficulty-v1",
+          "title": "Policy Version",
+          "type": "string"
+        },
+        "input_digest": {
+          "default": "",
+          "title": "Input Digest",
+          "type": "string"
+        },
+        "classifier_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Classifier Input Tokens",
+          "type": "integer"
+        },
+        "classifier_output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Classifier Output Tokens",
+          "type": "integer"
+        },
+        "classifier_duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Classifier Duration Ms"
+        },
+        "classifier_input_truncated": {
+          "default": false,
+          "title": "Classifier Input Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "level",
+        "target",
+        "model_ref",
+        "reason_code"
+      ],
+      "title": "ModelRoutingDecision",
       "type": "object"
     },
     "QuestionOption": {
@@ -3057,6 +3217,18 @@
         "model_ref": {
           "title": "Model Ref",
           "type": "string"
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelRoutingDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本轮已冻结的模型分配结果；旧默认或直接选择模型的轮次可为 null。"
         },
         "web_search_enabled": {
           "description": "本轮入队时采用的任务网络搜索开关快照；之后修改任务不会改变此值。",

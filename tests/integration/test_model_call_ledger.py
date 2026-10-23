@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import pytest
 from langchain.agents.middleware.summarization import SummarizationMiddleware
@@ -25,7 +26,10 @@ from octop.infra.agents.providers.box import OctopChatModelFactory, build_box_pr
 from octop.infra.cron.delivery import CronDeliveryCommand, CronDeliveryService
 from octop.infra.db.repos.model_calls import ModelCallRow
 from octop.infra.proactive.service import ProactiveCareService
+from octop.infra.projects import runtime, task_submission
+from octop.infra.projects.routing_classifier import DifficultyAssessment
 from octop.infra.usage.model_calls import current_model_call_scope, model_call_scope
+from tests.integration.test_project_task_routing import _configure, _seed_models, _settled
 from tests.support.auth import create_agent, create_user, resolve_user_id
 
 
@@ -582,6 +586,114 @@ async def test_background_business_calls_keep_purpose_and_owner(
     assert records[0]["user_id"] == owner and records[0]["agent_id"] == agent_id
     assert records[0]["thread_id"] == thread_id
     assert current_model_call_scope() is None
+
+
+async def test_classifier_call_survives_rejected_task_admission(
+    env: Any, observed_model: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, server, auth = env
+    await _seed_models(client, auth)
+    await _configure(client, auth)
+    model = observed_model(source="box", provider_name="Box", model_id="RM-01 VLM")
+    classified, release = asyncio.Event(), asyncio.Event()
+
+    async def classify(*args: Any) -> DifficultyAssessment:
+        await model.ainvoke("private classifier input")
+        classified.set()
+        await release.wait()
+        return DifficultyAssessment(9, "basic")
+
+    monkeypatch.setattr(task_submission, "classify_difficulty", classify)
+    project = (
+        await client.post(
+            "/api/projects",
+            headers={**auth, "Idempotency-Key": uuid4().hex},
+            json={"name": "Admission race", "instructions": "Initial"},
+        )
+    ).json()
+    operation = asyncio.create_task(
+        client.post(
+            "/api/project-tasks",
+            headers=auth,
+            json={
+                "request_id": "rejected-classifier",
+                "project_id": project["project_id"],
+                "prompt": "Classify before admission",
+                "options": {"routing": {"mode": "hybrid", "level": 100}},
+            },
+        )
+    )
+    try:
+        await asyncio.wait_for(classified.wait(), timeout=5)
+        changed = await client.patch(
+            f"/api/projects/{project['project_id']}",
+            headers=auth,
+            json={"expected_revision": 1, "instructions": "Changed"},
+        )
+        assert changed.status_code == 200, changed.text
+    finally:
+        release.set()
+        response = await operation
+    assert response.status_code == 409, response.text
+    assert (await client.get("/api/project-tasks", headers=auth)).json()["items"] == []
+    records = (await _calls(client, auth, submission_id="rejected-classifier"))["items"]
+    assert len(records) == 1
+    assert records[0]["purpose"] == "routing_classifier" and records[0]["status"] == "succeeded"
+    assert records[0]["source"] == "box" and records[0]["project_id"] == project["project_id"]
+    assert records[0]["task_id"] == records[0]["turn_id"] == ""
+
+
+async def test_concurrent_classifier_calls_are_kept_when_only_one_turn_is_admitted(
+    env: Any, observed_model: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _server, auth = env
+    await _seed_models(client, auth)
+    await _configure(client, auth)
+    model = observed_model(source="box", provider_name="Box", model_id="RM-01 VLM")
+    both_started, release = asyncio.Event(), asyncio.Event()
+    count = 0
+
+    async def classify(*args: Any) -> DifficultyAssessment:
+        nonlocal count
+        await model.ainvoke("duplicate classifier input")
+        count += 1
+        if count == 2:
+            both_started.set()
+        await release.wait()
+        return DifficultyAssessment(9, "basic")
+
+    async def run_turn(*args: Any) -> Any:
+        yield {"type": "token", "content": "Completed"}
+
+    monkeypatch.setattr(task_submission, "classify_difficulty", classify)
+    monkeypatch.setattr(runtime, "run_turn", run_turn)
+    body = {
+        "request_id": "concurrent-classifiers",
+        "prompt": "One business round",
+        "options": {"routing": {"mode": "hybrid", "level": 100}},
+    }
+    operations = [
+        asyncio.create_task(client.post("/api/project-tasks", headers=auth, json=body))
+        for _ in range(2)
+    ]
+    try:
+        await asyncio.wait_for(both_started.wait(), timeout=5)
+    finally:
+        release.set()
+        responses = await asyncio.gather(*operations)
+    assert all(response.status_code == 202 for response in responses)
+    assert responses[0].json()["task_id"] == responses[1].json()["task_id"]
+    done = await _settled(client, auth, responses[0].json()["task_id"])
+    assert len(done["turns"]) == 1
+    records = (await _calls(client, auth, submission_id=body["request_id"]))["items"]
+    assert len(records) == 2 and len({record["call_id"] for record in records}) == 2
+    assert all(
+        record["purpose"] == "routing_classifier" and record["status"] == "succeeded"
+        for record in records
+    )
+    replay = await client.post("/api/project-tasks", headers=auth, json=body)
+    assert replay.status_code == 202
+    assert len((await _calls(client, auth, submission_id=body["request_id"]))["items"]) == 2
 
 
 async def test_public_receipts_filter_metadata_and_preserve_interrupted_status(env: Any) -> None:

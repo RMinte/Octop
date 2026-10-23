@@ -4,9 +4,9 @@
 
 ## 计量单位与覆盖
 
-一条记录对应一次被观察到的 LangChain 模型调用，不是一条用户消息、整个 Task 或一次底层 HTTP 请求。一次业务轮次可能包含多次主执行、自动摘要、标题、审核、进展说明或 peer 调用。SDK 在同一次逻辑调用内部重试 HTTP 时，仍只产生一条流水；`physical_attempts_available=false`，不宣称物理请求次数完整。
+一条记录对应一次被观察到的 LangChain 模型调用，不是一条用户消息、整个 Task 或一次底层 HTTP 请求。一次业务轮次可能包含多次主执行、判难、自动摘要、标题、审核、进展说明或 peer 调用。SDK 在同一次逻辑调用内部重试 HTTP 时，仍只产生一条流水；`physical_attempts_available=false`，不宣称物理请求次数完整。
 
-接入点包括任务主执行、自动摘要、显式上下文压缩、同步与异步 peer、任务标题、自动审核、进展说明，以及普通聊天、cron、常驻会话、主动关怀、提示词润色、专家说明生成和知识库视觉 OCR 的模型调用。模型必须由已接入的 Octop 工厂构造，并在带有实例与身份的作用域内执行。ASR/TTS、embedding、连通性探测与外部插件自行创建的独立模型不属于本轮业务 LLM 流水覆盖。
+接入点包括任务主执行、自动摘要、显式上下文压缩、同步与异步 peer、盒子判难、任务标题、自动审核、进展说明，以及普通聊天、cron、常驻会话、主动关怀、提示词润色、专家说明生成和知识库视觉 OCR 的模型调用。模型必须由已接入的 Octop 工厂构造，并在带有实例与身份的作用域内执行。ASR/TTS、embedding、连通性探测与外部插件自行创建的独立模型不属于本轮业务 LLM 流水覆盖。
 
 主执行与摘要可能实际使用不同模型。每条流水保存工厂中真正调用的提供商和模型，不用轮次的主 `model_ref` 替换辅助调用模型。没有发生实际模型调用的宿主模板输出、无须压缩的操作或幂等回执不创建流水。
 
@@ -21,10 +21,17 @@
 
 普通用户不能通过筛选参数读取他人流水。无法确认用户身份的系统调用，其 `user_id=null`，只出现在管理员全局查询中。接口不查询模型服务商账单。
 
-例如查询某任务的盒子主模型调用记录：
+例如查询某任务的盒子判难记录：
 
 ```http
-GET /api/usage/calls?task_id=task_example&purpose=main&source=box&limit=50
+GET /api/usage/calls?task_id=task_example&purpose=routing_classifier&source=box&limit=50
+Authorization: Bearer <Octop access_token>
+```
+
+请求被受理前的判难还没有 `task_id/turn_id`，应通过原请求标识查询：
+
+```http
+GET /api/usage/calls?submission_id=create-request-001&purpose=routing_classifier
 Authorization: Bearer <Octop access_token>
 ```
 
@@ -52,12 +59,12 @@ Authorization: Bearer <Octop access_token>
       "agent_id": "",
       "thread_id": "",
       "project_id": "project_example",
-      "task_id": "task_example",
-      "turn_id": "turn_example",
+      "task_id": "",
+      "turn_id": "",
       "provider": "Box",
       "model_ref": "Box/RM-01 VLM",
       "source": "box",
-      "purpose": "main",
+      "purpose": "routing_classifier",
       "started_at": 1792627200000,
       "finished_at": 1792627200400,
       "status": "succeeded",
@@ -109,11 +116,15 @@ OpenAI 流式响应有时只提供标准化的 canonical usage，其默认 0 未
 
 `source` 表示产品接入来源：显式 `BoxProviderConfig` 或 Provider `kind=box` 记为 `box`；其他所有 Provider 均记为 `third_party`，包括用户自配、自托管、Ollama 和兼容接口。不读取 `metadata.execution_source`，也不按 URL 或模型名判断。两类来源均不承诺物理部署位置；本地/云端分类能力 `execution_location` 仍为 `false`，费用、节省和金额预算仍未支持。首版没有新增来源配置页面。
 
-常见 `purpose` 为 `main`、`summarization`、`compaction`、`title`、`approval_review`、`progress_narration`、`chat`、`resident`、`peer`、`subagent`、`cron`、`proactive`、`prompt_polish`、`expert_manifest`、`knowledge_ocr`。实际取值可能随新增业务接入扩展，客户端应允许展示未知用途。自动摘要由实际调用的摘要元数据识别；显式压缩保留 `compaction` 用途。
+常见 `purpose` 为 `main`、`routing_classifier`、`summarization`、`compaction`、`title`、`approval_review`、`progress_narration`、`chat`、`resident`、`peer`、`subagent`、`cron`、`proactive`、`prompt_polish`、`expert_manifest`、`knowledge_ocr`。实际取值可能随新增业务接入扩展，客户端应允许展示未知用途。自动摘要由实际调用的摘要元数据识别；显式压缩保留 `compaction` 用途。
+
+路由策略与实际执行来源分别读取。一个混合轮次可能先有盒子判难，再有第三方主执行；同一 Task 还可以包含不同轮次及辅助模型。不能把混合档位当作模型调用占比，也不能把 `routing.target` 当作已发生的网络调用。
 
 ## 生命周期、取消与恢复
 
-调用开始时保存 `running` 和唯一 `call_id`；收到实际结果后更新同一条记录为 `succeeded`。模型异常或取消分别记为 `failed/cancelled`，未报告 Token 继续为 null。逻辑调用成功指模型请求成功，不代表业务任务最终成功或模型返回内容通过业务校验。
+调用开始时保存 `running` 和唯一 `call_id`；收到实际结果后更新同一条记录为 `succeeded`。模型异常或取消分别记为 `failed/cancelled`，未报告 Token 继续为 null。逻辑调用成功指模型请求成功，不代表业务请求最终受理或模型返回内容通过业务校验。
+
+因此判难完成后若项目变更导致任务受理被拒绝，判难流水仍保留；并发相同 `request_id` 在受理前实际调用两次判难时，也保留两条独立调用，但最终只创建一个业务轮次。已受理请求的幂等重传不再调用模型，也不增加流水。判断这些情况应使用 `submission_id` 关联，不能要求每条流水都已有任务和轮次。
 
 暂停与恢复只为实际新发生的模型调用新增记录，不把 checkpoint 或历史用量回放重新写成调用。任务或网络请求取消不一定意味着所有后台工作都已取消；例如常驻显式压缩在断线后继续完成时，其模型调用仍可以成功。进程在写入终态前退出时，保留的 `running` 只表示未收到终态，不能据此保证模型仍在执行或断言实际零消耗；`interrupted` 是可保存的明确中断状态，不根据超时年龄猜测成功或失败。
 
@@ -125,4 +136,4 @@ OpenAI 流式响应有时只提供标准化的 canonical usage，其默认 0 未
 
 公开字段只有身份引用、模型、来源、用途、时间、状态和安全的用量与追踪元数据。不保存或返回提示词、回答正文、工具参数、完整模型响应、API Key、连接地址、HTTP 请求头或原始异常；元数据仅保留白名单。费用、节省、金额预算和物理重试次数均未新增，不用金额 0 代替未支持。
 
-后续若统一统计迁移到调用流水，应明确切换采集范围与覆盖状态后再替换旧数据源，不能同时累计旧轮次用量与这些调用。接口验证见[调用流水集成测试](../tests/integration/test_model_call_ledger.py)。
+后续若统一统计迁移到调用流水，应明确切换采集范围与覆盖状态后再替换旧数据源，不能同时累计旧轮次用量与这些调用。接口验证见[调用流水集成测试](../tests/integration/test_model_call_ledger.py)，路由协议见[任务模型路由接入](project-task-model-routing.md)。

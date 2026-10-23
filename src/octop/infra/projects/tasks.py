@@ -36,6 +36,16 @@ from octop.infra.projects.image_tools import READ_TASK_IMAGE
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.interaction_models import TaskInteraction, public_status
 from octop.infra.projects.knowledge import selection_snapshot
+from octop.infra.projects.model_routing import (
+    ModelRoutingDecision,
+    RoutingCapabilities,
+    RoutingRequest,
+    decide_model,
+    routing_capabilities,
+)
+from octop.infra.projects.model_routing import (
+    load_settings as load_routing_settings,
+)
 from octop.infra.projects.models import (
     ProjectFields,
     ProjectModel,
@@ -90,8 +100,12 @@ class TaskExecutionOptions(ProjectModel):
         | None
     ) = Field(
         default=None,
-        description="本轮模型引用，原样使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传；省略或 null 使用发送时的服务端默认模型，不继承上一轮选择。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
+        description="本轮模型引用，原样使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传，优先于 routing；省略或 null 且未启用 routing 时使用发送时的服务端默认模型，不继承上一轮选择。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
         examples=["Box/RM-01 VLM"],
+    )
+    routing: RoutingRequest | None = Field(
+        default=None,
+        description="本轮盒子或混合模式；省略保持现有默认模型行为。显式 model_ref 优先。混合档位是难度门槛，100 也保留基础任务在盒子。",
     )
     skills: list[SkillBinding | SkillHubBinding] | None = Field(
         default=None,
@@ -139,6 +153,7 @@ class TaskExecutionOptions(ProjectModel):
                     exclude_none=True,
                     exclude={
                         "model_ref",
+                        "routing",
                         "client_id",
                         "client_tools",
                         "reasoning_mode",
@@ -194,9 +209,12 @@ class TaskResources(ProjectResources):
         description="当前可用于任务的已启用模型，包含盒子和远端；不含 ASR/TTS 模型、密钥或连接地址。"
     )
     default_model_ref: str | None = Field(
-        description="当前服务端默认任务模型；null 表示无可用模型。客户端未传 options.model_ref 时由服务端在每次发送时解析。"
+        description="当前服务端默认任务模型；null 表示无可用模型。客户端未传 options.model_ref 且未启用 routing 时，由服务端在每次发送时解析。"
     )
     approval: ApprovalCapabilities
+    routing: RoutingCapabilities = Field(
+        description="服务端盒子/混合路由能力及两端模型配置，不含连接凭据。"
+    )
 
 
 class TaskPatch(ProjectModel):
@@ -329,6 +347,9 @@ class TaskTurn(ProjectModel):
         description="该轮已成功发布的不可变附件；仅含元数据，内容使用鉴权 HTTP 下载。",
     )
     model_ref: str
+    routing: ModelRoutingDecision | None = Field(
+        default=None, description="本轮已冻结的模型分配结果；旧默认或直接选择模型的轮次可为 null。"
+    )
     web_search_enabled: bool = Field(
         description="本轮入队时采用的任务网络搜索开关快照；之后修改任务不会改变此值。"
     )
@@ -470,6 +491,9 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         activity=t.activity,
         artifacts=attachments or [],
         model_ref=t.model_ref,
+        routing=ModelRoutingDecision.model_validate(configuration["routing"])
+        if configuration.get("routing")
+        else None,
         web_search_enabled=configuration.get("web_search_enabled", True),
         approval_policy_at_start=TaskApprovalPolicy.model_validate(
             configuration.get("approval_policy_at_start")
@@ -478,6 +502,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
         options=TaskExecutionOptions(
             action_timeline_enabled=configuration.get("action_timeline_enabled", True),
             model_ref=t.model_ref or None,
+            routing=configuration.get("execution_options", {}).get("routing"),
             reasoning_mode=configuration.get("reasoning_mode"),
             reasoning_effort=configuration.get("reasoning_effort"),
             skills=configuration.get("skills", []),
@@ -608,9 +633,9 @@ def _reasoning_configuration(
     }
 
 
-def _configuration(
+def _base_configuration(
     services: SharedServices, owner_id: int, project_id: str | None, options: TaskExecutionOptions
-) -> tuple[str, str]:
+) -> dict[str, Any]:
     project = get_project(services, owner_id, project_id) if project_id else None
     if project and project.archived:
         raise OctopError.localized(ErrorCode.PROJECT_ARCHIVED)
@@ -620,6 +645,7 @@ def _configuration(
         exclude_none=True,
         exclude={
             "model_ref",
+            "routing",
             "client_id",
             "client_tools",
             "reasoning_mode",
@@ -633,22 +659,51 @@ def _configuration(
     )
     _validate(services, owner_id, fields)
     assert_token_quota_available(services.user_policy_repo, services.usage_repo, owner_id)
-    ref = options.model_ref or resolve_model_ref(services)
+    return {
+        **snapshot,
+        **fields.model_dump(),
+        **selection_snapshot(services, owner_id, options.knowledge_base_ids),
+        "action_timeline_enabled": (
+            options.action_timeline_enabled
+            if options.action_timeline_enabled is not None
+            else load_settings(services).action_timeline_enabled
+        ),
+        "execution_options": options.model_dump(exclude_none=True),
+    }
+
+
+def _configuration(
+    services: SharedServices,
+    owner_id: int,
+    project_id: str | None,
+    options: TaskExecutionOptions,
+    routing_decision: ModelRoutingDecision | None = None,
+) -> tuple[str, str]:
+    snapshot = _base_configuration(services, owner_id, project_id, options)
+    if options.routing is not None and options.model_ref and routing_decision is None:
+        routing_decision = decide_model(
+            ProviderStore(services.provider_repo),
+            load_routing_settings(services),
+            mode=options.routing.mode,
+            level=options.routing.level,
+            explicit_model_ref=options.model_ref,
+        )
+    if options.routing is not None and routing_decision is None and not options.model_ref:
+        # Hybrid admission must classify outside the database transaction.
+        raise OctopError.localized(
+            ErrorCode.TASK_SETTINGS_INVALID, setting="routing", details={"setting": "routing"}
+        )
+    ref = options.model_ref or (
+        routing_decision.model_ref if routing_decision is not None else resolve_model_ref(services)
+    )
     providers = ProviderStore(services.provider_repo)
     if not ref or not providers.is_model_ref_usable(ref):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE, status=409)
     return json.dumps(
         {
             **snapshot,
-            **fields.model_dump(),
-            **selection_snapshot(services, owner_id, options.knowledge_base_ids),
             **_reasoning_configuration(providers, ref, options),
-            "action_timeline_enabled": (
-                options.action_timeline_enabled
-                if options.action_timeline_enabled is not None
-                else load_settings(services).action_timeline_enabled
-            ),
-            "execution_options": options.model_dump(exclude_none=True),
+            **({"routing": routing_decision.model_dump()} if routing_decision else {}),
         }
     ), ref
 
@@ -713,6 +768,61 @@ def _input_configuration(
     )
 
 
+def _submission_state(
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    body: TaskMessage | TaskRetry,
+    *,
+    task_id: str | None = None,
+    project_id: str | None = None,
+    retry_of_turn_id: str | None = None,
+) -> tuple[ProjectTaskRow | None, TaskMessage, ProjectTaskTurnRow | None]:
+    """Validate ownership, replay identity and admission state before any model call."""
+    tasks, turns = services.project_task_repo, services.project_task_turn_repo
+    if not tasks.lock_owner(conn, owner_id):
+        raise OctopError.localized(ErrorCode.FORBIDDEN)
+    task = (
+        tasks.get_in_transaction(conn, task_id, owner_id)
+        if task_id
+        else tasks.by_request(conn, owner_id, body.request_id)
+    )
+    if task_id and task is None:
+        raise OctopError.localized(ErrorCode.NOT_FOUND)
+    if retry_of_turn_id is not None:
+        original = turns.get_in_transaction(conn, retry_of_turn_id)
+        if original is None or original.task_id != task_id:
+            raise OctopError.localized(ErrorCode.NOT_FOUND)
+        body = TaskMessage(
+            request_id=body.request_id,
+            prompt=original.prompt,
+            attachment_ids=json.loads(original.configuration_json).get("attachment_ids", []),
+            options=body.options,
+        )
+    assert isinstance(body, TaskMessage)
+    if task is None:
+        return None, body, None
+    if not task_id and task.project_id != project_id:
+        raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
+    previous = turns.by_request(conn, task.task_id, body.request_id)
+    if previous:
+        _same_prompt(previous, body, retry_of_turn_id)
+        return task, body, previous
+    if task.archived:
+        raise OctopError.localized(ErrorCode.TASK_ARCHIVED)
+    if task.active_turn_id is not None:
+        raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
+    if retry_of_turn_id is not None:
+        latest = turns.page(conn, task.task_id, 1)
+        if (
+            not latest
+            or latest[0].turn_id != retry_of_turn_id
+            or latest[0].status not in {"failed", "cancelled"}
+        ):
+            raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
+    return task, body, None
+
+
 def send(
     services: SharedServices,
     owner_id: int,
@@ -744,93 +854,69 @@ def send_in_transaction(
     task_id: str | None = None,
     project_id: str | None = None,
     retry_of_turn_id: str | None = None,
+    routing_decision: ModelRoutingDecision | None = None,
 ) -> tuple[str, str]:
     """Admit one task turn inside the caller's transaction; never start execution."""
-    tasks, turns = services.project_task_repo, services.project_task_turn_repo
-    if not tasks.lock_owner(conn, owner_id):
-        raise OctopError.localized(ErrorCode.FORBIDDEN)
-    task = (
-        tasks.get_in_transaction(conn, task_id, owner_id)
-        if task_id
-        else tasks.by_request(conn, owner_id, body.request_id)
+    task, body, previous = _submission_state(
+        services,
+        conn,
+        owner_id,
+        body,
+        task_id=task_id,
+        project_id=project_id,
+        retry_of_turn_id=retry_of_turn_id,
     )
-    if task_id and task is None:
-        raise OctopError.localized(ErrorCode.NOT_FOUND)
-    if retry_of_turn_id is not None:
-        original = turns.get_in_transaction(conn, retry_of_turn_id)
-        if original is None or original.task_id != task_id:
-            raise OctopError.localized(ErrorCode.NOT_FOUND)
-        body = TaskMessage(
-            request_id=body.request_id,
-            prompt=original.prompt,
-            attachment_ids=json.loads(original.configuration_json).get("attachment_ids", []),
-            options=body.options,
-        )
-    assert isinstance(body, TaskMessage)
+    tasks, turns = services.project_task_repo, services.project_task_turn_repo
+    if previous is not None:
+        assert task is not None
+        return task.task_id, previous.turn_id
     if task:
-        if not task_id and task.project_id != project_id:
-            raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
-        previous = turns.by_request(conn, task.task_id, body.request_id)
-        if previous:
-            _same_prompt(previous, body, retry_of_turn_id)
-            task_id, turn_id = task.task_id, previous.turn_id
-        else:
-            if task.archived:
-                raise OctopError.localized(ErrorCode.TASK_ARCHIVED)
-            if task.active_turn_id is not None:
-                raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
-            if retry_of_turn_id is not None:
-                latest = turns.page(conn, task.task_id, 1)
-                if (
-                    not latest
-                    or latest[0].turn_id != retry_of_turn_id
-                    or latest[0].status not in {"failed", "cancelled"}
-                ):
-                    raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
-            configuration, model_ref = _configuration(
-                services, owner_id, task.project_id, body.options
-            )
+        configuration, model_ref = _configuration(
+            services, owner_id, task.project_id, body.options, routing_decision
+        )
+        configuration = json.dumps(
+            {
+                **json.loads(configuration),
+                "web_search_enabled": task.web_search_enabled,
+                "approval_policy_at_start": approval_policy.in_transaction(
+                    conn, services, owner_id
+                ).model_dump(mode="json"),
+            }
+        )
+        if retry_of_turn_id is not None:
             configuration = json.dumps(
-                {
-                    **json.loads(configuration),
-                    "web_search_enabled": task.web_search_enabled,
-                    "approval_policy_at_start": approval_policy.in_transaction(
-                        conn, services, owner_id
-                    ).model_dump(mode="json"),
-                }
+                {**json.loads(configuration), "retry_of_turn_id": retry_of_turn_id}
             )
-            if retry_of_turn_id is not None:
-                configuration = json.dumps(
-                    {**json.loads(configuration), "retry_of_turn_id": retry_of_turn_id}
-                )
-            turn_id, now = "turn_" + new_ulid(), now_ms()
-            configuration = _input_configuration(
-                services, conn, owner_id, task.task_id, body, configuration, model_ref
-            )
-            if not tasks.activate(conn, task.task_id, turn_id, now):
-                raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
-            turns.insert(
-                conn,
-                ProjectTaskTurnRow(
-                    turn_id,
-                    task.task_id,
-                    body.request_id,
-                    body.prompt,
-                    "",
-                    "queued",
-                    "",
-                    "",
-                    configuration,
-                    model_ref,
-                    "",
-                    False,
-                    now,
-                    now,
-                ),
-            )
-            task_id = task.task_id
+        turn_id, now = "turn_" + new_ulid(), now_ms()
+        configuration = _input_configuration(
+            services, conn, owner_id, task.task_id, body, configuration, model_ref
+        )
+        if not tasks.activate(conn, task.task_id, turn_id, now):
+            raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
+        turns.insert(
+            conn,
+            ProjectTaskTurnRow(
+                turn_id,
+                task.task_id,
+                body.request_id,
+                body.prompt,
+                "",
+                "queued",
+                "",
+                "",
+                configuration,
+                model_ref,
+                "",
+                False,
+                now,
+                now,
+            ),
+        )
+        task_id = task.task_id
     else:
-        configuration, model_ref = _configuration(services, owner_id, project_id, body.options)
+        configuration, model_ref = _configuration(
+            services, owner_id, project_id, body.options, routing_decision
+        )
         task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
         web_search_enabled = (
             body.web_search_enabled if isinstance(body, ProjectTaskCreate) else True
@@ -943,6 +1029,7 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
         **available.model_dump(),
         models=models,
         default_model_ref=resolve_model_ref(services),
+        routing=routing_capabilities(services),
         approval=approval_policy.capabilities(services),
     )
 
