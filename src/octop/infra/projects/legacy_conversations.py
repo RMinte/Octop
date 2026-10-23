@@ -40,6 +40,7 @@ from octop.infra.history.reader import export_messages
 from octop.infra.history.service import HistoryArchive
 from octop.infra.projects import approval_policy
 from octop.infra.projects.content import TaskContentBlock
+from octop.infra.projects.deletion_state import assert_project_writable
 from octop.infra.projects.expert_profiles import expert_configuration, resolve_expert_profile
 from octop.infra.projects.legacy_conversation_models import (
     LegacyConversationCreate,
@@ -382,6 +383,7 @@ def _save(
             project = services.project_repo.get_in_transaction(conn, body.project_id, owner_id)
             if project is None:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
+            assert_project_writable(services, conn, owner_id, body.project_id)
             if project.archived:
                 raise OctopError.localized(ErrorCode.PROJECT_ARCHIVED)
         policy = approval_policy.in_transaction(conn, services, owner_id)

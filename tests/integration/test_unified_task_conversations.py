@@ -200,16 +200,16 @@ async def test_global_filters_sync_and_reference_delete_protection(unified_env, 
     )
     assert delta.status_code == 200, delta.text
     assert delta.json()["changes"][0]["data"]["pinned"] is True
-    deletion = await client.delete(f"/api/projects/{project['project_id']}", headers=auth)
-    assert deletion.status_code == 409 and deletion.json()["error"]["code"] == "PROJECT_HAS_TASKS"
     expert_deletion = await client.delete("/api/agents/unified-expert", headers=auth)
     assert expert_deletion.status_code == 409, expert_deletion.text
     assert expert_deletion.json()["error"]["code"] == "EXPERT_IN_USE"
     assert server.services.agent_repo.get("unified-expert") is not None
     assert (tmp_path / "expert-state").is_dir()
+    deletion = await client.delete(f"/api/projects/{project['project_id']}", headers=auth)
+    assert deletion.status_code == 204, deletion.text
     assert (
         await client.get(f"/api/project-tasks/{task['task_id']}", headers=auth)
-    ).status_code == 200
+    ).status_code == 404
 
 
 async def test_branch_continuation_is_idempotent_after_expert_switch(unified_env):

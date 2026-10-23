@@ -296,8 +296,15 @@ class CronJobRepo:
         params.append(now_ts())
         params.append(cron_id)
         with self._db.transaction() as conn:
-            conn.execute(f"UPDATE cron_jobs SET {', '.join(fields)} WHERE cron_id = ?", params)
+            changed = conn.execute(
+                f"UPDATE cron_jobs SET {', '.join(fields)} WHERE cron_id = ?", params
+            ).rowcount
+            if changed and (project_id is not UNSET or target_task_id is not UNSET):
+                conn.execute(
+                    "DELETE FROM settings WHERE key=?", (f"deleted_cron_binding:{cron_id}",)
+                )
 
     def delete(self, cron_id: str) -> None:
         with self._db.transaction() as conn:
             conn.execute("DELETE FROM cron_jobs WHERE cron_id = ?", (cron_id,))
+            conn.execute("DELETE FROM settings WHERE key=?", (f"deleted_cron_binding:{cron_id}",))

@@ -63,6 +63,24 @@ class ExpertMemoryJobRepo:
         now: int,
     ) -> None:
         with self._db.transaction() as conn:
+            suffix = " FOR UPDATE" if self._db.dialect == "postgresql" else ""
+            if (
+                conn.execute(
+                    "SELECT id FROM users WHERE id=? AND disabled=0" + suffix, (owner_id,)
+                ).fetchone()
+                is None
+            ):
+                return
+            if (
+                conn.execute(
+                    "SELECT 1 FROM project_tasks t JOIN project_task_turns r ON r.task_id=t.task_id "
+                    "WHERE t.task_id=? AND t.owner_id=? AND r.turn_id=? AND NOT EXISTS "
+                    "(SELECT 1 FROM settings WHERE key=? || t.project_id)",
+                    (task_id, owner_id, turn_id, f"project_delete:{owner_id}:"),
+                ).fetchone()
+                is None
+            ):
+                return
             conn.execute(
                 "INSERT INTO expert_memory_jobs(job_id,owner_id,expert_id,task_id,turn_id,"
                 "namespace,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "

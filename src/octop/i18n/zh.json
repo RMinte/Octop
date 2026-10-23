@@ -538,7 +538,7 @@
     "TASK_EXECUTION_FAILED": "本轮执行失败，可重新发送消息；已完成的历史仍然保留。",
     "TASK_INTERRUPTED": "服务重启或执行中断，本轮未自动重试。可重新发送消息。",
     "TASK_RESOURCE_UNAVAILABLE": "项目的目录、Skill 或 MCP 无法加载，请检查项目配置和连接。",
-    "PROJECT_TASKS_BUSY": "项目中有任务正在排队或执行，暂时无法归档或删除项目。请等待完成或先停止所有任务。",
+    "PROJECT_TASKS_BUSY": "项目中仍有未结束的活动任务，请等待任务停止后重试。",
     "PROJECT_ARCHIVED": "项目已归档，请恢复项目后再继续执行任务。",
     "TASK_INTERACTION_CLOSED": "此交互已关闭，请刷新任务。",
     "TASK_INTERACTION_CONFLICT": "交互内容或版本已变化，请刷新后再操作。",

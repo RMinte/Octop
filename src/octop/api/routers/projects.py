@@ -24,6 +24,7 @@ from octop.infra.projects import (
     artifact_library,
     artifacts,
     branches,
+    deletion,
     expert_memory_management,
     input_attachments,
     interactions,
@@ -273,15 +274,26 @@ async def archive_project(
     "/{project_id}",
     status_code=204,
     response_class=Response,
-    summary="删除没有会话记录的项目",
-    description="按 ID 删除本人空项目，无需版本参数。有活动轮次返回 PROJECT_TASKS_BUSY，有保留记录返回 PROJECT_HAS_TASKS，应使用归档保留历史。保留服务端与客户端目录文件。其他用户的项目返回 404。",
+    summary="停止活动任务并删除项目及全部会话",
+    description="按 ID 删除本人项目及其中全部任务和会话，无需版本参数。服务端先封住新执行、停止活动轮次并等待退出，再清理工作台会话并原子删除记录。停止未确认时返回 PROJECT_TASKS_BUSY，保留记录，可重试删除。保留工作目录文件和专家记忆。其他用户的项目返回 404。",
 )
 async def delete_project(
     project_id: str,
     server: OctopServer = Depends(get_server),
     user: User = Depends(current_user),
 ) -> Response:
-    await asyncio.to_thread(service.delete_project, _services(server), user.id, project_id)
+    from octop.api.routers.project_task_workbench import close_task_sessions
+
+    async def close_sessions(task_id: str) -> None:
+        await close_task_sessions(task_id, user.id)
+
+    await deletion.delete_project(
+        _services(server),
+        server.project_task_worker,
+        user.id,
+        project_id,
+        close_sessions=close_sessions,
+    )
     return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 

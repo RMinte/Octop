@@ -74,6 +74,15 @@ async def capture_job(
     return memory, rows[0]
 
 
+async def test_project_deletion_blocks_pending_memory_apply(services):  # noqa: F811
+    _, job = await capture_job(services, project="deleting-project")
+    worker = extraction.ExpertMemoryWorker(services)
+    with services.db.transaction() as conn:
+        services.project_repo.mark_deleting(conn, 1, "deleting-project")
+    with pytest.raises(extraction._Stopped), worker._write_fence(job):
+        pytest.fail("A deleting project must not authorize new memory writes")
+
+
 def response(turn="memory-turn"):
     raw_id = hashlib.sha256(f"{turn}:user_message".encode()).hexdigest()
 

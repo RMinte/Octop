@@ -86,6 +86,29 @@ class ProjectRepo:
         )
 
     @staticmethod
+    def is_deleting(conn: Any, owner_id: int, project_id: str) -> bool:
+        return (
+            conn.execute(
+                "SELECT 1 FROM settings WHERE key=?",
+                (f"project_delete:{owner_id}:{project_id}",),
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def mark_deleting(conn: Any, owner_id: int, project_id: str) -> None:
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?,'requested') ON CONFLICT(key) DO NOTHING",
+            (f"project_delete:{owner_id}:{project_id}",),
+        )
+
+    @staticmethod
+    def clear_deleting(conn: Any, owner_id: int, project_id: str) -> None:
+        conn.execute(
+            "DELETE FROM settings WHERE key=?", (f"project_delete:{owner_id}:{project_id}",)
+        )
+
+    @staticmethod
     def creation_request(conn: Any, owner_id: int, request_id: str) -> tuple[str, str] | None:
         row = conn.execute(
             "SELECT fingerprint, response_json FROM project_create_requests "
@@ -132,10 +155,13 @@ class ProjectRepo:
 
     def update(self, row: ProjectRow, expected_revision: int) -> ProjectRow | None:
         with self._db.transaction() as conn:
+            if not self.lock_owner(conn, row.owner_id):
+                return None
             result = conn.execute(
                 "UPDATE projects SET name=?, description=?, directory=?, client_directory=?, instructions=?, "
                 "skills_json=?, mcp_servers_json=?, revision=revision+1, updated_at=?, capabilities_json=? "
-                "WHERE project_id=? AND owner_id=? AND revision=? RETURNING *",
+                "WHERE project_id=? AND owner_id=? AND revision=? "
+                "AND NOT EXISTS(SELECT 1 FROM settings WHERE key=?) RETURNING *",
                 (
                     row.name,
                     row.description,
@@ -149,6 +175,7 @@ class ProjectRepo:
                     row.project_id,
                     row.owner_id,
                     expected_revision,
+                    f"project_delete:{row.owner_id}:{row.project_id}",
                 ),
             ).fetchone()
             if result is None:
@@ -173,6 +200,15 @@ class ProjectRepo:
     @staticmethod
     def delete(conn: Any, row: ProjectRow) -> None:
         conn.execute(
+            "INSERT INTO settings(key,value) SELECT 'deleted_cron_binding:' || cron_id,'1' "
+            "FROM cron_jobs WHERE user_id=? AND project_id=? ON CONFLICT(key) DO NOTHING",
+            (row.owner_id, row.project_id),
+        )
+        conn.execute(
+            "UPDATE cron_jobs SET enabled=0 WHERE user_id=? AND project_id=?",
+            (row.owner_id, row.project_id),
+        )
+        conn.execute(
             "DELETE FROM project_create_requests WHERE project_id=? AND owner_id=?",
             (row.project_id, row.owner_id),
         )
@@ -181,3 +217,4 @@ class ProjectRepo:
             (row.project_id, row.owner_id),
         )
         record_change(conn, row.owner_id, "projects", row.project_id, row, deleted=True)
+        ProjectRepo.clear_deleting(conn, row.owner_id, row.project_id)

@@ -20,6 +20,7 @@ from octop.infra.projects.conversation_import_models import (
     ImportedTurnHistory,
     ImportTurn,
 )
+from octop.infra.projects.deletion_state import assert_project_writable
 from octop.infra.projects.models import ProjectModel
 from octop.infra.projects.tasks import TaskDetail, detail
 from octop.infra.utils.ulid import new_ulid
@@ -192,6 +193,7 @@ def import_conversation(
             project = services.project_repo.get_in_transaction(conn, body.project_id, owner_id)
             if project is None:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
+            assert_project_writable(services, conn, owner_id, body.project_id)
             if project.archived:
                 raise OctopError.localized(ErrorCode.PROJECT_ARCHIVED)
         previous = imports.session(conn, owner_id, body.source, body.external_session_id)

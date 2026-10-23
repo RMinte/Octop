@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast
@@ -1384,6 +1384,95 @@ class ProjectTaskWorker:
         if self._loop_task:
             await self._loop_task
 
+    def _deletion_state(
+        self, owner_id: int, task_ids: set[str], local_turn_ids: tuple[str, ...]
+    ) -> tuple[list[ProjectTaskTurnRow], dict[str, str], set[str]]:
+        active, local, protected = [], {}, set()
+        with self.services.db.read_snapshot() as conn:
+            for task_id in task_ids:
+                task = self.services.project_task_repo.get_in_transaction(conn, task_id, owner_id)
+                if task is None:
+                    raise OctopError.localized(ErrorCode.NOT_FOUND)
+                if conn.execute(
+                    "SELECT 1 FROM project_task_tool_calls WHERE task_id=? AND status='claimed' LIMIT 1",
+                    (task_id,),
+                ).fetchone():
+                    protected.add(task_id)
+                if task.active_turn_id:
+                    turn = self.services.project_task_turn_repo.get_in_transaction(
+                        conn, task.active_turn_id
+                    )
+                    if turn is not None:
+                        active.append(turn)
+            for turn_id in local_turn_ids:
+                turn = self.services.project_task_turn_repo.get_in_transaction(conn, turn_id)
+                if turn is not None and turn.task_id in task_ids:
+                    local[turn_id] = turn.task_id
+                    if turn not in active:
+                        active.append(turn)
+            for turn in active:
+                if turn.status == "running" and (
+                    self.services.project_task_execution_receipt_repo.unfinished(conn, turn.turn_id)
+                ):
+                    protected.add(turn.task_id)
+        return active, local, protected
+
+    async def stop_for_deletion(
+        self, owner_id: int, task_ids: Iterable[str], *, timeout: float = 10.0
+    ) -> bool:
+        """Drain fenced tasks without cancelling dispatched external operations.
+
+        The caller must persist its deletion fence and pause intent first. A
+        timeout leaves those records intact and never cancels a cleanup twice.
+        Other processes are observed through their actual durable finalization.
+        """
+        from octop.infra.projects import tasks
+
+        selected = set(task_ids)
+        if not selected:
+            return True
+        deadline = time.monotonic() + max(0.0, timeout)
+        cancelled: set[asyncio.Task[None]] = set()
+        while True:
+            active, local, protected = await asyncio.to_thread(
+                self._deletion_state, owner_id, selected, tuple(self._running)
+            )
+            for turn in active:
+                if (
+                    turn.task_id not in protected
+                    and turn.status in {"queued", "running"}
+                    and not turn.cancel_requested
+                ):
+                    await asyncio.to_thread(
+                        tasks.cancel, self.services, owner_id, turn.task_id, turn.turn_id
+                    )
+            pending = set()
+            for turn_id, task_id in local.items():
+                current = self._running.get(turn_id)
+                if current is None or current.done():
+                    continue
+                pending.add(current)
+                if task_id not in protected and current not in cancelled:
+                    cancelled.add(current)
+                    if not current.cancelling():
+                        current.cancel()
+            self.wake()
+            if (
+                not protected
+                and not pending
+                and not any(turn.status in {"queued", "running"} for turn in active)
+            ):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if pending:
+                # asyncio.wait neither propagates cancellation nor cancels the
+                # executions when this bounded observation times out.
+                await asyncio.wait(pending, timeout=min(0.05, remaining))
+            else:
+                await asyncio.sleep(min(0.05, remaining))
+
     def _recover(self) -> None:
         before, now = now_ms() - 90_000, now_ms()
         self._ready_waits(now)
@@ -1549,6 +1638,25 @@ class ProjectTaskWorker:
                             await asyncio.to_thread(self._park_interruption, turn, interruption)
                             self._notify_update(turn.task_id)
                             break
+                        current_turn = await asyncio.to_thread(
+                            self.services.project_task_turn_repo.get, turn.turn_id
+                        )
+                        if (
+                            current_turn is None
+                            or current_turn.status != "running"
+                            or current_turn.worker_id != turn.worker_id
+                        ):
+                            continue
+                        if current_turn.cancel_requested:
+                            await asyncio.to_thread(
+                                self._finish,
+                                current_turn,
+                                "cancelled",
+                                current_turn.reply,
+                                "",
+                            )
+                            self._notify_update(turn.task_id)
+                            continue
                         current = asyncio.create_task(self._execute(turn))
                         self._running[turn.turn_id] = current
 
@@ -1854,7 +1962,8 @@ class ProjectTaskWorker:
                     cancelled = await save_output()
                 if cancelled or self.closing:
                     assert execution_task is not None
-                    execution_task.cancel()
+                    if not execution_task.cancelling():
+                        execution_task.cancel()
                     return
 
         beat = asyncio.create_task(heartbeat())

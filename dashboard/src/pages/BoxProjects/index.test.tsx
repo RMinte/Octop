@@ -245,7 +245,7 @@ describe("独立项目正式页面", () => {
     ).toBeEnabled();
   });
 
-  it("删除项目需确认全部任务范围，任务忙时说明原因并保留项目供重试", async () => {
+  it("删除项目需确认全部任务范围，停止未完成时保留项目供重试", async () => {
     const normal = api.getMockImplementation()!;
     let fail = true;
     api.mockImplementation(async (url, init) => {

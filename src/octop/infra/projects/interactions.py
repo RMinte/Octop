@@ -13,6 +13,7 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.context import is_compaction
+from octop.infra.projects.deletion_state import assert_task_writable
 from octop.infra.projects.interaction_models import (
     ApprovalPayload,
     ApprovalResponse,
@@ -151,6 +152,7 @@ def respond(
         )
         if requests is None:
             return
+        assert_task_writable(services, conn, owner, task_id)
         items = load(turn)
         changed = expire(items)
         item = next((item for item in items if item.interaction_id == interaction_id), None)
@@ -207,6 +209,8 @@ def control(
         )
         if requests is None:
             return
+        if not paused:
+            assert_task_writable(services, conn, owner, task_id)
         if turn.status not in {"queued", "running"} or turn.cancel_requested:
             raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
         if paused and is_compaction(

@@ -374,6 +374,15 @@ class ExpertMemoryWorker:
         with self.services.db.transaction() as conn:
             if not self.services.project_task_repo.lock_owner(conn, job.owner_id):
                 raise _Stopped()
+            task = self.services.project_task_repo.get_in_transaction(
+                conn, job.task_id, job.owner_id
+            )
+            if (
+                task is not None
+                and task.project_id
+                and self.services.project_repo.is_deleting(conn, job.owner_id, task.project_id)
+            ):
+                raise _Stopped()
             if self.services.db.dialect == "postgresql":
                 conn.execute(
                     "SELECT agent_id FROM agents WHERE agent_id=? FOR UPDATE", (job.expert_id,)

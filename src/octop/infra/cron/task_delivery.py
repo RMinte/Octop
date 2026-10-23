@@ -32,6 +32,7 @@ def _authorize(service: Any, command: CronDeliveryCommand) -> None:
         or user is None
         or user.disabled
         or (automatic and not row.enabled)
+        or services.settings_repo.get(f"deleted_cron_binding:{command.cron_id}") is not None
     ):
         raise OctopError.localized(ErrorCode.FORBIDDEN)
     from octop.infra.cron.configuration import validate_task_selection

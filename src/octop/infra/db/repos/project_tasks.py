@@ -195,10 +195,22 @@ class ProjectTaskRepo:
     @staticmethod
     def delete(conn: Any, row: ProjectTaskRow) -> None:
         conn.execute(
-            "UPDATE unified_source_inbox SET payload_json='{}',status='target_deleted' WHERE task_id=?",
-            (row.task_id,),
+            "UPDATE unified_source_inbox SET payload_json='{}',status='target_deleted' "
+            "WHERE owner_id=? AND (task_id=? OR (status='received' AND route_id IN "
+            "(SELECT route_id FROM unified_source_routes WHERE owner_id=? AND task_id=?)))",
+            (row.owner_id, row.task_id, row.owner_id, row.task_id),
+        )
+        conn.execute(
+            "INSERT INTO settings(key,value) SELECT 'deleted_cron_binding:' || cron_id,'1' "
+            "FROM cron_jobs WHERE user_id=? AND target_task_id=? ON CONFLICT(key) DO NOTHING",
+            (row.owner_id, row.task_id),
+        )
+        conn.execute(
+            "UPDATE cron_jobs SET enabled=0 WHERE user_id=? AND target_task_id=?",
+            (row.owner_id, row.task_id),
         )
         for table in (
+            "expert_memory_jobs",
             "unified_source_deliveries",
             "project_task_execution_receipts",
             "project_task_artifacts",

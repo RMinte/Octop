@@ -190,6 +190,9 @@ def claim_call(
     with services.db.transaction() as conn:
         row = _load(services, conn, owner_id, client_id, task_id, turn_id, call_id)
         if row.status == "pending":
+            from octop.infra.projects.deletion_state import assert_task_writable
+
+            assert_task_writable(services, conn, owner_id, task_id)
             turn = services.project_task_turn_repo.get_in_transaction(conn, turn_id)
             if not _dispatch_allowed(turn, row):
                 error = ErrorCode.TASK_CLIENT_TOOL_CLOSED

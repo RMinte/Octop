@@ -31,6 +31,7 @@ from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.context import is_compaction
 from octop.infra.projects.conversation_import_models import ImportedTurnHistory, ImportSource
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
+from octop.infra.projects.deletion_state import assert_project_writable
 from octop.infra.projects.file_changes import TaskFileChange
 from octop.infra.projects.image_tools import READ_TASK_IMAGE
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
@@ -983,6 +984,7 @@ def _submission_state(
         )
     assert isinstance(body, TaskMessage)
     if task is None:
+        assert_project_writable(services, conn, owner_id, project_id)
         return None, body, None
     if not task_id and task.project_id != project_id:
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT, status=409)
@@ -990,6 +992,7 @@ def _submission_state(
     if previous:
         _same_prompt(previous, body, retry_of_turn_id)
         return task, body, previous
+    assert_project_writable(services, conn, owner_id, task.project_id)
     if (body.expected_configuration_revision or 1) != task.configuration_revision:
         raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
     if body.expected_project_revision is not None:
@@ -1294,6 +1297,7 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
         current = repo.get_in_transaction(conn, task_id, owner_id)
         if current is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        assert_project_writable(services, conn, owner_id, current.project_id)
         if current.list_revision != body.expected_revision:
             raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
         if {"selected_expert_id", "action_mode"} & body.model_fields_set:

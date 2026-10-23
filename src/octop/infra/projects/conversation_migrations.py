@@ -27,6 +27,7 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.history.migration_source import SourceUnavailable, read_source
 from octop.infra.history.migration_trajectory import attach_trajectory
 from octop.infra.projects import approval_policy, input_attachments, source_routes
+from octop.infra.projects.deletion_state import assert_project_writable
 from octop.infra.projects.expert_profiles import _workspace, expert_configuration
 from octop.infra.projects.legacy_conversations import _files, _local_backend, _visible_turns
 from octop.infra.projects.models import ProjectModel, Reference
@@ -659,6 +660,10 @@ class ConversationMigrationWorker:
                 )
                 if project is None or project.archived:
                     raise SourceUnavailable("target_project_unavailable")
+                try:
+                    assert_project_writable(services, conn, item.owner_id, body.project_id)
+                except OctopError as exc:
+                    raise SourceUnavailable("target_project_unavailable") from exc
             selected = None
             try:
                 expert_configuration(services, item.owner_id, agent.agent_id)

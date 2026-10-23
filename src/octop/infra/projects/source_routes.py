@@ -13,6 +13,7 @@ from octop.infra.agents.resident_worker_lock import ResidentWorkerLock
 from octop.infra.db.repos.unified_sources import UnifiedSourceRoute, UnifiedSourceRouteRepo
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.projects.deletion_state import assert_project_writable
 from octop.infra.utils.ulid import new_ulid
 
 
@@ -126,6 +127,8 @@ def reset_in_transaction(
         if route.task_id
         else None
     )
+    if task is not None:
+        assert_project_writable(services, conn, owner_id, task.project_id)
     if task is not None and task.active_turn_id:
         raise OctopError.localized(ErrorCode.TASK_BUSY, status=409)
     if not UnifiedSourceRouteRepo.transition(

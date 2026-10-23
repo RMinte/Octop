@@ -1,6 +1,6 @@
 # API Reference
 
-客户端本轮接线先读[统一 Task 客户端接口交接](agentcomputer-unified-conversations-handoff.md)，接口参考基线为 `feature/agentcomputer-foundation @ 4cd685b7`，Bridge 发送前令牌过滤随本次文档收尾提交交付。准确交付提交及复验结果见资料包 manifest 与部署记录。REST 完整模型见运行服务的 `/api/openapi.json`，Task WS 报文见[协议与 JSON Schema](project-task-websocket.md)。交接文档明确区分已实现接口、当前传输限制及安全修复的版本边界。
+客户端本轮接线先读[统一 Task 客户端接口交接](agentcomputer-unified-conversations-handoff.md)。统一 Task 基础接口参考 `feature/agentcomputer-foundation @ 4cd685b7`，Bridge 安全修复由 `34e918d5` 提供；项目自动停止后级联删除为其后的本次修订，准确运行版本见交接文档及交付资料包。REST 完整模型见运行服务的 `/api/openapi.json`，Task WS 报文见[协议与 JSON Schema](project-task-websocket.md)。协议号不用于判断这些后续修订是否已部署。
 
 ## 统一会话与可选专家（2026-10-23）
 
@@ -44,7 +44,7 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 
 网页语音输入/朗读复用账号已有 STT/TTS 服务，识别结果进入当前 Task 草稿。普通旧会话、团队和共享旧会话保留只读历史和显式续接入口，普通来源也支持 `/api/project-task-migrations` 后台批迁；新工作写入统一 Task。私人常驻保留专属入口，远程 Task 使用 Bridge 统一协议；跨桥迁移白名单尚未开放。
 
-删除仍有历史记录的项目返回 `PROJECT_HAS_TASKS`，建议归档；被当前选择、配置历史或旧续接来源引用的专家返回 `EXPERT_IN_USE`。这些操作不级联误删会话。升级使用 SQLite/PostgreSQL 成对的 schema 56；本机已完成真实 SQLite 库 v55→v56 结构升级并核对原记录完整，未执行旧 thread 批量迁移，未进行 PostgreSQL 实机验收。
+明确删除项目会永久删除其中全部 Task、会话和附件；服务端先停止并确认活动轮次退出，未确认则返回 `PROJECT_TASKS_BUSY` 并保留数据，可重试 DELETE。归档继续保留历史；被当前选择、配置历史或旧续接来源引用的专家仍返回 `EXPERT_IN_USE`，不级联删除专家记忆。升级使用 SQLite/PostgreSQL 成对的 schema 56；本机已完成真实 SQLite 库 v55→v56 结构升级并核对原记录完整，未执行旧 thread 批量迁移，未进行 PostgreSQL 实机验收。
 
 ## 私人智能体常驻会话（2026-10-20）
 
@@ -73,7 +73,7 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 | `GET /api/projects/{project_id}` | 获取项目完整配置和 `revision` | 服务端自动化通过 |
 | `PATCH /api/projects/{project_id}` | 局部修改；未提交字段保持原值，以 `expected_revision` 防止覆盖修改 | 定向自动化通过 |
 | `PUT /api/projects/{project_id}` | 显式完整替换；必须提交全部项目字段，局部请求返回 422 | 定向自动化通过 |
-| `DELETE /api/projects/{project_id}` | 仅删除空项目；有记录返回 PROJECT_HAS_TASKS，有活动轮次返回 PROJECT_TASKS_BUSY；成功返回 204 | 定向自动化覆盖 |
+| `DELETE /api/projects/{project_id}` | 停止并确认活动轮次退出后，永久删除项目及全部 Task；停止未确认返回 PROJECT_TASKS_BUSY 并保留数据，可重试；成功返回 204 | 定向验证覆盖以本次删除改造记录为准 |
 | `PATCH /api/projects/{project_id}/archive` | 以 archived 和 expected_revision 归档或恢复项目，保留全部任务及其归档状态 | 定向自动化覆盖 |
 | `GET /api/projects/resources` | 获取可选 Skill、当前用户 MCP 连接和目录浏览范围 | 服务端自动化通过 |
 
@@ -156,7 +156,7 @@ TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy=
 
 `scope` 默认 `all`，可选 `standalone` 或 `project`；`scope=project` 必须携带 `project_id`，其他 scope 不接受该参数。可使用 `task_id` 进一步限定，`kind` 筛选文件类型，`q` 搜索文件名的字面子串（ASCII 字母忽略大小写，去首尾空白，最多 200 字符）。`archived=all|active|archived` 默认 all，active 要求任务和所属项目均未归档，archived 匹配任一已归档。指定他人或不存在的项目/任务返回 404，合法但交集为空的筛选返回空列表。
 
-条目复用 `TaskArtifact` 的公开字段，补充 `file_kind`、`task_title`、`task_archived`、`turn_status` 及可空的 `project_id/project_name/project_archived`。`GET /api/project-tasks/artifacts/{artifact_id}` 返回相同结构的单份元数据；下载继续使用原 `download_url`。列表和详情不加载文件字节、不依赖模型；归档后仍可读取，发布后轮次失败或取消不移除文件。永久删除任务会删除对应成果，有历史的项目须归档保留。输入附件与未发布工作文件不收录。
+条目复用 `TaskArtifact` 的公开字段，补充 `file_kind`、`task_title`、`task_archived`、`turn_status` 及可空的 `project_id/project_name/project_archived`。`GET /api/project-tasks/artifacts/{artifact_id}` 返回相同结构的单份元数据；下载继续使用原 `download_url`。列表和详情不加载文件字节、不依赖模型；归档后仍可读取，发布后轮次失败或取消不移除文件。永久删除任务会删除对应成果，永久删除项目会删除其中全部任务及成果；希望保留历史时使用归档。输入附件与未发布工作文件不收录。
 
 资料库统一使用六个筛选标签：全部、文本和PDF、幻灯片、表格、图片、其他。列表、详情、任务历史和发布结果的 `business_category` 必返回 `document`（文本和PDF）、`presentation`（幻灯片）、`spreadsheet`（表格）、`image`（图片）或 `other`（其他）。查询参数 `business_category` 接受这五个值及默认值 `all`（全部）。资料库列表和详情继续返回原格式字段 `file_kind`，原 `kind` 筛选保持可用。例如 `GET /api/project-tasks/artifacts?business_category=document&kind=text&q=季度` 按资料分类、详细格式与文件名求交后分页，来源和归档筛选同样参与交集。
 
@@ -174,7 +174,7 @@ TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy=
 
 分页与增量响应交错时，使用 `list_revision` 保留较新的任务摘要；项目使用 `revision`。自己写入成功也不能跳过期间其他变化，直接推进同步位置。无效游标返回 HTTP 409 `PROJECT_SYNC_RESET`，重新建立项目快照或对应任务第一页即可。后台任务完成、取消和中断恢复的摘要更新与变更记录同事务提交；回复正文和心跳不产生列表变更。删除项目或任务时，同一事务写入 `operation=delete`、`data=null` 的同步记录；任务删除记录携带递增的 `list_revision`。客户端移除对应项并保存删除标记，防止旧分页或迟到的会话事件重新加入任务。仍不提供自动历史清理，备份恢复流程仍需可靠推进 `restoreEpoch` 后才能使旧游标失效。
 
-删除接口按 ID 操作，不要求 `expected_revision`；编辑和归档仍保留各自的版本检查。排队或运行中的任务须等待完成或先停止，单任务删除返回 `409 TASK_BUSY`；项目中存在此类任务返回 `409 PROJECT_TASKS_BUSY`。项目仍有任何保留记录时返回 `409 PROJECT_HAS_TASKS`，使用归档保留历史；仅空项目可删除。错误响应中的本地化消息说明禁止操作的原因，网页确认框显示具体错误。显式删除单任务会清理它的会话、附件、工具记录和上下文，但不删除独立分支及分支已复制的附件。删除保留工作目录中的文件，不回滚已发生的工具操作，也不删除专家记忆。已删除资源再次读取返回 404；项目名称和创建请求标识随空项目删除而释放。
+删除接口按 ID 操作，无请求体，不要求 `expected_revision`；成功返回无正文的 204，编辑和归档仍保留各自的版本检查。单任务有活动轮次时删除仍返回 `409 TASK_BUSY`，须等待完成或先停止。项目 DELETE 则由服务端持久阻止新执行、请求停止并等待全部活动轮次退出，再原子删除项目及全部 Task；停止超时或未知执行尚未退出时返回 `409 PROJECT_TASKS_BUSY`，不部分删除记录，客户端可稍后重试同一 DELETE。项目归档仍在有活动任务时返回 `PROJECT_TASKS_BUSY`，不自动停止。显式删除单任务不删除独立分支；项目删除不影响其他项目或无项目范围的独立分支及其已复制附件。删除保留工作目录文件，不回滚已发生的工具操作，也不删除专家记忆。已删除资源再次读取或删除返回 404；项目名称和创建请求标识随项目删除而释放。
 
 客户端删除请求、错误响应和提示要求见[项目和任务删除接口接入说明](project-task-deletion.md)。网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
 
@@ -548,8 +548,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 409 / `PROJECT_NAME_TAKEN` | 同账号下项目重名 | 提示更换名称 |
 | 409 / `PROJECT_REQUEST_CONFLICT` | 创建 key 被用于不同内容 | 先核对原创建结果；新的创建使用新 key |
 | 409 / `PROJECT_REVISION_CONFLICT` | 项目版本已变化 | 读取最新详情，处理冲突后再提交 |
-| 409 / `PROJECT_HAS_TASKS` | 项目仍有保留的任务或历史 | 引导归档，不提示或尝试级联删除任务 |
-| 409 / `PROJECT_TASKS_BUSY` | 项目内有活动任务 | 保留项目与记录，待任务停止后再操作 |
+| 409 / `PROJECT_TASKS_BUSY` | 项目 DELETE 的停止尚未确认，或项目归档时仍有活动任务 | 保留项目与全部记录；删除可稍后重试同一 DELETE，归档仍须先停止活动任务 |
 | 422 / `PROJECT_DIRECTORY_INVALID` | 服务端目录不存在或不可访问 | 重新选择有权限的服务端目录 |
 | 422 / `PROJECT_RESOURCE_INVALID` | Skill/MCP 引用不存在或无权使用 | 刷新资源目录后重新选择 |
 | 409 / `TASK_BUSY` | 任务已有活动轮次 | 读取当前任务，等待结束或由用户停止 |
@@ -570,7 +569,7 @@ App 根据 HTTP 状态和 `error.code` 分支，message 用于展示，不能作
 | 旧专用协议与新 Bridge Task | `/api/agentcomputer/v1` 及对应专用 Bridge 转发已移除；新 Bridge 通过统一 Task REST/WS 提供远端能力，范围见统一会话交接；已有数据保留 |
 | 项目与无项目任务、首轮和追问、幂等发送、历史恢复、取消基础行为 | 定向自动化通过；包含指定轮次取消、迟到取消不影响下一轮、手动重试和未完成上下文 |
 | 正式网页创建重试复用 key、改用 PATCH、保存后增量同步 | 前端自动化通过 |
-| 本机 8088 | 2026-10-23 已部署统一 Task 并升级 schema 56；升级前已备份，17 个项目、181 个任务、785 个轮次及其他核心表记录逐表校验一致，数据库完整性、外键及新接口 OpenAPI 检查通过。本次安全修复的提交与重启结果另附资料包 |
+| 本机 8088 | 2026-10-23 已部署统一 Task 并升级 schema 56；20:10（Asia/Shanghai）从隔离工作树重启，已加载自动停止后级联删除项目的修订。该次启动时改动尚未提交、未合入主工作目录，运行来源仍是隔离工作树。重启前已备份，17 个项目、181 个任务、785 个轮次及其他核心表记录逐表校验一致，数据库完整性、外键、健康及新删除接口 OpenAPI 检查通过；验证记录见统一接入交接 |
 | 当前原生 AgentComputer App | 本轮未修改，尚未验收新独立接口适配 |
 | PostgreSQL、目标 Ubuntu 盒子、真实 MCP 供应商 | 迁移文件/接口实现不等于实机验证，目前未验收 |
 

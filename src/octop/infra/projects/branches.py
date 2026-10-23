@@ -17,6 +17,7 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import approval_policy, input_attachments
 from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.conversation_import_models import ImportedTurnHistory
+from octop.infra.projects.deletion_state import assert_project_writable
 from octop.infra.projects.expert_profiles import resolve_expert_profile
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.legacy_conversation_models import LegacySourceAttachment
@@ -233,6 +234,7 @@ def create(
         source = tasks.get_in_transaction(conn, source_task_id, owner_id)
         if source is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        assert_project_writable(services, conn, owner_id, source.project_id)
         if source.active_turn_id is not None:
             raise OctopError.localized(ErrorCode.TASK_BUSY)
         history = services.project_task_turn_repo.list_in_transaction(conn, source_task_id)
@@ -255,6 +257,7 @@ def create(
             project = services.project_repo.get_in_transaction(conn, project_id, owner_id)
             if project is None:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
+            assert_project_writable(services, conn, owner_id, project_id)
             if project.archived:
                 raise OctopError.localized(ErrorCode.PROJECT_ARCHIVED)
         resolve_expert_profile(services, owner_id, selected)

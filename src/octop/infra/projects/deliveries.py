@@ -14,6 +14,7 @@ from octop.infra.db.repos.unified_sources import (
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import source_routes
+from octop.infra.projects.deletion_state import assert_task_writable
 from octop.infra.utils.ulid import new_ulid
 
 
@@ -28,10 +29,13 @@ def enqueue(
 ) -> UnifiedDelivery:
     identity = hashlib.sha256((route_id + ":" + turn_id + ":" + key).encode()).hexdigest()
     with services.db.transaction() as conn:
+        if not services.project_task_repo.lock_owner(conn, owner_id):
+            raise OctopError.localized(ErrorCode.FORBIDDEN)
         route = UnifiedSourceRouteRepo.get(conn, owner_id, route_id)
         if route is None or route.task_id != task_id:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
         source_routes.require_writable(route)
+        assert_task_writable(services, conn, owner_id, task_id)
         return UnifiedDeliveryRepo.enqueue(
             conn,
             delivery_id="delivery_" + identity,
@@ -47,6 +51,8 @@ def enqueue(
 
 def claim(services: SharedServices, row: UnifiedDelivery) -> UnifiedDelivery | None:
     with services.db.transaction() as conn:
+        if not services.project_task_repo.lock_owner(conn, row.owner_id):
+            return None
         route = UnifiedSourceRouteRepo.get(conn, row.owner_id, row.route_id)
         user = services.user_repo.get(row.owner_id)
         if (
@@ -56,6 +62,10 @@ def claim(services: SharedServices, row: UnifiedDelivery) -> UnifiedDelivery | N
             or user is None
             or user.disabled
         ):
+            return None
+        try:
+            assert_task_writable(services, conn, row.owner_id, row.task_id)
+        except OctopError:
             return None
         return UnifiedDeliveryRepo.claim(conn, row.delivery_id, new_ulid(), source_routes.now_ms())
 

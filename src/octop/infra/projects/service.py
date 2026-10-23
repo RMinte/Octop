@@ -171,8 +171,8 @@ def delete_project(services: SharedServices, owner_id: int, project_id: str) -> 
         tasks = services.project_task_repo.for_project(conn, project_id, owner_id)
         if any(task.active_turn_id for task in tasks):
             raise OctopError.localized(ErrorCode.PROJECT_TASKS_BUSY)
-        if tasks:
-            raise OctopError.localized(ErrorCode.PROJECT_HAS_TASKS)
+        for task in tasks:
+            services.project_task_repo.delete(conn, task)
         repo.delete(conn, row)
 
 
@@ -186,6 +186,9 @@ def archive_project(
         row = repo.get_in_transaction(conn, project_id, owner_id)
         if row is None:
             raise OctopError.localized(ErrorCode.NOT_FOUND)
+        from octop.infra.projects.deletion_state import assert_project_writable
+
+        assert_project_writable(services, conn, owner_id, project_id)
         if row.revision != expected_revision:
             raise OctopError.localized(ErrorCode.PROJECT_REVISION_CONFLICT)
         if row.archived == archived:

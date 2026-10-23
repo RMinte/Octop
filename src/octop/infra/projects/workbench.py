@@ -22,6 +22,7 @@ from pydantic import Field
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.context import task_backend
+from octop.infra.projects.deletion_state import assert_task_writable
 from octop.infra.projects.models import ProjectModel
 from octop.infra.projects.service import _allowed_root
 from octop.infra.utils.host_dirs import assert_safe_host_path
@@ -162,6 +163,11 @@ def resolve(
     user = services.user_repo.get(owner_id)
     if task is None or user is None or user.disabled:
         raise OctopError.localized(ErrorCode.NOT_FOUND)
+    if mutable:
+        with services.db.transaction() as conn:
+            if not services.project_task_repo.lock_owner(conn, owner_id):
+                raise OctopError.localized(ErrorCode.FORBIDDEN)
+            assert_task_writable(services, conn, owner_id, task_id)
 
     def can(key: str) -> bool:
         return user.role == "admin" or key in user.permissions

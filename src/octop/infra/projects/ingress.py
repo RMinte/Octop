@@ -19,6 +19,7 @@ from octop.infra.db.repos.unified_sources import (
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import source_routes, task_submission, tasks
+from octop.infra.projects.deletion_state import assert_project_writable, assert_task_writable
 from octop.infra.projects.models import ProjectModel
 
 logger = logging.getLogger(__name__)
@@ -116,10 +117,14 @@ def receive(
             task = services.project_task_repo.get_in_transaction(conn, current.task_id, owner_id)
             if task is None:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
+            if source.operation != "cancel":
+                assert_project_writable(services, conn, owner_id, task.project_id)
             if message.expected_configuration_revision is None:
                 message = message.model_copy(
                     update={"expected_configuration_revision": task.configuration_revision}
                 )
+        elif source.operation != "cancel":
+            assert_project_writable(services, conn, owner_id, message.project_id)
         payload = json.dumps(
             {"source": source.model_dump(mode="json"), "message": message.model_dump(mode="json")},
             ensure_ascii=False,
@@ -215,6 +220,8 @@ async def admit(services: SharedServices, owner_id: int, inbox_id: str) -> Submi
                     latest = UnifiedSourceInboxRepo.get(conn, owner_id, inbox_id)
                     if latest is None or latest.status != "received":
                         return
+                    if route.task_id is not None:
+                        assert_task_writable(services, conn, owner_id, route.task_id)
                     source_routes.reset_in_transaction(
                         services, conn, owner_id, route.route_id, message.request_id
                     )
@@ -382,6 +389,9 @@ def record_notification(
             services.project_task_repo.get_in_transaction(conn, route.task_id, owner_id)
             if route.task_id
             else None
+        )
+        assert_project_writable(
+            services, conn, owner_id, task.project_id if task is not None else project_id
         )
         if task is None:
             if route.task_id or (route.state == "task" and route.revision > 1):
