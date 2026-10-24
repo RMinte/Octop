@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 from pydantic import ValidationError
@@ -164,6 +164,7 @@ def test_fork_copies_visible_history_and_owned_bytes_without_execution_state(ser
     created = branches.create(services, 1, "source", TaskFork(request_id="fork-once"))
     assert created.continuation_prompt is None and not created.continuation_attachment_ids
     target = services.project_task_repo.get(created.task_id, 1)
+    assert target.title == "Original work (2)"
     assert (target.project_id, target.selected_expert_id, target.action_mode) == (
         "project",
         "expert",
@@ -197,6 +198,12 @@ def test_fork_copies_visible_history_and_owned_bytes_without_execution_state(ser
         assert not turn.worker_id and not turn.checkpoint_id and turn.interactions_json == "[]"
         assert (turn.input_tokens, turn.output_tokens) == (0, 0)
     with services.db.read_snapshot() as conn:
+        assert (
+            conn.execute(
+                "SELECT title_source FROM project_tasks WHERE task_id=?", (created.task_id,)
+            ).fetchone()[0]
+            == "generated"
+        )
         owned = services.project_task_attachment_repo.for_task(conn, 1, created.task_id)
         assert len(owned) == 1 and owned[0].attachment_id != "input_original"
         assert (
@@ -241,6 +248,7 @@ def test_edit_and_regenerate_branch_before_anchor_and_clone_continuation_inputs(
     if operation == "edit":
         body["prompt"] = "Edited second question"
     created = branches.create(services, 1, "source", TaskFork.model_validate(body))
+    assert services.project_task_repo.get(created.task_id, 1).title == "Original work (2)"
     assert [turn.prompt for turn in services.project_task_turn_repo.list(created.task_id)] == [
         "Question 1"
     ]
@@ -259,6 +267,7 @@ def test_edit_and_regenerate_branch_before_anchor_and_clone_continuation_inputs(
 def test_idempotency_returns_same_branch_after_source_changes(services):
     body = TaskFork(request_id="repeat-fork", prompt="Continue here")
     created = branches.create(services, 1, "source", body)
+    assert services.project_task_repo.get(created.task_id, 1).title == "Original work (2)"
     with services.db.transaction() as conn:
         conn.execute(
             "UPDATE project_tasks SET active_turn_id='another-turn' WHERE task_id='source'"
@@ -274,6 +283,87 @@ def test_idempotency_returns_same_branch_after_source_changes(services):
             services, 1, "source", body.model_copy(update={"prompt": "Different intent"})
         )
     assert error.value.code == ErrorCode.TASK_REQUEST_CONFLICT
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE project_tasks SET active_turn_id=NULL WHERE task_id='source'")
+    second = branches.create(services, 1, "source", TaskFork(request_id="second-fork"))
+    assert services.project_task_repo.get(second.task_id, 1).title == "Original work (3)"
+    assert services.project_task_repo.get("source", 1).title == "Original work"
+
+
+def test_branch_title_uses_first_available_number_across_owned_tasks(services):
+    with services.db.transaction() as conn:
+        for task_id, owner, project, number, archived, internal_kind in (
+            ("archived", 1, "target", 2, True, ""),
+            ("unassigned", 1, None, 3, False, ""),
+            ("other-owner", 2, "foreign-project", 4, False, ""),
+            ("internal", 1, "project", 4, False, "resident"),
+            ("later-number", 1, "project", 6, False, ""),
+        ):
+            services.project_task_repo.insert(
+                conn,
+                ProjectTaskRow(
+                    task_id,
+                    owner,
+                    project,
+                    f"Original work ({number})",
+                    task_id,
+                    None,
+                    1,
+                    1,
+                    archived=archived,
+                    internal_kind=internal_kind,
+                ),
+            )
+    created = branches.create(services, 1, "source", TaskFork(request_id="occupied-titles"))
+    assert services.project_task_repo.get(created.task_id, 1).title == "Original work (4)"
+
+
+@pytest.mark.parametrize("original", ["目录_100%！'quoted'", "Release (2026)", "界" * 128])
+def test_branch_title_preserves_original_text_and_fits_title_limit(services, original):
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE project_tasks SET title=? WHERE task_id='source'", (original,))
+    created = branches.create(services, 1, "source", TaskFork(request_id="title-text"))
+    title = services.project_task_repo.get(created.task_id, 1).title
+    assert title == original[:124] + " (2)"
+    assert len(title) <= 128
+
+
+@pytest.mark.parametrize("title_source", ["generated", "manual", "provisional"])
+def test_nested_branch_title_flattens_only_generated_number(services, title_source):
+    first = branches.create(services, 1, "source", TaskFork(request_id="first-level"))
+    if title_source == "manual":
+        row = services.project_task_repo.get(first.task_id, 1)
+        tasks.patch(
+            services,
+            1,
+            first.task_id,
+            tasks.TaskPatch(expected_revision=row.list_revision, title="Original work (2)"),
+        )
+    with services.db.transaction() as conn:
+        if title_source == "provisional":
+            conn.execute(
+                "UPDATE project_tasks SET title='Release (2026)',title_source='provisional' "
+                "WHERE task_id=?",
+                (first.task_id,),
+            )
+        services.project_task_turn_repo.insert_imported(
+            conn,
+            replace(
+                services.project_task_turn_repo.get_in_transaction(conn, "source-turn-2"),
+                task_id=first.task_id,
+                turn_id="branch-new-turn",
+                request_id="branch-new-message",
+                prompt="New work in the branch",
+                configuration_json="{}",
+            ),
+        )
+    nested = branches.create(services, 1, first.task_id, TaskFork(request_id="second-level"))
+    expected = {
+        "generated": "Original work (3)",
+        "manual": "Original work (2) (2)",
+        "provisional": "Release (2026) (2)",
+    }[title_source]
+    assert services.project_task_repo.get(nested.task_id, 1).title == expected
 
 
 def test_explicit_null_selections_clear_inherited_project_and_expert(services):

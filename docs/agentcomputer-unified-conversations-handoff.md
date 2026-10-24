@@ -161,6 +161,8 @@ PATCH /api/project-tasks/task_example
 
 `fork` 复制包含锚点的公开历史；`edit/regenerate` 从锚点前建立分支，regenerate 沿用原用户消息且不传 prompt。省略目标项目/专家表示继承，显式 null 表示清空。带新消息的 fork 或 edit/regenerate 会受理新轮；普通无 prompt 的 fork 返回空闲分支。APP 导航到返回的新 task_id，保留原分支。
 
+分支名称直接使用返回的 `title`：服务端生成 `原标题 (2)`、`原标题 (3)`，跳过同账号（包含其他项目及归档）已占用的标题，总长不超过 128 字符。自动命名分支再次分支时不叠加后缀；手动改名保留用户文字。相同请求重放沿用已创建分支的名称，APP 无需自行编号，既有 Task 名称不批量改写。
+
 来源 Task 必须空闲；锚点必须 completed 且不是 history_only，省略 turn_id 取最后一轮。成功始终返回 `202 TaskDetail`，即使分支暂时没有新执行。此请求不接受 options 或 expected_revision，后续执行使用分支当前配置。
 
 历史副本 `history_only=true` 不携带可执行检查点或审批授权，不能以该副本为锚点再次 fork/edit/regenerate，也不能 retry；可以在新 Task 正常发送后续新轮。工作目录文件不会因分支自动复制。
