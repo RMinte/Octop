@@ -254,14 +254,31 @@ class ProjectTaskRepo:
         return ProjectTaskRow.from_row(row) if row else None
 
     @staticmethod
-    def insert(conn: Any, row: ProjectTaskRow) -> None:
+    def title_exists(conn: Any, owner_id: int, title: str) -> bool:
+        return (
+            conn.execute(
+                "SELECT 1 FROM project_tasks WHERE owner_id=? AND title=? AND internal_kind='' LIMIT 1",
+                (owner_id, title),
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def title_source(conn: Any, task_id: str) -> str | None:
+        row = conn.execute(
+            "SELECT title_source FROM project_tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        return str(row["title_source"]) if row else None
+
+    @staticmethod
+    def insert(conn: Any, row: ProjectTaskRow, *, generated_title: bool = False) -> None:
         conn.execute(
             "INSERT INTO project_tasks(task_id, owner_id, project_id, title, request_id, "
             "active_turn_id, created_at, updated_at, status, title_source, "
             "approval_mode, approval_revision, approval_updated_at, web_search_enabled, "
             "import_source, external_session_id, selected_expert_id, configuration_revision, "
             "action_mode, pinned, archived, internal_kind) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.task_id,
                 row.owner_id,
@@ -272,6 +289,7 @@ class ProjectTaskRepo:
                 row.created_at,
                 row.updated_at,
                 row.status,
+                "generated" if generated_title else "provisional",
                 row.approval_mode,
                 row.approval_revision,
                 row.approval_updated_at,

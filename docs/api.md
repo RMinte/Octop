@@ -19,6 +19,8 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 | `POST /api/project-tasks/{task_id}/expert-memory` | `{request_id,source:scope\|general,content,topic?,expected_expert_id?}`；显式保存。completed 可同 ID 重放；uncertain 须核对，不能自动另发。 |
 | `GET/PATCH /api/project-tasks/{task_id}/expert-memory/policy` | PATCH 必填专家 `expected_revision`、`legacy_recall_enabled`，建议同时传 `expected_expert_id`；另可修改 `capture_enabled`、`auto_extract_enabled`、`general_promotion_enabled`。共享使用者 `policy_editable=false`。 |
 
+分支标题由服务端在原标题后添加 ` (2)`、` (3)` 等数字后缀，跳过当前账号全部项目及归档任务中已占用的标题，总长不超过 128 字符。从自动命名分支继续分支时沿用基础标题，不叠加后缀；手动改名保留用户文字。相同 `request_id` 重放返回同一分支，不重新编号。客户端直接展示返回的 `title`，旧任务标题不批量改写。
+
 分支历史标记 `history_only` 和来源 ID；只复制公开历史、经校验的任务附件及成果，不复制检查点、审批和执行授权。旧 thread 续接保留来源 thread/agent 以及原附件鉴权链接，缺失资源标记 unavailable，不移动文件、不同步旧会话。旧会话链接继续可读，普通本地旧会话网页通过明确续接入口继续工作。
 
 专家记忆按 owner/专家隔离，进一步区分通用范围与项目范围；无项目任务的 scope 仅属于自身。共享使用者不连接发布者的私人记忆、legacy 或凭据。旧未分域记忆默认不召回，显式启用后只读。恢复原轮重用冻结召回；持久后台工作项在完成轮次后抽取 scope，只有明确跨项目、可核对原句且无项目/临时限定的用户偏好可自动晋升 general。团队委派不能作为人类偏好晋升。查询附带 `extraction_jobs` 阶段和错误状态；未知模型或写入结果保持 uncertain，不盲目重放。实现和恢复边界见[记忆说明](unified-task-conversation-plan.md#61-本轮-m3-记忆实现与边界)。

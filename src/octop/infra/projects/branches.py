@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Self
 
@@ -65,6 +66,23 @@ def _result(row: ProjectTaskBranchRow) -> BranchResult:
     return BranchResult(
         row.task_id, row.continuation_prompt, json.loads(row.continuation_attachments_json)
     )
+
+
+def _title(services: SharedServices, conn: Any, source: ProjectTaskRow) -> str:
+    tasks = services.project_task_repo
+    base = source.title
+    if (
+        services.project_task_branch_repo.origin(conn, source.task_id) is not None
+        and tasks.title_source(conn, source.task_id) == "generated"
+    ):
+        base = re.sub(r" \([0-9]+\)$", "", base)
+    number = 2
+    while True:
+        suffix = f" ({number})"
+        title = base[: 128 - len(suffix)].rstrip() + suffix
+        if not tasks.title_exists(conn, source.owner_id, title):
+            return title
+        number += 1
 
 
 def _replace_ids(value: Any, replacements: dict[str, str]) -> Any:
@@ -272,7 +290,7 @@ def create(
                 task_id,
                 owner_id,
                 project_id,
-                source.title,
+                _title(services, conn, source),
                 "fork_" + hashlib.sha256(f"{owner_id}:{body.request_id}".encode()).hexdigest(),
                 None,
                 now,
@@ -285,6 +303,7 @@ def create(
                 approval_revision=policy.revision,
                 approval_updated_at=int(policy.updated_at.timestamp() * 1000),
             ),
+            generated_title=True,
         )
         copying = _HistoryCopy(services, conn, owner_id, source_task_id, task_id)
         for turn in history:
