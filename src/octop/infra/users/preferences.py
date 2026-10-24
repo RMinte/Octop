@@ -25,6 +25,7 @@ SIDEBAR_NAV_KEYS = frozenset(
         "experts",
         "tasks",
         "box-projects",
+        "resident",
         "token-usage",
         "personalization",
         "channels",

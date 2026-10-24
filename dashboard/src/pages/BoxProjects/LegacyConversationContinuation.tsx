@@ -169,7 +169,7 @@ export default function LegacyConversationContinuation({
             disabled={saving}
             value={expertID ?? ""}
             options={[
-              { value: "", label: t("projects.tasks.generalAssistant") },
+              { value: "", label: t("projects.tasks.noExpert") },
               ...experts.map((expert) => ({
                 value: expert.expert_id,
                 label: taskExpertLabel(expert, t),

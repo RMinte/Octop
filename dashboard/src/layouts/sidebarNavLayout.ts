@@ -122,7 +122,7 @@ export function editorFromCatalog(
     if (!seen.has(key)) {
       // Existing custom layouts predate this route. Show the new entry until
       // the user explicitly moves it to Hidden.
-      if (key === "box-projects") ungrouped.push(key);
+      if (key === "box-projects" || key === "resident") ungrouped.push(key);
       else hidden.push(key);
     }
   }

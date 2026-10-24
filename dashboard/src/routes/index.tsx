@@ -11,6 +11,7 @@ const BoxProjectsPage = lazy(() => import("../pages/BoxProjects"));
 const UnifiedConversationsPage = lazy(
   () => import("../pages/BoxProjects/UnifiedConversations"),
 );
+const ResidentPage = lazy(() => import("../pages/Resident"));
 const BridgePage = lazy(() => import("../pages/Settings/Bridge"));
 const PersonalizationPage = lazy(
   () => import("../pages/Agent/Personalization"),
@@ -57,6 +58,7 @@ export const pathToKey: Record<string, string> = {
   "/tasks": "tasks",
   "/box-projects": "box-projects",
   "/conversations": "box-projects",
+  "/resident": "resident",
   "/connectors": "connectors",
   "/skill-packages": "skill-packages",
   "/knowledge-bases": "knowledge-bases",
@@ -105,6 +107,7 @@ export const pathToKey: Record<string, string> = {
  */
 export const FULLSCREEN_PATHS = new Set([
   "/conversations",
+  "/resident",
   "/workbench",
   "/workbench/terminal",
   "/workbench/browser",
@@ -164,6 +167,7 @@ export const routeConfigs: RouteConfig[] = [
   { path: "/box-projects", element: <BoxProjectsPage /> },
   { path: "/conversations", element: <UnifiedConversationsPage /> },
   { path: "/conversations/:taskID", element: <UnifiedConversationsPage /> },
+  { path: "/resident", element: <ResidentPage /> },
   { path: "/box-projects/:projectID", element: <BoxProjectsPage /> },
   { path: "/connectors", element: <ConnectorsPage /> },
   { path: "/skill-packages", element: <SkillPackagesPage /> },

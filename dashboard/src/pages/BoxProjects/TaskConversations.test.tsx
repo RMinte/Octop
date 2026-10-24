@@ -325,6 +325,51 @@ it("changes the expert only between turns, retaining the draft and both revision
   );
 });
 
+it("explains an unavailable expert without silently changing identity and lets the user choose none", async () => {
+  const selected = {
+    ...fixture,
+    configuration_revision: 5,
+    selected_expert_id: "unavailable_expert",
+  };
+  api.open.mockResolvedValue(selected);
+  api.update.mockResolvedValue({
+    ...selected,
+    list_revision: 2,
+    configuration_revision: 6,
+    selected_expert_id: null,
+  });
+  const user = userEvent.setup();
+  mount("?task=task_a");
+  await screen.findByText(zh.projects.tasks.expertUnavailableHint);
+  expect(api.update).not.toHaveBeenCalled();
+  const input = screen.getByRole("textbox", {
+    name: zh.projects.tasks.message,
+  });
+  await waitFor(() => expect(input).toBeEnabled());
+  await user.type(input, "Keep this draft");
+  await user.click(
+    screen.getByRole("combobox", { name: zh.projects.tasks.expert }),
+  );
+  await user.click(
+    await screen.findByText(zh.projects.tasks.noExpert, {
+      selector: ".ant-select-item-option-content",
+    }),
+  );
+  await waitFor(() =>
+    expect(api.update).toHaveBeenCalledWith("task_a", {
+      selected_expert_id: null,
+      expected_revision: 1,
+      expected_configuration_revision: 5,
+    }),
+  );
+  expect(input).toHaveValue("Keep this draft");
+  await waitFor(() =>
+    expect(
+      screen.queryByText(zh.projects.tasks.expertUnavailableHint),
+    ).not.toBeInTheDocument(),
+  );
+});
+
 it("keeps the accepted expert fixed while a turn waits for approval", async () => {
   api.open.mockResolvedValue({
     ...fixture,
@@ -339,6 +384,37 @@ it("keeps the accepted expert fixed while a turn waits for approval", async () =
     ).toBeDisabled(),
   );
   expect(api.update).not.toHaveBeenCalled();
+});
+
+it("keeps the narrow-screen navigation reachable from a project overview and closes it after changing projects", async () => {
+  const user = userEvent.setup();
+  const workspace = (projectID: string) => (
+    <MemoryRouter>
+      <TaskConversations
+        projectID={projectID}
+        selectedTaskID={null}
+        workspace
+        overview={<div>Project overview</div>}
+        navigation={<nav aria-label="Project navigation">Projects</nav>}
+      />
+    </MemoryRouter>
+  );
+  const view = render(workspace("project_a"));
+  const toggle = screen.getByRole("button", {
+    name: zh.projects.workspace.navigation,
+  });
+  expect(toggle).toBeVisible();
+  await user.click(toggle);
+  expect(
+    screen.getByRole("region", { name: zh.projects.tasks.title }),
+  ).toHaveAttribute("data-list-open", "true");
+  view.rerender(workspace("project_b"));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("region", { name: zh.projects.tasks.title }),
+    ).toHaveAttribute("data-list-open", "false"),
+  );
+  expect(screen.getByText("Project overview")).toBeVisible();
 });
 
 it("uses the owner-wide scope rather than treating no project as all projects", async () => {

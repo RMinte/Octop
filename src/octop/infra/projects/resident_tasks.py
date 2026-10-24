@@ -283,10 +283,10 @@ async def ensure_task(
                             finished_at=now,
                         ),
                     )
-                    conn.execute(
-                        "INSERT INTO project_task_contexts(task_id,turn_id,messages_json,updated_at) VALUES (?,?,?,?)",
-                        (identifier, seed, json.dumps(source.wires, ensure_ascii=False), now),
-                    )
+                    if not services.project_task_turn_repo.seed_imported_context_in_transaction(
+                        conn, identifier, seed, json.dumps(source.wires, ensure_ascii=False)
+                    ):
+                        raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
 
         await asyncio.to_thread(create)
         return identifier

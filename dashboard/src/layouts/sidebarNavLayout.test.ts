@@ -34,11 +34,12 @@ describe("sidebarNavLayout", () => {
     const sections = catalog();
     expect(
       sectionsFromLayout(sections, null)[0].items.map((item) => item.key),
-    ).toEqual(["box-projects", "experts", "tasks", "token-usage"]);
+    ).toEqual(["box-projects", "resident", "experts", "tasks", "token-usage"]);
     expect(sections[0].items.some((item) => item.key === "chat")).toBe(true);
     const editor = editorFromCatalog(sections, null);
     expect(editor.ungrouped).toEqual([
       "box-projects",
+      "resident",
       "experts",
       "tasks",
       "token-usage",
@@ -74,6 +75,7 @@ describe("sidebarNavLayout", () => {
     expect(applied[0]?.items.map((item) => item.key)).toEqual([
       "chat",
       "box-projects",
+      "resident",
     ]);
     expect(applied[1]?.title).toBe("配置");
     expect(applied[1]?.items.map((item) => item.key)).toEqual([
@@ -87,7 +89,7 @@ describe("sidebarNavLayout", () => {
       groups: [{ id: "settings" }],
       items: [{ key: "chat" }],
     });
-    expect(editor.ungrouped).toEqual(["chat", "box-projects"]);
+    expect(editor.ungrouped).toEqual(["chat", "box-projects", "resident"]);
     expect(editor.hidden).toContain("experts");
     expect(editor.hidden).toContain("personalization");
     expect(editor.ungrouped).toContain("box-projects");
@@ -118,6 +120,18 @@ describe("sidebarNavLayout", () => {
     expect(editor.ungrouped).not.toContain("box-projects");
   });
 
+  it("adds the private assistant to saved navigation without restoring other hidden items", () => {
+    const layout = { groups: [], items: [{ key: "experts", hidden: true }] };
+    const editor = editorFromCatalog(catalog(), layout);
+    expect(editor.ungrouped).toContain("resident");
+    expect(editor.hidden).toContain("experts");
+    const visible = sectionsFromLayout(catalog(), layout).flatMap((section) =>
+      section.items.map((item) => item.key),
+    );
+    expect(visible).toContain("resident");
+    expect(visible).not.toContain("experts");
+  });
+
   it("moves a deleted group's items to the front of the ungrouped list", () => {
     const editor = editorFromCatalog(catalog(), null);
     const next = deleteGroup(editor, "settings");
@@ -129,8 +143,9 @@ describe("sidebarNavLayout", () => {
   it("places an item before another and can hide it", () => {
     const editor = editorFromCatalog(catalog(), null);
     const moved = placeItem(editor, "tasks", { kind: "ungrouped" }, "experts");
-    expect(moved.ungrouped.slice(0, 3)).toEqual([
+    expect(moved.ungrouped.slice(0, 4)).toEqual([
       "box-projects",
+      "resident",
       "tasks",
       "experts",
     ]);

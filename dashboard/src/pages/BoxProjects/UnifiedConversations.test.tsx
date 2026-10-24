@@ -164,12 +164,15 @@ it("keeps project navigation reachable and opens its overview inside the workspa
   const user = userEvent.setup();
   mount("/conversations");
   await screen.findByTestId("selection");
-  await user.click(
-    screen.getByRole("button", { name: "projects.workspace.projectMenu" }),
-  );
-  await user.click(
-    screen.getAllByRole("button", { name: "A", exact: true }).at(-1)!,
-  );
+  expect(
+    screen.queryByRole("button", { name: "projects.workspace.projectMenu" }),
+  ).toBeNull();
+  expect(
+    screen.getAllByRole("navigation", {
+      name: "projects.workspace.navigation",
+    }),
+  ).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "A", exact: true }));
   expect(
     await screen.findByRole("region", { name: "projects.workspace.overview" }),
   ).toBeTruthy();
@@ -193,6 +196,26 @@ it("keeps project navigation reachable and opens its overview inside the workspa
   expect(
     screen.getByRole("combobox", { name: "projects.tasks.project" }),
   ).toBeEnabled();
+});
+
+it("keeps a fallback project navigator reachable when the conversation cannot load", async () => {
+  api.get.mockRejectedValue(new Error("offline"));
+  const user = userEvent.setup();
+  mount("/conversations/task_a");
+  await screen.findByRole("button", { name: "projects.refresh" });
+  await user.click(
+    screen.getByRole("button", { name: "projects.workspace.projectMenu" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("navigation", {
+        name: "projects.workspace.navigation",
+      }),
+    ).toBeVisible(),
+  );
+  expect(
+    screen.getByRole("button", { name: "projects.workspace.all" }),
+  ).toBeVisible();
 });
 
 it("changes only the list scope when browsing pinned and standalone conversations", async () => {

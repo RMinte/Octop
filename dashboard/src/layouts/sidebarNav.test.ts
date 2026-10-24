@@ -22,6 +22,11 @@ describe("sidebarNav", () => {
       path: "/conversations",
       labelKey: "nav.boxProjects",
     });
+    expect(items[1]).toMatchObject({
+      key: "resident",
+      path: "/resident",
+      labelKey: "resident.page.title",
+    });
     expect(items.find((item) => item.key === "chat")).toMatchObject({
       path: "/chat",
       labelKey: "nav.legacyChat",

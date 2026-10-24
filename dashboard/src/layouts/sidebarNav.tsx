@@ -20,6 +20,7 @@ import {
   Boxes,
   Shield,
   PanelsTopLeft,
+  UserRound,
 } from "lucide-react";
 import type { OctopUser } from "../api/modules/auth";
 import { navAllowed, userCan } from "../utils/permissions";
@@ -54,6 +55,7 @@ export const SIDEBAR_NAV_KEYS = [
   "experts",
   "tasks",
   "box-projects",
+  "resident",
   "token-usage",
   "personalization",
   "channels",
@@ -145,6 +147,12 @@ export function buildNavSections(
           path: "/conversations",
           icon: <Boxes size={iconSize} strokeWidth={iconStroke} />,
           labelKey: "nav.boxProjects",
+        },
+        {
+          key: "resident",
+          path: "/resident",
+          icon: <UserRound size={iconSize} strokeWidth={iconStroke} />,
+          labelKey: "resident.page.title",
         },
         {
           key: "chat",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -148,6 +149,29 @@ class ProjectTaskTurnRepo:
     def save_context(self, turn_id: str, worker_id: str, messages_json: str) -> bool:
         with self._db.transaction() as conn:
             return self.save_context_in_transaction(conn, turn_id, worker_id, messages_json)
+
+    @staticmethod
+    def seed_imported_context_in_transaction(
+        conn: Any, task_id: str, turn_id: str, messages_json: str
+    ) -> bool:
+        """Seed completed imported history once; never replace a worker's later context."""
+        row = conn.execute(
+            "SELECT configuration_json FROM project_task_turns "
+            "WHERE task_id=? AND turn_id=? AND status='completed'",
+            (task_id, turn_id),
+        ).fetchone()
+        if (
+            row is None
+            or json.loads(str(row["configuration_json"])).get("imported_history") is not True
+        ):
+            return False
+        return bool(
+            conn.execute(
+                "INSERT INTO project_task_contexts(task_id,turn_id,messages_json) VALUES (?,?,?) "
+                "ON CONFLICT(task_id) DO NOTHING",
+                (task_id, turn_id, messages_json),
+            ).rowcount
+        )
 
     @staticmethod
     def save_context_in_transaction(

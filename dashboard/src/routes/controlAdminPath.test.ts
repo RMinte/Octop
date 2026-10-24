@@ -6,7 +6,12 @@ import {
   pathPermissionKeys,
   PERM,
 } from "../utils/permissions";
-import { isWorkbenchPath, resolveSelectedKey, routeConfigs } from "./index";
+import {
+  FULLSCREEN_PATHS,
+  isWorkbenchPath,
+  resolveSelectedKey,
+  routeConfigs,
+} from "./index";
 
 describe("pathPermissionKeys", () => {
   it("matches workbench and legacy aliases", () => {
@@ -64,6 +69,10 @@ describe("pathPermissionKeys", () => {
   });
 
   it("does not gate common pages", () => {
+    expect(pathPermissionKeys("/resident")).toBeNull();
+    expect(canAccessPath({ role: "user", permissions: [] }, "/resident")).toBe(
+      true,
+    );
     expect(pathPermissionKeys("/chat")).toBeNull();
     expect(pathPermissionKeys("/experts")).toBeNull();
     expect(pathPermissionKeys("/tasks")).toBeNull();
@@ -123,6 +132,13 @@ describe("pathPermissionKeys", () => {
 });
 
 describe("unknown dashboard paths", () => {
+  it("provides the private assistant its own full-height route and navigation identity", () => {
+    expect(resolveSelectedKey("/resident")).toBe("resident");
+    expect(FULLSCREEN_PATHS.has("/resident")).toBe(true);
+    expect(
+      routeConfigs.some((route) => route.path === "/resident" && route.element),
+    ).toBe(true);
+  });
   it("do not highlight a sidebar item", () => {
     expect(resolveSelectedKey("/does-not-exist")).toBe("");
   });

@@ -435,6 +435,8 @@ export default function AgentExpertsTable({
         const state = localStates[row.agent_id] ?? row.state;
         const isTransient = TRANSIENT.has(state);
         const chatReady = isAgentChatReady(state);
+        const unifiedEligible =
+          !row.kind || row.kind === "expert" || row.kind === "team";
         const isOwner = row.is_owner !== false;
         return (
           <div className={styles.tableActions}>
@@ -520,19 +522,19 @@ export default function AgentExpertsTable({
                 />
               </>
             )}
-            {chatReady ||
-            (!row.bridge &&
-              (!row.kind || row.kind === "expert" || row.kind === "team")) ? (
+            {chatReady || (!row.bridge && unifiedEligible) ? (
               <button
                 type="button"
                 className={styles.tableChatBtn}
                 onClick={() => handleOpenChat(row.agent_id)}
                 title={
-                  row.bridge ? t("projects.tasks.legacyOnlyHint") : undefined
+                  unifiedEligible
+                    ? t("experts.testChatHint")
+                    : t("projects.tasks.legacyOnlyHint")
                 }
               >
                 <MessageSquare size={13} />
-                {t("experts.openChat", "对话")}
+                {t(unifiedEligible ? "experts.testChat" : "experts.openChat")}
                 <ChevronRight size={13} />
               </button>
             ) : isOwner &&

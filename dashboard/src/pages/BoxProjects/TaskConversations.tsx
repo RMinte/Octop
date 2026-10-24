@@ -152,6 +152,10 @@ export default function TaskConversations({
   const [statusFilter, setStatusFilter] = useState<TaskStatus | undefined>();
   const [projectFilter, setProjectFilter] = useState<string | undefined>();
   const [mobileListOpen, setMobileListOpen] = useState(false);
+  const showingOverview = !!overview;
+  useEffect(() => {
+    setMobileListOpen(false);
+  }, [taskID, projectID, showingOverview]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [branch, setBranch] = useState<Omit<TaskFork, "request_id"> | null>(
     null,
@@ -363,6 +367,12 @@ export default function TaskConversations({
     webSearchSaving ||
     approvalSaving;
   const selectedExpert = taskID ? detail?.selected_expert_id ?? null : expertID;
+  const selectedExpertUnavailable =
+    !!selectedExpert &&
+    !resourceError &&
+    !!resources &&
+    Array.isArray(resources?.experts) &&
+    !resources.experts.some((expert) => expert.expert_id === selectedExpert);
   const selectedMode = taskID ? detail?.action_mode ?? "craft" : actionMode;
   const revisions = {
     expected_configuration_revision: detail?.configuration_revision ?? 1,
@@ -1176,20 +1186,24 @@ export default function TaskConversations({
         </div>
       </div>
       <div className={styles.conversation}>
+        <div
+          className={`${styles.conversationNavigation} ${
+            overview ? styles.overviewNavigation : ""
+          }`}
+        >
+          <Button
+            type="text"
+            size="small"
+            icon={<PanelLeft size={16} />}
+            className={styles.mobileListButton}
+            onClick={() => setMobileListOpen(true)}
+          >
+            {t("projects.workspace.navigation")}
+          </Button>
+          <span>{project?.name ?? t("projects.tasks.noProject")}</span>
+        </div>
         {overview}
         <div className={styles.conversationBody} hidden={!!overview}>
-          <div className={styles.conversationNavigation}>
-            <Button
-              type="text"
-              size="small"
-              icon={<PanelLeft size={16} />}
-              className={styles.mobileListButton}
-              onClick={() => setMobileListOpen(true)}
-            >
-              {t("projects.workspace.navigation")}
-            </Button>
-            <span>{project?.name ?? t("projects.tasks.noProject")}</span>
-          </div>
           {detail && (
             <>
               <TaskWorkbench
@@ -1740,6 +1754,14 @@ export default function TaskConversations({
               }}
               status={
                 <>
+                  {selectedExpertUnavailable && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t("projects.tasks.expertUnavailable")}
+                      description={t("projects.tasks.expertUnavailableHint")}
+                    />
+                  )}
                   {resourceError && (
                     <Alert
                       type="error"
@@ -1948,7 +1970,7 @@ export default function TaskConversations({
                       options={[
                         {
                           value: "",
-                          label: t("projects.tasks.generalAssistant"),
+                          label: t("projects.tasks.noExpert"),
                         },
                         ...(resources?.experts ?? []).map((expert) => ({
                           value: expert.expert_id,
@@ -1961,7 +1983,9 @@ export default function TaskConversations({
                           ? [
                               {
                                 value: selectedExpert,
-                                label: selectedExpert,
+                                label: selectedExpertUnavailable
+                                  ? t("projects.tasks.expertUnavailable")
+                                  : selectedExpert,
                                 disabled: true,
                               },
                             ]
@@ -2281,7 +2305,7 @@ export default function TaskConversations({
             disabled={forking}
             value={branch?.selected_expert_id ?? ""}
             options={[
-              { value: "", label: t("projects.tasks.generalAssistant") },
+              { value: "", label: t("projects.tasks.noExpert") },
               ...(resources?.experts ?? []).map((expert) => ({
                 value: expert.expert_id,
                 label: taskExpertLabel(expert, t),

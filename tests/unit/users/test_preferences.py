@@ -147,6 +147,15 @@ def test_sidebar_nav_accepts_box_projects_visibility() -> None:
     assert hidden[0].hidden is True
 
 
+def test_sidebar_nav_preserves_private_assistant_placement() -> None:
+    saved = merge_sidebar_nav_json(
+        "{}", {"groups": [], "items": [{"key": "resident"}, {"key": "experts", "hidden": True}]}
+    )
+    layout = get_sidebar_nav_from_json(saved)
+    assert layout is not None
+    assert layout["items"] == [{"key": "resident"}, {"key": "experts", "hidden": True}]
+
+
 def test_sidebar_nav_clear_and_invalid_payload() -> None:
     merged = merge_sidebar_nav_json("{}", {"groups": [], "items": [{"key": "chat"}]})
     cleared = merge_sidebar_nav_json(merged, None)

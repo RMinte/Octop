@@ -284,23 +284,25 @@ function UnifiedConversationBody() {
           <span className={styles.brandDot} />
           <h1>{t("projects.title")}</h1>
         </div>
-        <Popover
-          trigger="click"
-          placement="bottomLeft"
-          open={projectMenuOpen}
-          onOpenChange={setProjectMenuOpen}
-          content={<div className={styles.navigationPopup}>{navigation}</div>}
-        >
-          <Button
-            type="text"
-            size="small"
-            icon={<Folder size={15} />}
-            aria-label={t("projects.workspace.projectMenu")}
+        {(!ready || !!error) && (
+          <Popover
+            trigger="click"
+            placement="bottomLeft"
+            open={projectMenuOpen}
+            onOpenChange={setProjectMenuOpen}
+            content={<div className={styles.navigationPopup}>{navigation}</div>}
           >
-            {t("projects.list")}
-            <ChevronDown size={12} />
-          </Button>
-        </Popover>
+            <Button
+              type="text"
+              size="small"
+              icon={<Folder size={15} />}
+              aria-label={t("projects.workspace.projectMenu")}
+            >
+              {t("projects.list")}
+              <ChevronDown size={12} />
+            </Button>
+          </Popover>
+        )}
         <div className={styles.toolbarActions}>
           <Select
             className={styles.projectSelect}

@@ -155,6 +155,8 @@ export const TeamCard = memo(function TeamCard({
   const isTransient = TRANSIENT.has(localState);
   const switchChecked = localState === "running" || localState === "starting";
   const chatReady = isAgentChatReady(localState);
+  const unifiedEligible =
+    !agent.kind || agent.kind === "expert" || agent.kind === "team";
   const meta = getStateMeta(localState);
   const friendlyError = formatAgentError(localError, t);
 
@@ -418,9 +420,14 @@ export const TeamCard = memo(function TeamCard({
               type="button"
               className={`${styles.agentCard2ChatBtn} ${styles.teamCardChatBtn}`}
               onClick={handleOpenChat}
+              title={
+                unifiedEligible
+                  ? t("experts.testChatHint")
+                  : t("projects.tasks.legacyOnlyHint")
+              }
             >
               <MessageSquare size={13} />
-              {t("experts.openChat", "对话")}
+              {t(unifiedEligible ? "experts.testChat" : "experts.openChat")}
               <ChevronRight size={13} />
             </button>
           ) : localState === "failed" ||

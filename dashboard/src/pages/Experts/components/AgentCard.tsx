@@ -502,11 +502,13 @@ export const AgentCard = memo(function AgentCard({
               style={{ color: accent, borderColor: `${accent}55` }}
               onClick={handleOpenChat}
               title={
-                unifiedEligible ? undefined : t("projects.tasks.legacyOnlyHint")
+                unifiedEligible
+                  ? t("experts.testChatHint")
+                  : t("projects.tasks.legacyOnlyHint")
               }
             >
               <MessageSquare size={13} />
-              {t("experts.openChat", "对话")}
+              {t(unifiedEligible ? "experts.testChat" : "experts.openChat")}
               <ChevronRight size={13} />
             </button>
           ) : isOwner &&

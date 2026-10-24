@@ -57,7 +57,8 @@
 | 产物、下载、媒体预览、导出 | 每轮 Task 产物、产物库与 JSON/Markdown 导出继续可达。 |
 | 文件、浏览器、终端、录制、Tool UI | 已有 `TaskWorkbench`，按 Task scope 和能力开放；重排为上下文工具栏不改变其权限。 |
 | 旧历史、迁移状态、显式续接 | `LegacyConversationContinuation` / `TaskMigrations`；原有链接、附件与只读记录继续可达，draining/target_deleted 不得复活旧写入。 |
-| 私人 Resident 与高级历史兼容入口 | 从工作区“更多”保留旧入口；它们不是通用 Task 专家选择的后门。 |
+| 私人助手 | 全局独立入口 `/resident`，不经普通专家/通用 Task 选择器。固定私人身份、长期对话、独立历史与记忆；专业工作通过明确委派进入 Task。 |
+| 高级历史兼容入口 | 工作区“更多”保留旧历史入口；不以兼容入口绕过普通 Task 的来源与权限限制。 |
 
 关键源：`TaskConversations.tsx`、`TaskTurnContent.tsx`、`TaskInteractions.tsx`、`TaskWorkbench.tsx`、`LegacyConversationContinuation.tsx`；服务端 `infra/projects/branches.py`、`interactions.py`、`task_submission.py`、`runtime.py`。
 
@@ -68,6 +69,12 @@ Task API 原已返回 `turn.recovery`，本轮补上薄恢复卡及折叠诊断�
 独立 `/workbench` 仍提供手动浏览器和终端。它的 `BrowserAiPanel`、终端 `AiPanel` 使用 `hooks/useAgentThreadChat.ts`，仍会 list/create/rebind 旧 Thread 并通过 `useChat` 发送；终端 Autopilot 还在 `useTerminalAutopilot.ts` 执行命令。这些面板不经过普通 Chat 页的 LegacyHistory guard。此次保留可达，不将其宣传为已切换 Task，也不把它们直接复制进 Task Composer。
 
 普通专家/共享专家/团队的 Chat 页是只读历史与显式续接；特殊类型兼容分支及旧协议的收口要另外实施。改名或隐藏菜单不等于消除了这些执行链。
+
+2026-10-24 补充私人助手正式 Web 入口：`/resident` 沿用独立 Resident API，不创建普通 Task 作为私人身份。记忆面板接入显式手工新增、修正、废弃、采集策略版本校验、候选提炼与人工批准/拒绝及有限来源证据。打开页面只读取，原始采集默认关闭；提炼需显式确认调用模型，候选不会自动晋升。此新增入口的最终部署、浏览器与真实模型验收以本次交付记录为准，不能套用上文 2026-10-23 的页面验收结果。
+
+本次实际验收使用现有私人绑定：真实模型回答 `17+9=26`，刷新后追问得到 `28`；自然语言委派创建无项目 Task，完成后的三条检查清单回到原私人会话；历史搜索与定位、记忆手工新增/修正/废弃、一次性提醒暂停/恢复及按服务端时区投递均已通过。合成记忆已废弃，一次性提醒已完成且没有后续调度；未开启原始采集。候选提炼/批准和上下文整理的行为通过定向测试核对，本次未对已有用户原始材料发起真实模型提炼或整理。
+
+真实流程发现并修复了非空旧私人历史首次接入的上下文写入错误：调用仓储方法在同一事务内为已完成的导入轮次首次保存上下文，重复接入不会覆盖已有上下文。没有修改数据库结构、原私人身份或用户模型配置。服务已从当前工作树重启，重启前后的原项目、Task、Thread 及 Resident 记录校验一致。
 
 ### 与旧 Chat 的快捷操作差异
 
