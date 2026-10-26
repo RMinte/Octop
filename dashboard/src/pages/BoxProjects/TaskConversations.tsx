@@ -838,6 +838,7 @@ export default function TaskConversations({
       queued?.sendingID ||
       detail?.archived ||
       projectArchived ||
+      directoryChanged ||
       deleteTarget ||
       sending ||
       approvalSaving ||
@@ -1714,7 +1715,8 @@ export default function TaskConversations({
                                 queuedItems.length > 0 ||
                                 !!queued?.sendingID ||
                                 approvalSaving ||
-                                webSearchSaving
+                                webSearchSaving ||
+                                directoryChanged
                               }
                               onClick={() => void retry(turn.turn_id)}
                             >

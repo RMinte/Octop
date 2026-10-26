@@ -10,10 +10,9 @@ from uuid import uuid4
 import pytest
 
 from octop.api.routers import project_tasks_ws
-from octop.infra.projects import runtime as task_runtime
 from tests.integration.test_project_tasks_ws import command, connected, until
 from tests.integration.test_resident_conversations import _base, _binding, _turn
-from tests.support.auth import create_user, resolve_user_id
+from tests.support.auth import create_user
 from tests.support.harness import patch_resident_stream, patch_task_stream
 
 
@@ -421,13 +420,14 @@ async def test_fallback_delivers_resident_commit_without_a_local_notice(
 ):
     env = resident_delivery
     monkeypatch.setattr(project_tasks_ws, "_UPDATE_SECONDS", 0.02)
-    accepted, queue = await send(env, "External database commit.")
+    accepted, queue = await send(env, "Durable output with local notices suppressed.")
     await _turn(env.client, env.auth, env.base, accepted["request_id"], "running")
-    owner = await resolve_user_id(env.client, env.auth, "admin")
-    repo = env.server.services.resident_request_repo
-    row = await asyncio.to_thread(repo.get, owner, accepted["request_id"])
     original_snapshot = env.resident.snapshot
     reads = 0
+    suppressed = Counter()
+
+    def suppress_notice(thread_id):
+        suppressed[thread_id] += 1
 
     async def snapshot(*args, **kwargs):
         nonlocal reads
@@ -436,28 +436,29 @@ async def test_fallback_delivers_resident_commit_without_a_local_notice(
         return result
 
     monkeypatch.setattr(env.resident, "snapshot", snapshot)
+    # Disable notices before subscribing, leaving only the initial watch-install
+    # read and periodic fallback. Native Task output remains authoritative.
+    monkeypatch.setattr(env.resident._updates, "notify", suppress_notice)
     session, ws = await connected(env.client, env.auth)
     try:
-        await subscribe(ws, env.binding, "external-resident")
+        await subscribe(ws, env.binding, "polling-resident")
         # Drain the extra read queued when installing the watch. Only the periodic
         # fallback may discover the subsequent write without a local notification.
         async with asyncio.timeout(5):
             while reads < 2:
                 await asyncio.sleep(0.01)
-        # SQL-only mutation omits the runtime's post-commit notification on purpose.
-        assert await asyncio.to_thread(
-            repo.update_reply,
-            row.turn_id,
-            row.worker_id,
-            "Other process body",
-            task_runtime.now_ms(),
-        )
-        await next_snapshot(ws, env.binding, accepted["turn_id"], reply="Other process body")
-        queue.put_nowait({"type": "token", "content": "Other process body"})
+        # Commit through the real Task -> resident projection path. Mutating only
+        # the receipt would race its next mirror of the native Task's old reply.
+        queue.put_nowait({"type": "token", "content": "Fallback body"})
+        await receipt(env, accepted["request_id"], "Fallback body")
+        live = await next_snapshot(ws, env.binding, accepted["turn_id"], reply="Fallback body")
         queue.put_nowait(None)
-        await next_snapshot(
-            ws, env.binding, accepted["turn_id"], reply="Other process body", status="completed"
+        final = await next_snapshot(
+            ws, env.binding, accepted["turn_id"], reply="Fallback body", status="completed"
         )
+        assert final["revision"] > live["revision"]
+        assert suppressed[env.binding["thread_id"]] > 0
+        assert len(env.invocations) == 1
     finally:
         await session.__aexit__(None, None, None)
     assert not any(env.watches.values())

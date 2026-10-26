@@ -5,9 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
+from octop_harness.config import ModelConfig, ProviderConfig
 from octop_memory.core import Memory
 from octop_memory.types import Candidate
 
@@ -22,6 +27,7 @@ from octop.infra.agents.resident_memory import (
     create_resident_memory,
     decide_resident_memory_candidate,
     deprecate_resident_memory,
+    extract_resident_candidates,
     list_resident_memories,
     replace_resident_memory,
     resident_memory_candidates,
@@ -31,6 +37,8 @@ from octop.infra.agents.resident_memory import (
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import build_shared_services
+from octop.infra.errors import OctopError
+from octop.infra.usage.model_calls import attach_model_observer
 from octop.infra.utils.paths import PathLayout
 
 
@@ -163,8 +171,6 @@ def test_candidate_decisions_reuse_canonical_memory_and_preserve_evidence(privat
 
 
 def test_memory_source_turn_is_verified_and_source_location_survives(private_memory):
-    from octop.infra.errors import OctopError
-
     services, binding = private_memory
     args = (services, 1, binding.agent_id, binding.thread_id)
     now = int(datetime.now(UTC).timestamp() * 1000)
@@ -192,3 +198,145 @@ def test_memory_source_turn_is_verified_and_source_location_survives(private_mem
             *args, ResidentMemoryWrite(assertion="Unverified", source_turn_id="not-mine")
         )
     assert raised.value.code == "NOT_FOUND"
+
+
+def _extraction_registry(message, *, failing=False):
+    class FailingModel(FakeMessagesListChatModel):
+        def _generate(self, *args, **kwargs):
+            raise RuntimeError("synthetic-private-provider-body")
+
+    provider = ProviderConfig(
+        id="synthetic", api_key="fixture-only", base_url="http://fixture.invalid/v1"
+    )
+    model_type = FailingModel if failing else FakeMessagesListChatModel
+    model = attach_model_observer(model_type(responses=[message]), provider, ModelConfig(id="test"))
+    factory = SimpleNamespace(get_chat_model=Mock(return_value=model))
+    return SimpleNamespace(
+        providers=SimpleNamespace(is_model_ref_usable=Mock(return_value=True)),
+        get_agent=Mock(return_value=SimpleNamespace(model_factory=factory)),
+        start=Mock(),
+    ), factory
+
+
+def _captured_observation(services, binding):
+    with _memory(services, 1, binding.agent_id, binding.thread_id) as memory:
+        memory.add_raw(
+            "Synthetic memory audit: I prefer short precise examples.",
+            event_type="user_message",
+            thread_id=binding.thread_id,
+            session_id=binding.thread_id,
+        )
+
+
+async def test_extraction_blocks_exhausted_quota_before_starting_or_calling_a_model(private_memory):
+    services, binding = private_memory
+    registry, factory = _extraction_registry(AIMessage(content='{"candidates": []}'))
+    services.user_policy_repo.set(1, "token_quota", "0")
+    with pytest.raises(OctopError) as raised:
+        await extract_resident_candidates(
+            services, registry, 1, binding.agent_id, binding.thread_id, "synthetic/test"
+        )
+    assert raised.value.code == "TOKEN_QUOTA_EXCEEDED"
+    registry.get_agent.assert_not_called()
+    registry.start.assert_not_called()
+    factory.get_chat_model.assert_not_called()
+    assert services.model_call_repo.list_page(user_id=1) == []
+    assert services.usage_repo.total_tokens_for_user(1) == 0
+
+
+@pytest.mark.parametrize("usage_source", ["usage_metadata", "response_metadata"])
+async def test_extraction_records_one_scoped_invocation_and_usage_without_private_content(
+    private_memory, usage_source
+):
+    services, binding = private_memory
+    _captured_observation(services, binding)
+    metadata = (
+        {"usage_metadata": {"input_tokens": 19, "output_tokens": 7, "total_tokens": 26}}
+        if usage_source == "usage_metadata"
+        else {
+            "response_metadata": {
+                "token_usage": {"prompt_tokens": 19, "completion_tokens": 7, "total_tokens": 26}
+            }
+        }
+    )
+    registry, factory = _extraction_registry(AIMessage(content='{"candidates": []}', **metadata))
+    args = (services, registry, 1, binding.agent_id, binding.thread_id, "synthetic/test")
+    result = await extract_resident_candidates(*args)
+    assert result.status == "completed" and result.events_extracted == 1
+    calls = services.model_call_repo.list_page(user_id=1)
+    assert len(calls) == 1
+    call = calls[0]
+    assert (call.purpose, call.agent_id, call.thread_id, call.status) == (
+        "resident_memory_extract",
+        binding.agent_id,
+        binding.thread_id,
+        "succeeded",
+    )
+    assert not call.task_id and not call.project_id
+    assert json.loads(call.usage_json)["input_tokens"] == 19
+    assert "Synthetic memory audit" not in call.metadata_json + call.usage_json
+    with services.db.connect() as conn:
+        usage = conn.execute(
+            "SELECT * FROM usage_log WHERE source='resident_memory_extract'"
+        ).fetchall()
+    assert len(usage) == 1
+    assert (usage[0]["user_id"], usage[0]["agent_id"], usage[0]["thread_id"]) == (
+        1,
+        binding.agent_id,
+        binding.thread_id,
+    )
+    assert (usage[0]["input_tokens"], usage[0]["output_tokens"], usage[0]["model_calls"]) == (
+        19,
+        7,
+        1,
+    )
+    assert services.usage_repo.total_tokens_for_user(1) == 26
+    assert (await extract_resident_candidates(*args)).status == "empty"
+    factory.get_chat_model.assert_called_once_with("synthetic/test")
+    assert len(services.model_call_repo.list_page(user_id=1)) == 1
+
+
+async def test_failed_extraction_records_a_failed_invocation_without_private_error_text(
+    private_memory, caplog
+):
+    services, binding = private_memory
+    _captured_observation(services, binding)
+    registry, factory = _extraction_registry(AIMessage(content="unused"), failing=True)
+    result = await extract_resident_candidates(
+        services, registry, 1, binding.agent_id, binding.thread_id, "synthetic/test"
+    )
+    assert result.status == "failed" and result.error_code == "RESIDENT_MEMORY_EXTRACTION_FAILED"
+    calls = services.model_call_repo.list_page(user_id=1)
+    assert len(calls) == 1 and calls[0].status == "failed"
+    assert calls[0].purpose == "resident_memory_extract"
+    assert "synthetic-private-provider-body" not in (
+        calls[0].metadata_json + calls[0].usage_json + result.model_dump_json() + caplog.text
+    )
+    factory.get_chat_model.assert_called_once_with("synthetic/test")
+    assert services.usage_repo.total_tokens_for_user(1) == 0
+
+
+async def test_parser_retry_rechecks_quota_and_does_not_make_an_unbilled_second_call(
+    private_memory,
+):
+    services, binding = private_memory
+    _captured_observation(services, binding)
+    registry, factory = _extraction_registry(
+        AIMessage(
+            content="not valid candidate JSON",
+            usage_metadata={"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+        )
+    )
+    services.user_policy_repo.set(1, "token_quota", "18")
+    with pytest.raises(OctopError) as raised:
+        await extract_resident_candidates(
+            services, registry, 1, binding.agent_id, binding.thread_id, "synthetic/test"
+        )
+    assert raised.value.code == "TOKEN_QUOTA_EXCEEDED"
+    factory.get_chat_model.assert_called_once_with("synthetic/test")
+    assert len(services.model_call_repo.list_page(user_id=1)) == 1
+    assert services.usage_repo.total_tokens_for_user(1) == 18
+    assert (
+        resident_memory_candidates(services, 1, binding.agent_id, binding.thread_id, 50, None).items
+        == []
+    )

@@ -310,7 +310,8 @@ class ResidentConversationRuntime:
             await asyncio.gather(self._loop_task, return_exceptions=True)
             self._loop_task = None
         for task in list(self._active.values()):
-            task.cancel()
+            if task.cancelling() == 0:
+                task.cancel()
         await asyncio.gather(*self._active.values(), return_exceptions=True)
         self._active.clear()
         self._active_threads.clear()
@@ -475,7 +476,12 @@ class ResidentConversationRuntime:
             await asyncio.to_thread(cancel, self.services, owner_id, thread_id, row.turn_id)
         # A repeated cancellation for an old turn can never signal the next turn.
         task = self._active.get(row.turn_id)
-        if row.status == "running" and row.cancel_requested and task is not None:
+        if (
+            row.status == "running"
+            and row.cancel_requested
+            and task is not None
+            and task.cancelling() == 0
+        ):
             if getattr(self.gateway, "_task_worker", None) is None:
                 with resident_execution_scope(owner_id, thread_id):
                     self.registry.cancel_stream(agent_id, thread_id)
@@ -860,7 +866,8 @@ class ResidentConversationRuntime:
                     self.services.resident_request_repo.get, row.owner_id, row.request_id
                 )
                 if current is None or current.cancel_requested:
-                    parent.cancel()
+                    if parent.cancelling() == 0:
+                        parent.cancel()
                     return
                 renewed = await asyncio.to_thread(
                     self.services.resident_request_repo.renew,
@@ -870,13 +877,15 @@ class ResidentConversationRuntime:
                     now_ms() + LEASE_MS,
                 )
                 if not renewed:
-                    parent.cancel()
+                    if parent.cancelling() == 0:
+                        parent.cancel()
                     return
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Resident lease maintenance failed turn=%s", row.turn_id)
-            parent.cancel()
+            if parent.cancelling() == 0:
+                parent.cancel()
 
     @staticmethod
     def _message(

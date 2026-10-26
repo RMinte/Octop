@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import zh from "../../locales/zh.json";
 import {
   projectTasksApi,
+  type Project,
   type TaskDetail,
   type TaskInputAttachment,
   type TaskStatus,
@@ -163,6 +164,24 @@ const fixture: TaskDetail = {
       updated_at: "2026-10-15T00:00:00Z",
     },
   ],
+};
+const projectFixture: Project = {
+  project_id: "proj_a",
+  name: "项目A",
+  description: "",
+  directory: "/server/before",
+  client_directory: "/client/before",
+  instructions: "",
+  skills: [],
+  mcp_servers: [],
+  plugins: [],
+  subagents: [],
+  memory_enabled: true,
+  team_enabled: false,
+  archived: false,
+  revision: 1,
+  created_at: fixture.created_at,
+  updated_at: fixture.updated_at,
 };
 beforeEach(() => {
   vi.clearAllMocks();
@@ -1526,6 +1545,74 @@ it("失败后手动重试保留原轮次，网络重传沿用重试标识", asyn
   expect(api.send).not.toHaveBeenCalled();
 });
 
+it.each([
+  ["failed", "directory"],
+  ["failed", "client_directory"],
+  ["cancelled", "directory"],
+  ["cancelled", "client_directory"],
+] as const)(
+  "%s 轮次在 %s 目录变更后重试前须确认新执行范围",
+  async (status, field) => {
+    const failed: TaskDetail = {
+      ...fixture,
+      status,
+      configuration_revision: 3,
+      turns: [
+        {
+          ...fixture.turns[0],
+          status,
+          server_directory: projectFixture.directory,
+          client_directory: projectFixture.client_directory,
+        },
+      ],
+    };
+    const changed = {
+      ...projectFixture,
+      [field]: projectFixture[field] + "/after",
+      revision: 2,
+    };
+    api.open.mockResolvedValue(failed);
+    api.retry.mockResolvedValue(failed);
+    const page = (project: Project) => (
+      <MemoryRouter initialEntries={["/box-projects/proj_a?task=task_a"]}>
+        <TaskConversations projectID="proj_a" project={project} />
+      </MemoryRouter>
+    );
+    const user = userEvent.setup();
+    const view = render(page(changed));
+    const retry = await screen.findByRole("button", {
+      name: zh.projects.tasks.retry,
+    });
+    await screen.findByText(zh.projects.tasks.directoryChanged);
+    expect(retry).toBeDisabled();
+    await user.click(retry);
+    expect(api.retry).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole("button", { name: zh.projects.tasks.confirmDirectory }),
+    );
+    await waitFor(() => expect(retry).toBeEnabled());
+    await user.click(retry);
+    await waitFor(() => expect(api.retry).toHaveBeenCalledTimes(1));
+    expect(api.retry).toHaveBeenCalledWith(
+      "task_a",
+      "turn_a",
+      expect.any(String),
+      {},
+      {
+        expected_configuration_revision: 3,
+        expected_project_revision: 2,
+      },
+    );
+    view.rerender(
+      page({ ...changed, [field]: changed[field] + "/again", revision: 3 }),
+    );
+    await screen.findByText(zh.projects.tasks.directoryChanged);
+    expect(retry).toBeDisabled();
+    await user.click(retry);
+    expect(api.retry).toHaveBeenCalledTimes(1);
+  },
+);
+
 it("断线使用最后收到的游标续接，不重新下载会话历史", async () => {
   let disconnect!: (reason: Error) => void;
   api.events.mockImplementationOnce(
@@ -2433,6 +2520,77 @@ it("暂停与继续绑定原轮次，暂停意图确认后显示继续", async (
     false,
   ]);
 });
+
+it.each(["paused", "interrupted"] as const)(
+  "%s 原轮恢复保留冻结目录，不被新轮目录确认阻断",
+  async (status) => {
+    const paused: TaskDetail = {
+      ...fixture,
+      status,
+      active_turn_id: "turn_a",
+      turns: [
+        {
+          ...fixture.turns[0],
+          status,
+          server_directory: projectFixture.directory,
+          client_directory: projectFixture.client_directory,
+          recovery:
+            status === "interrupted"
+              ? {
+                  can_resume: true,
+                  needs_reconciliation: false,
+                  phase: "mcp_connect",
+                  reason_code: "TASK_RESOURCE_UNAVAILABLE",
+                  cause_type: "ConnectionError",
+                  diagnostic_id: "directory-recovery",
+                  resource_type: "mcp",
+                  resource_id: "service",
+                  status_code: 503,
+                }
+              : undefined,
+        },
+      ],
+    };
+    api.open.mockResolvedValue(paused);
+    api.control.mockResolvedValue({
+      ...paused,
+      status: "running",
+      turns: [{ ...paused.turns[0], status: "running" }],
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/box-projects/proj_a?task=task_a"]}>
+        <TaskConversations
+          projectID="proj_a"
+          project={{
+            ...projectFixture,
+            directory: "/server/after",
+            revision: 2,
+          }}
+        />
+      </MemoryRouter>,
+    );
+    await screen.findByText(zh.projects.tasks.directoryChanged);
+    const resume = screen.getByRole("button", {
+      name:
+        status === "interrupted"
+          ? zh.projects.recovery.resume
+          : zh.projects.tasks.resume,
+    });
+    expect(resume).toBeEnabled();
+    await user.click(resume);
+    await waitFor(() =>
+      expect(api.control).toHaveBeenCalledWith(
+        "task_a",
+        "turn_a",
+        false,
+        expect.any(String),
+      ),
+    );
+    expect(api.retry).not.toHaveBeenCalled();
+    expect(api.send).not.toHaveBeenCalled();
+  },
+);
 
 it("新任务默认开启网络搜索并保存到创建顶层字段，后续消息沿用任务配置", async () => {
   const enabled = { ...fixture, web_search_enabled: true };

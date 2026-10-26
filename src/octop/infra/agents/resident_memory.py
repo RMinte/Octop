@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -19,10 +19,13 @@ from octop.infra.agents.resident_history import require_resident_binding
 from octop.infra.agents.workspace.dir import resolve_workspace_host_path
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.usage.model_calls import model_call_scope
+from octop.infra.users.resource_policy import assert_token_quota_available
 
 if TYPE_CHECKING:
-    from octop_harness.memory.llm_client import HarnessAgentLLMClient
+    from octop_harness.llm.factory import ChatModelFactory
     from octop_memory.core import Memory
+    from octop_memory.ports.llm import LLMClient, LLMTier
     from octop_memory.types import AtomCard, Candidate
 
     from octop.infra.agents.manager import AgentManager
@@ -489,7 +492,7 @@ def _extract_candidates(
     owner_id: int,
     agent_id: str,
     thread_id: str,
-    llm: HarnessAgentLLMClient,
+    llm: LLMClient,
 ) -> ResidentMemoryExtraction:
     from octop_memory.pipeline.extractor import CandidateExtractor
 
@@ -525,6 +528,8 @@ def _extract_candidates(
             return response
         try:
             result = CandidateExtractor(llm=llm).extract(batch, session_id=thread_id)
+        except OctopError:
+            raise
         except Exception:
             # Provider and parser failures must not expose the underlying private text.
             return response.model_copy(
@@ -564,6 +569,71 @@ def _extract_candidates(
         )
 
 
+@dataclass(frozen=True)
+class _ResidentMemoryLLMClient:
+    services: SharedServices
+    factory: ChatModelFactory
+    owner_id: int
+    agent_id: str
+    thread_id: str
+    model_ref: str
+
+    def call_llm(
+        self,
+        prompt: str,
+        *,
+        tier: LLMTier = "light",
+        system: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        response_format: Literal["text", "json"] = "text",
+    ) -> str:
+        from octop_harness.context_usage import extract_usage_from_message
+        from octop_harness.llm.invoke_helpers import (
+            bind_call_options,
+            build_text_messages,
+            stringify_content,
+        )
+
+        # Parser retries are separate model calls. Recheck access and quota for
+        # each dispatch, without holding a control-plane transaction over I/O.
+        with _memory_control(self.services, self.owner_id, self.agent_id, self.thread_id):
+            pass
+        assert_token_quota_available(
+            self.services.user_policy_repo, self.services.usage_repo, self.owner_id
+        )
+        model = bind_call_options(
+            self.factory.get_chat_model(self.model_ref),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=response_format,
+            timeout_s=120 if tier == "light" else 300,
+        )
+        with model_call_scope(
+            self.services,
+            user_id=self.owner_id,
+            agent_id=self.agent_id,
+            thread_id=self.thread_id,
+            purpose="resident_memory_extract",
+        ):
+            result = model.invoke(build_text_messages(prompt, system=system))
+        if usage := extract_usage_from_message(result):
+            self.services.usage_repo.record(
+                agent_id=self.agent_id,
+                user_id=self.owner_id,
+                thread_id=self.thread_id,
+                source="resident_memory_extract",
+                model=self.model_ref,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                uncached_input_tokens=usage.get("uncached_input_tokens"),
+                cache_read_tokens=usage.get("cache_read_tokens", 0),
+                cache_write_tokens=usage.get("cache_write_tokens", 0),
+                reasoning_tokens=usage.get("reasoning_tokens", 0),
+            )
+        return stringify_content(result.content)
+
+
 async def extract_resident_candidates(
     services: SharedServices,
     registry: AgentManager,
@@ -572,9 +642,10 @@ async def extract_resident_candidates(
     thread_id: str,
     model_ref: str,
 ) -> ResidentMemoryExtraction:
-    from octop_harness.memory.llm_client import HarnessAgentLLMClient
-
     await asyncio.to_thread(require_resident_binding, services, owner_id, agent_id, thread_id)
+    await asyncio.to_thread(
+        assert_token_quota_available, services.user_policy_repo, services.usage_repo, owner_id
+    )
     if not model_ref or not registry.providers.is_model_ref_usable(model_ref):
         raise OctopError.localized(ErrorCode.RESIDENT_MODEL_UNAVAILABLE)
     try:
@@ -582,7 +653,9 @@ async def extract_resident_candidates(
     except OctopError:
         await registry.start(agent_id)
         agent = registry.get_agent(agent_id)
-    llm = HarnessAgentLLMClient(agent.model_factory, default_model=model_ref)
+    llm = _ResidentMemoryLLMClient(
+        services, agent.model_factory, owner_id, agent_id, thread_id, model_ref
+    )
     return await asyncio.to_thread(
         _extract_candidates, services, owner_id, agent_id, thread_id, llm
     )
