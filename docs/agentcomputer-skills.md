@@ -1,6 +1,6 @@
 # AgentComputer 技能接口接入说明
 
-AgentComputer 可以直接调用 Octop 已有的技能接口，复用网页登录所用的用户 Bearer token。项目选择技能使用全局 SkillHub 目录和项目资源接口，管理共享技能库使用技能包接口。以下路径均为完整 HTTP 路径，直接请求当前连接的 Octop 服务。
+AgentComputer 可以直接调用 Octop 已有的技能接口，复用网页登录所用的用户 Bearer token。项目选择技能使用 SkillHub 目录和当前账号的项目资源接口，管理技能库使用技能包接口。新建技能包默认私有，显式分享后才对同一 Octop 实例的其他账号可见；客户端适配、旧服务隐私兼容及验收见[私有与分享交接](agentcomputer-skill-sharing-handoff.md)。以下路径均为完整 HTTP 路径，直接请求当前连接的 Octop 服务。
 
 ## 认证和权限
 
@@ -21,7 +21,7 @@ Content-Type: application/json
 | `/api/skill-packages` 及其全部子路径 | 账号具有 `skill_packages` 权限；管理员自动通过 |
 | 修改、删除技能包及其中技能 | 在模块权限之外，还要求是该包创建者或管理员 |
 
-AgentComputer 应直连目标 Octop；这些全局技能接口和项目接口没有 Bridge 转发入口。也没有 `/api/agentcomputer/v1` 技能专用协议。
+技能包管理接口没有 Bridge 转发入口，AgentComputer 应直连目标 Octop。远端项目和 Task 沿用[统一会话的 Bridge 接线](agentcomputer-unified-conversations-handoff.md#11-已实现的远程-task-协议与迁移接线)，不能据此推导技能包管理也可转发；没有 `/api/agentcomputer/v1` 技能专用协议。
 
 ## 为项目选择技能
 
@@ -72,7 +72,7 @@ AgentComputer 应直连目标 Octop；这些全局技能接口和项目接口没
 }
 ```
 
-`package_id` 和 `slug` 必须使用资源列表中的原值。只做项目技能选择时，无需先请求受 `skill_packages` 权限限制的技能包管理接口。
+`package_id` 和 `slug` 必须使用资源列表中的原值。列表按当前 host 和账号过滤：普通账号可选本人私有包及已分享包的有效技能，管理员可见全部包。只做项目技能选择时，无需先请求受 `skill_packages` 权限限制的技能包管理接口。
 
 ### 保存和修改选择
 
@@ -115,33 +115,37 @@ Content-Type: application/json
 
 `skills` 省略表示保持原选择，`[]` 表示全部移除，不接受 `null`。SkillHub 的 `name` 必填，`description` 可省略。避免重复引用，并避免不同来源使用相同 `slug`，运行时技能名不能冲突。版本冲突返回 `409 PROJECT_REVISION_CONFLICT`，应重新读取详情后处理冲突。更多项目字段见 [项目和任务接口](api.md)。
 
-保存项目只保存引用，不下载或执行 SkillHub 技能。发送任务消息时才加载本轮项目配置：已安装技能从 Octop 共享技能库读取，SkillHub 引用由 Octop 下载后加载到任务工作区。修改后的选择在下一轮消息生效。技能包管理的安装操作则立即写入 Octop 服务端共享技能库，不会写入用户电脑的客户端目录。
+保存项目只保存引用，不下载或执行 SkillHub 技能。发送任务消息时才加载本轮项目配置：已安装技能从服务端技能包读取，SkillHub 引用由 Octop 下载后加载到任务工作区。修改后的选择在下一轮消息生效。技能包管理的安装操作则立即写入 Octop 服务端目标包，不会写入用户电脑的客户端目录，也不会自动将私有包改为分享。
 
-## 管理共享技能包
+## 管理技能包
 
 以下全部接口要求 `skill_packages` 权限。`package_id` 使用不透明字符串，`slug` 作为 URL 路径段编码。
 
 | 方法 | 路径 | 请求体或用途 | 成功状态 |
 | --- | --- | --- | --- |
-| GET | `/api/skill-packages` | 所有共享技能包；可加 `writable_only=true` 只列可修改的包 | 200 |
-| POST | `/api/skill-packages` | `{name, description?, icon_name?, icon_url?}` | 200 |
+| GET | `/api/skill-packages` | 当前账号可见包；可加 `writable_only=true` 只列可修改的包 | 200 |
+| POST | `/api/skill-packages` | `{name, description?, icon_name?, icon_url?, shared?, copy_policy?, allow_download?}`；默认私有 | 200 |
 | GET | `/api/skill-packages/{package_id}` | 包元数据、技能列表、当前用户操作权限 | 200 |
-| PATCH | `/api/skill-packages/{package_id}` | `{name?, description?, icon_name?, icon_url?, copy_policy?}` | 200 |
+| PATCH | `/api/skill-packages/{package_id}` | `{name?, description?, icon_name?, icon_url?, shared?, copy_policy?, allow_download?}` | 200 |
 | DELETE | `/api/skill-packages/{package_id}` | 删除技能包 | 204 |
 | GET | `/api/skill-packages/{package_id}/skills` | 包内技能摘要数组 | 200 |
 | GET | `/api/skill-packages/{package_id}/skills/{slug}` | 技能摘要及 `frontmatter`、`body`、`raw` | 200 |
 | POST | `/api/skill-packages/{package_id}/skills` | `{name, content?, files?, overwrite?}` | 200 |
-| PUT | `/api/skill-packages/{package_id}/skills/{slug}` | `{content?, files?}`，替换已有技能文件集合 | 200 |
+| PUT | `/api/skill-packages/{package_id}/skills/{slug}` | `{content?, files?}`；仅 content 改 SKILL.md，非空 files 替换完整目录 | 200 |
 | DELETE | `/api/skill-packages/{package_id}/skills/{slug}` | 删除包内技能 | 204 |
 | POST | `/api/skill-packages/{package_id}/skills/hub/install` | `{skill_name, display_name?, icon_url?, label?, summary?, overwrite?}` | 201 |
 | POST | `/api/skill-packages/{package_id}/skills/import` | `{bundle_url, version?, overwrite?}` | 201 |
-| POST | `/api/skill-packages/from-skillhub` | `{slug, name?, description?, icon_name?, icon_url?}`，从 SkillHub 技能合集新建包 | 201 |
+| POST | `/api/skill-packages/from-skillhub` | `{slug, name?, description?, icon_name?, icon_url?, shared?}`，从 SkillHub 技能合集新建包；默认私有 | 201 |
+| GET | `/api/skill-packages/{package_id}/skills/{slug}/tree?path=相对路径` | 读取目录项，path 可省略 | 200 |
+| GET | `/api/skill-packages/{package_id}/skills/{slug}/file?path=相对路径` | 读取文本文件 JSON | 200 |
+| GET | `/api/skill-packages/{package_id}/skills/{slug}/download?path=相对路径` | 单文件二进制，按包可见性授权 | 200 |
+| GET | `/api/skill-packages/{package_id}/export` | 包 ZIP 二进制，要求 `can_download` | 200 |
 | GET | `/api/skill-packages/hub/search?q=关键词&limit=50` | 技能包管理入口的 SkillHub 搜索 | 200 |
 | GET | `/api/skill-packages/hub/rankings?type=all` | 技能包管理入口的 SkillHub 榜单 | 200 |
 
-包列表返回 `id`、`name`、`description`、`created_by`、`creator_username`、`creator_display_name`、`skill_count`、`icon_name`、`icon_url`、`copy_policy`、`created_at`、`updated_at`、`can_write`、`can_copy`。详情额外包含 `skills`。根据 `can_write` 控制管理按钮；`can_copy` 表示向专家工作区复制的权限，不表示项目技能引用的权限。
+包列表返回 `id`、`name`、`description`、`created_by`、`creator_username`、`creator_display_name`、`skill_count`、`icon_name`、`icon_url`、`shared`、`copy_policy`、`allow_download`、`created_at`、`updated_at`、`can_write`、`can_copy`、`can_download`。详情额外包含 `skills`。根据 `can_write` 控制管理按钮；`shared` 只控制可见性，不授予修改权。`can_copy` 表示向专家工作区复制的权限，不表示项目技能引用的权限；`can_download` 表示当前账号可否导出 ZIP。响应没有 `is_owner`，不能由管理员的 `can_write=true` 推断本人创建。
 
-创建和修改响应不保证包含 `can_write`、`can_copy`；需要刷新这些权限时重新读取列表或详情。`copy_policy` 可为 `snapshot`、`lock`、`deny`，作用于向专家工作区复制的行为。
+创建和修改响应没有 `can_write`、`can_copy`、`can_download`；需要刷新这些权限时重新读取列表或详情。旧服务缺少新字段时保留未知，不猜成 false；发送 `shared:false` 也不能证明旧服务支持私有包，先按[交接文档](agentcomputer-skill-sharing-handoff.md#旧服务和旧缓存)确认部署。`copy_policy` 可为 `snapshot`、`lock`、`deny`，作用于向专家工作区复制的行为。
 
 技能摘要包含 `slug`、`name`、`description`、`path`、`kind: "package"`、`package_id`，可能附带 `emoji`、`icon_url` 等展示字段。详情的 `raw` 是完整 `SKILL.md`，`frontmatter` 是解析后的元数据，`body` 是去掉 frontmatter 的正文。损坏项可能返回 `corrupt: true`，客户端应禁用该项。
 
@@ -157,7 +161,7 @@ Content-Type: application/json
 }
 ```
 
-包含脚本、模板等配套文件时改用 `files`：每项为 `{"path":"SKILL.md","content_base64":"文件原始字节的 Base64"}`，路径相对于该技能根目录，必须包含 `SKILL.md`。`files` 非空时优先于 `content`；不要把 Base64 字符串直接放进 `content`。替换操作会移除原有但本次未提供的文件，因此编辑前应保留完整文件集合；技能详情接口只返回说明文件，不提供完整配套文件下载。
+包含脚本、模板等配套文件时改用 `files`：每项为 `{"path":"SKILL.md","content_base64":"文件原始字节的 Base64"}`，路径相对于该技能根目录，必须包含 `SKILL.md`。`files` 非空时优先于 `content`；不要把 Base64 字符串直接放进 `content`。非空 `files` 更新或 `POST overwrite:true` 会替换完整目录并移除遗漏文件；`PUT` 仅传 `content` 则只修改 `SKILL.md`，保留配套文件。技能详情只返回说明文件，完整编辑可结合 tree、单文件下载或包 ZIP；二进制保存和权限边界见[交接文档](agentcomputer-skill-sharing-handoff.md#可选文件查看和导出)。
 
 新建技能时 `name` 是技能目录的 `slug`，不能包含路径分隔符或以点开头；与 SkillHub 的展示名称区分。`overwrite` 默认 `false`，重名返回 409。
 
@@ -202,7 +206,7 @@ AgentComputer 如果需要操作已有专家的工作区技能，可以继续调
 | --- | --- | --- |
 | 401 | 未登录、token 无效或过期 | 重新登录 |
 | 403 | 缺少模块权限，或不是技能包创建者 | 提示权限不足 |
-| 404 | 技能包或技能不存在，或项目不属于当前用户 | 刷新资源或返回列表 |
+| 404 | 技能包或技能不存在/不可见，或项目不属于当前用户 | 刷新资源或返回列表，不探测其他账号私有包 |
 | 409 | 包名或技能重名、项目版本或幂等请求冲突 | 按错误码处理重名或刷新最新项目 |
 | 400、422 | 请求字段、引用、Base64 或文件路径不合法 | 提示修正输入 |
 | 502、504 | SkillHub 上游失败或超时 | 展示重试入口 |
