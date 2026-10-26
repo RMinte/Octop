@@ -65,6 +65,13 @@ class ProjectRepo:
         ).fetchall()
         return [ProjectRow.from_row(row) for row in rows]
 
+    @staticmethod
+    def names_in_transaction(conn: Any, owner_id: int) -> dict[str, str]:
+        rows = conn.execute(
+            "SELECT project_id, name FROM projects WHERE owner_id=?", (owner_id,)
+        ).fetchall()
+        return {str(row["project_id"]): str(row["name"]) for row in rows}
+
     def get(self, project_id: str, owner_id: int) -> ProjectRow | None:
         with self._db.connect() as conn:
             return self.get_in_transaction(conn, project_id, owner_id)

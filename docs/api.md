@@ -12,7 +12,7 @@ Task 返回 `configuration_revision`、`selected_expert_id`、`action_mode`、`p
 
 | 接口 | 行为 |
 | --- | --- |
-| `GET /api/project-tasks?scope=all`、`/sync?scope=all` | 当前账号全部项目及无项目记录；支持 `expert_id`、`status`、`q`；省略 scope 保持仅无项目。筛选和分页/同步游标绑定。 |
+| `GET /api/project-tasks?scope=all`、`/sync?scope=all` | 当前账号全部项目及无项目记录；支持 `expert_id`、`status`。列表显式传 `q` 时启用标题＋项目名全局搜索，搜索游标不用于 `/sync`；省略 scope 保持仅无项目。筛选和分页/同步游标绑定。 |
 | `POST /api/project-tasks/{task_id}/forks` | `{request_id,operation:fork\|edit\|regenerate,turn_id?,prompt?,project_id?,selected_expert_id?}`；明确创建关联分支。省略目标配置继承，显式 null 清空。带新消息时受理新轮次，原记录不变。 |
 | `POST /api/project-tasks/from-thread` | `{request_id,agent_id,thread_id,project_id,selected_expert_id?}`；显式接入本人有权使用的普通/共享专家或本人团队的空闲旧网页会话，来源 thread 必须属于当前用户；返回 201 TaskDetail，不运行模型。 |
 | `GET /api/project-tasks/{task_id}/expert-memory` | `source=scope\|general\|legacy`、`q`、`path`、`limit`；按当前专家和项目/任务范围读取。 |
@@ -190,6 +190,16 @@ TaskSummary/TaskDetail 返回当前账号全部任务共用的 `approval_policy=
 客户端删除请求、错误响应和提示要求见[项目和任务删除接口接入说明](project-task-deletion.md)。网页在 `sessionStorage` 按服务地址、账号、列表分别保存摘要缓存和游标，不保存任务对话正文。完整字段与示例见 [增量同步设计](project-task-incremental-sync.md)。
 
 项目、任务和轮次 ID 都是不透明字符串，例如 `proj_…`、`task_…`、`turn_…`；调用方应原样保存和传回，不能转成 UUID。时间字段为 UTC ISO 8601，界面使用 `GET /api/settings/timezone` 返回的服务端时区。
+
+### 全局任务搜索
+
+`GET /api/project-tasks?scope=all&q=产品调研%20连接器&limit=50&archived=false` 在当前账号的全部项目任务及无项目任务中搜索，包括客户端从未加载的历史记录。匹配文本为任务标题和当前项目名，按 Unicode 空白拆词，所有词均须以字面子串命中，顺序不限；忽略大小写、重音和全半角。`%`、`_`、`!` 和引号没有通配符语义。项目改名后重新查询立即采用新名称。
+
+每页沿用 `TaskListPage` 和完整 `TaskSummary`，并返回 `scope="all"`、`q=<去首尾空白的原始查询>`。`q` 最长 256 字符，空串合法；空查询返回整个可见范围，无匹配返回合法空页。结果按 `pinned DESC, updated_at DESC, task_id DESC` 排序，完成匹配后再组成结果页，不受普通列表已加载页数限制。响应为 JSON，并带 `Cache-Control: no-store`，不读取或返回会话正文。
+
+默认每页 50 条、最多 100 条；沿 `next_page_cursor` 读取全部命中，末页为 null。首页必有 `sync_cursor`，续页为 null。显式 `q`（包括空串）的搜索游标绑定账号、实例、查询原词、归档及其他筛选，使用独立用途；查询变化、无效或旧用途游标返回 `409 PROJECT_SYNC_RESET`，从同查询首页恢复。搜索的同步基线仅属于本次搜索，不能推进侧栏同步，也不能传给 `/api/project-tasks/sync`。不传 `q` 的普通全局列表继续支持原有列表增量同步。
+
+项目名称筛选使用完整 `/api/projects/sync` 目录，无需新增项目搜索接口。客户端缓存合并、离线提示及打开结果继续由客户端处理。服务端在单次数据库快照内分批检查完整候选范围，SQLite 与 PostgreSQL 共用匹配逻辑，无累计截断；稀疏查询的最坏成本随账号任务数增长。分页不是跨请求冻结快照，发生变化后应刷新首页。
 
 ### 项目字段和编辑规则
 

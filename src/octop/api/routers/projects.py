@@ -561,14 +561,18 @@ async def download_task_attachment(
     "",
     response_model=sync.TaskListPage,
     summary="列出本人任务与会话",
-    description="scope=all 读取本人全部任务，默认 standalone 仅无项目任务。支持专家、状态和标题筛选，置顶优先；仅首页返回同步基线，游标绑定筛选条件。",
+    description="scope=all 读取本人全部任务，每页回显 scope 和 q；同时传 q 时按任务标题及当前项目名进行 Unicode 归一、多词全部命中的全局搜索，空 q 返回全部。默认 standalone 仅无项目任务。支持专家、状态筛选，置顶优先；仅首页返回同步基线，游标绑定筛选条件。搜索游标不得用于列表 /sync。",
 )
 async def list_standalone_tasks(
     response: Response,
     scope: Literal["standalone", "all"] = Query(default="standalone"),
     expert_id: str | None = Query(default=None, min_length=1, max_length=256),
     status: tasks.TurnStatus | None = Query(default=None),
-    q: str | None = Query(default=None, max_length=256),
+    q: str | None = Query(
+        default=None,
+        max_length=256,
+        description="全局搜索词：去首尾空白回显；按 Unicode 空白拆词，忽略大小写、重音及全半角，%/_/! 按字面匹配。",
+    ),
     archived: bool = Query(
         default=False, description="false 读取未归档任务，true 读取归档任务；两种游标不可混用。"
     ),

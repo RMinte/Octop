@@ -14,7 +14,7 @@ from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.repos.projects import ProjectRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects import approval_policy
+from octop.infra.projects import approval_policy, task_search
 from octop.infra.projects.cursors import CursorCodec, cursor_codec, cursor_reset
 from octop.infra.projects.models import ProjectModel, ProjectView
 from octop.infra.projects.service import _view
@@ -39,6 +39,12 @@ class TaskListPage(ProjectModel):
     items: list[TaskSummary]
     next_page_cursor: str | None = Field(description="历史任务下一页位置；null 表示已到末尾。")
     sync_cursor: str | None = Field(description="仅首页返回的增量基线，不表示历史任务已全部下载。")
+    scope: Literal["all"] | None = Field(
+        default=None, description="全局列表每页回显 all；普通项目或无项目列表可为 null。"
+    )
+    q: str | None = Field(
+        default=None, description="全局列表每页回显去首尾空白的原始查询，空查询为空字符串。"
+    )
 
 
 class TaskChange(ProjectModel):
@@ -69,11 +75,15 @@ def task_page(
     query: str | None = None,
 ) -> TaskListPage:
     storage_scope = all_task_scope() if scope == "all" else task_scope(project_id)
+    search = scope == "all" and query is not None
+    if search:
+        query = query.strip() if query is not None else ""
     filters = json.dumps([scope, expert_id, status, query], ensure_ascii=False)
+    purpose = ":global-search-v1:" if search else ":archive-v2:"
     codec = cursor_codec(
         services,
         owner_id,
-        storage_scope + f":archive-v2:{archived}:" + hashlib.sha256(filters.encode()).hexdigest(),
+        storage_scope + f"{purpose}{archived}:" + hashlib.sha256(filters.encode()).hexdigest(),
     )
     cursor = codec.decode(page_cursor, "history") if page_cursor is not None else None
     boundary = None
@@ -90,18 +100,31 @@ def task_page(
             raise OctopError.localized(ErrorCode.NOT_FOUND)
         policy = approval_policy.in_transaction(conn, services, owner_id)
         head = services.project_sync_repo.head(conn, owner_id, storage_scope)
-        rows = services.project_task_repo.page(
-            conn,
-            owner_id,
-            project_id,
-            limit + 1,
-            boundary,
-            archived,
-            scope="all" if scope == "all" else None,
-            selected_expert_id=expert_id if expert_id is not None else UNSET,
-            status=status,
-            query=query,
-        )
+        if search:
+            rows = task_search.page(
+                conn,
+                services,
+                owner_id,
+                query=query or "",
+                limit=limit + 1,
+                boundary=boundary,
+                archived=archived,
+                expert_id=expert_id,
+                status=status,
+            )
+        else:
+            rows = services.project_task_repo.page(
+                conn,
+                owner_id,
+                project_id,
+                limit + 1,
+                boundary,
+                archived,
+                scope="all" if scope == "all" else None,
+                selected_expert_id=expert_id if expert_id is not None else UNSET,
+                status=status,
+                query=query,
+            )
     items = rows[:limit]
     next_page = None
     if len(rows) > limit:
@@ -113,6 +136,8 @@ def task_page(
         items=[summary(row, policy) for row in items],
         next_page_cursor=next_page,
         sync_cursor=codec.encode("sync", position=head) if cursor is None else None,
+        scope="all" if scope == "all" else None,
+        q=(query or "") if scope == "all" else None,
     )
 
 
