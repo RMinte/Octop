@@ -23,10 +23,12 @@ from typing import Any, cast
 from langchain_core.messages import HumanMessage, SystemMessage
 from octop_harness.context_usage import extract_usage_from_message
 from octop_harness.llm.invoke_helpers import bind_call_options, stringify_content
+from octop_harness.memory.llm_client import HarnessAgentLLMClient
 from octop_memory import MemoryService
 from octop_memory.core import Memory
 from octop_memory.pipeline.extractor import CandidateExtractor
 from octop_memory.pipeline.promotion import PromotionWorker
+from octop_memory.ports.llm import DEFAULT_EXTRACT_MAX_TOKENS
 from octop_memory.types import Candidate, RawEvent
 
 from octop.infra.agents.providers.box import OctopChatModelFactory
@@ -69,15 +71,38 @@ def _candidate(value: dict[str, Any]) -> Candidate:
     return Candidate(**data)
 
 
+def _call_timeout(options: dict[str, Any], tier: str) -> float:
+    default = (
+        HarnessAgentLLMClient.DEFAULT_LIGHT_TIMEOUT_S
+        if tier == "light"
+        else HarnessAgentLLMClient.DEFAULT_HEAVY_TIMEOUT_S
+    )
+    value = options.get(f"extract_{tier}_timeout_s")
+    return max(30.0, min(3600.0, float(value))) if value is not None and value > 0 else default
+
+
+def _extraction_budget(options: dict[str, Any]) -> int:
+    value = options.get("extract_max_tokens")
+    return (
+        max(128, min(65536, int(value)))
+        if value is not None and value > 0
+        else DEFAULT_EXTRACT_MAX_TOKENS
+    )
+
+
 def _single_attempt_model(
-    model: Any, capability: dict[str, Any] | None = None, options: dict[str, Any] | None = None
+    model: Any,
+    capability: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
+    *,
+    tier: str = "light",
 ) -> Any:
     # Field changes do not replace an already-created SDK retry policy. SDK
     # with_options copies share their HTTP pool; the factory keeps its lifecycle.
     # Extraction has its own short, structured-output budget. In particular,
     # providers may enable thinking by default even when the Task disabled it.
     options = options or {}
-    timeout = max(30.0, min(3600.0, float(options.get("extract_heavy_timeout_s") or 30)))
+    timeout = _call_timeout(options, tier)
     thinking = options.get("extract_thinking", "off")
     overrides = reasoning_request_parameters(
         {**capability, "default_effort": None} if capability is not None else None,
@@ -148,35 +173,44 @@ class _ModelClient:
         job: ExpertMemoryJob,
         model: Any,
         loop: asyncio.AbstractEventLoop,
+        capability: dict[str, Any] | None = None,
     ) -> None:
         self.worker, self.job, self.model, self.loop = worker, job, model, loop
+        self.capability = capability
         payload = json.loads(job.payload_json)
-        options = (payload.get("profile", {}).get("memory") or {}).get("extract_config") or {}
-        self.timeout = max(30.0, min(3600.0, float(options.get("extract_heavy_timeout_s") or 30)))
-        self.max_tokens = max(128, min(65536, int(options.get("extract_max_tokens") or 4096)))
-        self.max_retries = max(0, min(5, int(options.get("extract_max_retries") or 0)))
-        self.retry_backoff = max(0.0, min(60.0, float(options.get("extract_retry_backoff_s") or 1)))
+        self.options = (payload.get("profile", {}).get("memory") or {}).get("extract_config") or {}
+        retries = self.options.get("extract_max_retries")
+        self.max_retries = max(0, min(10, int(retries))) if retries is not None else 2
+        backoff = self.options.get("extract_retry_backoff_s")
+        base = max(0.0, min(60.0, float(backoff))) if backoff is not None else 1.0
+        self.retry_delays: tuple[float, ...] = tuple(
+            min(60.0, base * 2**attempt) for attempt in range(self.max_retries)
+        )
+
+    def _call_budget(self, options: dict[str, Any]) -> float:
+        timeout = _call_timeout(self.options, options.get("tier", "light"))
+        return timeout * (self.max_retries + 1) + sum(self.retry_delays)
 
     def call_llm(self, prompt: str, **options: Any) -> str:
         self.worker.authorize(self.job)
         future = asyncio.run_coroutine_threadsafe(self._invoke(prompt, options), self.loop)
         try:
-            return future.result(
-                timeout=(self.timeout + self.retry_backoff * 2**self.max_retries + 10)
-                * (self.max_retries + 1)
-            )
+            # The owner loop enforces the same attempt/delay budget. Allow only
+            # a small scheduling margin for delivery back to the extractor thread.
+            return future.result(timeout=self._call_budget(options) + 10)
         except TimeoutError:
             future.cancel()
             raise
 
     async def _invoke(self, prompt: str, options: dict[str, Any]) -> str:
-        for attempt in range(self.max_retries + 1):
-            try:
-                return await self._invoke_once(prompt, options)
-            except Exception as exc:
-                if attempt == self.max_retries or not transient(exc):
-                    raise
-                await asyncio.sleep(self.retry_backoff * 2**attempt)
+        async with asyncio.timeout(self._call_budget(options)):
+            for attempt in range(self.max_retries + 1):
+                try:
+                    return await self._invoke_once(prompt, options)
+                except Exception as exc:
+                    if attempt == self.max_retries or not transient(exc):
+                        raise
+                    await asyncio.sleep(self.retry_delays[attempt])
         raise RuntimeError("memory extraction retries exhausted")
 
     async def _invoke_once(self, prompt: str, options: dict[str, Any]) -> str:
@@ -195,6 +229,13 @@ class _ModelClient:
             ),
             HumanMessage(prompt),
         ]
+        tier = options.get("tier", "light")
+        timeout = _call_timeout(self.options, tier)
+        model = _single_attempt_model(self.model, self.capability, self.options, tier=tier)
+        max_tokens = options.get("max_tokens")
+        output_limit = getattr(model, "_harness_max_output_tokens", None)
+        if max_tokens is not None and isinstance(output_limit, int) and output_limit > 0:
+            max_tokens = min(max_tokens, output_limit)
         with model_call_scope(
             services,
             user_id=job.owner_id,
@@ -206,18 +247,15 @@ class _ModelClient:
             thread_id=job.task_id,
         ):
             bound = bind_call_options(
-                self.model,
-                max_tokens=min(
-                    getattr(self.model, "_harness_max_output_tokens", 0) or self.max_tokens,
-                    self.max_tokens,
-                ),
+                model,
+                max_tokens=max_tokens,
                 temperature=0,
                 response_format="json" if options.get("response_format") == "json" else "text",
-                timeout_s=self.timeout,
+                timeout_s=timeout,
             )
             pending = asyncio.create_task(bound.ainvoke(messages))
             try:
-                async with asyncio.timeout(self.timeout):
+                async with asyncio.timeout(timeout):
                     while not pending.done():
                         await asyncio.wait({pending}, timeout=0.5)
                         if self.worker._stopping.is_set():
@@ -376,9 +414,12 @@ class ExpertMemoryWorker:
 
     def _prepare(self, job: ExpertMemoryJob, events: list[RawEvent], llm: _ModelClient) -> str:
         self.authorize(job)
-        result = CandidateExtractor(llm=llm, max_candidates=12, max_retries=0).extract(
-            events, session_id=job.turn_id
-        )
+        options = (json.loads(job.payload_json).get("profile", {}).get("memory") or {}).get(
+            "extract_config"
+        ) or {}
+        result = CandidateExtractor(
+            llm=llm, max_candidates=12, max_retries=0, max_tokens=_extraction_budget(options)
+        ).extract(events, session_id=job.turn_id)
         if result.failure_reason:
             raise ValueError("extraction_failed")
         sources = {event.id: event for event in events}
@@ -567,10 +608,6 @@ class ExpertMemoryWorker:
                 capability = await asyncio.to_thread(
                     store.get_model_reasoning_capability, model_ref
                 )
-                extract_options = (payload.get("profile", {}).get("memory") or {}).get(
-                    "extract_config"
-                ) or {}
-                model = _single_attempt_model(model, capability, extract_options)
                 if not await asyncio.to_thread(repo.update, job, phase="extracting", now=_now()):
                     raise _Stopped()
                 llm = _ModelClient(
@@ -580,6 +617,7 @@ class ExpertMemoryWorker:
                     ),
                     model,
                     asyncio.get_running_loop(),
+                    capability=capability,
                 )
                 result_json = await asyncio.to_thread(self._prepare, job, sources, llm)
                 if not await asyncio.to_thread(

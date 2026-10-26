@@ -114,3 +114,66 @@ async def test_create_connection_rejects_taken_display_name(
         )
     assert ei.value.code == ErrorCode.BRIDGE_DISPLAY_NAME_TAKEN
     repo.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_url", "requested_url", "username", "allowed"),
+    [
+        ("https://PEER.example", "https://peer.example:443/", " alice ", True),
+        ("https://PEER.example", "https://peer.example:443/", " Alice ", False),
+        ("http://localhost", "http://127.0.0.1:80/", " Alice ", False),
+    ],
+)
+async def test_create_peer_account_identity_preserves_username_case(
+    monkeypatch: pytest.MonkeyPatch,
+    stored_url: str,
+    requested_url: str,
+    username: str,
+    allowed: bool,
+) -> None:
+    repo = MagicMock()
+    repo.list_for_owner.return_value = [_row(peer_base_url=stored_url, peer_username="Alice")]
+    repo.find_by_display_name.return_value = None
+    repo.get.return_value = None
+    repo.create.return_value = _row(connection_id="NEWCONN", peer_username=username.strip())
+    mgr = BridgeManager(
+        bridge_repo=repo,
+        secret_repo=MagicMock(),
+        user_repo=MagicMock(),
+        advertise_base_url="http://local.test",
+    )
+    login = AsyncMock(return_value={"access_token": "tok"})
+    monkeypatch.setattr("octop.infra.bridge.manager.login_peer", login)
+    monkeypatch.setattr(
+        "octop.infra.bridge.manager.normalize_peer_base_url", lambda url: url.rstrip("/")
+    )
+    monkeypatch.setattr("octop.infra.bridge.manager.encrypt_payload", lambda _s, _p: b"enc")
+
+    if allowed:
+        result = await mgr.create_connection(
+            owner_user_id=1,
+            peer_base_url=requested_url,
+            peer_username=username,
+            password="secret",
+            display_name="Other account",
+            connect=False,
+        )
+        assert result.peer_username == "alice"
+        assert repo.create.call_args.kwargs["peer_username"] == "alice"
+        login.assert_awaited_once_with(
+            base_url=requested_url.rstrip("/"), username="alice", password="secret"
+        )
+    else:
+        with pytest.raises(OctopError) as exc:
+            await mgr.create_connection(
+                owner_user_id=1,
+                peer_base_url=requested_url,
+                peer_username=username,
+                password="secret",
+                display_name="Other account",
+                connect=False,
+            )
+        assert exc.value.code == ErrorCode.BRIDGE_PEER_ALREADY_LINKED
+        repo.create.assert_not_called()
+        login.assert_not_awaited()

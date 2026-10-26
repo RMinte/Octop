@@ -77,7 +77,7 @@ def peer_url_identity(raw: str) -> str:
 
 
 def peer_identity_key(base_url: str, username: str) -> tuple[str, str]:
-    return (peer_url_identity(base_url), username.strip().casefold())
+    return (peer_url_identity(base_url), username.strip())
 
 
 def is_self_peer_url(peer_base_url: str, advertise_base_url: str) -> bool:

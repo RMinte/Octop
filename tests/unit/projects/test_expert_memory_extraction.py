@@ -594,7 +594,7 @@ async def test_extraction_model_respects_budget_timeouts_and_vendor_extras():
     model = ChatOpenAI(model="test", api_key="fake", extra_body={"original": True})
     try:
         configured = extraction._single_attempt_model(
-            model, options={"extract_heavy_timeout_s": 120, "extract_extra_body": {"vendor": 1}}
+            model, options={"extract_light_timeout_s": 120, "extract_extra_body": {"vendor": 1}}
         )
         assert configured.extra_body == {"original": True, "vendor": 1}
         assert model.extra_body == {"original": True}

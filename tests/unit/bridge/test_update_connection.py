@@ -116,6 +116,43 @@ async def test_update_endpoint_reauths_and_reconnects(
     mgr.connect.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("username", "allowed"), [(" alice ", True), (" Alice ", False)])
+async def test_update_peer_account_identity_preserves_username_case(
+    monkeypatch: pytest.MonkeyPatch, username: str, allowed: bool
+) -> None:
+    mgr = _mgr()
+    row = _row(peer_username="bob", auto_reconnect=False)
+    other = _row(connection_id="cid2", peer_username="Alice", display_name="Other")
+    updated = _row(peer_username=username.strip(), auto_reconnect=False)
+    mgr.get_owned = MagicMock(return_value=row)  # type: ignore[method-assign]
+    mgr._repo.list_for_owner.return_value = [row, other]
+    mgr._repo.update_settings.return_value = updated
+    mgr._repo.get.return_value = updated
+    mgr.disconnect = AsyncMock()  # type: ignore[method-assign]
+    login = AsyncMock(return_value={"access_token": "tok"})
+    monkeypatch.setattr("octop.infra.bridge.manager.login_peer", login)
+    monkeypatch.setattr("octop.infra.bridge.manager.encrypt_payload", lambda _s, _p: b"enc")
+
+    if allowed:
+        result = await mgr.update_connection_meta(
+            "cid1", owner_user_id=1, peer_username=username, password="secret"
+        )
+        assert result.peer_username == "alice"
+        assert mgr._repo.update_settings.call_args.kwargs["peer_username"] == "alice"
+        login.assert_awaited_once_with(
+            base_url=row.peer_base_url, username="alice", password="secret"
+        )
+    else:
+        with pytest.raises(OctopError) as exc:
+            await mgr.update_connection_meta(
+                "cid1", owner_user_id=1, peer_username=username, password="secret"
+            )
+        assert exc.value.code == ErrorCode.BRIDGE_PEER_ALREADY_LINKED
+        mgr._repo.update_settings.assert_not_called()
+        login.assert_not_awaited()
+
+
 def test_connection_public_marks_inbound() -> None:
     mgr = _mgr()
     inbound = mgr.connection_public(_row(credential_blob=None))
