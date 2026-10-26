@@ -50,7 +50,7 @@ def test_resident_upgrade_and_watermark_repair_preserve_accepted_work(
             assert after.pop("day_key") == after.pop("timezone") == ""
             assert after.pop("input_json") == "{}"
             assert after == before
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 57
             assert "message_json" in {
                 row["name"] for row in conn.execute("PRAGMA table_info(resident_task_reports)")
             }

@@ -458,6 +458,10 @@ async def run(
         memory_backend_config=options,
     )
     cfg.providers = await asyncio.to_thread(providers.build_harness_configs)
+    from octop.infra.projects.model_failover import automatic_route, task_failover_middleware
+
+    failover = await task_failover_middleware(services, owner, turn, raw, cfg.providers)
+    cfg.middleware = [*(cfg.middleware or []), failover]
     cfg.protocol = TASK_PROTOCOL
     cfg.model_retry_enabled = False
     cfg.session_log_enabled = False
@@ -521,6 +525,11 @@ async def run(
                             agent_id=binding.agent_id,
                             user=str(owner),
                             source="resident-task",
+                            callbacks=failover.callbacks,
+                            configurable={
+                                "model": turn.model_ref,
+                                "octop_auto_route": automatic_route(raw),
+                            },
                         ),
                         protocol=TASK_PROTOCOL,
                     ),
@@ -568,4 +577,7 @@ async def run(
                     int(usage.usage.get("input_tokens") or 0),
                     int(usage.usage.get("output_tokens") or 0),
                 )
-            await agent.aclose()
+            try:
+                await agent.aclose()
+            finally:
+                await failover.aclose()

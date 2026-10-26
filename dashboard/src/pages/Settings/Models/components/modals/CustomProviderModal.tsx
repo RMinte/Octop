@@ -80,7 +80,11 @@ export function CustomProviderModal({
     }
   }, [open, form]);
 
-  const testDraftModel = async (modelId: string) => {
+  const testDraftModel = async (
+    modelId: string,
+    apiMode?: ProviderModel["api_mode"],
+    apiFallback?: ProviderModel["api_fallback"],
+  ) => {
     const values = await form.validateFields([
       "name",
       "kind",
@@ -97,6 +101,8 @@ export function CustomProviderModal({
       api_key: values.kind === "box" ? undefined : key,
       base_url: values.base_url?.trim() || null,
       model_id: modelId,
+      api_mode: apiMode,
+      api_fallback: apiFallback,
       embedding: isEmbeddingModel(models.find((m) => m.id === modelId)),
     });
   };
@@ -168,6 +174,8 @@ export function CustomProviderModal({
           thinking: null,
         };
         if (m.max_tokens != null) entry.max_tokens = m.max_tokens;
+        if (m.api_mode) entry.api_mode = m.api_mode;
+        if (m.api_fallback) entry.api_fallback = m.api_fallback;
         if (m.context_window != null) entry.context_window = m.context_window;
         if (m.reasoning) entry.reasoning = true;
         if (m.task) entry.task = m.task;
@@ -316,20 +324,28 @@ export function CustomProviderModal({
                 message.warning(t("models.testDraftNeedModel"));
                 return;
               }
-              const result = await testDraftModel(modelId);
+              const result = await testDraftModel(
+                modelId,
+                models.find((m) => m.id === modelId)?.api_mode,
+                models.find((m) => m.id === modelId)?.api_fallback,
+              );
               if (result.ok) {
-                const latency =
-                  result.latency_ms != null
-                    ? t("models.testConnectionLatency", {
-                        time: result.latency_ms,
-                      })
-                    : "";
-                message.success(
-                  t("models.testConnectionSuccess", {
-                    name: name || "draft",
-                    latency,
-                  }),
-                );
+                if (result.fallback_used) {
+                  message.warning(t("models.apiFallbackTestUsed"));
+                } else {
+                  const latency =
+                    result.latency_ms != null
+                      ? t("models.testConnectionLatency", {
+                          time: result.latency_ms,
+                        })
+                      : "";
+                  message.success(
+                    t("models.testConnectionSuccess", {
+                      name: name || "draft",
+                      latency,
+                    }),
+                  );
+                }
               } else {
                 message.error(
                   t("models.testConnectionFailed", {
@@ -366,7 +382,9 @@ export function CustomProviderModal({
         onModelsChange={setModels}
         apiPrefix={apiPrefix}
         canTest={canTest}
-        onTestModel={(modelId) => testDraftModel(modelId)}
+        onTestModel={(modelId, _modelName, apiMode, apiFallback) =>
+          testDraftModel(modelId, apiMode, apiFallback)
+        }
       />
     </Drawer>
   );

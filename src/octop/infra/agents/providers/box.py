@@ -71,8 +71,10 @@ def _observe_model(
 
 
 class OctopChatModelFactory(ChatModelFactory):
-    def _build(self, provider: ProviderConfig, model: ModelConfig) -> BaseChatModel:
-        instance = super()._build(provider, model)
+    def _build(
+        self, provider: ProviderConfig, model: ModelConfig, *, max_retries: int | None = None
+    ) -> BaseChatModel:
+        instance = super()._build(provider, model, max_retries=max_retries)
         return _observe_model(instance, provider, model)
 
 

@@ -1255,11 +1255,9 @@ async def test_model_retry_exhaustion_fails_background_job(
         response = await retry.awrap_model_call(None, fail)
         return {"messages": response.result}
 
-    # Exhausted retries become a model-visible prompt, not a raised exception.
-    response = await retry.awrap_model_call(None, fail)
-    text = str(response.result[0].content)
-    assert "provider unavailable" in text
-    assert "[model_call_failed]" in text
+    # Exhausted retries remain failures for every runtime entry point.
+    with pytest.raises(failure_type, match="provider unavailable"):
+        await retry.awrap_model_call(None, fail)
     assert attempts == cfg.model_retry_max_retries + 1
     attempts = 0
 
@@ -1279,15 +1277,6 @@ async def test_model_retry_exhaustion_fails_background_job(
     )
     await inbox._process(msg)
     assert attempts == cfg.model_retry_max_retries + 1
-    try:
-        from octop_harness.messages import is_model_retry_failure_text
-    except ImportError:
-        is_model_retry_failure_text = None  # type: ignore[assignment]
-    if is_model_retry_failure_text is None:
-        # Published harness still treats a continue-on-error AIMessage as success.
-        assert msg.status == "done"
-        return
-    assert is_model_retry_failure_text(text)
     assert msg.status == "failed"
     event = processor.on_reply.call_args.args[0]
     assert event.status == "failed"
@@ -1305,9 +1294,8 @@ def test_model_retry_sync_failure_and_recovery(manager: AgentManager) -> None:
     retry.initial_delay = 0
     failure = TypeError("model failed")
     handler = MagicMock(side_effect=failure)
-    exhausted = retry.wrap_model_call(None, handler)
-    assert "model failed" in str(exhausted.result[0].content)
-    assert "[model_call_failed]" in str(exhausted.result[0].content)
+    with pytest.raises(TypeError, match="model failed"):
+        retry.wrap_model_call(None, handler)
     assert handler.call_count == cfg.model_retry_max_retries + 1
     response = ModelResponse(result=[AIMessage(content="recovered")])
     handler = MagicMock(side_effect=[failure, response])

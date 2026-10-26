@@ -448,6 +448,9 @@ async def _run_turn(
     ):
         raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
     configs_provider = await asyncio.to_thread(providers.build_harness_configs)
+    from octop.infra.projects.model_failover import automatic_route, task_failover_middleware
+
+    failover = await task_failover_middleware(services, owner_id, turn, raw, configs_provider)
     workspace = Path(fields.directory) if fields.directory else runtime_dir / "workspace"
     if fields.directory is None:
         await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
@@ -474,6 +477,8 @@ async def _run_turn(
             "projects.expert_profile_prompt", locale, name=profile.get("name", ""), content=content
         )
         if expert_memory is not None:
+            if expert_memory.manual_context():
+                prompt += "\n\n" + tr("projects.expert_manual_priority", locale)
             recalled = await expert_memory.prompt(turn.prompt)
             if recalled:
                 prompt += "\n\n" + tr("projects.expert_memory_prompt", locale, content=recalled)
@@ -757,6 +762,7 @@ async def _run_turn(
                 _readonly_mcp_tools([*tools, *plugin_tools]),
             ),
             execution,
+            failover,
             ReasoningRequestMiddleware(summary=raw.get("reasoning_mode") not in {None, "disabled"}),
             KnowledgeSearchHintMiddleware(),
             TaskImageMaterializeMiddleware(services, owner_id, turn.task_id),
@@ -852,6 +858,7 @@ async def _run_turn(
             team_manager=team.manager if fields.team_enabled else None,
         )
     except BaseException:
+        await failover.aclose()
         if checkpoint_connection is not None:
             await checkpoint_connection.close()
         raise
@@ -981,7 +988,10 @@ async def _run_turn(
             source="project-task",
             skills=[slug for slug, _ in files],
             mcp_servers=active_mcp,
+            callbacks=failover.callbacks,
             configurable={
+                "model": turn.model_ref,
+                "octop_auto_route": automatic_route(raw),
                 **knowledge_config,
                 CONFIG_KEY: raw.get("reasoning_overrides", {}),
                 "plugin_tool_configs": plugin_tool_configs,
@@ -1334,7 +1344,10 @@ async def _run_turn(
                 )
             finally:
                 try:
-                    await team.close()
+                    try:
+                        await team.close()
+                    finally:
+                        await failover.aclose()
                 finally:
                     if checkpoint_connection is not None:
                         await checkpoint_connection.close()

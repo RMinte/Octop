@@ -1,3 +1,4 @@
+import { isImeComposing } from "../../utils/ime";
 import { Dropdown } from "antd";
 import TaskMemory from "./TaskMemory";
 import TaskPromptPolish from "./TaskPromptPolish";
@@ -2243,7 +2244,7 @@ export default function TaskConversations({
                   if (
                     event.key === "Enter" &&
                     !event.shiftKey &&
-                    !event.nativeEvent.isComposing
+                    !isImeComposing(event)
                   ) {
                     event.preventDefault();
                     void send();

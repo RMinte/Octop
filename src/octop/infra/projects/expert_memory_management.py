@@ -300,7 +300,11 @@ def save_memory(
 
         persist()
         try:
-            node = MemoryService(store, host="octop-memory-management").save(
+            node = MemoryService(
+                store,
+                host="octop-memory-management",
+                manual_documents_provider=memory.current_manual_documents,
+            ).save(
                 body.content,
                 topic=body.topic,
                 metadata={

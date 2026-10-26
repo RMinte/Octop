@@ -7,6 +7,8 @@ export interface TestProviderDraftParams {
   api_key?: string;
   base_url?: string | null;
   model_id: string;
+  api_mode?: "chat_completions" | "responses";
+  api_fallback?: "none" | "chat_completions";
   extra_json?: string | null;
   embedding?: boolean;
 }
@@ -15,6 +17,8 @@ export interface TestProviderResult {
   ok: boolean;
   latency_ms?: number;
   error?: string;
+  fallback_used?: boolean;
+  api_mode_used?: "chat_completions" | "responses";
 }
 
 export async function testProviderDraft(
@@ -28,6 +32,8 @@ export async function testProviderDraft(
       api_key: params.api_key?.trim() || null,
       base_url: params.base_url?.trim() || null,
       model_id: params.model_id,
+      api_mode: params.api_mode ?? "chat_completions",
+      api_fallback: params.api_fallback ?? "none",
       extra_json: params.extra_json ?? null,
       embedding: params.embedding === true,
     }),

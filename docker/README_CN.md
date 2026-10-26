@@ -26,7 +26,9 @@
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-访问 `http://localhost:8088`。未设置 `OCTOP_DEFAULT_PASSWORD` 时，首次初始化会自动生成随机密码并写入 `/data/.octop/credential.txt`；设置了则按设置值初始化（须 ≥8 位且同时包含字母和数字；被应用密码策略拒绝的常见弱密码会自动回退为随机密码）。首次登录后请立即修改密码。
+访问 `http://localhost:8088`。设置 `OCTOP_DEFAULT_PASSWORD` 可创建初始管理员（须 ≥8 位且同时包含字母和数字）。未设置或密码未通过策略时，打开设置向导；一次性向导口令保存在 `/data/.octop/octop-login.txt`。初始凭据或向导说明写入 `/data/.octop/credential.txt`。
+
+Compose 将 `nofile` 设为 65535，以支持多个专家、流连接及连接器子进程。使用 `docker run` 时添加 `--ulimit nofile=65535:65535`。
 
 **方式二：构建脚本**
 

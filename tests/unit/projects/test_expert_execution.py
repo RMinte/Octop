@@ -111,7 +111,7 @@ def test_workspace_skill_collision_requires_explicit_override_or_matching_packag
     store = SkillPackageStore(
         repo=services.skill_package_repo, root=services.paths.skill_packages_dir
     )
-    package = store.create(name="Matching package", description="", created_by="owner")
+    package = store.create(name="Matching package", description="", created_by="1")
     skill_root = store.package_skills_dir(package.id) / "local-method"
     skill_root.mkdir(parents=True)
     (skill_root / "SKILL.md").write_bytes(b"Local method")

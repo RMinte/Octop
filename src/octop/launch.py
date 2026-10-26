@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from typing import Any
 
 from octop.infra.agentcomputer.bootstrap import DaemonBootstrap
 from octop.infra.server import OctopServer
+from octop.infra.utils.accept_errors import coalesce_accept_errors
 from octop.infra.utils.paths import PathLayout
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,9 @@ async def run_foreground(
     srv = OctopServer(daemon_bootstrap=guard)
     bwrap_task: asyncio.Task[None] | None = None
     memory_control = None
+    stack = ExitStack()
     try:
+        stack.enter_context(coalesce_accept_errors(asyncio.get_running_loop()))
         await srv.start()
         bwrap_task = _schedule_linux_bubblewrap_ensure()
         # Greenfield deferral leaves services unset until /setup/database binds.
@@ -115,6 +118,7 @@ async def run_foreground(
                 host=plan.bind_host,
                 port=plan.https_port,
                 log_config=None,
+                ws_max_size=32 * 1024 * 1024,
                 log_level=level,
                 workers=worker_count,
                 reload=False,
@@ -127,6 +131,7 @@ async def run_foreground(
                 host=plan.bind_host,
                 port=plan.http_port,
                 log_config=None,
+                ws_max_size=32 * 1024 * 1024,
                 log_level=level,
                 workers=1,
                 reload=False,
@@ -146,6 +151,7 @@ async def run_foreground(
                 host=plan.bind_host,
                 port=plan.http_port or bind_port,
                 log_config=None,
+                ws_max_size=32 * 1024 * 1024,
                 log_level=level,
                 workers=worker_count,
                 reload=reload,
@@ -167,7 +173,10 @@ async def run_foreground(
             try:
                 await _cancel_background_task(bwrap_task)
             finally:
-                await srv.stop()
+                try:
+                    await srv.stop()
+                finally:
+                    stack.close()
 
 
 def run_foreground_blocking(**kwargs: Any) -> None:

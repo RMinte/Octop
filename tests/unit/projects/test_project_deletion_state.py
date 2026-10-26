@@ -431,6 +431,8 @@ def test_task_delete_clears_pending_source_and_disables_target_cron(services):
 
 @pytest.mark.parametrize("binding", ["project", "task"])
 async def test_deleted_cron_binding_blocks_manual_run_until_explicit_reselection(services, binding):
+    from weakref import WeakValueDictionary
+
     services.cron_repo.create(
         cron_id="bound-job",
         agent_id=None,
@@ -450,7 +452,7 @@ async def test_deleted_cron_binding_blocks_manual_run_until_explicit_reselection
             services.project_repo.delete(
                 conn, services.project_repo.get_in_transaction(conn, "project", 1)
             )
-    service = SimpleNamespace(_task_services=services)
+    service = SimpleNamespace(_task_services=services, _task_occurrence_locks=WeakValueDictionary())
 
     def command():
         row = services.cron_repo.get("bound-job")

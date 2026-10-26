@@ -144,9 +144,14 @@ def profile_prompt(profile: dict[str, Any], locale: str) -> str:
             f"[{item['path']}]\n{item['content']}" for item in profile.get("profile_files", [])
         )
     )
-    return tr(
+    prompt = tr(
         "projects.expert_profile_prompt", locale, name=profile.get("name", ""), content=content
     )
+    if any(
+        item.get("path") in {"USER.md", "MEMORY.md"} for item in profile.get("profile_files", [])
+    ):
+        prompt += "\n\n" + tr("projects.expert_manual_priority", locale)
+    return prompt
 
 
 def expert_profile_supported(config: dict[str, Any], *, backend_spec: Any = None) -> bool:
@@ -275,7 +280,11 @@ def resolve_expert_profile(
     row, config = expert_configuration(services, owner_id, selected_expert_id)
     shared_viewer = row.user_id != owner_id
     workspace = _workspace(services, row, config)
-    paths = ["SOUL.md", "AGENTS.md"] if shared_viewer else ["SOUL.md", "USER.md", "AGENTS.md"]
+    paths = (
+        ["SOUL.md", "AGENTS.md"]
+        if shared_viewer
+        else ["SOUL.md", "USER.md", "MEMORY.md", "AGENTS.md"]
+    )
     configured = config.get("memory_files")
     if not shared_viewer and isinstance(configured, list):
         paths.extend(str(path) for path in configured)
@@ -299,7 +308,11 @@ def resolve_expert_profile(
     skills = []
     mounted: set[str] = set()
     installed_roots: dict[str, list[Path]] = {}
+    visible_packages = {package.id for package in store.repo.list_visible(owner_id)}
+    account = services.user_repo.get(owner_id)
     for package_id in _array(row.skill_package_ids or config.get("skill_package_ids")):
+        if package_id not in visible_packages and not (account and account.role == "admin"):
+            continue
         for summary in store.list_skill_summaries(package_id):
             slug = str(summary["slug"])
             if slug not in disabled:
@@ -409,6 +422,21 @@ def resolve_expert_profile(
             "tools_disabled": sorted(disabled_tools),
         },
         "memory": {
+            "extract_config": {}
+            if shared_viewer
+            else {
+                key: memory[key]
+                for key in (
+                    "extract_max_tokens",
+                    "extract_light_timeout_s",
+                    "extract_heavy_timeout_s",
+                    "extract_thinking",
+                    "extract_max_retries",
+                    "extract_retry_backoff_s",
+                    "extract_extra_body",
+                )
+                if key in memory
+            },
             "enabled": memory.get("memory_enabled", True) is not False,
             "capture_enabled": memory.get("capture_enabled", True) is not False,
             "auto_extract_enabled": memory.get("auto_extract_enabled", True) is not False

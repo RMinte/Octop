@@ -166,6 +166,7 @@ export default function KnowledgeCitationPanelContent({
     if (
       richKind &&
       richKind !== "ppt" &&
+      richKind !== "doc" &&
       isRichPreviewFilename(citation.filename)
     ) {
       setKind(richKind);

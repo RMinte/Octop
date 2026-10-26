@@ -1,3 +1,4 @@
+import { Checkbox } from "antd";
 import {
   Archive,
   Code2,
@@ -22,6 +23,8 @@ interface SkillCardProps {
   onMouseLeave: () => void;
   onToggleEnabled: (e: React.MouseEvent) => void;
   onDelete?: (e?: React.MouseEvent) => void;
+  selected?: boolean;
+  onToggleSelected?: () => void;
   /** When false, hide the enable/disable action (e.g. package not mounted). */
   showEnableToggle?: boolean;
 }
@@ -181,6 +184,8 @@ export function SkillCard({
   onMouseLeave,
   onToggleEnabled,
   onDelete,
+  selected = false,
+  onToggleSelected,
   showEnableToggle = true,
 }: SkillCardProps) {
   const { t } = useTranslation();
@@ -213,6 +218,14 @@ export function SkillCard({
     >
       <div className={styles.cardBody}>
         <div className={styles.cardHeader}>
+          {onToggleSelected ? (
+            <Checkbox
+              className={styles.cardSelect}
+              checked={selected}
+              onClick={(event) => event.stopPropagation()}
+              onChange={() => onToggleSelected()}
+            />
+          ) : null}
           <div
             className={styles.iconWrapper}
             style={{

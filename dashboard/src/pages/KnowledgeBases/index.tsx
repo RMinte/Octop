@@ -90,6 +90,7 @@ import PageShell from "../../layouts/PageShell";
 import { apiErrorMessage, isNotFoundApiError } from "../../utils/apiError";
 import { createDetailRequestGate } from "../../utils/detailRequestGate";
 import { getDocKind, type DocKind } from "../../utils/docKind";
+import { isImeComposing } from "../../utils/ime";
 import { formatBytes, formatSizeGb } from "../../utils/embeddingDownload";
 import { fileTreeIconSpec } from "../../utils/fileTreeIcon";
 import { formatServerDateTime } from "../../utils/formatMessageTime";
@@ -291,6 +292,8 @@ export default function KnowledgeBasesPage() {
   );
   const [bases, setBases] = useState<KnowledgeBase[]>([]);
   const [selected, setSelected] = useState<KnowledgeBase | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selected?.id ?? null;
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [currentFolder, setCurrentFolder] = useState("");
   const [folderModalOpen, setFolderModalOpen] = useState(false);
@@ -658,11 +661,13 @@ export default function KnowledgeBasesPage() {
   const [defaultOpenChecked, setDefaultOpenChecked] = useState(false);
   const [sharedChecked, setSharedChecked] = useState(false);
   const [uploadState, setUploadState] = useState<{
+    baseId: string;
     filename: string;
     index: number;
     total: number;
     percent: number;
   } | null>(null);
+  const uploadInFlightRef = useRef(false);
   const uploadRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const [dragActive, setDragActive] = useState(false);
@@ -1286,6 +1291,8 @@ export default function KnowledgeBasesPage() {
 
   const uploadDocuments = async (files: FileList | File[] | null) => {
     if (!selected || !files || !usable || isAtDocumentLimit) return;
+    if (uploadInFlightRef.current) return;
+    const baseId = selected.id;
     const remaining = Math.max(
       0,
       (selected?.max_documents ?? limits.max_docs_per_kb) - fileCount,
@@ -1321,31 +1328,39 @@ export default function KnowledgeBasesPage() {
       if (uploadRef.current) uploadRef.current.value = "";
       return;
     }
+    uploadInFlightRef.current = true;
     try {
       for (const [index, file] of chosen.entries()) {
         setUploadState({
+          baseId,
           filename: file.name,
           index: index + 1,
           total: chosen.length,
           percent: 0,
         });
         await knowledgeBasesApi.uploadDocument(
-          selected.id,
+          baseId,
           file,
           joinKnowledgePath(currentFolder, file.name),
           (percent) =>
             setUploadState((current) =>
-              current && current.filename === file.name
+              current &&
+              current.baseId === baseId &&
+              current.filename === file.name
                 ? { ...current, percent }
                 : current,
             ),
         );
         // Show each finished file while the remaining ones still upload.
-        if (index < chosen.length - 1) {
-          void loadDetail(selected.id, { silent: true });
+        // Skip when the user has opened another base — loadDetail would
+        // replace that view with this upload's base.
+        if (index < chosen.length - 1 && selectedIdRef.current === baseId) {
+          void loadDetail(baseId, { silent: true });
         }
       }
-      await loadDetail(selected.id);
+      if (selectedIdRef.current === baseId) {
+        await loadDetail(baseId);
+      }
       await loadBases();
       message.success(t("knowledgeBases.uploaded"));
     } catch (error) {
@@ -1353,13 +1368,18 @@ export default function KnowledgeBasesPage() {
         apiErrorMessage(error, t("knowledgeBases.uploadFailed"), t),
       );
     } finally {
-      setUploadState(null);
+      uploadInFlightRef.current = false;
+      setUploadState((current) =>
+        current?.baseId === baseId ? null : current,
+      );
       if (uploadRef.current) uploadRef.current.value = "";
     }
   };
 
+  const uploadingThisBase = uploadState?.baseId === selected?.id;
+  const uploadBusy = uploadState !== null;
   const canDropUpload =
-    canWriteSelected && usable && !isAtDocumentLimit && !uploadState;
+    canWriteSelected && usable && !isAtDocumentLimit && !uploadBusy;
 
   const resetDragActive = () => {
     dragDepthRef.current = 0;
@@ -2270,8 +2290,8 @@ export default function KnowledgeBasesPage() {
                           <Button
                             type="primary"
                             icon={<FileUp size={14} />}
-                            loading={Boolean(uploadState)}
-                            disabled={isAtDocumentLimit || Boolean(uploadState)}
+                            loading={uploadingThisBase}
+                            disabled={isAtDocumentLimit || uploadBusy}
                             onClick={() => uploadRef.current?.click()}
                           >
                             {t("knowledgeBases.upload")}
@@ -2338,7 +2358,7 @@ export default function KnowledgeBasesPage() {
                         </Typography.Text>
                       ) : null}
                     </div>
-                    {uploadState ? (
+                    {uploadingThisBase && uploadState ? (
                       <div className={styles.uploadProgress} aria-live="polite">
                         <Typography.Text
                           className={styles.uploadProgressLabel}
@@ -2799,8 +2819,11 @@ export default function KnowledgeBasesPage() {
                       setMdFindQuery(event.target.value);
                       setMdFindIndex(0);
                     }}
-                    onPressEnter={() => jumpMdFind(1)}
+                    onPressEnter={(event) => {
+                      if (!isImeComposing(event)) jumpMdFind(1);
+                    }}
                     onKeyDown={(event) => {
+                      if (isImeComposing(event)) return;
                       if (event.key === "Escape") {
                         event.stopPropagation();
                         setMdFindOpen(false);
@@ -2949,7 +2972,9 @@ export default function KnowledgeBasesPage() {
           value={folderName}
           onChange={(event) => setFolderName(event.target.value)}
           placeholder={t("knowledgeBases.folderNamePlaceholder")}
-          onPressEnter={() => void createFolder()}
+          onPressEnter={(event) => {
+            if (!isImeComposing(event)) void createFolder();
+          }}
         />
       </Modal>
 
@@ -2966,7 +2991,9 @@ export default function KnowledgeBasesPage() {
           value={renameName}
           onChange={(event) => setRenameName(event.target.value)}
           placeholder={t("knowledgeBases.folderNamePlaceholder")}
-          onPressEnter={() => void renameFolder()}
+          onPressEnter={(event) => {
+            if (!isImeComposing(event)) void renameFolder();
+          }}
         />
       </Modal>
 

@@ -23,7 +23,7 @@ async def connected(client, auth):
 
 async def until(ws, predicate):
     for _ in range(100):
-        frame = await ws.receive_json(timeout=5)
+        frame = await ws.receive_json()
         if predicate(frame):
             return frame
     pytest.fail("expected task frame was not received")

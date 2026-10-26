@@ -438,6 +438,7 @@ class ResidentConversationRuntime:
         assert row is not None
         config = self.registry.get_config(agent_id)
         model = self.registry.providers.resolve_explicit_default_model(row, config)
+        automatic_model_route = not bool(model)
         user = self.services.user_repo.get(owner_id)
         preferred = get_preferred_model_from_json(user.preferences_json if user else None)
         if not model and preferred and self.registry.providers.is_model_ref_usable(preferred):
@@ -451,7 +452,7 @@ class ResidentConversationRuntime:
             snapshot["system_prompt"] = tr(
                 "agents.resident.system_prompt", user.locale if user else "en"
             )
-        return {"model_ref": model, **snapshot}
+        return {"model_ref": model, "automatic_model_route": automatic_model_route, **snapshot}
 
     async def cancel(
         self, owner_id: int, agent_id: str, thread_id: str, body: ResidentCancel

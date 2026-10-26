@@ -34,6 +34,61 @@ def test_build_chat_model_includes_provider_id_and_model_name() -> None:
     assert model.name == "MiniMax-M2.7"
 
 
+def test_build_codex_probe_uses_stateless_responses() -> None:
+    row = SimpleNamespace(
+        name="openai-codex",
+        kind="openai",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="test-access-token",
+        extra_json='{"headers": {"ChatGPT-Account-Id": "acct-test"}}',
+        get_models=lambda: [{"id": "gpt-5.6-luna", "name": "GPT-5.6-LUNA"}],
+    )
+
+    chat = _build_chat_model(row, model_id="gpt-5.6-luna")
+    payload = chat._get_request_payload([("human", "ping")])
+
+    assert payload["store"] is False
+    assert payload["stream"] is True
+    assert chat.use_previous_response_id is False
+
+
+def test_build_chat_model_allows_probe_api_mode_override() -> None:
+    row = SimpleNamespace(
+        name="relay",
+        kind="openai",
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        get_models=lambda: [{"id": "gpt-X", "api_mode": "chat_completions"}],
+    )
+
+    with patch("octop.infra.agents.providers.box.build_chat_model") as mock_build:
+        mock_build.return_value = FakeListChatModel(responses=["ok"])
+        _build_chat_model(row, model_id="gpt-X", api_mode="responses")
+
+    assert mock_build.call_args.args[1].api_mode == "responses"
+
+
+def test_build_chat_model_allows_probe_api_fallback_override() -> None:
+    row = SimpleNamespace(
+        name="relay",
+        kind="openai",
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        get_models=lambda: [{"id": "gpt-X", "api_mode": "responses"}],
+    )
+
+    with patch("octop.infra.agents.providers.box.build_chat_model") as mock_build:
+        mock_build.return_value = FakeListChatModel(responses=["ok"])
+        _build_chat_model(
+            row,
+            model_id="gpt-X",
+            api_mode="responses",
+            api_fallback="chat_completions",
+        )
+
+    assert mock_build.call_args.args[1].api_fallback == "chat_completions"
+
+
 def _embedding_row(**overrides: Any) -> SimpleNamespace:
     models = overrides.pop(
         "models",
@@ -194,6 +249,41 @@ async def test_chat_probe_skips_embeddings_endpoint() -> None:
     assert result["ok"] is True
     client.assert_not_called()
     fake.ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_probe_reports_when_protocol_fallback_was_used() -> None:
+    row = SimpleNamespace(
+        name="relay",
+        kind="openai",
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        extra_json=None,
+        get_models=lambda: [
+            {
+                "id": "gpt-X",
+                "name": "gpt-X",
+                "api_mode": "responses",
+                "api_fallback": "chat_completions",
+            }
+        ],
+    )
+    fake = AsyncMock()
+    fake.ainvoke = AsyncMock(
+        return_value=SimpleNamespace(
+            content="pong",
+            response_metadata={"api_fallback": "chat_completions"},
+        )
+    )
+    with patch(
+        "octop.infra.agents.providers.probe.build_probe_chat_model",
+        return_value=fake,
+    ):
+        result = await probe_provider_row(row, model_id="gpt-X")
+
+    assert result["ok"] is True
+    assert result["fallback_used"] is True
+    assert result["api_mode_used"] == "chat_completions"
 
 
 @pytest.mark.asyncio

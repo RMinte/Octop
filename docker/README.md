@@ -26,7 +26,9 @@ From the repository root:
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-Open `http://localhost:8088`. If `OCTOP_DEFAULT_PASSWORD` is unset, a strong random password is generated on first init and written to `/data/.octop/credential.txt`; if it is set, it is used as-is (must be ≥8 characters with letters and digits; passwords rejected by the app password policy — e.g. common ones — fall back to a random one automatically). Change the password immediately after first login.
+Open `http://localhost:8088`. Set `OCTOP_DEFAULT_PASSWORD` to create the initial administrator (at least 8 characters with letters and digits). When it is unset or rejected by the password policy, open the setup wizard instead; its one-time password is saved to `/data/.octop/octop-login.txt`. Initial credentials or setup instructions are written to `/data/.octop/credential.txt`.
+
+Compose sets `nofile` to 65535 for multiple agents, streams and connector subprocesses. When using `docker run`, add `--ulimit nofile=65535:65535`.
 
 **Option 2: Build script**
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from octop.infra.agents.providers.presets import load_provider_presets
+from octop.infra.agents.providers.reasoning import reasoning_capability
 
 
 def test_load_provider_presets_integration() -> None:
@@ -16,10 +17,11 @@ def test_load_provider_presets_integration() -> None:
 
     deepseek = next(p for p in presets if p["id"] == "deepseek")
     deepseek_ids = {m["id"] for m in deepseek["models"]}
-    assert "deepseek-v4-flash" in deepseek_ids
+    assert "deepseek-flash" in deepseek_ids
     assert "deepseek-v4-pro" in deepseek_ids
-    flash = next(m for m in deepseek["models"] if m["id"] == "deepseek-v4-flash")
-    assert flash["reasoning_config"]["adapter"] == "thinking"
+    flash = next(m for m in deepseek["models"] if m["id"] == "deepseek-flash")
+    flash_reasoning = reasoning_capability(flash, base_url=deepseek["base_url"])
+    assert flash_reasoning is not None and flash_reasoning["adapter"] == "thinking"
 
     token_plan = next(p for p in presets if p["id"] == "tencent-token-plan")
     token_ids = {m["id"] for m in token_plan["models"]}

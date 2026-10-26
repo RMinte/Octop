@@ -49,6 +49,7 @@ def resources(
         store = SkillPackageStore(
             repo=services.skill_package_repo, root=services.paths.skill_packages_dir
         )
+        user = services.user_repo.get(owner_id)
         skills = [
             SkillOption(
                 package_id=package.id,
@@ -56,7 +57,11 @@ def resources(
                 name=str(skill.get("name") or skill["slug"]),
                 description=str(skill.get("description") or ""),
             )
-            for package in store.repo.list_all()
+            for package in (
+                store.repo.list_all()
+                if user is not None and user.role == "admin"
+                else store.repo.list_visible(owner_id)
+            )
             for skill in store.list_skill_summaries(package.id)
             if not skill.get("corrupt")
         ]

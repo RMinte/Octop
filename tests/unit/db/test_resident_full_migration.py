@@ -83,7 +83,7 @@ def test_professional_upgrade_preserves_private_identity_receipts_and_reports(
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
             foreign_keys = conn.execute("PRAGMA foreign_key_list(resident_requests)").fetchall()
             assert any(row["table"] == "resident_conversations" for row in foreign_keys)
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 57
             # The former primary-only CHECK must be gone, without replacing primary.
             conn.execute(
                 "INSERT INTO agents(agent_id,user_id,name,created_at,updated_at) VALUES('professional',1,'Writer',1,1)"
@@ -157,6 +157,6 @@ def test_existing_unreleased_53_followup_constraint_expands_without_losing_autho
                 "INSERT INTO resident_followups(followup_id,owner_id,agent_id,thread_id,request_id,fingerprint,purpose,kind,schedule,timezone,payload_json,created_at,updated_at) VALUES('scheduled-task',1,'agent','thread','authorize-task','hash','Do authorized work','task','interval:60','UTC','{}',1000,1000)"
             )
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 57
     finally:
         pool.close()

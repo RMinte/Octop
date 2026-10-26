@@ -40,6 +40,9 @@ def test_langfuse_settings_roundtrip(store: LangfuseSettingsStore) -> None:
     assert loaded.enabled is True
     assert loaded.public_key == "pk-test"
     assert loaded.configured is True
+    raw = store._secrets.get("langfuse_secret_key")
+    assert raw is not None
+    assert raw != b"sk-test"
 
 
 def test_langfuse_requires_secret_when_enabling(store: LangfuseSettingsStore) -> None:
@@ -63,6 +66,12 @@ def test_langfuse_harness_config(store: LangfuseSettingsStore) -> None:
     assert hc.public_key == "pk-test"
     assert hc.host == "http://langfuse.example"
     assert hc.secret_key == "sk-test"
+
+
+def test_langfuse_reads_legacy_plaintext_secret(store: LangfuseSettingsStore) -> None:
+    store._secrets.get_or_create("langfuse_secret_key", lambda: b"legacy-secret")
+    store.save(enabled=True, public_key="pk-test", host="http://langfuse.example")
+    assert store.harness_config().secret_key == "legacy-secret"
 
 
 def test_verify_langfuse_credentials_accepts_legacy_project_shape() -> None:

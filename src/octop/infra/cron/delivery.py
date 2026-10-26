@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from weakref import WeakValueDictionary
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -69,6 +71,7 @@ class CronDeliveryService:
         self._repos = repos
         self._task_services = services
         self._task_worker = task_worker
+        self._task_occurrence_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         if services is not None:
             gateway._task_cron_delivery = self
 

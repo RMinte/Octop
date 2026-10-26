@@ -220,8 +220,14 @@ class CronManager:
                 existing.project_id if project_id is UNSET else project_id,
                 existing.selected_expert_id if selected_expert_id is UNSET else selected_expert_id,
             )
-            if trigger is not None or enabled_bool is True:
-                self._mail_source(trigger or existing.trigger, existing.user_id)
+            trigger_changed = trigger is not None and trigger != existing.trigger
+            enabled_changed = enabled_bool is not None and enabled_bool != bool(existing.enabled)
+            # Echoed form values must not reset an interval deadline or re-check mailbox auth.
+            if trigger_changed or (enabled_bool is True and not existing.enabled):
+                self._mail_source(
+                    trigger if trigger is not None else existing.trigger,
+                    existing.user_id,
+                )
             repo_kwargs: dict[str, Any] = {
                 "trigger": trigger,
                 "name": name,
@@ -247,11 +253,37 @@ class CronManager:
             row = self._repos.cron_repo.get(cron_id)
             if row is None:
                 raise OctopError(ErrorCode.NOT_FOUND, f"cron job {cron_id!r} not found")
-            await self._unschedule(cron_id)
-            if row.enabled:
-                self._schedule(row)
+            if self._schedule_needs_rebuild(
+                existing,
+                row,
+                trigger_changed=trigger_changed,
+                enabled_changed=enabled_changed,
+            ):
+                await self._unschedule(cron_id)
+                if row.enabled:
+                    self._schedule(row)
             logger.info("CronJob %s updated", cron_id)
             return row
+
+    def _schedule_needs_rebuild(
+        self,
+        existing: Any,
+        row: Any,
+        *,
+        trigger_changed: bool,
+        enabled_changed: bool,
+    ) -> bool:
+        """Keep pending runs on metadata edits; restore a detached enabled schedule."""
+        if not row.enabled:
+            return bool(existing.enabled)
+        if trigger_changed or enabled_changed:
+            return True
+        return not self._schedule_is_attached(row)
+
+    def _schedule_is_attached(self, row: Any) -> bool:
+        if str(row.trigger).startswith("agently:"):
+            return self._mail_watch.has_job(row.cron_id)
+        return self._scheduler.get_job(row.cron_id) is not None
 
     async def delete(self, cron_id: str) -> None:
         async with self._lock:

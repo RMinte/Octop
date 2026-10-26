@@ -81,6 +81,16 @@ def reserve(service: Any, command: CronDeliveryCommand) -> Any:
 
 
 async def deliver(service: Any, command: CronDeliveryCommand) -> None:
+    """An active run and recovery must observe one complete delivery outcome."""
+    if not command.event_key:
+        command = CronDeliveryCommand(**{**asdict(command), "event_key": "manual:" + new_ulid()})
+    key = command.cron_id + ":" + command.event_key
+    lock = service._task_occurrence_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        await _deliver(service, command)
+
+
+async def _deliver(service: Any, command: CronDeliveryCommand) -> None:
     services, owner = service._task_services, command.user_id
     key = command.event_key or "manual:" + new_ulid()
     command = CronDeliveryCommand(**{**asdict(command), "event_key": key})

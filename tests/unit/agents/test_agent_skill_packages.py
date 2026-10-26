@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from octop.config import OctopConfig
-from octop.infra.agents.manager import AgentManager, skill_package_ids_list
+from octop.infra.agents.manager import AgentCreateSpec, AgentManager, skill_package_ids_list
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import SqlitePool
 from octop.infra.db.services import build_shared_services
@@ -23,12 +23,53 @@ def manager(tmp_path: Path) -> AgentManager:
     db = SqlitePool(paths.db)
     run_migrations(db)
     services = build_shared_services(db=db, paths=paths, config=OctopConfig())
+    services.user_repo.create(username="owner", password_hash="x", role="user")
     return AgentManager(repos=services.repos, paths=services.paths)
 
 
 def test_skill_package_ids_list_keeps_only_non_empty_list_items() -> None:
     assert skill_package_ids_list({"skill_package_ids": ["PACK01", "", 2]}) == ["PACK01", "2"]
     assert skill_package_ids_list({"skill_package_ids": "PACK01"}) == []
+
+
+@pytest.mark.asyncio
+async def test_private_package_cannot_enter_via_create_or_config_patch(
+    manager: AgentManager,
+) -> None:
+    owner = manager._repos.user_repo.create(username="other", password_hash="x", role="user")
+    manager._repos.skill_package_repo.create(id="PRIVATE", name="Private", created_by="1")
+    with pytest.raises(OctopError) as created:
+        await manager.create(
+            AgentCreateSpec(name="Denied", user_id=owner, skill_package_ids=["PRIVATE"])
+        )
+    assert created.value.code == ErrorCode.SKILL_PACKAGE_NOT_FOUND
+    manager._repos.agent_repo.create(agent_id="OTHER", user_id=owner, name="Other")
+    for operation in (
+        manager.update,
+        manager.update_config_json,
+    ):
+        with pytest.raises(OctopError) as patched:
+            await operation("OTHER", config_json='{"skill_package_ids":["PRIVATE"]}')
+        assert patched.value.code == ErrorCode.SKILL_PACKAGE_NOT_FOUND
+    assert manager.get_config("OTHER").get("skill_package_ids", []) == []
+
+
+def test_revoked_share_is_removed_when_runtime_mounts_are_resolved(manager: AgentManager) -> None:
+    owner = manager._repos.user_repo.create(username="viewer", password_hash="x", role="user")
+    manager._repos.skill_package_repo.create(
+        id="SHARED", name="Shared", created_by="1", shared=True
+    )
+    manager._repos.agent_repo.create(
+        agent_id="VIEWER",
+        user_id=owner,
+        name="Viewer",
+        skill_package_ids='["SHARED"]',
+    )
+    assert manager._resolve_skill_package_dirs("VIEWER")
+    manager._repos.skill_package_repo.update("SHARED", shared=0)
+    assert manager._resolve_skill_package_dirs("VIEWER") == []
+    with pytest.raises(OctopError):
+        manager.validate_skill_package_ids(["SHARED"], owner_id=owner)
 
 
 @pytest.mark.asyncio
@@ -41,7 +82,7 @@ async def test_persist_skill_package_ids_hot_syncs_without_reload(
 
     agent_id = "AGENT01"
     package_id = "PACK01"
-    manager._repos.agent_repo.create(agent_id=agent_id, user_id=None, name="agent")
+    manager._repos.agent_repo.create(agent_id=agent_id, user_id=1, name="agent")
     manager._repos.skill_package_repo.create(
         id=package_id,
         name="Package",
@@ -75,7 +116,7 @@ async def test_persist_skill_package_ids_rejects_non_host_root_backend(
     package_id = "PACK01"
     manager._repos.agent_repo.create(
         agent_id=agent_id,
-        user_id=None,
+        user_id=1,
         name="agent",
         config_json='{"backend":{"type":"local_shell","root_dir":"/tmp/octop","virtual_mode":true}}',
     )
@@ -209,7 +250,7 @@ async def test_persist_skill_package_ids_accepts_workspace_scoped_backend(
     workspace = manager.paths.ensure_agent_workspace(agent_id)
     manager._repos.agent_repo.create(
         agent_id=agent_id,
-        user_id=None,
+        user_id=1,
         name="agent",
         config_json=(
             '{"backend":{"type":"local_shell","root_dir":'
@@ -237,7 +278,7 @@ async def test_persist_skill_package_ids_accepts_workspace_scoped_backend(
 async def test_persist_skill_package_ids_rejects_unknown_package(
     manager: AgentManager,
 ) -> None:
-    manager._repos.agent_repo.create(agent_id="AGENT01", user_id=None, name="agent")
+    manager._repos.agent_repo.create(agent_id="AGENT01", user_id=1, name="agent")
 
     with pytest.raises(OctopError) as exc_info:
         await manager.persist_skill_package_ids("AGENT01", ["MISSING"])
@@ -256,7 +297,7 @@ def test_build_harness_config_includes_existing_skill_package_dirs(manager: Agen
     )
     manager._repos.agent_repo.create(
         agent_id=agent_id,
-        user_id=None,
+        user_id=1,
         name="agent",
         config_json='{"skill_package_ids":["PACK01", "MISSING"]}',
     )
@@ -276,7 +317,7 @@ def test_build_harness_config_includes_existing_skill_package_dirs(manager: Agen
 def test_persist_harness_config_lifts_legacy_skill_package_ids(manager: AgentManager) -> None:
     manager._repos.agent_repo.create(
         agent_id="AGENT01",
-        user_id=None,
+        user_id=1,
         name="agent",
         config_json='{"skill_package_ids":["PACK01"],"backend":{"type":"local_shell"}}',
     )
@@ -299,7 +340,7 @@ async def test_strip_skill_package_id_removes_it_and_hot_syncs(
 ) -> None:
     manager._repos.agent_repo.create(
         agent_id="AGENT01",
-        user_id=None,
+        user_id=1,
         name="agent",
         config_json='{"skill_package_ids":["PACK01", "PACK02"]}',
     )
@@ -324,13 +365,13 @@ async def test_refresh_agents_for_package_hot_syncs_only_mounted_agents(
     manager._repos.skill_package_repo.create(id="PACK01", name="Package", created_by="1")
     manager._repos.agent_repo.create(
         agent_id="MOUNTED",
-        user_id=None,
+        user_id=1,
         name="mounted",
         config_json='{"skill_package_ids":["PACK01"]}',
     )
     manager._repos.agent_repo.create(
         agent_id="OTHER",
-        user_id=None,
+        user_id=1,
         name="other",
         config_json='{"skill_package_ids":["PACK02"]}',
     )
@@ -358,7 +399,7 @@ async def test_list_skill_summaries_relabels_mounted_package_skills(
     package_id = "PACK01"
     manager._repos.agent_repo.create(
         agent_id=agent_id,
-        user_id=None,
+        user_id=1,
         name="agent",
         config_json=json.dumps(
             {

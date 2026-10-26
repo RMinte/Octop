@@ -75,7 +75,7 @@ def model_factory(monkeypatch):
         ],
         metadata={"execution_source": "third_party"},
     )
-    monkeypatch.setattr(ChatModelFactory, "_build", lambda *_args: base)
+    monkeypatch.setattr(ChatModelFactory, "_build", lambda *_args, **_kwargs: base)
     provider = ProviderConfig(
         id="ActualProvider",
         name="Actual provider",

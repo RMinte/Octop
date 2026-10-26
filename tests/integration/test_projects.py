@@ -18,7 +18,7 @@ def resource_fixture(server, owner):
     store = SkillPackageStore(
         repo=services.skill_package_repo, root=server.paths.skill_packages_dir
     )
-    package = store.create(name="Project skills", description="fixture", created_by="admin")
+    package = store.create(name="Project skills", description="fixture", created_by=str(owner))
     for slug in ("review", "research"):
         store.write_skill(
             package.id,

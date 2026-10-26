@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from threading import Event as ThreadEvent
 
 import pytest
 
@@ -160,15 +161,27 @@ async def test_timeout_and_repeated_observation_do_not_cancel_cleanup_again(serv
 
 async def test_real_execution_heartbeat_does_not_cancel_slow_cleanup_again(services, monkeypatch):
     turn = running(services, "heartbeat-cleanup")
+    # Start with an ordinary running turn. The deletion observer owns the first
+    # cancellation; a pre-existing pause could let the heartbeat cancel first.
+    with services.db.transaction() as conn:
+        conn.execute(
+            "UPDATE project_task_turns SET pause_requested=0 WHERE turn_id=?", (turn.turn_id,)
+        )
+    turn = replace(turn, pause_requested=False)
     entered, cleaning, heartbeat_observed, release, cleaned, cancelled_again = (
         asyncio.Event() for _ in range(6)
     )
     loop = asyncio.get_running_loop()
+    cleanup_entered = ThreadEvent()
     original_progress = services.project_task_turn_repo.progress
 
     def progress(*args, **kwargs):
         stopped = original_progress(*args, **kwargs)
-        if stopped and cleaning.is_set():
+        if stopped:
+            # progress has already released its DB transaction. Hold this
+            # heartbeat result until the real execution enters slow cleanup,
+            # so the test always exercises the second-cancel guard.
+            cleanup_entered.wait()
             loop.call_soon_threadsafe(heartbeat_observed.set)
         return stopped
 
@@ -179,6 +192,7 @@ async def test_real_execution_heartbeat_does_not_cancel_slow_cleanup_again(servi
             await asyncio.Event().wait()
         finally:
             cleaning.set()
+            cleanup_entered.set()
             try:
                 await release.wait()
                 cleaned.set()
@@ -211,6 +225,7 @@ async def test_real_execution_heartbeat_does_not_cancel_slow_cleanup_again(servi
         assert saved.status == "cancelled" and saved.reply == "saved partial reply"
         assert services.project_task_repo.get(turn.task_id, 1).active_turn_id is None
     finally:
+        cleanup_entered.set()
         release.set()
         await asyncio.gather(execution, return_exceptions=True)
         if observation is not None:

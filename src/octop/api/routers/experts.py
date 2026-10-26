@@ -759,7 +759,9 @@ async def install_expert_hub_item(
         policy_repo=server.services.user_policy_repo,
     )
     package_ids = (
-        server.app_runtime.agent_registry.validate_skill_package_ids(body.skill_package_ids)
+        server.app_runtime.agent_registry.validate_skill_package_ids(
+            body.skill_package_ids, owner_id=user.id
+        )
         if body.skill_package_ids is not None
         else None
     )
@@ -857,7 +859,9 @@ async def create_agent_from_expert(
         policy_repo=server.services.user_policy_repo,
     )
     package_ids = (
-        server.app_runtime.agent_registry.validate_skill_package_ids(body.skill_package_ids)
+        server.app_runtime.agent_registry.validate_skill_package_ids(
+            body.skill_package_ids, owner_id=user.id
+        )
         if body.skill_package_ids is not None
         else None
     )

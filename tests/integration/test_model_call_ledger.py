@@ -40,7 +40,9 @@ def observed_model(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     options: dict[str, Any] = {}
 
-    def build(provider: Any, model: Any) -> FakeMessagesListChatModel:
+    def build(
+        provider: Any, model: Any, *, max_retries: int | None = None
+    ) -> FakeMessagesListChatModel:
         return options["instance"]
 
     monkeypatch.setattr(harness_factory, "_build_openai", build)

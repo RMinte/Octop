@@ -242,7 +242,7 @@ async def test_real_fake_model_uses_configured_model_and_records_usage(
     config["memory"]["aux_model"] = aux_model
     services.agent_repo.update_config("expert-one", config_json=json.dumps(config))
 
-    def build(factory, provider, model):
+    def build(factory, provider, model, *, max_retries=None):
         fake = FakeMessagesListChatModel(
             responses=[
                 AIMessage(
@@ -295,7 +295,7 @@ async def test_response_metadata_usage_is_recorded_for_memory_extraction(service
         models_json=json.dumps([{"id": "model", "enabled": True}]),
     )
 
-    def build(factory, provider, model):
+    def build(factory, provider, model, *, max_retries=None):
         message = AIMessage(
             content=response(),
             response_metadata={
@@ -560,3 +560,46 @@ async def test_memory_model_disables_sdk_retries_without_mutating_shared_factory
         await before.close()
         if provider == "openai":
             model.root_client.close()
+
+
+async def test_manual_documents_and_extraction_limits_are_turn_snapshots(services):  # noqa: F811
+    from octop.infra.projects.expert_profiles import _workspace
+
+    row = services.agent_repo.get("expert-one")
+    config = json.loads(row.config_json)
+    config["memory"]["extract_max_tokens"] = 2048
+    config["memory"]["extract_heavy_timeout_s"] = 90
+    config["memory"]["extract_extra_body"] = {"vendor_flag": True}
+    services.agent_repo.update_config("expert-one", config_json=json.dumps(config))
+    workspace = _workspace(services, row, config)
+    workspace.upload_bytes("MEMORY.md", b"The owner prefers detailed reports.")
+    memory, job = await capture_job(services)
+    assert memory.manual_context()["MEMORY.md"] == "The owner prefers detailed reports."
+    limits = json.loads(job.payload_json)["profile"]["memory"]["extract_config"]
+    assert limits["extract_max_tokens"] == 2048
+    assert limits["extract_heavy_timeout_s"] == 90
+    workspace.upload_bytes("MEMORY.md", b"The owner now prefers brief reports.")
+    assert memory.manual_context()["MEMORY.md"] == "The owner prefers detailed reports."
+    assert memory.current_manual_documents()["MEMORY.md"] == "The owner now prefers brief reports."
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE agents SET is_shared=1 WHERE agent_id='expert-one'")
+    shared = resolve_expert_profile(services, 2, "expert-one")
+    assert not {"USER.md", "MEMORY.md"} & {item["path"] for item in shared["profile_files"]}
+    assert shared["memory"]["extract_config"] == {}
+
+
+async def test_extraction_model_respects_budget_timeouts_and_vendor_extras():
+    from langchain_openai import ChatOpenAI
+
+    model = ChatOpenAI(model="test", api_key="fake", extra_body={"original": True})
+    try:
+        configured = extraction._single_attempt_model(
+            model, options={"extract_heavy_timeout_s": 120, "extract_extra_body": {"vendor": 1}}
+        )
+        assert configured.extra_body == {"original": True, "vendor": 1}
+        assert model.extra_body == {"original": True}
+        assert configured.root_async_client.timeout == 120
+        assert configured.root_async_client.max_retries == 0
+    finally:
+        await model.root_async_client.close()
+        model.root_client.close()

@@ -12,7 +12,6 @@ import hashlib
 import json
 import logging
 import os
-import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -26,6 +25,8 @@ from pydantic import BaseModel, Field
 
 from octop.i18n import tr
 from octop.infra.agents.memory.backend import open_memory_kwargs
+from octop.infra.agents.memory.locking import scope_lock as _scope_lock
+from octop.infra.agents.memory.locking import store_lock
 from octop.infra.agents.workspace.dir import workspace_dir_from_config
 from octop.infra.db.services import SharedServices
 from octop.infra.projects.checkpoint_saver import checkpoint_fence
@@ -38,38 +39,6 @@ EXPERT_MEMORY_TOOLS = frozenset({"expert_memory_search", "expert_memory_get"})
 def memory_namespace(owner_id: int, expert_id: str, kind: str, scope_id: str = "") -> str:
     identity = json.dumps([owner_id, expert_id, kind, scope_id], separators=(",", ":"))
     return "octop_expert_" + hashlib.sha256(identity.encode()).hexdigest()
-
-
-@contextlib.contextmanager
-def _scope_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
-    with os.fdopen(descriptor, "r+b", buffering=0) as lock:
-        if sys.platform == "win32":
-            import msvcrt
-
-            if os.fstat(lock.fileno()).st_size == 0:
-                lock.write(b"\0")
-            while True:
-                lock.seek(0)
-                try:
-                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.02)
-            try:
-                yield
-            finally:
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 class SearchArgs(BaseModel):
@@ -180,7 +149,10 @@ class ExpertMemory:
             )
         namespace = self.namespaces[source]
         lock = self.services.paths.root / "expert-memory-locks" / f"{namespace}.lock"
-        with _scope_lock(lock):
+        with (
+            store_lock(self.services.paths.root, str(self.profile["expert_id"])),
+            _scope_lock(lock),
+        ):
             # Lock contention must not let an admitted operation outlive a
             # revoked identity or an expert storage/policy change.
             _, current_config = self._configuration()
@@ -188,7 +160,11 @@ class ExpertMemory:
                 raise ValueError("expert memory configuration changed")
             memory = Memory(namespace=namespace, backend=backend, backend_config=backend_config)
             try:
-                service = MemoryService(memory, host="octop-project-task")
+                service = MemoryService(
+                    memory,
+                    host="octop-project-task",
+                    manual_documents_provider=self.current_manual_documents,
+                )
                 if method == "management_operation":
                     operation: Callable[[Memory], Any] = kwargs["operation"]
                     return operation(memory)
@@ -211,6 +187,28 @@ class ExpertMemory:
                 return getattr(service, method)(**kwargs)
             finally:
                 memory.backend.close()
+
+    def manual_context(self) -> dict[str, str]:
+        """Only the admitted turn's private owner documents are prompt context."""
+        if self.profile.get("owner_id", self.owner_id) != self.owner_id:
+            return {}
+        return {
+            str(item["path"]): str(item["content"])
+            for item in self.profile.get("profile_files", [])
+            if item.get("path") in {"USER.md", "MEMORY.md"}
+        }
+
+    def current_manual_documents(self) -> dict[str, str]:
+        """Read current owner files for explicit writes; never refresh turn snapshots."""
+        row, config = self._configuration()
+        if row.user_id != self.owner_id:
+            return {}
+        from octop.infra.projects.expert_profiles import _workspace
+
+        workspace = _workspace(self.services, row, config)
+        return {
+            name: workspace.read_text(name, limit=131073) or "" for name in ("USER.md", "MEMORY.md")
+        }
 
     def management_operation(self, source: str, operation: Callable[[Memory], Any]) -> Any:
         """Run a server-owned maintenance operation under the same scope lock."""
@@ -281,7 +279,9 @@ class ExpertMemory:
                 return str(cached["content"])
             parts = []
             for source in self.namespaces:
-                result = self._call(source, "recall", query=query)
+                result = self._call(
+                    source, "recall", query=query, manual_context=self.manual_context()
+                )
                 if result.rendered:
                     parts.append(f"[{source}]\n{result.rendered}")
             content = "\n\n".join(parts)
@@ -435,6 +435,7 @@ class ExpertMemory:
                     "project_id": self.project_id,
                     "profile": {
                         "expert_id": self.profile["expert_id"],
+                        "owner_id": self.profile.get("owner_id", self.owner_id),
                         "memory": {
                             **self.profile.get("memory", {}),
                             **(

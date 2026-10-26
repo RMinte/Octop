@@ -23,6 +23,7 @@ from typing import Any, cast
 from langchain_core.messages import HumanMessage, SystemMessage
 from octop_harness.context_usage import extract_usage_from_message
 from octop_harness.llm.invoke_helpers import bind_call_options, stringify_content
+from octop_memory import MemoryService
 from octop_memory.core import Memory
 from octop_memory.pipeline.extractor import CandidateExtractor
 from octop_memory.pipeline.promotion import PromotionWorker
@@ -36,6 +37,7 @@ from octop.infra.db.services import SharedServices
 from octop.infra.errors import OctopError
 from octop.infra.projects.expert_memory import ExpertMemory
 from octop.infra.projects.expert_profiles import expert_configuration
+from octop.infra.projects.recovery import transient
 from octop.infra.usage.model_calls import model_call_scope
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.ulid import new_ulid
@@ -67,27 +69,39 @@ def _candidate(value: dict[str, Any]) -> Candidate:
     return Candidate(**data)
 
 
-def _single_attempt_model(model: Any, capability: dict[str, Any] | None = None) -> Any:
+def _single_attempt_model(
+    model: Any, capability: dict[str, Any] | None = None, options: dict[str, Any] | None = None
+) -> Any:
     # Field changes do not replace an already-created SDK retry policy. SDK
     # with_options copies share their HTTP pool; the factory keeps its lifecycle.
     # Extraction has its own short, structured-output budget. In particular,
     # providers may enable thinking by default even when the Task disabled it.
+    options = options or {}
+    timeout = max(30.0, min(3600.0, float(options.get("extract_heavy_timeout_s") or 30)))
+    thinking = options.get("extract_thinking", "off")
     overrides = reasoning_request_parameters(
         {**capability, "default_effort": None} if capability is not None else None,
-        mode="disabled",
+        mode={"off": "disabled", "on": "enabled", "auto": "auto"}.get(thinking, "disabled"),
         effort=None,
     )
     updates: dict[str, Any] = {"max_retries": 0, **overrides.get("model_fields", {})}
     if extra := overrides.get("extra_body"):
         updates["extra_body"] = {**(getattr(model, "extra_body", None) or {}), **extra}
+    extra_body = options.get("extract_extra_body")
+    if isinstance(extra_body, dict) and extra_body:
+        updates["extra_body"] = {
+            **(getattr(model, "extra_body", None) or {}),
+            **updates.get("extra_body", {}),
+            **extra_body,
+        }
     root = getattr(model, "root_async_client", None)
     if root is not None and callable(getattr(root, "with_options", None)):
-        root = root.with_options(max_retries=0, timeout=30)
+        root = root.with_options(max_retries=0, timeout=timeout)
         updates.update(root_async_client=root, async_client=root.chat.completions)
     else:
         root = getattr(model, "_async_client", None)
         if root is not None and callable(getattr(root, "with_options", None)):
-            updates["_async_client"] = root.with_options(max_retries=0, timeout=30)
+            updates["_async_client"] = root.with_options(max_retries=0, timeout=timeout)
     return model.model_copy(update=updates)
 
 
@@ -136,17 +150,36 @@ class _ModelClient:
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.worker, self.job, self.model, self.loop = worker, job, model, loop
+        payload = json.loads(job.payload_json)
+        options = (payload.get("profile", {}).get("memory") or {}).get("extract_config") or {}
+        self.timeout = max(30.0, min(3600.0, float(options.get("extract_heavy_timeout_s") or 30)))
+        self.max_tokens = max(128, min(65536, int(options.get("extract_max_tokens") or 4096)))
+        self.max_retries = max(0, min(5, int(options.get("extract_max_retries") or 0)))
+        self.retry_backoff = max(0.0, min(60.0, float(options.get("extract_retry_backoff_s") or 1)))
 
     def call_llm(self, prompt: str, **options: Any) -> str:
         self.worker.authorize(self.job)
         future = asyncio.run_coroutine_threadsafe(self._invoke(prompt, options), self.loop)
         try:
-            return future.result(timeout=40)
+            return future.result(
+                timeout=(self.timeout + self.retry_backoff * 2**self.max_retries + 10)
+                * (self.max_retries + 1)
+            )
         except TimeoutError:
             future.cancel()
             raise
 
     async def _invoke(self, prompt: str, options: dict[str, Any]) -> str:
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await self._invoke_once(prompt, options)
+            except Exception as exc:
+                if attempt == self.max_retries or not transient(exc):
+                    raise
+                await asyncio.sleep(self.retry_backoff * 2**attempt)
+        raise RuntimeError("memory extraction retries exhausted")
+
+    async def _invoke_once(self, prompt: str, options: dict[str, Any]) -> str:
         services, job = self.worker.services, self.job
         await asyncio.to_thread(self.worker.authorize, job)
         await asyncio.to_thread(
@@ -174,15 +207,27 @@ class _ModelClient:
         ):
             bound = bind_call_options(
                 self.model,
-                max_tokens=min(getattr(self.model, "_harness_max_output_tokens", 0) or 4096, 4096),
+                max_tokens=min(
+                    getattr(self.model, "_harness_max_output_tokens", 0) or self.max_tokens,
+                    self.max_tokens,
+                ),
                 temperature=0,
                 response_format="json" if options.get("response_format") == "json" else "text",
-                timeout_s=30,
+                timeout_s=self.timeout,
             )
-            result = await asyncio.wait_for(
-                bound.ainvoke(messages),
-                timeout=30,
-            )
+            pending = asyncio.create_task(bound.ainvoke(messages))
+            try:
+                async with asyncio.timeout(self.timeout):
+                    while not pending.done():
+                        await asyncio.wait({pending}, timeout=0.5)
+                        if self.worker._stopping.is_set():
+                            raise _Stopped()
+                    result = await pending
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pending
         usage = extract_usage_from_message(result)
         if usage is not None:
             await asyncio.to_thread(
@@ -411,6 +456,11 @@ class ExpertMemoryWorker:
                 candidates = [_candidate(item) for item in proposal["candidates"]]
                 store.add_candidates(candidates)
                 outcome = PromotionWorker(store).promote(candidates)
+                documents = memory.current_manual_documents()
+                if any(documents.values()):
+                    MemoryService(store, host="octop-project-task").reconcile_manual_documents(
+                        documents, is_current=lambda: memory.current_manual_documents() == documents
+                    )
                 self.authorize(job)
                 store.set_meta(
                     receipt_key,
@@ -466,13 +516,30 @@ class ExpertMemoryWorker:
                     store.add_raw_batch([evidence])
                     store.add_candidates([candidate])
                     PromotionWorker(store).promote([candidate])
+                documents = memory.current_manual_documents()
+                if any(documents.values()):
+                    MemoryService(store, host="octop-project-task").reconcile_manual_documents(
+                        documents, is_current=lambda: memory.current_manual_documents() == documents
+                    )
                 self.authorize(job)
                 store.set_meta(receipt_key, "completed")
 
         memory.management_operation("general", general)
 
+    async def _keep_lease(self, job: ExpertMemoryJob, finished: asyncio.Event) -> None:
+        while not finished.is_set():
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=20)
+            except TimeoutError:
+                if not await asyncio.to_thread(
+                    self.services.expert_memory_job_repo.heartbeat, job, _now()
+                ):
+                    return
+
     async def execute(self, job: ExpertMemoryJob) -> None:
         repo = self.services.expert_memory_job_repo
+        finished = asyncio.Event()
+        lease = asyncio.create_task(self._keep_lease(job, finished))
         factory: OctopChatModelFactory | None = None
         try:
             _, policy = await asyncio.to_thread(self.authorize, job)
@@ -500,7 +567,10 @@ class ExpertMemoryWorker:
                 capability = await asyncio.to_thread(
                     store.get_model_reasoning_capability, model_ref
                 )
-                model = _single_attempt_model(model, capability)
+                extract_options = (payload.get("profile", {}).get("memory") or {}).get(
+                    "extract_config"
+                ) or {}
+                model = _single_attempt_model(model, capability, extract_options)
                 if not await asyncio.to_thread(repo.update, job, phase="extracting", now=_now()):
                     raise _Stopped()
                 llm = _ModelClient(
@@ -540,6 +610,8 @@ class ExpertMemoryWorker:
                 repo.update, job, status=status, error_code="extraction_failed", now=_now()
             )
         finally:
+            finished.set()
+            await lease
             if factory is not None:
                 await factory.aclose()
 

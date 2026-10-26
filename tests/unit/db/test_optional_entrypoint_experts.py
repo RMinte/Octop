@@ -112,7 +112,7 @@ def test_optional_upgrade_preserves_rows_and_first_expert_backfill(
             )
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
             assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 57
     finally:
         db.close()
 

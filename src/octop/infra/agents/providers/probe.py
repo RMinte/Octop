@@ -39,16 +39,17 @@ def provider_headers(row: Any) -> dict[str, str]:
     return result
 
 
-def _is_codex_base_url(base_url: str | None) -> bool:
-    return bool(base_url and "chatgpt.com/backend-api/codex" in base_url)
-
-
-def build_probe_chat_model(row: Any, *, model_id: str | None = None) -> Any:
+def build_probe_chat_model(
+    row: Any,
+    *,
+    model_id: str | None = None,
+    api_mode: str | None = None,
+    api_fallback: str | None = None,
+) -> Any:
     """Construct a chat model from a provider row for probing."""
     from octop_harness.config import ModelConfig, ProviderConfig
 
     from octop.infra.agents.providers.box import build_box_chat_model
-    from octop.infra.usage.model_calls import attach_model_observer
 
     protocol = KIND_TO_PROTOCOL.get(row.kind, row.kind)
     base_url = row.base_url or "https://api.openai.com/v1"
@@ -56,8 +57,16 @@ def build_probe_chat_model(row: Any, *, model_id: str | None = None) -> Any:
     models = row.get_models() if hasattr(row, "get_models") else []
     mid = model_id or (models[0]["id"] if models else "gpt-4o-mini")
     entry = next((m for m in models if m.get("id") == mid), None)
-    display_name = (entry or {}).get("name") or mid
-    model = ModelConfig(id=mid, name=display_name)
+    model_data = dict(entry) if isinstance(entry, dict) else {}
+    model_data["id"] = mid
+    model_data.setdefault("name", mid)
+    if api_mode is not None:
+        model_data["api_mode"] = api_mode
+    if api_fallback is not None:
+        model_data["api_fallback"] = api_fallback
+    elif api_mode is not None and api_mode != "responses":
+        model_data["api_fallback"] = "none"
+    model = ModelConfig.from_dict(model_data)
 
     if row.kind == "box":
         from octop.infra.agents.providers.box import (
@@ -73,30 +82,6 @@ def build_probe_chat_model(row: Any, *, model_id: str | None = None) -> Any:
             headers=headers,
         )
         return build_box_chat_model(provider, model)
-
-    if _is_codex_base_url(base_url):
-        from langchain_openai import ChatOpenAI
-
-        kwargs: dict[str, Any] = {
-            "model": model.id,
-            "base_url": base_url,
-            "api_key": row.api_key or "",
-            "use_responses_api": True,
-        }
-        if headers:
-            kwargs["default_headers"] = dict(headers)
-        instance = ChatOpenAI(**kwargs)
-        return attach_model_observer(
-            instance,
-            ProviderConfig(
-                id=row.name,
-                name=row.name,
-                protocol=protocol,
-                api_key=row.api_key or "",
-                base_url=base_url,
-            ),
-            model,
-        )
 
     provider = ProviderConfig(
         id=row.name,
@@ -116,11 +101,18 @@ def make_probe_provider_row(
     api_key: str | None,
     base_url: str | None,
     model_id: str,
+    api_mode: str = "chat_completions",
+    api_fallback: str = "none",
     extra_json: str | None = None,
     embedding: bool = False,
 ) -> Any:
     """Build a ProviderRow-like object for connectivity probes."""
-    model: dict[str, Any] = {"id": model_id, "name": model_id}
+    model: dict[str, Any] = {
+        "id": model_id,
+        "name": model_id,
+        "api_mode": api_mode,
+        "api_fallback": api_fallback,
+    }
     if embedding:
         model["embedding"] = True
         model["task"] = "embedding"
@@ -258,6 +250,8 @@ async def probe_provider_row(
     row: Any,
     *,
     model_id: str | None = None,
+    api_mode: str | None = None,
+    api_fallback: str | None = None,
     embedding: bool | None = None,
     locale: str = "en",
 ) -> dict[str, Any]:
@@ -283,7 +277,12 @@ async def probe_provider_row(
         return await _probe_embedding_endpoint(row, model_id=mid, locale=locale)
     started = time.perf_counter()
     try:
-        chat = build_probe_chat_model(row, model_id=mid)
+        chat = build_probe_chat_model(
+            row,
+            model_id=mid,
+            api_mode=api_mode,
+            api_fallback=api_fallback,
+        )
         result = await asyncio.wait_for(chat.ainvoke("ping"), timeout=30.0)
     except Exception as exc:
         logger.info(
@@ -295,7 +294,18 @@ async def probe_provider_row(
         return {"ok": False, "error": _friendly_probe_error(exc, locale=locale)}
     latency_ms = int((time.perf_counter() - started) * 1000)
     _ = getattr(result, "content", None)
-    return {"ok": True, "latency_ms": latency_ms}
+    metadata = getattr(result, "response_metadata", None)
+    fallback_used = bool(
+        isinstance(metadata, dict) and metadata.get("api_fallback") == "chat_completions"
+    )
+    entry = _probe_model_entry(row, mid)
+    selected_mode = api_mode or str(entry.get("api_mode") or "chat_completions")
+    return {
+        "ok": True,
+        "latency_ms": latency_ms,
+        "fallback_used": fallback_used,
+        "api_mode_used": "chat_completions" if fallback_used else selected_mode,
+    }
 
 
 def _models_list_url(base_url: str | None) -> str:

@@ -30,6 +30,7 @@ from octop.infra.agents.providers import ProviderStore, sync_providers_to_harnes
 from octop.infra.agents.providers.harness_factory import (
     OctopHarnessAgentManager as HarnessAgentManager,
 )
+from octop.infra.agents.providers.health import model_health_for
 from octop.infra.agents.security import SecuritySettingsStore, ToolGuardRulesStore
 from octop.infra.agents.security.hitl_session import (
     HitlSessionPolicyStore,
@@ -105,14 +106,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _model_retry_on_failure(exc: Exception) -> str:
-    # Feed a specific, model-visible prompt instead of raising. Inbox jobs still
-    # mark failed when the reply carries MODEL_RETRY_FAILURE_MARK.
-    from octop.i18n.domains.stream import model_retry_failure_prompt
-
-    return model_retry_failure_prompt(exc, "en")
-
-
 # Bounded parallelism for awaited provider/active-model reload batches.
 _PROVIDER_RELOAD_CONCURRENCY = 6
 # One hung remote backend must not block ``octop run`` from serving HTTP.
@@ -184,6 +177,20 @@ def _memory_aux_model_settings(
     return {"memory_aux_light_model": ref, "memory_aux_heavy_model": ref}
 
 
+def memory_extract_supported_options() -> list[str]:
+    """Call options supported by the installed harness, for the settings UI."""
+    fields = {
+        "extract_max_tokens": "memory_extract_max_tokens",
+        "extract_light_timeout_s": "memory_aux_light_timeout_s",
+        "extract_heavy_timeout_s": "memory_aux_heavy_timeout_s",
+        "extract_thinking": "memory_aux_thinking",
+        "extract_extra_body": "memory_aux_extra_body",
+        "extract_max_retries": "memory_aux_max_retries",
+        "extract_retry_backoff_s": "memory_aux_retry_backoff_s",
+    }
+    return [key for key, field in fields.items() if field in _HARNESS_AGENT_CONFIG_FIELDS]
+
+
 def _memory_extract_settings(
     cfg: dict[str, Any],
     *,
@@ -222,6 +229,55 @@ def _memory_extract_settings(
             and val > 0
         ):
             out[dst] = float(val)
+
+    # Aux-call options (#1360): read timeouts per tier, an extraction output
+    # budget, and vendor request extras for the aux LLM. Forward-compat: only
+    # forwarded when the installed octop-harness knows the field.
+    for src, dst in (
+        ("extract_light_timeout_s", "memory_aux_light_timeout_s"),
+        ("extract_heavy_timeout_s", "memory_aux_heavy_timeout_s"),
+    ):
+        val = mem.get(src)
+        if (
+            dst in supported_fields
+            and isinstance(val, int | float)
+            and not isinstance(val, bool)
+            and val > 0
+        ):
+            # Older API versions accepted timeouts beyond harness limits.
+            out[dst] = max(30.0, min(3600.0, float(val)))
+    max_tokens = mem.get("extract_max_tokens")
+    if (
+        "memory_extract_max_tokens" in supported_fields
+        and isinstance(max_tokens, int)
+        and not isinstance(max_tokens, bool)
+        and max_tokens > 0
+    ):
+        out["memory_extract_max_tokens"] = max(128, min(65536, max_tokens))
+    thinking = mem.get("extract_thinking")
+    if thinking in ("auto", "off", "on") and "memory_aux_thinking" in supported_fields:
+        out["memory_aux_thinking"] = thinking
+    for src, dst in (
+        ("extract_max_retries", "memory_aux_max_retries"),
+        ("extract_retry_backoff_s", "memory_aux_retry_backoff_s"),
+    ):
+        value = mem.get(src)
+        if (
+            dst in supported_fields
+            and isinstance(value, int | float)
+            and not isinstance(value, bool)
+        ):
+            out[dst] = value
+    extra_body = mem.get("extract_extra_body")
+    aux_model = mem.get("aux_model")
+    has_aux_override = isinstance(aux_model, str) and bool(aux_model.strip())
+    if (
+        "memory_aux_extra_body" in supported_fields
+        and isinstance(extra_body, dict)
+        and extra_body
+        and (not has_aux_override or "memory_aux_light_model" in out)
+    ):
+        out["memory_aux_extra_body"] = dict(extra_body)
 
     # octop-harness 0.9.5 predates the interval trigger fields. Keep
     # hot reload working against that release and approximate interval mode
@@ -437,6 +493,7 @@ class AgentManager:
         self._providers = ProviderStore(
             provider_repo=repos.provider_repo,
         )
+        self._model_health = model_health_for(repos.provider_repo)
         self._connector_svc = ConnectorService(
             repo=repos.connector_repo,
             secret_repo=repos.secret_repo,
@@ -468,6 +525,7 @@ class AgentManager:
             agents_repo=repos.agent_repo,
         )
         self._providers = ProviderStore(provider_repo=repos.provider_repo)
+        self._model_health = model_health_for(repos.provider_repo)
         self._connector_svc = ConnectorService(
             repo=repos.connector_repo,
             secret_repo=repos.secret_repo,
@@ -674,6 +732,12 @@ class AgentManager:
                 if spec.skill_package_ids is not None
                 else profile.get("skill_package_ids")
             )
+            if package_ids_json is not None:
+                package_ids_json = dump_id_list(
+                    self.validate_skill_package_ids(
+                        json.loads(package_ids_json), owner_id=spec.user_id
+                    )
+                )
             knowledge_ids_json = (
                 dump_id_list(spec.knowledge_base_ids)
                 if spec.knowledge_base_ids is not None
@@ -866,6 +930,14 @@ class AgentManager:
             kwargs["config_json"] = dumps_config(parsed_profile_cfg)
             for key, value in lifted.items():
                 kwargs.setdefault(key, value)
+        if "skill_package_ids" in kwargs:
+            owner_row = self._repos.agent_repo.get(agent_id)
+            kwargs["skill_package_ids"] = dump_id_list(
+                self.validate_skill_package_ids(
+                    json.loads(kwargs["skill_package_ids"] or "[]"),
+                    owner_id=owner_row.user_id if owner_row is not None else None,
+                )
+            )
         new_name = kwargs.get("name")
         if isinstance(new_name, str):
             row = self._repos.agent_repo.get(agent_id)
@@ -1021,6 +1093,79 @@ class AgentManager:
                 shutdown()
         self._wait_memory_maintenance_idle(mw)
 
+    async def restore_memory_store(
+        self, agent_id: str, memory: Any, operation: Callable[[], dict[str, Any]], *, locale: str
+    ) -> dict[str, Any]:
+        """Drain and recreate only this expert; caller owns its turn reservation."""
+        from octop_harness.memory.store import shared_memory_store
+
+        from octop.i18n import tr
+
+        assert self._harness_manager is not None
+        async with self._lifecycle_lock_for(agent_id):
+            agent = self.get_agent(agent_id)
+            runtime = agent._memory_runtime
+            if runtime.memory is not memory:
+                raise ValueError(tr("memory_storage.restore_changed", locale))
+            key = runtime._memory_key
+            if key is not None and shared_memory_store().refs(key) != 1:
+                raise ValueError(tr("memory_storage.shared_sqlite", locale))
+            mw = runtime._middleware
+            pause_background = getattr(mw, "pause_background", None)
+            if not callable(pause_background):
+                raise ValueError(tr("memory_storage.incompatible", locale))
+            pause = pause_background(timeout=120)
+            draining = asyncio.create_task(asyncio.to_thread(pause.__enter__))
+            try:
+                await asyncio.shield(draining)
+            except asyncio.CancelledError:
+                await draining
+                await asyncio.to_thread(pause.__exit__, None, None, None)
+                raise
+            removed = False
+            try:
+                row = self.get_row(agent_id)
+                if row is None:
+                    raise ValueError(tr("memory_storage.restore_changed", locale))
+                cfg, metadata, tags, user_display = self._agent_runtime_bundle(row)
+                removed = True
+                await self._harness_manager.aremove_agent(agent_id)
+                if runtime.memory is not None or (
+                    key is not None and shared_memory_store().peek(key) is not None
+                ):
+                    raise ValueError(tr("memory_storage.restore_changed", locale))
+                worker = asyncio.create_task(asyncio.to_thread(operation))
+                try:
+                    return await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    await worker
+                    raise
+            finally:
+                try:
+                    if removed:
+                        try:
+                            assert row is not None
+                            entry = await self._harness_manager.acreate_agent(
+                                cfg,
+                                agent_id=agent_id,
+                                metadata=metadata,
+                                tags=tags,
+                                init_workspace=False,
+                            )
+                            await self._post_start_agent(
+                                row, entry.agent, cfg, user_display=user_display
+                            )
+                            self._repos.agent_repo.set_state(agent_id, "running", error=None)
+                        except Exception as exc:
+                            self._repos.agent_repo.set_state(
+                                agent_id, "failed", error=format_agent_start_error(exc)
+                            )
+                            raise ValueError(
+                                tr("memory_storage.restore_reload_failed", locale)
+                            ) from exc
+                finally:
+                    await asyncio.to_thread(pause.__exit__, None, None, None)
+
     @staticmethod
     def _wait_memory_maintenance_idle(mw: object, *, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
@@ -1063,6 +1208,84 @@ class AgentManager:
             except KeyError:
                 pass
         return self._backend_workspace_for_row(row)
+
+    async def save_manual_memory_document(self, agent_id: str, filename: str, content: str) -> None:
+        """Serialize owner edits with document review and lifecycle changes."""
+        if filename not in {"USER.md", "MEMORY.md"}:
+            raise ValueError("Unsupported manual memory document")
+        async with self._lifecycle_lock_for(agent_id):
+            workspace = await asyncio.to_thread(self.workspace_for_agent, agent_id)
+            if workspace is None:
+                raise self._unavailable_error(agent_id)
+            await workspace.awrite_text(filename, content, force=True)
+
+    async def review_manual_memory_documents(self, agent_id: str) -> dict[str, Any]:
+        """Review current files, including for stopped agents, without changing session snapshots."""
+        async with self._lifecycle_lock_for(agent_id):
+            if self.memory_slim.busy and self.memory_slim.status(agent_id) is not None:
+                raise OctopError.localized(ErrorCode.AGENT_BUSY)
+            workspace = await asyncio.to_thread(self.workspace_for_agent, agent_id)
+            if workspace is None:
+                raise self._unavailable_error(agent_id)
+            documents = {}
+            for filename in ("USER.md", "MEMORY.md"):
+                data = await workspace.adownload_bytes(filename)
+                documents[filename] = data.decode("utf-8") if data is not None else ""
+
+            def run() -> dict[str, Any]:
+                from octop_harness.llm.factory import ChatModelFactory
+                from octop_harness.memory.runtime import MemoryRuntime
+
+                temporary = None
+                owned_factory = None
+                try:
+                    try:
+                        service = self.get_agent(agent_id)._memory_runtime.service
+                    except OctopError:
+                        row = self.get_row(agent_id)
+                        if row is None:
+                            raise self._unavailable_error(agent_id) from None
+                        cfg = self._build_harness_config(row)
+                        if not cfg.memory_enabled:
+                            return {"status": "disabled"}
+                        factory = (
+                            self._harness_manager.shared_factory
+                            if self._harness_manager is not None
+                            else None
+                        )
+                        if factory is None:
+                            factory = owned_factory = ChatModelFactory(
+                                cfg.providers, agent_config=cfg
+                            )
+                        temporary = MemoryRuntime(
+                            config=cfg,
+                            workspace_path=Path(cfg.workspace_dir),
+                            model_factory=factory,
+                            workspace=workspace,
+                        )
+                        service = temporary.service
+                    if service is None:
+                        return {"status": "disabled"}
+
+                    def current() -> bool:
+                        return all(
+                            (workspace.download_bytes(name) or b"").decode("utf-8") == body
+                            for name, body in documents.items()
+                        )
+
+                    return dict(service.reconcile_manual_documents(documents, is_current=current))
+                finally:
+                    if temporary is not None:
+                        temporary.close()
+                    if owned_factory is not None:
+                        owned_factory.close()
+
+            worker = asyncio.create_task(asyncio.to_thread(run))
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                await worker
+                raise
 
     def list_agents(self, user_id: int) -> list[AgentRow]:
         return self._repos.agent_repo.list_by_user(
@@ -1429,14 +1652,40 @@ class AgentManager:
         if self._harness_manager is not None:
             self._harness_manager.clear_thread_model(agent_id, thread_id)
 
-    def resolve_fallback_model_ref(self) -> str | None:
-        """Settings active model when usable, else the first enabled catalog model."""
+    def _resolve_configured_fallback_model_ref(self) -> str | None:
+        """Return the configured fallback without applying runtime health."""
         name, model_id = self._repos.settings_repo.get_active_model()
         if name and model_id:
             ref = f"{name}/{model_id}"
             if self._providers.is_model_ref_usable(ref):
                 return ref
         return self._providers.resolve_first_model_ref()
+
+    def resolve_fallback_model_ref(self) -> str | None:
+        """Return the first healthy model for an automatic route."""
+        configured = self._resolve_configured_fallback_model_ref()
+        if configured and self._model_health.is_routable(configured):
+            return configured
+        source = (
+            self._repos.provider_repo.get_by_name(configured.partition("/")[0])
+            if configured
+            else None
+        )
+        allowed = {
+            row.name
+            for row in self._providers.iter_usable_rows()
+            if source is None or (row.kind == "box") == (source.kind == "box")
+        }
+        for candidate in self._providers.list_auto_route_candidates(needs_multimodal=False):
+            if candidate.ref.partition("/")[0] in allowed and self._model_health.is_routable(
+                candidate.ref
+            ):
+                return candidate.ref
+        return None
+
+    def is_auto_route_model_available(self, ref: str) -> bool:
+        """Return whether a usable model can start an automatic route now."""
+        return self._providers.is_model_ref_usable(ref) and self._model_health.is_routable(ref)
 
     # ------------------------------------------------------------------
     # Hot-reload — rebuild harness agents after config / provider changes
@@ -2054,6 +2303,14 @@ class AgentManager:
             agent_id, parse_config_json(config_json), pin_workspace_dir=True
         )
         lifted = extract_profile_from_config(parsed)
+        if "skill_package_ids" in lifted:
+            row = self._repos.agent_repo.get(agent_id)
+            lifted["skill_package_ids"] = dump_id_list(
+                self.validate_skill_package_ids(
+                    json.loads(lifted["skill_package_ids"] or "[]"),
+                    owner_id=row.user_id if row is not None else None,
+                )
+            )
         self._repos.agent_repo.update_config(
             agent_id,
             config_json=dumps_config(parsed),
@@ -2104,8 +2361,10 @@ class AgentManager:
             root=self._paths.skill_packages_dir,
         )
         roots: list[str] = []
+        row = self._repos.agent_repo.get(agent_id)
+        visible = self._visible_skill_package_ids(row.user_id if row is not None else None)
         for package_id in skill_package_ids_list(self.get_config(agent_id)):
-            if self._repos.skill_package_repo.get(package_id) is None:
+            if package_id not in visible:
                 continue
             roots.append(str(store.package_skills_dir(package_id).resolve()))
         return roots
@@ -2194,7 +2453,7 @@ class AgentManager:
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
-        normalized_ids = self.validate_skill_package_ids(package_ids)
+        normalized_ids = self.validate_skill_package_ids(package_ids, owner_id=row.user_id)
         workspace_dir = self.resolve_workspace_dir(agent_id)
         if normalized_ids and not self._backend_supports_host_skill_packages(
             self._backend_spec_for_row(row),
@@ -2245,11 +2504,26 @@ class AgentManager:
             if callable(init_graph):
                 init_graph()
 
-    def validate_skill_package_ids(self, package_ids: list[str]) -> list[str]:
-        """Normalize package ids and ensure each package still exists."""
+    def _visible_skill_package_ids(self, owner_id: int | None) -> set[str]:
+        """An agent's execution identity, rather than an acting admin, owns its mounts."""
+        account = self._repos.user_repo.get(owner_id) if owner_id is not None else None
+        if owner_id is None or account is None or account.disabled:
+            return set()
+        packages = (
+            self._repos.skill_package_repo.list_all()
+            if account.role == "admin"
+            else self._repos.skill_package_repo.list_visible(owner_id)
+        )
+        return {package.id for package in packages}
+
+    def validate_skill_package_ids(
+        self, package_ids: list[str], *, owner_id: int | None
+    ) -> list[str]:
+        """Normalize mounts and require visibility to the execution owner."""
         normalized_ids = skill_package_ids_list({"skill_package_ids": package_ids})
+        visible = self._visible_skill_package_ids(owner_id)
         for package_id in normalized_ids:
-            if self._repos.skill_package_repo.get(package_id) is None:
+            if package_id not in visible:
                 raise OctopError(
                     ErrorCode.SKILL_PACKAGE_NOT_FOUND,
                     f"skill package {package_id!r} not found",
@@ -2463,7 +2737,11 @@ class AgentManager:
                         continue
                     meta, _body = parse_frontmatter(manifest)
                     harness_rows[index] = apply_skill_presentation(row, meta)
-        package_ids = skill_package_ids_list(cfg)
+        agent_row = self._repos.agent_repo.get(agent_id)
+        visible = self._visible_skill_package_ids(
+            agent_row.user_id if agent_row is not None else None
+        )
+        package_ids = [item for item in skill_package_ids_list(cfg) if item in visible]
         if not package_ids:
             if locale is not None:
                 return [localize_skill_summary(row, locale) for row in harness_rows]
@@ -3471,7 +3749,7 @@ class AgentManager:
             # ``resolve_explicit_default_model`` directly.
             default_model=(
                 self._providers.resolve_explicit_default_model(row, cfg)
-                or self.resolve_fallback_model_ref()
+                or self._resolve_configured_fallback_model_ref()
             ),
             system_prompt=system_prompt,
             memory=memory,
@@ -3511,20 +3789,39 @@ class AgentManager:
         if interrupt_on is not applied.interrupt_on:
             applied = replace(applied, interrupt_on=interrupt_on)
         if applied.model_retry_enabled:
-            from langchain.agents.middleware import ModelRetryMiddleware
+            factory = (
+                self._harness_manager.shared_factory if self._harness_manager is not None else None
+            )
+            get_chat_model = getattr(factory, "get_chat_model", None)
+            if callable(get_chat_model):
+                from octop.infra.agents.middleware.model_failover import SafeModelFailoverMiddleware
 
+                retry_middleware: Any = SafeModelFailoverMiddleware(
+                    health=self._model_health,
+                    candidates=lambda _current_ref, needs_multimodal: (
+                        self._providers.list_auto_route_candidates(
+                            needs_multimodal=needs_multimodal
+                        )
+                    ),
+                    model_for_ref=get_chat_model,
+                    max_retries=applied.model_retry_max_retries,
+                    initial_delay=applied.model_retry_initial_delay,
+                    max_delay=applied.model_retry_max_delay,
+                    on_failure="error",
+                )
+            else:
+                from langchain.agents.middleware import ModelRetryMiddleware
+
+                retry_middleware = ModelRetryMiddleware(
+                    max_retries=applied.model_retry_max_retries,
+                    initial_delay=applied.model_retry_initial_delay,
+                    max_delay=applied.model_retry_max_delay,
+                    on_failure="error",
+                )
             applied = replace(
                 applied,
                 model_retry_enabled=False,
-                middleware=[
-                    ModelRetryMiddleware(
-                        max_retries=applied.model_retry_max_retries,
-                        initial_delay=applied.model_retry_initial_delay,
-                        max_delay=applied.model_retry_max_delay,
-                        on_failure=_model_retry_on_failure,
-                    ),
-                    *(applied.middleware or []),
-                ],
+                middleware=[retry_middleware, *(applied.middleware or [])],
             )
         return replace(
             applied,

@@ -1564,11 +1564,25 @@ def _ensure_skill_copy_policy_schema(db: DatabasePool) -> None:
     _ensure_column(db, "skill_packages", "copy_policy", "TEXT NOT NULL DEFAULT 'snapshot'")
 
 
+def _ensure_skill_package_access_schema(db: DatabasePool) -> None:
+    """Upgrade existing v56 installations and repair incomplete restores."""
+    if not _table_exists(db, "skill_packages"):
+        return
+    _ensure_column(db, "skill_packages", "allow_download", "INTEGER NOT NULL DEFAULT 1")
+    if "shared" not in _table_columns(db, "skill_packages"):
+        with db.transaction() as conn:
+            conn.execute("ALTER TABLE skill_packages ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
+            # Packages were instance-wide before sharing became configurable.
+            # Keep existing mounts usable; newly created packages stay private.
+            conn.execute("UPDATE skill_packages SET shared = 1")
+
+
 def _ensure_bridge_connections_schema(db: DatabasePool) -> None:
     """Fold notes + unique display_name + auto_reconnect into unreleased v19."""
     if not _table_exists(db, "bridge_connections"):
         return
     _ensure_column(db, "bridge_connections", "notes", "TEXT")
+    _ensure_column(db, "bridge_connections", "peer_connection_id", "TEXT")
     _ensure_column(db, "bridge_connections", "icon_name", "TEXT")
     _ensure_column(db, "bridge_connections", "auto_reconnect", "INTEGER NOT NULL DEFAULT 1")
     # Make every (owner, display_name) unique before creating the index.
@@ -2340,6 +2354,11 @@ def run_migrations(db: DatabasePool) -> None:
         # only after those tables exist, including on a fresh installation.
         if 28 <= version <= 53 or version == 56 or version <= _current_version(db):
             continue
+        if version == 57:
+            _ensure_skill_package_access_schema(db)
+            with db.connect() as conn:
+                conn.execute("UPDATE _schema_version SET version = 57")
+            continue
         # v18 touches optional ``user_invites``; use the idempotent helper for both
         # dialects so restores from pre-invite physical schemas do not fail.
         if version == 18:
@@ -2388,3 +2407,4 @@ def run_migrations(db: DatabasePool) -> None:
     _ensure_bridge_connections_schema(db)
     _ensure_independent_projects_schema(db)
     _ensure_unified_task_conversations_schema(db)
+    _ensure_skill_package_access_schema(db)

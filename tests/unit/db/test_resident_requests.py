@@ -163,7 +163,7 @@ def test_migration_from_50_preserves_existing_records(tmp_path, monkeypatch):
             assert after.pop("config_revision") == 1
             assert after == before
             assert conn.execute("SELECT COUNT(*) FROM resident_conversations").fetchone()[0] == 0
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 56
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 57
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
