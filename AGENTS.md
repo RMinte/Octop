@@ -16,6 +16,14 @@ Navigation guide for AI coding agents working in this repository.
 - AgentComputer 客户端仅用于核对产品与接口；本轮不修改其 Swift/UI，不新增测试或验收页面。
 - 先整体功能再细节，使用有针对性的验证；用户现已授权将本轮改造提交到独立分支，再尝试合并到 `feature/agentcomputer-foundation`。正常执行提交钩子，保留目标工作目录已有改动，不推送。
 
+## 上游整合防重约定（2026-10-26）
+
+- 后续比较或合并 `main` 前，先读取 [上游能力整合记录](docs/main-capability-integration.md)，核对目标分支是否已包含本地整合提交 `ddf3f566569086551a6a70d0e148eae9a8cd9e3c`，以及记录中列出的能力是否仍在代码中。
+- 该提交位于 `codex/integrate-main-capabilities`，从 `feature/agentcomputer-foundation@6cbb83ad` 选择性移植了上游 `main@890111b7` 的合适能力；这不是整个 `main` 的合并，也尚未合回原分支。
+- 记录中“纳入范围与来源”的能力已经整合，不重复 cherry-pick 或重新实现。部分来源提交只移植了列明范围，不能把该提交的其余内容标为已合并；“本轮未移植的设计”继续保留为未移植。
+- 选择性移植不会保留上游提交的祖先关系，不能仅凭 `git log`、`git branch --contains` 或 `git cherry` 判定能力缺失；目标经过 squash/cherry-pick 后也须结合整合记录与实际代码核对。
+- 新的上游候选以 `890111b7..upstream/main` 为起点，另行评估记录中的暂缓项；每次后续整合都更新来源节点、本地交付节点、实际范围与状态，防止重复尝试。
+
 ## 1. Collaboration principles
 
 > Favor caution over speed; trivial tasks may relax these rules. These principles complement [§10 Change workflow](#10-change-workflow) and [§11 Communication](#11-communication).
