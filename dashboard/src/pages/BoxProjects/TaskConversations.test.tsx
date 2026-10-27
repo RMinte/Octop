@@ -493,41 +493,159 @@ it("edits into a new branch and leaves the source message and task untouched", a
   expect(fixture.turns[0].prompt).not.toBe("Revised request");
 });
 
-it("marks imported branch history without offering retry or regeneration", async () => {
-  api.open.mockResolvedValue({
-    ...fixture,
-    turns: [
-      {
-        ...fixture.turns[0],
-        history_only: true,
-        source_task_id: "source_task",
-        source_turn_id: "source_turn",
-      },
-    ],
-  });
-  const navigate = vi.fn();
-  const user = userEvent.setup();
-  render(
-    <MemoryRouter>
-      <TaskConversations
-        projectID="proj_a"
-        selectedTaskID="task_a"
-        onSelectTask={navigate}
-      />
-    </MemoryRouter>,
-  );
-  await screen.findByText(zh.projects.tasks.historyOnly);
-  expect(
-    screen.queryByRole("button", { name: zh.projects.tasks.editBranch }),
-  ).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: zh.projects.tasks.regenerate }),
-  ).not.toBeInTheDocument();
-  await user.click(
-    screen.getByRole("button", { name: zh.projects.tasks.viewSource }),
-  );
-  expect(navigate).toHaveBeenCalledWith("source_task");
-});
+it.each([
+  ["fork", zh.projects.tasks.fork],
+  ["edit", zh.projects.tasks.editBranch],
+  ["regenerate", zh.projects.tasks.regenerate],
+] as const)(
+  "creates a %s branch from inherited history",
+  async (operation, label) => {
+    api.open.mockResolvedValue({
+      ...fixture,
+      turns: [
+        {
+          ...fixture.turns[0],
+          history_only: true,
+          source_task_id: "source_task",
+          source_turn_id: "source_turn",
+        },
+      ],
+    });
+    api.fork.mockResolvedValue({ ...fixture, task_id: "branch_a" });
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <TaskConversations
+          projectID="proj_a"
+          selectedTaskID="task_a"
+          onSelectTask={navigate}
+        />
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByRole("button", { name: label }));
+    if (operation !== "fork") {
+      const input = screen.getByRole("textbox", {
+        name: zh.projects.tasks.branchPrompt,
+      });
+      expect(input).toHaveValue(fixture.turns[0].prompt);
+      if (operation === "edit") {
+        await user.clear(input);
+        await user.type(input, "Revised inherited request");
+      } else expect(input).toHaveAttribute("readonly");
+    }
+    await user.click(
+      screen.getByRole("button", {
+        name: new RegExp(zh.common.confirm.split("").join("\\s*")),
+      }),
+    );
+    await waitFor(() =>
+      expect(api.fork).toHaveBeenCalledWith("task_a", {
+        operation,
+        turn_id: "turn_a",
+        project_id: "proj_a",
+        selected_expert_id: null,
+        request_id: expect.any(String),
+        ...(operation === "edit"
+          ? { prompt: "Revised inherited request" }
+          : {}),
+      }),
+    );
+    expect(navigate).toHaveBeenCalledWith("branch_a");
+    expect(api.send).not.toHaveBeenCalled();
+    expect(api.retry).not.toHaveBeenCalled();
+  },
+);
+
+it.each([false, true])(
+  "offers the latest inherited answer in conversation tools (has local history: %s)",
+  async (hasLocalHistory) => {
+    api.open.mockResolvedValue({
+      ...fixture,
+      turns: [
+        ...(hasLocalHistory ? [fixture.turns[0]] : []),
+        {
+          ...fixture.turns[0],
+          sequence: 2,
+          turn_id: "inherited_turn",
+          history_only: true,
+          source_task_id: "source_task",
+          source_turn_id: "source_turn",
+        },
+      ],
+    });
+    api.fork.mockResolvedValue({ ...fixture, task_id: "branch_a" });
+    const user = userEvent.setup();
+    mount("?task=task_a");
+    await user.click(
+      await screen.findByRole("button", {
+        name: zh.projects.workspace.conversationTools,
+      }),
+    );
+    const tools = await screen.findByRole("tooltip");
+    await user.click(
+      within(tools).getByRole("button", { name: zh.projects.tasks.fork }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: new RegExp(zh.common.confirm.split("").join("\\s*")),
+      }),
+    );
+    await waitFor(() =>
+      expect(api.fork).toHaveBeenCalledWith(
+        "task_a",
+        expect.objectContaining({
+          operation: "fork",
+          turn_id: "inherited_turn",
+        }),
+      ),
+    );
+  },
+);
+
+it.each(["failed", "cancelled"] as const)(
+  "marks %s inherited history without offering execution retry",
+  async (status) => {
+    api.open.mockResolvedValue({
+      ...fixture,
+      status,
+      turns: [
+        {
+          ...fixture.turns[0],
+          status,
+          history_only: true,
+          source_task_id: "source_task",
+          source_turn_id: "source_turn",
+        },
+      ],
+    });
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <TaskConversations
+          projectID="proj_a"
+          selectedTaskID="task_a"
+          onSelectTask={navigate}
+        />
+      </MemoryRouter>,
+    );
+    await screen.findByText(zh.projects.tasks.historyOnly);
+    expect(
+      screen.queryByRole("button", { name: zh.projects.tasks.retry }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: zh.projects.tasks.editBranch }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: zh.projects.tasks.regenerate }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: zh.projects.tasks.viewSource }),
+    );
+    expect(navigate).toHaveBeenCalledWith("source_task");
+  },
+);
 const imageAttachment: TaskInputAttachment = {
   attachment_id: "image_a",
   name: "截图.png",

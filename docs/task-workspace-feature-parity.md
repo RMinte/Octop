@@ -49,7 +49,7 @@
 | --- | --- |
 | 全部任务/项目筛选、搜索、专家筛选、状态筛选 | `TaskConversations` 与工作区导航；不能因新布局丢失无项目任务。 |
 | 置顶、归档、恢复、删除 | `TaskConversations` 的 Task 操作菜单；活动状态和确认规则继续遵守领域约束。 |
-| 编辑后重跑、重新生成、从某轮分支 | 通过 `openBranch` / forks API 创建新分支，不改写原始执行记录。`history_only` 轮次不能作为可执行重试轮。 |
+| 编辑后重跑、重新生成、从某轮分支 | 通过 `openBranch` / forks API 创建新分支，不改写原始执行记录。已完成的 `history_only` 轮次也保留这三种操作入口，可在当前 Task 直接再分支；不能作为旧执行的重试或恢复轮。 |
 | 失败重试、暂停、停止、继续、中断恢复 | 保留现有 Task lifecycle；不将取消请求已保存误呈现为所有外部动作已停止。 |
 | 审批卡片、问答、恢复提示 | `TaskInteractions` 保留 revision、request_id、状态与服务端过期检查；本轮补 `TaskRecoveryNotice`，仅可安全恢复的 interrupted 原轮提供恢复按钮，未决外部执行先核对，失败轮保留原重试。 |
 | 团队发言、工具进度、来源轨迹 | `TaskTurnContent` 与 `TaskSourceTrajectory`；保留 speaker/来源，不能折成只有一段 reply。 |

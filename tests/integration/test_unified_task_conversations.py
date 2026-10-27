@@ -255,6 +255,73 @@ async def test_branch_continuation_is_idempotent_after_expert_switch(unified_env
     ] == source["turns"]
 
 
+async def test_inherited_answer_can_branch_before_any_new_turn(unified_env):
+    client, server, auth, owner, calls = unified_env
+    created = await client.post(
+        "/api/project-tasks",
+        headers=auth,
+        json={"request_id": "inherited-source", "prompt": "First source question"},
+    )
+    assert created.status_code == 202, created.text
+    source = await finished(client, auth, created.json()["task_id"])
+    sent = await client.post(
+        f"/api/project-tasks/{source['task_id']}/messages",
+        headers=auth,
+        json={"request_id": "inherited-later", "prompt": "Later source question"},
+    )
+    assert sent.status_code == 202, sent.text
+    source = await finished(client, auth, source["task_id"])
+    assert len(source["turns"]) == 2 and len(calls) == 2
+
+    forked = await client.post(
+        f"/api/project-tasks/{source['task_id']}/forks",
+        headers=auth,
+        json={"request_id": "inherited-history", "operation": "fork"},
+    )
+    assert forked.status_code == 202, forked.text
+    branch = await finished(client, auth, forked.json()["task_id"])
+    assert branch["task_id"] != source["task_id"]
+    assert len(branch["turns"]) == 2 and len(calls) == 2
+    assert all(turn["history_only"] for turn in branch["turns"])
+    assert [turn["source_turn_id"] for turn in branch["turns"]] == [
+        turn["turn_id"] for turn in source["turns"]
+    ]
+
+    continued = await client.post(
+        f"/api/project-tasks/{branch['task_id']}/forks",
+        headers=auth,
+        json={
+            "request_id": "inherited-continue",
+            "operation": "fork",
+            "turn_id": branch["turns"][0]["turn_id"],
+            "prompt": "Continue only the first answer",
+        },
+    )
+    assert continued.status_code == 202, continued.text
+    nested = await finished(client, auth, continued.json()["task_id"])
+    assert nested["task_id"] not in {source["task_id"], branch["task_id"]}
+    assert len(nested["turns"]) == 2
+    inherited, fresh = nested["turns"]
+    assert inherited["history_only"] is True
+    assert inherited["source_task_id"] == branch["task_id"]
+    assert inherited["source_turn_id"] == branch["turns"][0]["turn_id"]
+    assert inherited["prompt"] == source["turns"][0]["prompt"]
+    assert inherited["reply"] == "Response 1"
+    assert fresh["history_only"] is False and fresh["status"] == "completed"
+    assert fresh["prompt"] == "Continue only the first answer"
+    assert fresh["reply"] == "Response 3"
+    assert len(calls) == 3
+    assert calls[-1][0].turn_id == fresh["turn_id"]
+    assert calls[-1][1] == [
+        {"role": "user", "content": "First source question"},
+        {"role": "assistant", "content": "Response 1"},
+    ]
+    for original in (source, branch):
+        unchanged = await client.get(f"/api/project-tasks/{original['task_id']}", headers=auth)
+        assert unchanged.status_code == 200, unchanged.text
+        assert unchanged.json()["turns"] == original["turns"]
+
+
 async def test_expert_memory_http_save_scope_and_policy_cas(unified_env):
     client, server, auth, owner, calls = unified_env
     created = await client.post(

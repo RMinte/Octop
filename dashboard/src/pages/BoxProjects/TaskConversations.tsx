@@ -1097,10 +1097,12 @@ export default function TaskConversations({
     setForking(true);
     setError("");
     try {
-      const result = await projectTasksApi.fork(taskID, {
+      const request: TaskFork = {
         ...branch,
         request_id: branchRequest.current.requestID,
-      });
+      };
+      if (request.operation === "regenerate") delete request.prompt;
+      const result = await projectTasksApi.fork(taskID, request);
       if (!alive.current || selectedTaskID.current !== taskID) return;
       setBranch(null);
       upsertTask(result);
@@ -1470,19 +1472,13 @@ export default function TaskConversations({
                               busy ||
                               sending ||
                               !detail.turns.some(
-                                (turn) =>
-                                  turn.status === "completed" &&
-                                  !turn.history_only,
+                                (turn) => turn.status === "completed",
                               )
                             }
                             onClick={() => {
                               const turn = [...detail.turns]
                                 .reverse()
-                                .find(
-                                  (item) =>
-                                    item.status === "completed" &&
-                                    !item.history_only,
-                                );
+                                .find((item) => item.status === "completed");
                               if (turn) openBranch(turn, "fork");
                             }}
                           >
@@ -1713,7 +1709,7 @@ export default function TaskConversations({
                             }
                           />
                         )}
-                      {turn.status === "completed" && !turn.history_only && (
+                      {turn.status === "completed" && (
                         <Space wrap style={{ marginBottom: 10 }}>
                           <Button
                             size="small"

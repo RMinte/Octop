@@ -40,7 +40,7 @@
 - [ ] 保留 `history_only`、全部来源 ID、`source_status`、`legacy_attachments`、`source_trajectory`；缺失附件显示不可用。
 - [ ] 内容块保留 `speaker_agent_id`、`speaker_name`；团队成员输出不平铺丢失身份。正文、计划、交互继续按各自版本替换完整快照。
 - [ ] `OctopWorkspaceCache` 与 `OctopTaskBodyCache` 同时升级；旧缓存缺少版本时先刷新权威状态再开放新发送。正文事件、历史分页和列表同步游标分别保存。
-- [ ] `history_only` 轮次不显示 retry/resume 或以其为锚点的 fork/edit/regenerate；其工具只展示保存的公开结果，不请求 ToolHost。Task 本身仍可接受正常的新消息。
+- [ ] `history_only` 轮次不显示旧执行的 retry/resume；已完成历史仍显示 fork/edit/regenerate，并在当前 Task 直接创建新分支，不要求跳回原 Task。其工具只展示保存的公开结果，不请求 ToolHost。Task 本身仍可接受正常的新消息。
 
 验收：新旧缓存、含团队成员的历史、分支复制的只读轮次和缺失附件均能重开；历史不会变成可执行检查点，成员身份不会在投影或缓存后丢失。
 
@@ -87,11 +87,11 @@
 ### 8. 分支、编辑与重新生成
 
 - [ ] 对接 `POST /api/project-tasks/{task_id}/forks`，operation 为 fork/edit/regenerate，使用新业务 request_id。
-- [ ] 来源 Task 必须空闲，锚点必须 completed 且不是 history_only；edit 发送新 prompt，regenerate 不传 prompt。
+- [ ] 来源 Task 必须空闲，锚点必须 completed，允许 history_only；edit 发送新 prompt，regenerate 不传 prompt。
 - [ ] 返回 `202 TaskDetail` 后导航到新的 task_id，保留原分支。普通 fork 可没有新执行；不能因 202 假定已经在生成。
 - [ ] 目标项目/专家省略表示继承，显式 null 表示清空；请求不附加未声明的 options 或 expected_revision。
 
-验收：三种操作分别检查来源关系、公开历史、当前导航与后续追问；原 Task 不改写，复制历史不携带可执行授权，失败不会自动再创建另一条分支。
+验收：三种操作分别覆盖普通回答和分支继承的历史回答，检查来源关系、公开历史、当前导航与后续追问；原 Task 不改写，复制历史不携带检查点、审批授权或工具执行状态，不能 retry/resume 旧执行；失败不会自动再创建另一条分支。
 
 ## 客户端交付证据
 

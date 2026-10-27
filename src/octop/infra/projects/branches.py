@@ -43,7 +43,8 @@ class TaskFork(ProjectModel):
         default="fork", description="fork 包含锚点；edit 和 regenerate 从锚点前继续。"
     )
     turn_id: Reference | None = Field(
-        default=None, description="来源中已完成的轮次；省略使用来源最后一轮，活动来源不可分支。"
+        default=None,
+        description="来源中已完成的轮次，包含继承的历史副本；省略使用来源最后一轮，活动来源不可分支。",
     )
     prompt: Prompt | None = Field(
         default=None,
@@ -272,8 +273,6 @@ def create(
             else (history[-1] if history else None)
         )
         if anchor is None or anchor.status != "completed":
-            raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
-        if json.loads(anchor.configuration_json).get("branch_origin", {}).get("history_only"):
             raise OctopError.localized(ErrorCode.TASK_RETRY_UNAVAILABLE)
         project_id = body.project_id if "project_id" in body.model_fields_set else source.project_id
         selected = (

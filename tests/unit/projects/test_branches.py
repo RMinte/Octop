@@ -457,21 +457,84 @@ def test_forked_history_can_continue_and_source_remains_unchanged(services, monk
     assert [asdict(row) for row in services.project_task_turn_repo.list("source")] == original
 
 
-def test_branch_creation_does_not_allow_editing_a_history_copy(services):
-    created = branches.create(services, 1, "source", TaskFork(request_id="readonly-fork"))
+@pytest.mark.parametrize("operation", ["fork", "edit", "regenerate"])
+@pytest.mark.parametrize("delete_original", [False, True])
+def test_history_copy_can_branch_without_original_execution_state(
+    services, operation, delete_original
+):
+    created = branches.create(services, 1, "source", TaskFork(request_id="history-fork"))
     copied = services.project_task_turn_repo.list(created.task_id)
-    with pytest.raises(OctopError):
-        branches.create(
-            services,
-            1,
-            created.task_id,
-            TaskFork(
-                request_id="edit-copy",
-                operation="edit",
-                turn_id=copied[0].turn_id,
-                prompt="Changed",
-            ),
+    if delete_original:
+        with services.db.transaction() as conn:
+            services.project_task_repo.delete(
+                conn, services.project_task_repo.get_in_transaction(conn, "source", 1)
+            )
+    body = TaskFork.model_validate(
+        {
+            "request_id": "branch-copy",
+            "operation": operation,
+            "turn_id": copied[-1].turn_id,
+            **({"prompt": "Changed"} if operation == "edit" else {}),
+        }
+    )
+    nested = branches.create(services, 1, created.task_id, body)
+    assert branches.create(services, 1, created.task_id, body) == nested
+    assert services.project_task_turn_repo.list(created.task_id) == copied
+    assert services.project_task_turn_repo.context(nested.task_id) is None
+    turns = services.project_task_turn_repo.list(nested.task_id)
+    assert [turn.prompt for turn in turns] == (
+        ["Question 1", "Question 2"] if operation == "fork" else ["Question 1"]
+    )
+    for source, turn in zip(copied, turns, strict=operation == "fork"):
+        assert turn.turn_id != source.turn_id
+        assert json.loads(turn.configuration_json)["branch_origin"] == {
+            "source_task_id": created.task_id,
+            "source_turn_id": source.turn_id,
+            "operation": operation,
+            "history_only": True,
+            "source_status": "completed",
+        }
+        assert not turn.worker_id and not turn.checkpoint_id and turn.interactions_json == "[]"
+    assert (
+        nested.continuation_prompt
+        == {
+            "fork": None,
+            "edit": "Changed",
+            "regenerate": "Question 2",
+        }[operation]
+    )
+    source_attachment_id = json.loads(copied[-1].configuration_json)["attachment_ids"][0]
+    with services.db.read_snapshot() as conn:
+        origin = services.project_task_branch_repo.origin(conn, nested.task_id)
+        assert origin.source_task_id == created.task_id
+        assert origin.source_turn_id == copied[-1].turn_id
+        attachments = services.project_task_attachment_repo.for_task(conn, 1, nested.task_id)
+        assert len(attachments) == 1
+        attachment = attachments[0]
+        assert attachment.attachment_id not in {source_attachment_id, "input_original"}
+        assert (
+            services.project_task_attachment_repo.download(conn, 1, attachment.attachment_id)[1]
+            == b"Quarter,Revenue\nQ1,12\n"
         )
+        if operation == "fork":
+            assert not nested.continuation_attachment_ids
+            assert json.loads(turns[-1].configuration_json)["attachment_ids"] == [
+                attachment.attachment_id
+            ]
+        else:
+            assert nested.continuation_attachment_ids == [attachment.attachment_id]
+        artifacts = services.project_task_artifact_repo.for_turns(
+            conn, nested.task_id, [turns[0].turn_id]
+        )
+        assert len(artifacts) == 1 and artifacts[0].source_path is None
+        assert (
+            services.project_task_artifact_repo.download(
+                conn, nested.task_id, artifacts[0].artifact_id
+            )[1]
+            == b"Report"
+        )
+        assert artifacts[0].artifact_id in turns[0].reply
+        assert artifacts[0].artifact_id in turns[0].content_blocks_json
 
 
 def test_copied_history_and_bytes_survive_explicit_source_deletion(services):
