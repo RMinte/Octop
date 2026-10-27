@@ -275,6 +275,7 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "artifacts":[],
       "model_ref":"provider/model",
       "options":{"action_timeline_enabled":true,"model_ref":"provider/model","reasoning_mode":null,"reasoning_effort":null,"skills":[],"mcp_servers":[]},
+      "presentation":{"action_timeline_enabled":true,"step_panel_enabled":true},
       "interactions": [],
       "interaction_revision": 0,
       "pause_requested": false,
@@ -324,6 +325,7 @@ task.open 回执丢失时，生成请求可能已入队；本次进入的自动�
       "artifacts":[],
       "model_ref":"provider/model",
       "options":{"action_timeline_enabled":true,"model_ref":"provider/model","reasoning_mode":"enabled","reasoning_effort":null,"skills":[],"mcp_servers":[]},
+      "presentation":{"action_timeline_enabled":true,"step_panel_enabled":true},
       "interactions": [],
       "interaction_revision": 0,
       "pause_requested": false,
@@ -383,6 +385,7 @@ Schema 根节点接受双向帧；`$defs.ClientCommand`、`$defs.AuthenticateFra
 | activity | string | 当前工具名称；空字符串表示无活动摘要，不含参数或工具结果 |
 | model_ref | string | 实际模型引用 |
 | options | TaskExecutionOptions | 本轮实际模型、资源与动作生成开关，继承部分已解析为实际值 |
+| presentation | TaskPresentation | 本轮入队时冻结的 `action_timeline_enabled`、`step_panel_enabled` 布尔值；只读展示依据，不受当前设置变化影响 |
 | approval_policy_at_start | object | 本轮开始时的模式；动作采用各自创建时的冻结版本 |
 | interactions / interaction_revision | array / int | 完整交互列表与独立版本，见交互协议 |
 | pause_requested | boolean | 已请求暂停，status=paused 才表示已生效 |
@@ -411,7 +414,8 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 2. 按 turn_id 合并轮次，按 sequence 排序。终态不回退；暂停、中断和等待恢复允许重新排队，不能用 running 永不退回 queued 的旧规则；cancel_requested=true 不被迟到的 false 清除。恢复字段变化会进入 event_cursor 指纹，不能只依赖正文长度判断更新。
 3. 同一轮的累计 reply 和 reasoning 分别合并，不接受迟到短文本覆盖。迟到的 REST 写入回执和历史页使用相同规则。终态正文可能为空，例如排队时被取消。
 4. 计划按 `plan_revision` 独立合并，内容块按 `content_revision` 替换完整数组；先选出各自的新快照，再做终态保护并写回这些独立字段。回复、计划、思考、进展和工具活动变化不要求 list_revision 变化。
-5. 应用 turn 后保存其 cursor。已有订阅时，不用迟到写入回执的 event_cursor 跳过尚未应用的事件。
+5. `presentation` 对同一轮不可变并随完整轮次缓存，权威响应补齐旧缓存缺失字段；传入快照缺字段时保留已有值（`incoming.presentation ?? old?.presentation`），不能丢弃原值或根据全局设置刷新、内容长度及 list_revision 变化重算。新旧快照均缺失时采用下文固定兼容规则。分叉的历史轮保留源轮值。
+6. 应用 turn 后保存其 cursor。已有订阅时，不用迟到写入回执的 event_cursor 跳过尚未应用的事件。
 
 重建 snapshot 基线时替换原加载范围，防止在未知历史缺口两侧直接拼接。需要更早正文时再按分页接口读取。
 
@@ -441,7 +445,7 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 
 | options 字段 | 省略或 null | 显式值 |
 | --- | --- | --- |
-| action_timeline_enabled | 使用入队时全局默认值，生效值随轮次冻结 | 严格布尔值；控制本轮宿主进展及异步公开进展/动作说明，不改变计划调度、审批或步骤面板显示 |
+| action_timeline_enabled | 使用入队时全局默认值，生效值随轮次冻结 | 严格布尔值；控制本轮宿主进展及异步公开进展/动作说明，以及无可见计划时的过程展示，不改变计划调度、审批或步骤面板开关 |
 | model_ref | 每轮使用入队时的当前默认模型，不继承前轮 | 1–512 字符；不可用返回 status=409 / TASK_MODEL_UNAVAILABLE，不静默换模型 |
 | reasoning_mode | 使用所选模型的默认模式 | auto / enabled / disabled；不支持的模式返回 422 TASK_REASONING_INVALID |
 | reasoning_effort | 使用所选模型的默认强度 | 必须来自该模型 reasoning_config.efforts；不支持的值或关闭思考时指定强度返回 422 TASK_REASONING_INVALID |
@@ -516,8 +520,8 @@ REST 同样使用 `POST /api/project-tasks/{task_id}/messages`。沿用原有鉴
 
 | 环境变量 | 生效范围 |
 | --- | --- |
-| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮宿主进展及异步公开进展/动作说明的生成默认值，同时提供当前过程显示偏好 |
-| `OCTOP_TASK_STEP_PANEL_ENABLED` | 已有计划的步骤面板显示默认值，不控制计划是否创建或执行 |
+| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮宿主进展及异步公开进展/动作说明的生成默认值，同时作为新轮动作链路展示默认值 |
+| `OCTOP_TASK_STEP_PANEL_ENABLED` | 新轮已有计划的步骤面板展示默认值，不控制计划是否创建或执行 |
 
 接受 true/false、1/0、yes/no、on/off，忽略大小写和两端空白。环境保存先校验这两键，非法值返回 `400 TASK_SETTINGS_INVALID`，不保存本次环境修改，错误只含设置名。
 
@@ -527,11 +531,19 @@ REST 同样使用 `POST /api/project-tasks/{task_id}/messages`。沿用原有鉴
 {"action_timeline_enabled":true,"step_panel_enabled":true}
 ```
 
-响应 `Cache-Control: no-store`，只包含两个布尔值，不返回环境变量全集、路径或密钥。它是 HTTP 设置接口，没有新增 WebSocket 命令。APP 不读取 `/api/envs`。
+响应 `Cache-Control: no-store`，只包含两个新轮默认布尔值，不返回环境变量全集、路径或密钥。它是 HTTP 设置接口，没有新增 WebSocket 命令。APP 不读取 `/api/envs`，也不以当前设置决定历史轮次的展示方式。
 
 服务端每次读取持久化的 `OCTOP_HOME/env`。文件存在时以文件为两键权威，缺键回默认 true，避免另一个 worker 的旧进程环境覆盖删除结果；仅整个文件不存在时才回退进程环境，再缺省 true。保存/删键对之后的请求热生效，不依赖跨进程环境广播、agent 重载或服务重启。
 
-本轮生成配置优先级：显式 `options.action_timeline_enabled` 优先，否则取入队时全局默认。创建、追问和手动重试均支持；options 不接受 step_panel_enabled。生效值写入轮次配置并在 `turn.options.action_timeline_enabled` 回显。暂停/审批/客户端工具等待后恢复使用同一快照；相同 request_id 重传返回原轮，不重新取默认。保留原始请求 options，不把响应中解析的默认值填回待重传消息。新轮重新解析，旧轮缺字段按 true 读取且不补写历史。
+本轮生成配置优先级：显式 `options.action_timeline_enabled` 优先，否则取入队时全局默认。创建、追问和手动重试均支持；`options` 不接受 `step_panel_enabled`。生效值写入轮次配置并在 `turn.options.action_timeline_enabled` 回显，同时冻结 `configuration_json.presentation`。REST 详情、历史分页、导出、WebSocket 的 `result/snapshot/turn` 共用 `TaskTurn.presentation`（`TaskPresentation`）：
+
+```json
+{"action_timeline_enabled":true,"step_panel_enabled":false}
+```
+
+两项均为布尔值。动作值与本轮有效生成值一致，步骤面板值取入队时全局默认。暂停/审批/客户端工具等待后恢复使用同一快照；相同 `request_id` 重传返回原轮，不重新取默认。保留原始请求 `options`，不把响应中解析的默认值填回待重传消息。普通追问和手动重试的新轮重新解析；分叉复制的历史轮保留源轮快照。
+
+旧记录缺少 `presentation` 时，服务端使用原轮配置的动作值，缺失则为 `true`，步骤面板固定为 `true`；不读取当前全局默认，不补写历史。历史未保存过的步骤面板偏好无法准确重建。旧客户端缓存或旧服务端响应缺字段时，客户端以 `turn.options.action_timeline_enabled ?? true`、步骤面板 `true` 兼容，不能用安全设置响应回填旧轮。DTO、状态合并、导出与持久缓存都保留新对象；权威响应补齐旧缓存缺失字段后，后续设置刷新不覆盖该值。
 
 ```json
 {"type":"task.message","id":"command-classic-001","task_id":"task_example","data":{"request_id":"message-classic-001","prompt":"继续处理","options":{"action_timeline_enabled":false}}}
@@ -541,9 +553,9 @@ REST 同样使用 `POST /api/project-tasks/{task_id}/messages`。沿用原有鉴
 
 开启时，宿主立即保存已收到请求及计划当前步骤的意图进展，独立异步模型随后补充公开文案。工具标签立即可用，brief 可缺失/null；生成后更新原 call_id 块，最多 240 字符，主执行不等待。主模型新请求隐藏 message_notify_user，注册表仅用于正常结束原有调用。计划、审批与同名业务字段规则见下文“执行计划和动作链路”。
 
-当前显示设置与冻结的生成策略分开。`step_panel_enabled && turn.plan != null` 时仅显示计划面板：步骤结果、当前一条短活动、已知时间/耗时和产物入口，不在步骤内铺开思考/进展/工具列表，也不并列 Process。无可见计划时，action_timeline_enabled=true 显示结构化 Process 的公开进展与工具，默认隐藏原始思考；false 显示经典思考与工具事实。切换不删记录，不补生已关闭轮次的进展，答案始终独立。
+客户端应按本轮 `presentation` 展示。`turn.presentation.step_panel_enabled && turn.plan != null` 时仅显示计划面板：步骤结果、当前一条短活动、已知时间/耗时和产物入口，不在步骤内铺开思考/进展/工具列表，也不并列 Process。无可见计划时，`turn.presentation.action_timeline_enabled=true` 显示结构化 Process 的公开进展与工具，默认隐藏原始思考；false 显示经典思考与工具事实。修改全局设置只影响后续新轮，运行轮、历史轮、冷启动与续接均保持已保存展示，不删记录、不补生进展，答案始终独立。服务端与网页已接本合同；本次按用户范围不修改 APP，当前 APP 仍读取全局偏好，后续须单独接线，不能认定两端已实现一致。
 
-客户端在进入和恢复前台及配置保存后刷新安全设置。网页与 APP 已接安全设置和互斥展示；最新 AgentComputer `4be12673` 已复用原阶段、结果、工具行和命令卡，并接入显式开场与整轮计时。客户端 H/I 真实复验已覆盖有效 brief 的具体标题，以及无计划调用缺失 brief 在审批前被拒、补正后仅执行一次；240 字符边界、提问豁免及后续宿主错误归因修正未由这次实测覆盖，详见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)。
+客户端在进入和恢复前台及配置保存后可刷新新轮默认值，接线后不能因刷新而使已有轮次改用全局展示。此前 AgentComputer `4be12673` 的原阶段、结果、工具行/命令卡复用、显式开场与整轮计时，以及 H/I 真实复验均为历史接线记录，不作为本次逐轮快照的验收。H/I 覆盖有效 brief 的具体标题，以及无计划调用缺失 brief 在审批前被拒、补正后仅执行一次；240 字符边界、提问豁免及后续宿主错误归因修正未由这次实测覆盖，详见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)。
 
 上述 H/I 是旧门控合同的历史实测；同日后续旁路方案已替代开场/brief 执行前置，不改写旧记录，也不将历史实测视为新旁路的客户端验收。
 
@@ -654,7 +666,7 @@ TaskTurn 另提供可空的 started_at、finished_at、processing_duration_ms：
 
 该分支不是公开 WebSocket 命令或 allowed_decisions 的新值，客户端不提交它，也不把 output 类型收窄为字符串。任务 HITL 适配保留原中间件名称和槽位，保持检查点拓扑，主任务审批映射不泄漏到子代理/peer。已完成历史保留真实原值，包括 I 当时误带拒绝前缀的输出；本轮审计没有待恢复的旧 inline 项，不做历史重写或新增迁移。
 
-计划、结果和执行事实随完整 turn 保存和续接。plan_revision 与 content_revision 独立合并，不依赖 list_revision 或回复增长。暂停恢复同轮保留身份、关联和生成快照；普通追问与手动重试创建新轮，从无计划开始。取消、失败和等待保留事实，不伪造完成或时间。
+计划、结果、展示快照和执行事实随完整 turn 保存和续接。plan_revision 与 content_revision 独立合并，不依赖 list_revision 或回复增长。暂停恢复同轮保留身份、关联、生成与展示快照；普通追问与手动重试创建新轮，从无计划开始并冻结新默认。取消、失败和等待保留事实，不伪造完成或时间。
 
 历史未记录计划时保持 null/0，source:"harness_todos" 旧计划只读保留，不回填身份或恢复原生 todos。实际 APP 已接六类块、设置、brief、互斥投影、原计划面板和阶段式 Process，显式开场与权威整轮耗时也已贯通 DTO、缓存、合并及原组件。未知字段仍可空；具体客户端记录与剩余验收边界见 [APP 专项指南](agentcomputer-task-planning-and-progress.md)，本次文档更新不修改 Swift/UI。
 
@@ -860,6 +872,7 @@ func observeExampleTask(endpoint: URL, accessToken: String) async throws {
 - 模型选择只展示支持的思考设置；切换模型清除不适用的选择，关闭思考同时清除强度。
 - 断线后任务继续，重连补齐结果，没有额外创建任务或轮次。
 - 回执丢失后的显式重试保留原 request_id、正文、attachment_ids 及顺序和 options。
+- 修改动作/步骤默认后，已运行、历史、分页、缓存冷重开及恢复的轮次仍按原 presentation 展示；新追问和手动重试采用新默认，同 request_id 重传与分叉历史保留原值。网页与 APP 使用相同固定旧记录兼容规则。
 - 游标失效只重建对应任务；取消订阅和切换页面不停止任务。
 - 停止指定 turn_id，等待 cancelled；迟到停止不影响下一轮。
 - 续期沿用原凭据保存策略，切换账号后不处理旧连接数据。

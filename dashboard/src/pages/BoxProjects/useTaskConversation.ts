@@ -36,6 +36,7 @@ function mergeTurns(current: TaskTurn[], incoming: TaskTurn[]): TaskTurn[] {
       old && (old.plan_revision ?? 0) > (turn.plan_revision ?? 0) ? old : turn;
     rows.set(turn.turn_id, {
       ...base,
+      presentation: turn.presentation ?? old?.presentation,
       interactions: interaction.interactions,
       interaction_revision: interaction.interaction_revision,
       pause_requested: interaction.pause_requested,

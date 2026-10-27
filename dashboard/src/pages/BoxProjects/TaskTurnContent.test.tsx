@@ -176,8 +176,10 @@ describe("计划面板与动作链路互斥", () => {
       const original = JSON.stringify(plannedTurn);
       const { container } = render(
         <TaskTurnContent
-          turn={plannedTurn}
-          settings={settings(actionTimeline, true)}
+          turn={{
+            ...plannedTurn,
+            presentation: settings(actionTimeline, true),
+          }}
         />,
       );
       const panel = screen.getByText("接口接入计划").closest("details")!;
@@ -237,8 +239,10 @@ describe("计划面板与动作链路互斥", () => {
       const user = userEvent.setup();
       render(
         <TaskTurnContent
-          turn={plannedTurn}
-          settings={settings(actionTimeline, false)}
+          turn={{
+            ...plannedTurn,
+            presentation: settings(actionTimeline, false),
+          }}
         />,
       );
       expect(screen.queryByText("接口接入计划")).not.toBeInTheDocument();
@@ -279,8 +283,11 @@ describe("计划面板与动作链路互斥", () => {
     (actionTimeline, stepPanel) => {
       render(
         <TaskTurnContent
-          turn={{ ...plannedTurn, plan: null }}
-          settings={settings(actionTimeline, stepPanel)}
+          turn={{
+            ...plannedTurn,
+            plan: null,
+            presentation: settings(actionTimeline, stepPanel),
+          }}
         />,
       );
       expect(screen.getAllByRole("region")).toHaveLength(1);
@@ -296,29 +303,44 @@ describe("计划面板与动作链路互斥", () => {
     },
   );
 
-  it("设置变化立即重投影已保存的回合，生成时的开关不控制当前展示", () => {
-    const stored = {
-      ...plannedTurn,
-      options: { action_timeline_enabled: false },
-    };
-    const { rerender } = render(
-      <TaskTurnContent turn={stored} settings={settings(true, true)} />,
+  it("同一任务的每轮独立使用展示快照，快照优先于旧执行开关", () => {
+    const { container } = render(
+      <>
+        {[
+          settings(true, true),
+          settings(true, false),
+          settings(false, false),
+        ].map((presentation, index) => (
+          <section key={index} data-turn={index}>
+            <TaskTurnContent
+              turn={{
+                ...plannedTurn,
+                sequence: index + 1,
+                turn_id: `turn_${index}`,
+                options: {
+                  action_timeline_enabled:
+                    !presentation.action_timeline_enabled,
+                },
+                presentation,
+              }}
+            />
+          </section>
+        ))}
+      </>,
     );
-    expect(screen.queryByRole("region")).not.toBeInTheDocument();
-    rerender(
-      <TaskTurnContent turn={stored} settings={settings(true, false)} />,
-    );
-    expect(screen.getByRole("region", { name: "动作链路" })).toBeVisible();
-    expect(screen.queryByText("保存的思考原文。")).not.toBeInTheDocument();
-    rerender(
-      <TaskTurnContent turn={stored} settings={settings(false, false)} />,
-    );
-    expect(screen.getByRole("region", { name: "思考过程" })).toBeVisible();
-    expect(screen.getByText("保存的思考原文。")).toBeInTheDocument();
-    rerender(
-      <TaskTurnContent turn={stored} settings={settings(false, true)} />,
-    );
-    expect(screen.queryByRole("region")).not.toBeInTheDocument();
+    const rounds = [...container.querySelectorAll<HTMLElement>("[data-turn]")];
+    expect(within(rounds[0]).getByText("接口接入计划")).toBeVisible();
+    expect(within(rounds[0]).queryByRole("region")).not.toBeInTheDocument();
+    expect(
+      within(rounds[1]).getByRole("region", { name: "动作链路" }),
+    ).toBeVisible();
+    expect(
+      within(rounds[1]).queryByText("保存的思考原文。"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(rounds[2]).getByRole("region", { name: "思考过程" }),
+    ).toBeVisible();
+    expect(within(rounds[2]).getByText("保存的思考原文。")).toBeInTheDocument();
   });
 
   it("同会话的无计划追问展示过程，不继承前一轮计划", () => {
@@ -498,11 +520,11 @@ describe("过程区执行详情与旧记录", () => {
           plan: null,
           status: "completed",
           reply: "文件已更新。",
+          presentation: settings(false, false),
           file_changes: [
             { path: "src/example.ts", additions: 3, deletions: 1, diff: null },
           ],
         }}
-        settings={settings(false, false)}
       />,
     );
     const reply = screen.getByText("文件已更新。");
@@ -603,7 +625,7 @@ describe("过程区执行详情与旧记录", () => {
     },
   );
 
-  it("旧版无内容块时按当前开关保留 Thinking 和最终回答，面板优先时隐藏过程", () => {
+  it("旧版无展示快照时固定使用当轮执行开关和默认面板", () => {
     const legacy = {
       ...turn,
       plan: null,
@@ -611,19 +633,18 @@ describe("过程区执行详情与旧记录", () => {
       reasoning: "旧版思考原文。",
       activity: "read_file",
     };
-    const { rerender } = render(
-      <TaskTurnContent turn={legacy} settings={settings(true, true)} />,
-    );
+    const { rerender } = render(<TaskTurnContent turn={legacy} />);
     expect(screen.queryByText("旧版思考原文。")).not.toBeInTheDocument();
     expect(screen.getByText("旧版答复。")).toBeVisible();
     rerender(
-      <TaskTurnContent turn={legacy} settings={settings(false, true)} />,
+      <TaskTurnContent
+        turn={{ ...legacy, options: { action_timeline_enabled: false } }}
+      />,
     );
     expect(screen.getByText("旧版思考原文。")).toBeInTheDocument();
     rerender(
       <TaskTurnContent
-        turn={{ ...legacy, plan }}
-        settings={settings(false, true)}
+        turn={{ ...legacy, plan, options: { action_timeline_enabled: false } }}
       />,
     );
     expect(screen.queryByRole("region")).not.toBeInTheDocument();

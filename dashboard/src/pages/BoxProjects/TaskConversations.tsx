@@ -78,7 +78,6 @@ import {
   taskOptionsForEngine,
 } from "./taskEngine";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
-import { useTaskPresentationSettings } from "../../hooks/useTaskPresentationSettings";
 import { apiErrorMessage, parseApiError } from "../../utils/apiError";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import styles from "./index.module.less";
@@ -149,7 +148,6 @@ export default function TaskConversations({
   const queue = sharedQueue ?? localQueue;
   const clearQueue = queue.clear;
   const timeZone = useServerTimezone();
-  const presentationSettings = useTaskPresentationSettings();
   const [params, setParams] = useSearchParams();
   const taskID = routedTaskID !== undefined ? routedTaskID : params.get("task");
   const [resources, setResources] = useState<TaskResources | null>(null);
@@ -1676,7 +1674,6 @@ export default function TaskConversations({
                       </Typography.Paragraph>
                       <TaskTurnContent
                         turn={turn}
-                        settings={presentationSettings}
                         onOpenToolUI={(callID) =>
                           setWorkbenchTool((previous) => ({
                             taskID: detail.task_id,

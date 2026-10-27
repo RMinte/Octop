@@ -1,17 +1,17 @@
 # AgentComputer APP 任务计划与动作链路接入指南
 
-Octop 的计划面板和动作链路是两种互斥的过程展示。有可见计划时，面板展示步骤、结果、当前短活动、已知时间与产物入口；不把思考、公开进展和工具详情列表嵌入步骤。无计划或关闭步骤面板时，才由动作链路开关决定过程区样式。原始执行记录始终保存，切换展示不删除数据。
+Octop 的计划面板和动作链路是两种互斥的过程展示。有可见计划时，面板展示步骤、结果、当前短活动、已知时间与产物入口；不把思考、公开进展和工具详情列表嵌入步骤。无计划或本轮未启用步骤面板时，才由本轮动作链路开关决定过程区样式。2026 年 10 月 27 日服务端新增逐轮 `presentation` 快照，网页据此保持历史展示。本次按用户范围不修改 APP：当前 APP 仍读取全局偏好，以下逐轮配置、DTO、缓存与展示规则是后续客户端接线要求，尚不能宣称 APP 与网页已经一致。
 
-最新核对实际 APP `/Users/fangyuan/Desktop/code/AgentComputer/` 的基线为 `feature/0.0.2/octp @ 4be12673af766308c6516b69ea2c6cd0be94174d`；参考版为 AgentComputer2 `da4a8afdf19d3aa654d8040629758b4b80b4d03a`，服务端为 Octop `04c17f55` 加未提交改动，保留用户已提交的审批模式修改。APP 已完成安全设置、互斥展示、原计划面板，以及原阶段式 Process、工具行和命令卡复用，显式开场与权威整轮计时也已贯通。旧版“步骤内嵌完整过程”和“远端仅线性投影”均不再描述当前 APP。本文于 2026 年 10 月 19 日按源码、[原组件记录](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:64) 和 [最新 H/I 真实复验](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:76) 更新；本次文档工作只读核对 Swift 与记录，不修改客户端、用户配置或发起模型请求。H/I 的 brief 实测与后续宿主错误归因修正分开，不能将已完成 I 当作新错误分支的验收。
+以下组件与真实模型验收依据保留 2026 年 10 月 19 日核对结果：实际 APP `/Users/fangyuan/Desktop/code/AgentComputer/` 的当时基线为 `feature/0.0.2/octp @ 4be12673af766308c6516b69ea2c6cd0be94174d`；参考版为 AgentComputer2 `da4a8afdf19d3aa654d8040629758b4b80b4d03a`，服务端为 Octop `04c17f55` 加未提交改动。APP 当时已完成安全设置、互斥展示、原计划面板，以及原阶段式 Process、工具行和命令卡复用，显式开场与权威整轮计时也已贯通。依据为[原组件记录](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:64) 与 [H/I 真实复验](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:76)。这些历史结果不作为本次逐轮展示快照的验收，也不能将 H/I 的 brief 实测当作后续宿主错误分支的验收。
 
 ## 配置入口与优先级
 
-管理员在“应用设置 → 环境变量”维护两个全局默认值，缺省均为 `true`。显示时读取当前安全接口，不能拿某次历史核对或轮次生成快照代替当前配置；本轮不修改其实际值。
+管理员在“应用设置 → 环境变量”维护两个全局默认值，缺省均为 `true`。新合同中安全接口用于读取新轮默认值；APP 接线后已有轮次显示时应只读取本轮 `presentation`，不能用当前全局设置或本机偏好覆盖。
 
 | 环境变量 | 作用 |
 | --- | --- |
-| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮次是否启用公开进展生成及适用工作工具必填宿主 `brief`；同时为客户端过程区提供当前显示偏好 |
-| `OCTOP_TASK_STEP_PANEL_ENABLED` | 客户端是否显示已有计划的步骤面板；不启停规划，不改变执行顺序 |
+| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮次是否启用公开进展/动作说明生成，以及动作链路展示的默认值 |
+| `OCTOP_TASK_STEP_PANEL_ENABLED` | 新轮次是否显示已有计划步骤面板的默认值；不启停规划，不改变执行顺序 |
 
 支持大小写不敏感、允许两端空白的 `true/false`、`1/0`、`yes/no`、`on/off`。保存前校验这两项，非法值返回 `400 TASK_SETTINGS_INVALID`，不保存任何本次修改；错误只包含设置名，不回显其值。不要把这两个显示/生成开关当作权限开关。
 
@@ -26,7 +26,7 @@ Authorization: Bearer <access token>
 {"action_timeline_enabled":true,"step_panel_enabled":true}
 ```
 
-响应使用 `Cache-Control: no-store`，只返回两个布尔值。不要让 APP 读取 `/api/envs` 或整个环境文件。该 HTTP 接口不属于 WebSocket 命令，未新增协议帧。
+响应使用 `Cache-Control: no-store`，只返回两个新轮默认布尔值。不要让 APP 读取 `/api/envs` 或整个环境文件。该 HTTP 接口不属于 WebSocket 命令，未新增协议帧。
 
 服务端每次读取持久化的 `~/.octop/env`（自定义安装使用对应 `OCTOP_HOME/env`）。文件存在时，文件是这两项的权威来源：缺键回到 `true`，不回退其他 worker 可能残留的旧 `os.environ`；仅整个文件不存在时才读取启动进程环境，再缺省为 `true`。管理员保存后，新请求即可读取，多 worker 不依赖环境变量广播，不需为这两个键重启服务。
 
@@ -36,23 +36,29 @@ Authorization: Bearer <access token>
 {"type":"task.message","id":"command-actions-001","task_id":"task_example","data":{"request_id":"message-actions-001","prompt":"继续处理","options":{"action_timeline_enabled":false}}}
 ```
 
-创建、追问和手动重试都支持该选项。`options` 不接受 `step_panel_enabled`，它只属于当前显示设置。生效值在入队时写入本轮配置，`turn.options.action_timeline_enabled` 回显实际值。暂停、审批、客户端工具等待后恢复沿用原快照；同一 `request_id` 重传仍返回原轮，不重新解析全局默认。原请求选项不变，不能把服务器解析出的默认值填回待重传请求。新轮次才重新解析默认。旧轮缺该字段按 `true` 读取，不补写历史。
+创建、追问和手动重试都支持该选项。`options` 不接受 `step_panel_enabled`。服务端入队时保存 `configuration_json.presentation`，`TaskTurn.presentation` 返回两个严格布尔值：动作链路值采用本轮实际生成值，步骤面板值采用入队时全局默认；`turn.options.action_timeline_enabled` 仍回显实际生成值。暂停、审批、客户端工具等待后恢复沿用原快照；同一 `request_id` 重传仍返回原轮，不重新解析全局默认。原请求选项不变，不能把服务器解析出的默认值填回待重传请求。普通追问和手动重试的新轮次才重新解析默认；分叉复制的历史轮保留源轮快照。
 
-显示配置与生成快照分开：当前安全接口的 `step_panel_enabled` 决定已有计划是否可见，`action_timeline_enabled` 决定无可见计划时的过程样式；显示切换可立即作用于已有任务，但不能改变该轮已经冻结的生成策略或补生进展。APP 已接安全设置读取与恢复刷新；本地开发 Runtime 的偏好继续独立。客户端面板关闭实测见交接记录第 57～61 行，其中当前布尔值依据行为与代码推断，不能描述成独立认证 HTTP 取值验证。
+APP 接线后，展示与生成都应按轮冻结。例如某轮入队时两项都是 `true`，有计划时显示步骤面板；之后关闭、重新开启全局步骤面板，该轮始终显示原面板。关闭后的新轮保存 `step_panel_enabled=false`，即使随后全局重新开启，该轮仍采用 Process。同一任务可以有不同展示方式的轮次。安全设置在进入、恢复前台或配置保存后刷新，应只更新新轮默认值，不使远端历史轮改用全局设置。本地开发 Runtime 的偏好继续独立。
 
-## 统一展示规则
+```json
+{"presentation": {"action_timeline_enabled": true, "step_panel_enabled": false}}
+```
+
+服务端旧记录没有该对象时，固定使用旧轮配置中的动作值，缺失为 `true`，步骤面板固定为 `true`；不读取当前全局默认、不写回历史。旧版本没有保存步骤面板开关，无法恢复任意旧轮当时的值。旧缓存或旧服务端响应缺字段时，APP 应使用 `turn.options.action_timeline_enabled ?? true` 与步骤面板 `true` 兼容，不能回退到当前安全接口。后续升级须完整传递 DTO → 合并 → Snapshot → 持久缓存 → 展示投影，保留已有快照；设置变化不得再以全局偏好清除或重算历史展示。收到服务端权威快照后，用它补齐旧缓存缺失字段。
+
+## 逐轮展示接线规则
 
 | 条件 | 过程展示 |
 | --- | --- |
-| `step_panel_enabled && turn.plan != null` | 仅步骤面板；步骤结果、已知起止时间/耗时、当前步骤一条短活动和产物入口；无步骤内动作列表或卡外 Process |
-| 无可见计划，`action_timeline_enabled=true` | APP 已复用原结构化 Process：开场、阶段标题/状态、阶段内动作及可展开阶段结果；无正式计划时只有轮次级进展和工具。工具优先 `brief`，默认不显示原始思考 |
-| 无可见计划，`action_timeline_enabled=false` | 经典过程区，显示已保存的思考/供应商摘要与工具事实；旧公开进展仍保留，不因切换被删除 |
+| `turn.presentation.step_panel_enabled && turn.plan != null` | 仅步骤面板；步骤结果、已知起止时间/耗时、当前步骤一条短活动和产物入口；无步骤内动作列表或卡外 Process |
+| 无可见计划，`turn.presentation.action_timeline_enabled=true` | APP 已复用原结构化 Process：开场、阶段标题/状态、阶段内动作及可展开阶段结果；无正式计划时只有轮次级进展和工具。工具优先 `brief`，默认不显示原始思考 |
+| 无可见计划，`turn.presentation.action_timeline_enabled=false` | 经典过程区，显示已保存的思考/供应商摘要与工具事实；公开进展仍保留 |
 
 正文和答案复制始终只取 `text`。计划面板的当前短活动可以取当前步骤最新公开进展或工具 `brief/tool_label`，不是嵌套完整时间线。已知步骤耗时可由已记录起止时间计算；工具耗时只用 `duration_ms`，未知值不补造。完成后可收起面板；暂停、失败、取消停止执行动画，保留实际步骤结果。
 
-这属于展示互斥，不是记录互斥。计划模式仍可产生 reasoning、progress 和工具事实，正常保存和同步；步骤面板不铺开这些列表。关闭面板后可通过 Process 查看。不要为了实现互斥删掉步骤关联、工具输出或历史思考。
+这属于展示互斥，不是记录互斥。计划模式仍可产生 reasoning、progress 和工具事实，正常保存和同步；步骤面板不铺开这些列表。本轮步骤面板快照为关闭时可通过 Process 查看。不要为了实现互斥删掉步骤关联、工具输出或历史思考。
 
-原版截图中“已处理 → 开场说明 → 阶段对勾 → 缩进工具 → 阶段结果”是动作 Process，而非步骤面板。参考条件为 `(!stepPanelEnabled || plan == nil) && showsProcessShell`：计划数据可以参与关闭面板后的动作分组。无计划任务没有可据以生成的正式阶段，不能按段落或文字相似度猜阶段。
+原版截图中“已处理 → 开场说明 → 阶段对勾 → 缩进工具 → 阶段结果”是动作 Process，而非步骤面板。远端参考条件为 `(!turn.presentation.step_panel_enabled || plan == nil) && showsProcessShell`：计划数据可以参与本轮未显示面板时的动作分组。无计划任务没有可据以生成的正式阶段，不能按段落或文字相似度猜阶段。
 
 ## 当前 APP 的具体差异
 
@@ -125,8 +131,9 @@ WebSocket 仍为 v3，连接 `/api/project-tasks/ws`，沿用 `task.create/messa
 | `list_revision` | 只控制摘要；不作为忽略新结果、工具详情或思考的条件 |
 | `plan_id / step_id` | 执行时固定关联，恢复和迟到结果不重新绑定；无 ID 的旧记录不按文字或位置补配 |
 | `interactions / interaction_revision` | 沿用原审批、提问和暂停规则，状态保护不能吞掉较新内容或计划 |
+| `presentation` | 同一轮不可变，完整缓存；传入快照缺字段时保留已有值（`incoming.presentation ?? old?.presentation`），双方均缺时用固定兼容值；历史、恢复和分叉均不按全局默认重算，权威响应补齐旧缓存缺失字段 |
 
-先选择各自最新快照，再做终态保护；合并成功后将完整正文与 cursor 一起保存。终态新结果仍需刷新。旧计划快照、退役步骤和未关联记录继续保存；切换面板不修改这些数据。普通追问与手动重试创建新轮，计划不继承；暂停恢复同轮保留计划、身份和工具回执。
+先选择各自最新快照，再做终态保护；合并成功后将完整正文、`presentation` 与 cursor 一起保存。终态新结果仍需刷新。旧计划快照、退役步骤和未关联记录继续保存。普通追问与手动重试创建新轮，计划不继承并重新冻结展示默认；暂停恢复同轮保留计划、展示快照、身份和工具回执。
 
 内容块仍为 `text / reasoning / reasoning_summary / tool / plan / progress`。公开正文可以与工具、思考交错，保留消息边界、顺序和固定的计划/步骤关联，始终独立于 Process 与计划面板。`reply` 包含本轮全部公开正文及交付纠正前已发布的文字，不表示最终结论或任务成功；未 mark 当前步骤就结束仍报 TASK_PLAN_UNFINISHED，受阻仍报 TASK_PLAN_BLOCKED，文件交付必须有实际附件发布收据。成功规划与通知不重复显示为普通工具；失败保留失败工具块。`progress` 不进入累计回复或答案复制。
 
@@ -159,17 +166,19 @@ WebSocket 仍为 v3，连接 `/api/project-tasks/ws`，沿用 `task.create/messa
 - I 无计划，首次 execute 缺 brief，在审批前保存 failed 工具块，没有任何关联审批或执行开始/结束/耗时。模型换用新 call 并补说明后，只有新 call 获批并实际执行一次，退出码 0、19ms；最终仍保留首次失败和随后成功两条事实。该首次失败当时被错误包装成 `User rejected the tool call…`，并没有真实用户拒绝；原记录保持，后续宿主错误分支修正不能算作已完成 I 的实测结果。
 - G 的完整轮次 hash 保持，旧 brief 仍为 null。H/I 的审批回执均来自用户 allow_once，测试工具未发送批准或模式修改。空白、恰 240/241 字符、业务同名字段、关闭动作和提问豁免没有新增真实模型验收，不能以服务端定向用例替代。
 
-## 接入验收
+## 接入验收要求
+
+以下逐轮快照条目供后续 APP 接线验收，本次未执行 APP 修改、构建或新 UI 验收。
 
 - 有计划且步骤面板开启：只出现计划面板，展开步骤没有完整思考/进展/工具列表；答案独立。
-- 关闭步骤面板：恢复 Process；已有计划按稳定步骤身份显示阶段标题、子动作和阶段结果，无计划保持轮次级列表；动作开关切换结构化与经典样式，原始数据及游标不变。
+- 新轮步骤面板快照为关闭：显示 Process；已有计划按稳定步骤身份显示阶段标题、子动作和阶段结果，无计划保持轮次级列表；本轮动作快照决定结构化或经典样式。
 - 生成首帧、无正文、已有正文、待审批、恢复及终态：同一运行状态只显示一个主要占位；阶段和工具收展保留独立稳定身份。
 - 工具语义：文件读取、搜索、编辑和命令显示对应图标/摘要，合法资源入口可打开，参数、输出和未知时间仍保留真实边界。
 - brief 生成与读取：动作生成开启时，有/无计划的适用工作调用均要求有效宿主 brief，不凭曾开始的 call_id 豁免；未执行的新旧缺失调用不消费审批或派发，模型纠正不得改写已批准参数。控制工具及业务同名字段保持原合同，历史 DTO 的 null 不补造，已派发客户端结果沿原调用消费。
 - 错误归因：宿主准入错误保留原 call_id/工具名及本地化原因，工具 status 为 failed，output 为实际错误字符串；不冒充用户 deny，不将内部 host_error 暴露为客户端决定，不改写历史 I。
-- 全局默认变更：安全 GET 返回最新布尔值；旧轮生成快照不变，新轮继承新值；显式本轮覆盖有效。
-- 暂停、审批和断线恢复：固定计划身份、工具归属及生成快照；只恢复订阅，不重发消息或 task.open。
+- 全局默认变更：安全 GET 返回最新布尔值；运行轮和历史轮的生成与展示快照不变，普通追问/手动重试的新轮继承新值；显式动作覆盖同时影响本轮生成和展示。
+- 暂停、审批和断线恢复：固定计划身份、工具归属、生成与展示快照；只恢复订阅，不重发消息或 task.open；相同 request_id 不重新取默认。
 - 严格顺序：只能结束当前步，宿主自动推进；未完成或受阻不误报轮次成功；混批与子代理不能改主计划。
-- 缓存与历史：完整字段和 cursor 一致往返，已保存旧记录只读保留，不补造身份或执行时间。
+- 缓存与历史：完整字段、presentation 和 cursor 一致往返；冷重开和历史分页保持展示，旧缓存缺字段采用固定兼容值，分叉保留源轮快照，不补造身份或执行时间。
 
 此前客户端 [SPEC029 第 64～73 行](/Users/fangyuan/Desktop/code/AgentComputer/SPEC/029-octop-box-integration.md:64) 已记录原阶段树、工具行/命令卡、占位互斥、缓存与整轮计时接线，以及核心协议定向 48 项、应用定向 133 个用例和 macOS/iOS Simulator 双端构建通过。真实 G 展示两阶段及结果、一次实际 execute 和整轮计时，冷重开保持轮次与游标。随后 H 的真实待审批已补充观察中性静态状态，H/I 的具体 brief 及缺失补正结果见上节。真实 iOS、VoiceOver、真正断网、中途暂停/失败和更长链路仍未验收。以上均来自客户端既有记录，本次文档工作未修改或重新构建 APP，也不将它们计作宿主错误归因修正的最新联合测试或在线加载结论。

@@ -195,34 +195,36 @@ flowchart TD
 
 | 环境变量 | 职责 |
 | --- | --- |
-| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮宿主进展及异步公开进展/动作说明的生成默认值，同时提供当前过程显示偏好 |
-| `OCTOP_TASK_STEP_PANEL_ENABLED` | 已生成计划的面板显示默认值，不控制是否规划或执行 |
+| `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮宿主进展及异步公开进展/动作说明的生成默认值，同时作为新轮动作链路展示默认值 |
+| `OCTOP_TASK_STEP_PANEL_ENABLED` | 新轮已有计划的面板展示默认值，不控制是否规划或执行 |
 
 支持 true/false、1/0、yes/no、on/off，大小写不敏感且忽略两端空白。环境变量保存前校验这两项，非法值返回 `TASK_SETTINGS_INVALID` 且不保存本次修改。其他环境变量沿用现有规则。
 
-登录用户通过 `GET /api/project-tasks/settings` 读取 `{action_timeline_enabled, step_panel_enabled}`，均为布尔值，响应 no-store，无需管理员权限。该接口不返回任意环境变量或密钥，APP 不应读取整个环境列表。
+登录用户通过 `GET /api/project-tasks/settings` 读取新轮默认值 `{action_timeline_enabled, step_panel_enabled}`，均为布尔值，响应 no-store，无需管理员权限。该接口不返回任意环境变量或密钥，APP 不应读取整个环境列表，也不应使用该响应重新选择历史轮次的展示方式。
 
 每次读取持久化 `OCTOP_HOME/env`。文件存在时，该文件对两键权威，缺键回默认 true；仅文件不存在时回退进程环境，再缺省为 true。因此保存和删除键可对后续请求热生效，多 worker 不会被另一进程残留的旧环境值覆盖，也不依赖 agent 重载或服务重启。
 
-生成优先级是 `options.action_timeline_enabled` 显式严格布尔值优先，否则采用入队时全局默认。省略或 null 继承；有效值冻结在轮次 configuration_json 顶层，turn.options 回显。原 execution_options 保留原请求用于幂等比较；同 request_id 重传复用旧轮，暂停、审批、客户端工具等待后恢复不重新读取默认，新轮才重新解析。旧轮缺字段按 true 读取，不补写历史。
+生成优先级是 `options.action_timeline_enabled` 显式严格布尔值优先，否则采用入队时全局默认。省略或 null 继承；有效值冻结在轮次 `configuration_json` 顶层，`turn.options` 回显。同时保存 `configuration_json.presentation`，通过 `TaskTurn.presentation` 返回 `{action_timeline_enabled, step_panel_enabled}`：动作值与本轮有效生成值一致，步骤面板值采用入队时全局默认。`options` 不接受 `step_panel_enabled`。原 `execution_options` 保留原请求用于幂等比较；同 `request_id` 重传复用旧轮，暂停、审批、客户端工具等待后恢复不重新读取默认，普通追问和手动重试的新轮才重新解析。
 
 关闭动作生成时不启动进展旁路，也不生成宿主开场或要求宿主 brief；普通工具执行、实际结果和 Provider 公开思考仍保留，业务同名字段沿用原合同。开启时宿主即时保存进展，旁路随后补充说明，与是否建计划无关；计划状态不由这些文字驱动。主模型的新请求均隐藏通知工具，已有调用仍可通过保留的注册项正常结束。
 
-显示设置采用当前安全接口的值，与既有轮次生成快照分开。步骤面板开关即时影响已有计划是否可见；无可见计划时，当前动作开关决定结构化 Process 或经典过程区。改变显示不会补生成公开进展，也不会删原始记录。网页与 APP 已接设置读取和恢复刷新；APP 的阶段树与原工具组件复用属于后续已完成的客户端接线，详见专项指南。
+服务端已返回每轮 `presentation`，网页使用它决定展示，不能用当前全局设置覆盖远端轮次。保存设置只影响后续新轮；正在运行、暂停恢复、历史分页、冷启动和断线续接的已有轮次保持原快照，分叉复制的历史轮也保留源值。同一任务的不同轮次可以采用不同展示方式。改变默认值不会补生成公开进展，也不会删除原始记录。本次按用户范围不修改 APP；当前 APP 仍读取全局偏好，需后续按下述协议接线后才能获得相同行为。
+
+旧记录未保存 `presentation` 时，服务端固定采用原轮配置中的 `action_timeline_enabled`，仍缺失则为 `true`；`step_panel_enabled` 固定为 `true`，不读取当前全局默认，也不补写历史。此前没有记录步骤面板偏好，无法准确重建任意旧轮当时的开关值。旧缓存或旧服务端响应缺字段时，客户端应采用同一兼容规则：`turn.options.action_timeline_enabled ?? true` 与步骤面板 `true`。APP 后续升级 DTO、合并、导出与持久缓存时须完整保留 `presentation`，设置刷新不能再清除该轮的展示快照；本次不把这一客户端接线计为已实现。APP 的阶段树与原工具组件复用及接线要求见专项指南。
 
 ## 持久化恢复与界面
 
 content_blocks 按 content_revision 替换完整数组，plan/plan_revision 独立选择最新快照，不依赖 list_revision 或回复长度。先选择内容与计划版本，再做状态保护；迟到回执和终态保护不能吞掉新的结果。完整正文和已应用 cursor 一起缓存，不能只保存游标。
 
-暂停恢复同一轮保留计划、生成策略、步骤身份、结果及工具关联；普通追问或手动重试的新轮从无计划开始。取消、失败和等待保留最后事实，不伪造完成。已保存的旧计划、退役步骤及无 ID 记录继续读取，不自动迁移或恢复旧命令。
+暂停恢复同一轮保留计划、生成策略、展示快照、步骤身份、结果及工具关联；普通追问或手动重试的新轮从无计划开始，并冻结新轮展示默认值。取消、失败和等待保留最后事实，不伪造完成。已保存的旧计划、退役步骤及无 ID 记录继续读取，不自动迁移或恢复旧命令。
 
 审批恢复时，规划状态和规划调用的幂等回执只从当前轮的持久化 `content_blocks` 恢复。Harness 检查点包含作为模型上下文传入的前几轮消息，不能扫描其中的 `planning` 回执来决定本轮计划，也不能跨轮比较 `revision`。规划修改在工具成功返回前已保存计划快照、调用 ID 和参数；即使检查点尚未保存工具返回，也能从本轮记录恢复同一回执。历史消息继续作为会话上下文保留。
 
 | 可见条件 | 网页和 APP 应采用的展示 |
 | --- | --- |
-| 步骤面板开启且有计划 | 唯一计划面板：步骤、结果、已知时间/耗时、当前短活动和产物入口；不嵌完整动作列表，不并列 Process |
-| 无可见计划且动作链路开启 | APP 已显示开场、阶段标题/状态、阶段内工具与可展开阶段结果，无正式计划时展示轮次级进展和工具；网页仍为线性进展/工具，默认隐藏原始思考 |
-| 无可见计划且动作链路关闭 | 经典过程区显示已保存思考/供应商摘要和工具事实；不删除旧 progress |
+| 本轮 `presentation.step_panel_enabled` 且有计划 | 唯一计划面板：步骤、结果、已知时间/耗时、当前短活动和产物入口；不嵌完整动作列表，不并列 Process |
+| 无可见计划且本轮 `presentation.action_timeline_enabled` | APP 已显示开场、阶段标题/状态、阶段内工具与可展开阶段结果，无正式计划时展示轮次级进展和工具；网页仍为线性进展/工具，默认隐藏原始思考 |
+| 无可见计划且本轮动作链路关闭 | 经典过程区显示已保存思考/供应商摘要和工具事实；不删除旧 progress |
 
 正文与答案复制始终只取 text。面板内当前短活动来源于当前步骤已发生的最新 progress 或工具 brief/label，不是展开整条动作链。步骤耗时可以从已知起止时间求得；工具耗时使用 duration_ms，不从轮次时间估算。
 
@@ -242,7 +244,7 @@ content_blocks 按 content_revision 替换完整数组，plan/plan_revision 独�
 | [content.py](../src/octop/infra/projects/content.py) | 稳定块、计划修订、公开进展与工具详情更新 |
 | [tasks.py](../src/octop/infra/projects/tasks.py) | 入队冻结动作生成配置，从持久块投影统一 TaskTurn |
 | [settings.py](../src/octop/infra/projects/settings.py) | 读取两项全局默认值并验证布尔环境配置 |
-| `dashboard/src/pages/BoxProjects/` | 独立版本合并、互斥计划面板与 Process、当前设置刷新 |
+| `dashboard/src/pages/BoxProjects/` | 独立版本合并、按轮展示快照选择互斥计划面板与 Process、新轮默认设置刷新 |
 | [实时协议](project-task-websocket.md)及 Schema | APP/网页共享合同 |
 
 接口保持 `/api/projects`、`/api/project-tasks`；不恢复 `/api/agentcomputer/v1` 或 Bridge。项目独立于专家。客户端目录仍仅保存用户电脑绝对路径，规划不授权服务端探测、读取或上传该目录内容。

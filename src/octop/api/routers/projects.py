@@ -505,8 +505,8 @@ async def task_artifact_library_detail(
 @task_router.get(
     "/settings",
     response_model=TaskSettings,
-    summary="读取任务过程显示与生成默认值",
-    description="登录用户可读取两个全局布尔默认值，不返回环境变量内容或密钥。动作链路默认值在新轮次入队时固定；步骤面板只影响客户端显示。每次读取持久化配置，不使用缓存。",
+    summary="读取新轮次的过程显示与生成默认值",
+    description="登录用户可读取两个全局布尔默认值，不返回环境变量内容或密钥。两项展示配置均在新轮次入队时冻结到 turn.presentation；修改只影响新轮次，已有轮次的展示、生成及恢复保持原快照。步骤面板不改变计划生成或执行。每次读取持久化配置，不使用缓存。",
 )
 async def task_settings(
     response: Response,

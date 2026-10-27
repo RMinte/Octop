@@ -13,12 +13,10 @@ import { useTranslation } from "react-i18next";
 import type {
   TaskContentBlock,
   TaskPlanStep,
-  TaskPresentationSettings,
   TaskTurn,
 } from "../../api/modules/projects";
 import LazyMarkdown from "../../components/Markdown/LazyMarkdown";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
-import { DEFAULT_TASK_PRESENTATION_SETTINGS } from "../../hooks/useTaskPresentationSettings";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
 import { parseKnowledgeCitations } from "../../utils/parseKnowledgeCitations";
 import TaskFileChanges from "./TaskFileChanges";
@@ -439,16 +437,19 @@ function TaskActions({
 
 export default function TaskTurnContent({
   turn,
-  settings = DEFAULT_TASK_PRESENTATION_SETTINGS,
   onOpenArtifacts,
   onOpenToolUI,
 }: {
   turn: TaskTurn;
-  settings?: TaskPresentationSettings;
   onOpenArtifacts?: () => void;
   onOpenToolUI?: (id: string) => void;
 }) {
   const timeZone = useServerTimezone();
+  // Older cached turns use their saved execution option and a fixed panel default.
+  const settings = turn.presentation ?? {
+    action_timeline_enabled: turn.options.action_timeline_enabled ?? true,
+    step_panel_enabled: true,
+  };
   const showPlan = settings.step_panel_enabled && turn.plan != null;
   const process = turn.content_blocks.filter(
     (block) =>

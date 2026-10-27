@@ -88,6 +88,47 @@ beforeEach(() => {
 
 describe("计划版本合并", () => {
   it.each(["turn", "snapshot", "write"] as const)(
+    "%s 为已完成的旧缓存补齐展示快照，迟到无快照记录不清除它",
+    async (kind) => {
+      const cached: TaskDetail = {
+        ...fixture,
+        status: "completed",
+        active_turn_id: null,
+        turns: [{ ...fixture.turns[0], status: "completed" }],
+      };
+      api.open.mockResolvedValue(cached);
+      const hook = renderHook(() => useTaskConversation("task_a", null));
+      await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1));
+      const receive = api.events.mock.calls[0][2];
+      const presentation = {
+        action_timeline_enabled: false,
+        step_panel_enabled: false,
+      };
+      for (const detail of [
+        {
+          ...cached,
+          turns: [{ ...cached.turns[0], presentation }],
+        },
+        cached,
+      ]) {
+        await act(async () => {
+          if (kind === "write") hook.result.current.applyWrite(detail);
+          else if (kind === "snapshot")
+            receive({ type: "snapshot", data: detail });
+          else
+            receive({
+              type: "turn",
+              data: { task: detail, turn: detail.turns[0], cursor: "next" },
+            });
+        });
+        expect(hook.result.current.detail?.turns[0].presentation).toEqual(
+          presentation,
+        );
+      }
+    },
+  );
+
+  it.each(["turn", "snapshot", "write"] as const)(
     "%s 的计划独立于正文版本，迟到计划不会覆盖最新或已清空的计划",
     async (kind) => {
       const hook = renderHook(() => useTaskConversation("task_a", null));

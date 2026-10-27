@@ -47,6 +47,7 @@ from octop.infra.gateway.process.usage_record import UsageTracker
 from octop.infra.projects import source_routes
 from octop.infra.projects.checkpoint_saver import TaskCheckpointSaver
 from octop.infra.projects.context import capture_memory, close_pending_tools, model_context
+from octop.infra.projects.settings import snapshot_presentation
 from octop.infra.projects.stream import TASK_PROTOCOL
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.locale import normalize_locale
@@ -330,6 +331,7 @@ async def admit(services: SharedServices, queued: ResidentRequestRow) -> str:
                 "resident_input": json.loads(queued.input_json),
                 "resident_configuration": json.loads(queued.configuration_json),
                 "action_timeline_enabled": False,
+                "presentation": snapshot_presentation(services, False).model_dump(),
                 "action_mode": "ask",
             }
             services.project_task_repo.activate(conn, identifier, queued.turn_id, now)
@@ -407,6 +409,7 @@ async def append_message(
                             "execution_kind": "resident_notification",
                             "resident_message": message_to_dict(message),
                             "action_timeline_enabled": False,
+                            "presentation": snapshot_presentation(services, False).model_dump(),
                         },
                         ensure_ascii=False,
                     ),

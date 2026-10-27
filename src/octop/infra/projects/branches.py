@@ -29,6 +29,7 @@ from octop.infra.projects.expert_profiles import resolve_expert_profile
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.legacy_conversation_models import LegacySourceAttachment
 from octop.infra.projects.models import ProjectModel, Reference
+from octop.infra.projects.settings import presentation_for_turn
 from octop.infra.projects.tasks import ActionMode, Prompt, RequestID, now_ms
 from octop.infra.utils.ulid import new_ulid
 
@@ -163,6 +164,8 @@ class _HistoryCopy:
         attached = [self.attachment(item) for item in original.get("attachment_ids", [])]
         expert = original.get("expert_profile") or {}
         configuration: dict[str, Any] = {
+            "presentation": presentation_for_turn(original).model_dump(),
+            "action_timeline_enabled": original.get("action_timeline_enabled", True),
             "branch_origin": {
                 "source_task_id": self.source_id,
                 "source_turn_id": source.turn_id,

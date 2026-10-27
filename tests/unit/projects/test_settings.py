@@ -10,6 +10,7 @@ from octop.infra.projects.settings import (
     ACTION_TIMELINE_ENV,
     STEP_PANEL_ENV,
     load_settings,
+    presentation_for_turn,
     validate_env_values,
 )
 from octop.infra.projects.tasks import TaskExecutionOptions
@@ -80,3 +81,22 @@ def test_per_turn_override_requires_an_actual_boolean(value):
 def test_per_turn_override_is_optional_and_does_not_become_project_configuration():
     assert TaskExecutionOptions().action_timeline_enabled is None
     assert TaskExecutionOptions(action_timeline_enabled=False).action_timeline_enabled is False
+
+
+@pytest.mark.parametrize("actions", [True, False])
+def test_history_without_a_snapshot_uses_fixed_compatibility_values(actions):
+    configuration = {"action_timeline_enabled": actions}
+    assert presentation_for_turn(configuration).model_dump() == {
+        "action_timeline_enabled": actions,
+        "step_panel_enabled": True,
+    }
+    assert configuration == {"action_timeline_enabled": actions}
+
+
+def test_saved_presentation_is_independent_of_generation_and_legacy_defaults():
+    assert presentation_for_turn(
+        {
+            "action_timeline_enabled": True,
+            "presentation": {"action_timeline_enabled": False, "step_panel_enabled": False},
+        }
+    ).model_dump() == {"action_timeline_enabled": False, "step_panel_enabled": False}

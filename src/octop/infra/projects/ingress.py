@@ -21,6 +21,7 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects import source_routes, task_submission, tasks
 from octop.infra.projects.deletion_state import assert_project_writable, assert_task_writable
 from octop.infra.projects.models import ProjectModel
+from octop.infra.projects.settings import snapshot_presentation
 
 logger = logging.getLogger(__name__)
 
@@ -473,6 +474,7 @@ def record_notification(
                         "execution_kind": "notification",
                         "source": source.model_dump(mode="json"),
                         "action_timeline_enabled": False,
+                        "presentation": snapshot_presentation(services, False).model_dump(),
                     }
                 ),
                 "",

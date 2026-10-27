@@ -2178,16 +2178,16 @@ it("常驻模型选择用于重试，跟随默认和切换任务不会沿用另�
 });
 
 it("独立展示思考内容并合并实时更新，迟到内容不截断已收到的思考", async () => {
-  api.settings.mockResolvedValue({
-    action_timeline_enabled: false,
-    step_panel_enabled: true,
-  });
   const running: TaskDetail = {
     ...fixture,
     active_turn_id: "turn_a",
     turns: [
       {
         ...fixture.turns[0],
+        presentation: {
+          action_timeline_enabled: false,
+          step_panel_enabled: true,
+        },
         status: "running",
         reply: "",
         reasoning: "先分析问题。",
@@ -2233,16 +2233,16 @@ it("独立展示思考内容并合并实时更新，迟到内容不截断已收�
 });
 
 it("摘要与工具按顺序展示，稳定标识保留展开状态，迟到快照不会覆盖新内容块", async () => {
-  api.settings.mockResolvedValue({
-    action_timeline_enabled: false,
-    step_panel_enabled: true,
-  });
   const running: TaskDetail = {
     ...fixture,
     active_turn_id: "turn_a",
     turns: [
       {
         ...fixture.turns[0],
+        presentation: {
+          action_timeline_enabled: false,
+          step_panel_enabled: true,
+        },
         status: "running",
         reply: "",
         reasoning: "准备检查。",
@@ -3237,13 +3237,17 @@ it("Reviewer 转人工时在原卡显示稳定原因并保留人工决定入口"
   ).toBeEnabled();
 });
 
-it("多个历史回合共用一次设置读取，恢复焦点后同时更新展示", async () => {
+it("历史回合使用各轮展示快照，恢复焦点和全局开关变化不改变历史展示", async () => {
   const history: TaskDetail = {
     ...fixture,
-    turns: [1, 2].map((sequence) => ({
+    turns: [1, 2, 3].map((sequence) => ({
       ...fixture.turns[0],
       turn_id: `turn_${sequence}`,
       sequence,
+      presentation: {
+        action_timeline_enabled: sequence !== 3,
+        step_panel_enabled: sequence === 1,
+      },
       reply: `第 ${sequence} 轮答复`,
       plan: {
         source: "octop_planning" as const,
@@ -3275,23 +3279,27 @@ it("多个历史回合共用一次设置读取，恢复焦点后同时更新展�
   api.get.mockResolvedValue(history);
   mount("?task=task_a");
   await screen.findByText("第 1 轮计划");
-  expect(screen.getByText("第 2 轮计划")).toBeVisible();
-  expect(api.settings).toHaveBeenCalledOnce();
-  expect(
-    screen.queryByRole("region", { name: "动作链路" }),
-  ).not.toBeInTheDocument();
+  expect(screen.queryByText("第 2 轮计划")).not.toBeInTheDocument();
+  expect(screen.queryByText("第 3 轮计划")).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "动作链路" })).toHaveTextContent(
+    "第 2 轮公开进展",
+  );
+  expect(screen.getByRole("region", { name: "思考过程" })).toHaveTextContent(
+    "第 3 轮公开进展",
+  );
+  expect(api.settings).not.toHaveBeenCalled();
   api.settings.mockResolvedValue({
     action_timeline_enabled: false,
     step_panel_enabled: false,
   });
-  act(() => window.dispatchEvent(new Event("focus")));
-  await waitFor(() =>
-    expect(screen.getAllByRole("region", { name: "思考过程" })).toHaveLength(2),
-  );
-  expect(screen.queryByText("第 1 轮计划")).not.toBeInTheDocument();
-  expect(screen.getByText("第 1 轮公开进展")).toBeVisible();
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(screen.getByText("第 1 轮计划")).toBeVisible();
+  expect(screen.queryByText("第 1 轮公开进展")).not.toBeInTheDocument();
   expect(screen.getByText("第 2 轮公开进展")).toBeVisible();
-  expect(api.settings).toHaveBeenCalledTimes(2);
+  expect(screen.getByText("第 3 轮公开进展")).toBeVisible();
+  expect(screen.getAllByRole("region", { name: "动作链路" })).toHaveLength(1);
+  expect(screen.getAllByRole("region", { name: "思考过程" })).toHaveLength(1);
+  expect(api.settings).not.toHaveBeenCalled();
 });
 
 it("账号审批在任务之间共享，迟到任务摘要和低版本推送不覆盖已确认模式", async () => {

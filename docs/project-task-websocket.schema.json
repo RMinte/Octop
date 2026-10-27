@@ -3628,6 +3628,25 @@
       "title": "TaskPlanStep",
       "type": "object"
     },
+    "TaskPresentation": {
+      "additionalProperties": false,
+      "properties": {
+        "action_timeline_enabled": {
+          "default": true,
+          "description": "本轮固定的动作链路展示方式，不随之后的全局设置改变。",
+          "title": "Action Timeline Enabled",
+          "type": "boolean"
+        },
+        "step_panel_enabled": {
+          "default": true,
+          "description": "本轮固定的步骤面板显示方式，不改变计划生成或执行。",
+          "title": "Step Panel Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "TaskPresentation",
+      "type": "object"
+    },
     "TaskRecovery": {
       "additionalProperties": false,
       "properties": {
@@ -3710,6 +3729,10 @@
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
+        "presentation": {
+          "$ref": "#/$defs/TaskPresentation",
+          "description": "本轮入队时冻结的展示配置，供网页和 APP 按轮展示使用；旧记录采用固定兼容值，不读取当前全局设置。"
+        },
         "execution_engine": {
           "$ref": "#/$defs/ExecutionEngineSnapshot",
           "description": "本轮受理时冻结的引擎、连接、原生模型及适配能力；不含凭据和私有会话标识。"
@@ -4131,6 +4154,7 @@
         }
       },
       "required": [
+        "presentation",
         "sequence",
         "turn_id",
         "request_id",

@@ -184,7 +184,11 @@
       "updated_at": "2026-10-22T02:00:03Z",
       "started_at": "2026-10-22T02:00:00Z",
       "finished_at": null,
-      "processing_duration_ms": null
+      "processing_duration_ms": null,
+      "presentation": {
+        "action_timeline_enabled": true,
+        "step_panel_enabled": false
+      }
     },
     "cursor": "opaque_example_cursor"
   }

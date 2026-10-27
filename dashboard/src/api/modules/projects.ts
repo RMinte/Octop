@@ -383,6 +383,7 @@ export interface TaskTurn {
   input_tokens?: number;
   output_tokens?: number;
   options: TaskExecutionOptions;
+  presentation?: TaskPresentationSettings;
   web_search_enabled: boolean;
   project_revision: number | null;
   server_directory?: string | null;

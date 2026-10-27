@@ -85,6 +85,11 @@ def services(tmp_path):
                 "directory": str(tmp_path / "source-directory"),
                 "client_directory": "opaque-client-directory",
                 "action_mode": "plan",
+                "action_timeline_enabled": index == 1,
+                "presentation": {
+                    "action_timeline_enabled": index == 1,
+                    "step_panel_enabled": False,
+                },
                 "attachment_ids": ["input_original"] if index == 2 else [],
                 "execution_options": {"client_tools": [{"name": "client__write"}]},
                 "approval_policy_at_start": {"mode": "no_approval"},
@@ -178,6 +183,10 @@ def test_fork_copies_visible_history_and_owned_bytes_without_execution_state(ser
     assert services.project_task_turn_repo.context(created.task_id) is None
     for source, turn in zip(original, copied, strict=True):
         configuration = json.loads(turn.configuration_json)
+        assert (
+            configuration["presentation"] == json.loads(source.configuration_json)["presentation"]
+        )
+        assert tasks.turn_view(turn).presentation.model_dump() == configuration["presentation"]
         assert configuration["branch_origin"] == {
             "source_task_id": "source",
             "source_turn_id": source.turn_id,

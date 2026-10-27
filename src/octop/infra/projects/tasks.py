@@ -74,7 +74,11 @@ from octop.infra.projects.progress import TaskPlan
 from octop.infra.projects.recovery import TaskRecovery
 from octop.infra.projects.service import _validate, get_project
 from octop.infra.projects.service import resources as project_resources
-from octop.infra.projects.settings import load_settings
+from octop.infra.projects.settings import (
+    TaskPresentation,
+    presentation_for_turn,
+    snapshot_presentation,
+)
 from octop.infra.projects.title_policy import provisional_title
 from octop.infra.users.resource_policy import assert_token_quota_available
 from octop.infra.utils.locale import normalize_locale
@@ -384,6 +388,9 @@ class TaskCreate(ProjectTaskCreate):
 
 
 class TaskTurn(ProjectModel):
+    presentation: TaskPresentation = Field(
+        description="本轮入队时冻结的展示配置，供网页和 APP 按轮展示使用；旧记录采用固定兼容值，不读取当前全局设置。"
+    )
     execution_engine: ExecutionEngineSnapshot = Field(
         default_factory=ExecutionEngineSnapshot,
         description="本轮受理时冻结的引擎、连接、原生模型及适配能力；不含凭据和私有会话标识。",
@@ -582,6 +589,7 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
             if block.status == "streaming":
                 block.status = "interrupted"
     return TaskTurn(
+        presentation=presentation_for_turn(configuration),
         execution_engine=ExecutionEngineSnapshot.model_validate(
             configuration.get("execution_engine") or {}
         ),
@@ -843,6 +851,7 @@ def _base_configuration(
     )
     _validate(services, owner_id, fields, allow_expert_team=is_expert_team)
     assert_token_quota_available(services.user_policy_repo, services.usage_repo, owner_id)
+    presentation = snapshot_presentation(services, options.action_timeline_enabled)
     return {
         **snapshot,
         **fields.model_dump(),
@@ -858,11 +867,8 @@ def _base_configuration(
         "expert_memory_enabled": options.expert_memory_enabled,
         "action_mode": action_mode,
         "configuration_revision": configuration_revision,
-        "action_timeline_enabled": (
-            options.action_timeline_enabled
-            if options.action_timeline_enabled is not None
-            else load_settings(services).action_timeline_enabled
-        ),
+        "action_timeline_enabled": presentation.action_timeline_enabled,
+        "presentation": presentation.model_dump(),
         "execution_options": options.model_dump(exclude_none=True),
     }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from typing import Any
 
 from pydantic import Field
 
@@ -18,12 +19,45 @@ _TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "off"})
 
 
-class TaskSettings(ProjectModel):
+class TaskPresentation(ProjectModel):
     action_timeline_enabled: bool = Field(
-        default=True, description="新轮次的结构化动作链路默认开关；已有轮次保留入队快照。"
+        default=True, description="本轮固定的动作链路展示方式，不随之后的全局设置改变。"
     )
     step_panel_enabled: bool = Field(
-        default=True, description="客户端步骤面板的全局显示默认值，不改变计划生成或执行。"
+        default=True, description="本轮固定的步骤面板显示方式，不改变计划生成或执行。"
+    )
+
+
+class TaskSettings(ProjectModel):
+    action_timeline_enabled: bool = Field(
+        default=True, description="新轮次的动作生成及展示默认值；已有轮次保留入队快照。"
+    )
+    step_panel_enabled: bool = Field(
+        default=True, description="新轮次的步骤面板显示默认值；已有轮次保留入队快照。"
+    )
+
+
+def presentation_for_turn(configuration: Mapping[str, Any]) -> TaskPresentation:
+    """Read immutable preferences, using fixed defaults for pre-snapshot history."""
+    if configuration.get("presentation") is not None:
+        return TaskPresentation.model_validate(configuration["presentation"])
+    return TaskPresentation(
+        action_timeline_enabled=configuration.get("action_timeline_enabled", True),
+        step_panel_enabled=True,
+    )
+
+
+def snapshot_presentation(
+    services: SharedServices, action_timeline_enabled: bool | None = None
+) -> TaskPresentation:
+    defaults = load_settings(services)
+    return TaskPresentation(
+        action_timeline_enabled=(
+            action_timeline_enabled
+            if action_timeline_enabled is not None
+            else defaults.action_timeline_enabled
+        ),
+        step_panel_enabled=defaults.step_panel_enabled,
     )
 
 
