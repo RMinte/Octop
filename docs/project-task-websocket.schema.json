@@ -2363,7 +2363,8 @@
             "timeout",
             "auto_reviewer",
             "full_access_mode",
-            "previous_denial"
+            "previous_denial",
+            "cron_skip_confirmation"
           ],
           "title": "Source",
           "type": "string"

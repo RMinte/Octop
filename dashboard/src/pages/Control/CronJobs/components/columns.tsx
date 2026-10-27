@@ -134,6 +134,20 @@ export const createColumns = (
       },
     },
     {
+      title: handlers.t("cronJobs.project"),
+      dataIndex: "project_name",
+      key: "project",
+      width: 180,
+      ellipsis: true,
+    },
+    {
+      title: handlers.t("cronJobs.expert"),
+      dataIndex: "expert_name",
+      key: "expert",
+      width: 160,
+      ellipsis: true,
+    },
+    {
       title: handlers.t("common.enabled"),
       dataIndex: "enabled",
       key: "enabled",

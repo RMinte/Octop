@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 
-from octop.infra.db.repos.unified_sources import UnifiedSourceRouteRepo
+from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
+from octop.infra.db.repos.unified_sources import (
+    CronOccurrenceRepo,
+    UnifiedSourceInboxRepo,
+    UnifiedSourceRouteRepo,
+)
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 
@@ -41,6 +47,51 @@ def assert_source_access(
             or (authority.get("automatic") and not cron.enabled)
         ):
             raise OctopError.localized(ErrorCode.FORBIDDEN)
+
+
+def cron_skip_confirmation(
+    services: SharedServices, conn: Any, owner: int, turn: ProjectTaskTurnRow
+) -> bool:
+    """Grant only this admitted Octop turn its accepted Cron occurrence choice."""
+    configuration = json.loads(turn.configuration_json)
+    if (configuration.get("execution_engine") or {}).get("engine_id") == "acp":
+        return False
+    origin = configuration.get("source_origin") or {}
+    source = origin.get("source") or {}
+    authority = source.get("authority") or {}
+    if source.get("source_kind") != "cron" or authority.get("skip_confirmation") is not True:
+        return False
+    inbox = UnifiedSourceInboxRepo.get(conn, owner, str(origin.get("inbox_id") or ""))
+    if (
+        inbox is None
+        or inbox.status != "admitted"
+        or inbox.route_id != origin.get("route_id")
+        or inbox.task_id != turn.task_id
+        or inbox.turn_id != turn.turn_id
+        or inbox.event_id != source.get("event_id")
+        or json.loads(inbox.payload_json).get("source") != source
+    ):
+        return False
+    occurrence = CronOccurrenceRepo.get(conn, owner, inbox.event_id)
+    if occurrence is None or occurrence["cron_id"] != authority.get("cron_id"):
+        return False
+    accepted = json.loads(occurrence["payload_json"])
+    if (
+        accepted.get("skip_confirmation") is not True
+        or accepted.get("cron_id") != occurrence["cron_id"]
+        or accepted.get("user_id") != owner
+        or accepted.get("event_key") != occurrence["event_key"]
+        or accepted.get("task_type") != "agent"
+        or occurrence["task_id"] not in {None, turn.task_id}
+        or occurrence["turn_id"] not in {None, turn.turn_id}
+    ):
+        return False
+    # The accepted flag is immutable; current transport revocation still wins.
+    try:
+        assert_source_access(services, owner, turn.task_id, origin)
+    except OctopError:
+        return False
+    return True
 
 
 class SourceAccessMiddleware(AgentMiddleware[Any, Any]):

@@ -26,7 +26,11 @@ from octop.infra.projects.file_changes import recorded_file_changes
 from octop.infra.projects.interaction_models import ApprovalPayload, AskQuestions
 from octop.infra.projects.planning import PLANNING
 from octop.infra.projects.receipts import TaskReceipts
-from octop.infra.projects.source_access import external_requires_human, external_unverified
+from octop.infra.projects.source_access import (
+    cron_skip_confirmation,
+    external_requires_human,
+    external_unverified,
+)
 
 ASK_USER = "ask_user_question"
 
@@ -138,9 +142,18 @@ class TaskControlMiddleware(AgentMiddleware[Any, Any]):
                     or item.resolution.outcome != "allow_once"
                 ):
                     return False
-                if item.resolution.source in {"auto_reviewer", "full_access_mode"} and (
+                if item.resolution.source in {
+                    "auto_reviewer",
+                    "full_access_mode",
+                    "cron_skip_confirmation",
+                } and (
                     payload.tool_name in settings.require_human_tools
                     or external_unverified(json.loads(self.turn.configuration_json))
+                ):
+                    return False
+                if (
+                    item.resolution.source == "cron_skip_confirmation"
+                    and not cron_skip_confirmation(self.services, conn, self.owner, current)
                 ):
                     return False
             for item in approvals:

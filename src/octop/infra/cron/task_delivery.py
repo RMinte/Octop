@@ -13,7 +13,7 @@ from octop_gateway.models import ChannelSubject
 
 from octop.i18n import tr
 from octop.infra.cron.delivery import CronDeliveryCommand
-from octop.infra.db.repos.unified_sources import CronOccurrenceRepo
+from octop.infra.db.repos.unified_sources import CronOccurrenceRepo, UnifiedSourceRouteRepo
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.gateway.threads import ThreadRegistry
 from octop.infra.projects import deliveries, ingress, source_routes, tasks
@@ -87,7 +87,72 @@ async def deliver(service: Any, command: CronDeliveryCommand) -> None:
     key = command.cron_id + ":" + command.event_key
     lock = service._task_occurrence_locks.setdefault(key, asyncio.Lock())
     async with lock:
-        await _deliver(service, command)
+        if command.conversation_policy in {"per_job", "continue_target"}:
+            job_lock = service._task_occurrence_locks.setdefault(
+                "job:" + command.cron_id, asyncio.Lock()
+            )
+            async with job_lock:
+                await _deliver(service, command)
+        else:
+            await _deliver(service, command)
+
+
+async def _select_expert(service: Any, command: CronDeliveryCommand, task_id: str) -> int:
+    """Apply a job selection while idle, preserving previous turn snapshots."""
+    services = service._task_services
+    while True:
+        await asyncio.to_thread(_authorize, service, command)
+        task = await asyncio.to_thread(services.project_task_repo.get, task_id, command.user_id)
+        if task is None:
+            raise OctopError.localized(ErrorCode.NOT_FOUND)
+        if task.selected_expert_id == command.selected_expert_id:
+            return int(task.configuration_revision)
+        try:
+            detail = await asyncio.to_thread(
+                tasks.patch,
+                services,
+                command.user_id,
+                task_id,
+                tasks.TaskPatch(
+                    expected_revision=task.list_revision,
+                    expected_configuration_revision=task.configuration_revision,
+                    selected_expert_id=command.selected_expert_id,
+                ),
+            )
+            return int(detail.configuration_revision)
+        except OctopError as exc:
+            if exc.code not in {ErrorCode.TASK_BUSY, ErrorCode.TASK_REVISION_CONFLICT}:
+                raise
+            await asyncio.sleep(0.2)
+
+
+def _project_source_key(
+    services: Any,
+    owner: int,
+    instance: str,
+    key: str,
+    project: str | None,
+    legacy_thread_id: str | None = None,
+) -> str:
+    """Reuse an existing job Task only while its saved project still matches."""
+    with services.db.connect() as conn:
+        route = UnifiedSourceRouteRepo.by_identity(
+            conn,
+            owner_id=owner,
+            source_kind="legacy_thread" if legacy_thread_id else "cron",
+            source_instance=instance,
+            source_key=legacy_thread_id or key,
+        )
+        task = (
+            services.project_task_repo.get_in_transaction(conn, route.task_id, owner)
+            if route and route.task_id
+            else None
+        )
+    if task is not None and task.project_id == project:
+        return key
+    if project is not None or task is not None:
+        return key + ":project:" + json.dumps(project)
+    return key
 
 
 async def _deliver(service: Any, command: CronDeliveryCommand) -> None:
@@ -129,20 +194,40 @@ async def _deliver(service: Any, command: CronDeliveryCommand) -> None:
         "metadata": dict(session.channel_metadata or {}) if session else {},
     }
     policy = command.conversation_policy
+    instance = await asyncio.to_thread(source_routes.local_instance, services)
     source_key = command.session_key if policy == "continue_target" else "cron:" + command.cron_id
+    legacy_thread_id = (
+        session.thread_id
+        if session and policy == "continue_target" and command.project_id is None
+        else None
+    )
+    if policy in {"per_job", "continue_target"}:
+        source_key = await asyncio.to_thread(
+            _project_source_key,
+            services,
+            owner,
+            instance,
+            source_key,
+            command.project_id,
+            legacy_thread_id,
+        )
     if policy == "per_run":
         source_key += ":" + occurrence_id
     if policy == "task":
         source_key += ":task:" + str(command.target_task_id)
     source = ingress.SourceEnvelope(
         source_kind="cron",
-        source_instance=source_routes.local_instance(services),
+        source_instance=instance,
         source_key=source_key,
         event_id=occurrence_id,
-        legacy_thread_id=session.thread_id if session and policy == "continue_target" else None,
+        legacy_thread_id=legacy_thread_id if source_key == command.session_key else None,
         legacy_agent_id=command.agent_id,
         reply_target=target,
-        authority={"cron_id": command.cron_id, "automatic": key.startswith(("schedule:", "mail:"))},
+        authority={
+            "cron_id": command.cron_id,
+            "automatic": key.startswith(("schedule:", "mail:")),
+            "skip_confirmation": command.skip_confirmation,
+        },
     )
     route = await asyncio.to_thread(
         source_routes.resolve,
@@ -164,6 +249,19 @@ async def _deliver(service: Any, command: CronDeliveryCommand) -> None:
         await asyncio.to_thread(
             source_routes.reset, services, owner, route.route_id, "cron-new-" + occurrence_id
         )
+        route = await asyncio.to_thread(
+            source_routes.resolve,
+            services,
+            owner,
+            source_kind=source.source_kind,
+            source_instance=source.source_instance,
+            source_key=source.source_key,
+            legacy_thread_id=source.legacy_thread_id,
+            legacy_agent_id=source.legacy_agent_id,
+        )
+    configuration_revision = None
+    if replay is None and policy in {"per_job", "continue_target"} and route.task_id is not None:
+        configuration_revision = await _select_expert(service, command, route.task_id)
     locale = resolve_user_locale(user_repo=services.user_repo, user_id=owner)
     if command.task_type == "text":
         title = tr("cron.history.executed", locale, cron_id=command.cron_id, name=command.cron_name)
@@ -196,6 +294,7 @@ async def _deliver(service: Any, command: CronDeliveryCommand) -> None:
                 prompt=command.prompt,
                 project_id=command.project_id,
                 selected_expert_id=command.selected_expert_id,
+                expected_configuration_revision=configuration_revision,
                 options=tasks.TaskExecutionOptions(
                     model_ref=command.model,
                     mcp_servers=list(command.mcp_servers) if command.mcp_servers else None,

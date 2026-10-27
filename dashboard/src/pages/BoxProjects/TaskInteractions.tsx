@@ -123,6 +123,7 @@ function InteractionCard({
     item.status !== "pending" &&
     (item.resolution?.source === "auto_reviewer" ||
       item.resolution?.source === "full_access_mode" ||
+      item.resolution?.source === "cron_skip_confirmation" ||
       item.resolution?.source === "previous_denial")
   ) {
     return (

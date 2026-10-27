@@ -15,30 +15,30 @@ export interface CronTaskExamples {
 }
 
 export const octopCronApi = {
-  settings: () => request<OctopCronSettings>("/cron/settings"),
+  settings: () => request<OctopCronSettings>("/settings/timezone"),
 
-  list: (agentId: string) => request<OctopCronRow[]>(`/agents/${agentId}/cron`),
+  list: () => request<OctopCronRow[]>("/cron", { cache: "no-store" }),
 
-  create: (agentId: string, body: OctopCronCreateBody) =>
-    request<OctopCronRow>(`/agents/${agentId}/cron`, {
+  create: (body: OctopCronCreateBody) =>
+    request<OctopCronRow>("/cron", {
       method: "POST",
       body: JSON.stringify(body),
     }),
 
-  get: (agentId: string, cronId: string) =>
-    request<OctopCronRow>(`/agents/${agentId}/cron/${cronId}`),
+  get: (cronId: string) =>
+    request<OctopCronRow>(`/cron/${encodeURIComponent(cronId)}`),
 
-  patch: (agentId: string, cronId: string, body: OctopCronPatchBody) =>
-    request<OctopCronRow>(`/agents/${agentId}/cron/${cronId}`, {
+  patch: (cronId: string, body: OctopCronPatchBody) =>
+    request<OctopCronRow>(`/cron/${encodeURIComponent(cronId)}`, {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
 
-  delete: (agentId: string, cronId: string) =>
-    request<void>(`/agents/${agentId}/cron/${cronId}`, { method: "DELETE" }),
+  delete: (cronId: string) =>
+    request<void>(`/cron/${encodeURIComponent(cronId)}`, { method: "DELETE" }),
 
-  runNow: (agentId: string, cronId: string) =>
-    request<void>(`/agents/${agentId}/cron/${cronId}/run-now`, {
+  runNow: (cronId: string) =>
+    request<void>(`/cron/${encodeURIComponent(cronId)}/run-now`, {
       method: "POST",
     }),
 };

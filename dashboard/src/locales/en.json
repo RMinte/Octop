@@ -2251,6 +2251,23 @@
     "kindPackage": "Skill package"
   },
   "cronJobs": {
+    "expertUnavailable": "Unavailable",
+    "targetTaskExpertHint": "This schedule continues its linked task and uses that task’s selected expert. Change the expert in the linked task.",
+    "project": "Project (optional)",
+    "expert": "Expert (optional)",
+    "allProjects": "All projects",
+    "noProject": "No project",
+    "pleaseSelectProject": "Select a project (optional)",
+    "projectHint": "Select a project to use its directory, instructions and capabilities. Leave empty to use the task’s own workspace.",
+    "generalAssistant": "General assistant",
+    "expertHint": "Leave empty to use the general assistant. This choice applies only to this schedule.",
+    "conversationPolicy": "Conversation",
+    "conversationPolicyHint": "Continue this schedule’s conversation or start a new one each run. Existing task history is preserved.",
+    "policyPerJob": "Continue this schedule’s conversation",
+    "policyPerRun": "Start a new conversation each run",
+    "policyContinueTarget": "Keep existing conversation routing",
+    "policyTask": "Continue the linked task",
+    "goToTask": "Open linked task",
     "title": "Cron Jobs",
     "description": "Configure and monitor scheduled tasks",
     "createJob": "Create Job",
@@ -2277,7 +2294,7 @@
     "triggeredSuccess": "Task triggered, result will appear shortly",
     "executeFailed": "Failed to trigger execution",
     "totalItems": "Total {{count}} items",
-    "loadingJobs": "Loading this expert's tasks…",
+    "loadingJobs": "Loading schedules…",
     "syncing": "Syncing…",
     "noJobs": "Create your first scheduled task",
     "noJobsDesc": "Pick a suggestion below, or click \"Create Task\" to start from scratch",
@@ -2353,9 +2370,11 @@
       "modelTooltip": "Specify the LLM model for this task. Leave empty to use the system's default active model.",
       "modelPlaceholder": "Use default model",
       "connectors": "Connectors",
-      "connectorsTooltip": "Leave empty to follow default-open connectors. If you pick any here, only your selection is used (defaults are not merged in).",
-      "connectorsHint": "Only connectors installed for your account appear here. Empty = default-open; explicit picks = those only.",
+      "connectorsTooltip": "When empty, inherits the project and expert MCP configuration. An explicit selection uses only those connectors for the turn.",
+      "connectorsHint": "Only connectors installed for your account are listed. Leave empty to inherit project and expert configuration, or select the connectors to use.",
       "connectorsPlaceholder": "Select connectors (multi)",
+      "skipConfirmation": "Skip confirmation",
+      "skipConfirmationHint": "Runs started by this schedule can execute tools in Octop’s built-in server runtime, including commands, MCP, sending and publishing, without confirmation. Your account approval settings remain unchanged. Administrator-required manual approval, prohibited actions, local device authorization, ACP engine permissions and questions still follow their existing rules.",
       "freshThread": "Fresh thread each run",
       "freshThreadTooltip": "When enabled, the session context is reset before each run (like starting a new chat).",
       "sectionRouting": "Routing",
@@ -6699,7 +6718,7 @@
     },
     "tasks": {
       "title": "Automation",
-      "subtitle": "Scheduled tasks that run on a cron trigger"
+      "subtitle": "Configure scheduled tasks with an optional project and expert"
     },
     "connectors": {
       "title": "Connectors",
@@ -7301,6 +7320,7 @@
         "reviewing": "AI is reviewing this action",
         "auto_reviewer": "AI review record",
         "full_access_mode": "Full access record",
+        "cron_skip_confirmation": "Schedule confirmation skipped",
         "previous_denial": "Previously denied action",
         "reviewReason": {
           "review_allow": "The Reviewer allowed the original action once.",

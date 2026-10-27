@@ -59,7 +59,7 @@ def freeze_server(
     payload = item.payload
     assert isinstance(payload, ApprovalPayload)
     policy = approval_policy.snapshot(conn, services, turn.task_id, owner)
-    from octop.infra.projects.source_access import external_unverified
+    from octop.infra.projects.source_access import cron_skip_confirmation, external_unverified
 
     if external_unverified(json.loads(turn.configuration_json)):
         policy = policy.model_copy(update={"mode": "ask_for_approval"})
@@ -88,10 +88,14 @@ def freeze_server(
         _resolve(item, "deny", "previous_denial", now)
         return
     if (
-        payload.tool_name not in MODE_TOOLS
-        or payload.tool_name in settings.require_human_tools
+        payload.tool_name in settings.require_human_tools
         or "allow_once" not in payload.allowed_decisions
     ):
+        return
+    if cron_skip_confirmation(services, conn, owner, turn):
+        _resolve(item, "allow_once", "cron_skip_confirmation", now)
+        return
+    if payload.tool_name not in MODE_TOOLS:
         return
     if policy.mode == "full_access":
         _resolve(item, "allow_once", "full_access_mode", now)

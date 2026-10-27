@@ -39,6 +39,7 @@ class CronJob:
         target_task_id: str | None = None,
         project_id: str | None = None,
         selected_expert_id: str | None = None,
+        skip_confirmation: bool = False,
     ) -> None:
         self._cron_id = cron_id
         self._name = name
@@ -59,6 +60,7 @@ class CronJob:
             self._project_id,
             self._selected_expert_id,
         ) = conversation_policy, target_task_id, project_id, selected_expert_id
+        self._skip_confirmation = skip_confirmation
 
     @classmethod
     def from_row(
@@ -87,6 +89,7 @@ class CronJob:
             target_task_id=row.target_task_id,
             project_id=row.project_id,
             selected_expert_id=row.selected_expert_id,
+            skip_confirmation=row.skip_confirmation,
         )
 
     async def run(self, *, raise_on_error: bool = False, event_key: str = "") -> None:
@@ -113,6 +116,7 @@ class CronJob:
                     target_task_id=self._target_task_id,
                     project_id=self._project_id,
                     selected_expert_id=self._selected_expert_id,
+                    skip_confirmation=self._skip_confirmation,
                 )
             )
         except Exception as exc:
@@ -153,4 +157,5 @@ class CronJob:
             target_task_id=self._target_task_id,
             project_id=self._project_id,
             selected_expert_id=self._selected_expert_id,
+            skip_confirmation=self._skip_confirmation,
         )

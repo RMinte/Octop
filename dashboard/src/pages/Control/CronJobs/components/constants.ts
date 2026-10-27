@@ -22,6 +22,7 @@ export const TIMEZONE_OPTIONS = [
 
 export const DEFAULT_FORM_VALUES = {
   enabled: false,
+  skip_confirmation: false,
   schedule: {
     type: "cron" as const,
     timezone: "UTC",
@@ -50,6 +51,7 @@ export function buildDefaultFormValues(timezone: string) {
   return {
     name: "",
     enabled: false,
+    skip_confirmation: false,
     schedule: {
       type: "cron" as const,
       timezone,
@@ -60,6 +62,10 @@ export function buildDefaultFormValues(timezone: string) {
     task_type: "text" as const,
     model: undefined,
     fresh_thread: false,
+    conversation_policy: "per_job" as const,
+    target_task_id: null,
+    project_id: null,
+    selected_expert_id: null,
     session_key: undefined,
     mcp_servers: [],
   };

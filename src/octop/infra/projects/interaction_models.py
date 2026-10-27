@@ -48,7 +48,13 @@ class ApprovalPayload(ProjectModel):
 class InteractionResolution(ProjectModel):
     outcome: Literal["allow_once", "deny", "answered", "skipped", "defaulted", "unanswered"]
     source: Literal[
-        "user", "user_default", "timeout", "auto_reviewer", "full_access_mode", "previous_denial"
+        "user",
+        "user_default",
+        "timeout",
+        "auto_reviewer",
+        "full_access_mode",
+        "previous_denial",
+        "cron_skip_confirmation",
     ]
     answer: str | None = None
 

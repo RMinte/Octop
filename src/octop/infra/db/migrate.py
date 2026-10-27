@@ -2352,7 +2352,7 @@ def run_migrations(db: DatabasePool) -> None:
     for version, path in _discover(db.dialect):
         # Independent project DDL is repaired below. Apply its dependent v56
         # only after those tables exist, including on a fresh installation.
-        if 28 <= version <= 53 or version in {56, 58} or version <= _current_version(db):
+        if 28 <= version <= 53 or version in {56, 58, 59} or version <= _current_version(db):
             continue
         if version == 57:
             _ensure_skill_package_access_schema(db)
@@ -2412,3 +2412,14 @@ def run_migrations(db: DatabasePool) -> None:
         _ensure_column(db, "project_tasks", "execution_json", "TEXT NOT NULL DEFAULT '{}'")
         with db.transaction() as conn:
             conn.execute("UPDATE _schema_version SET version = 58 WHERE version < 58")
+    if _table_exists(db, "cron_jobs") and any(
+        version == 59 for version, _path in _discover(db.dialect)
+    ):
+        _ensure_column(
+            db,
+            "cron_jobs",
+            "skip_confirmation",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (skip_confirmation IN (0,1))",
+        )
+        with db.transaction() as conn:
+            conn.execute("UPDATE _schema_version SET version = 59 WHERE version < 59")

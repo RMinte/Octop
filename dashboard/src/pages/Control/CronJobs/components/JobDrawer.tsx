@@ -8,14 +8,11 @@ import {
   Button,
   Divider,
   Typography,
-  Alert,
 } from "antd";
 import { useTranslation } from "react-i18next";
 import type { FormInstance } from "antd";
 import { providerApi } from "../../../../api/modules/provider";
 import { connectorsApi } from "../../../../api/modules/connectors";
-import { octopThreadsApi } from "../../../../api/modules/octopThreads";
-import { isBridgeAgentId } from "../../../../utils/remoteExpert";
 import {
   buildDefaultFormValues,
   SCHEDULE_PRESETS,
@@ -23,7 +20,6 @@ import {
   presetToCron,
 } from "./constants";
 import { CRON_NAME_MAX_LEN, CRON_PROMPT_MAX_LEN } from "../constants";
-import { channelFromSessionKey } from "../cronDisplay";
 import type { CronJobFormValues } from "../useCronJobs";
 import {
   buildModelSelectOptions,
@@ -38,7 +34,9 @@ const { Text } = Typography;
 interface JobDrawerProps {
   open: boolean;
   editingJob: CronJobFormValues | null;
-  activeAgentId: string | null;
+  projects: Array<{ project_id: string; name: string; archived: boolean }>;
+  experts: Array<{ expert_id: string; name: string }>;
+  defaultProjectId: string | null;
   cronTimezone: string;
   form: FormInstance<CronJobFormValues>;
   onClose: () => void;
@@ -81,23 +79,21 @@ function SectionHeader({
 export function JobDrawer({
   open,
   editingJob,
-  activeAgentId,
+  projects,
+  experts,
+  defaultProjectId,
   cronTimezone,
   form,
   onClose,
   onSubmit,
 }: JobDrawerProps) {
   const { t } = useTranslation();
-  const remote = isBridgeAgentId(activeAgentId);
+  const selectedExpertId = Form.useWatch("selected_expert_id", form);
+  const conversationPolicy = Form.useWatch("conversation_policy", form);
   const scheduleMode = Form.useWatch("_scheduleMode", form);
-  const freshThread = Form.useWatch("fresh_thread", form);
 
   const [models, setModels] = useState<ModelPickerOption[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
-  const [sessionOptions, setSessionOptions] = useState<
-    Array<{ label: string; value: string }>
-  >([]);
-  const [sessionsLoading, setSessionsLoading] = useState(false);
   const [connectorOptions, setConnectorOptions] = useState<
     Array<{ label: string; value: string }>
   >([]);
@@ -121,6 +117,7 @@ export function JobDrawer({
       const matchedPreset = cronToPreset(editingJob.schedule?.cron || "");
       form.setFieldsValue({
         ...editingJob,
+        skip_confirmation: editingJob.skip_confirmation ?? false,
         model: defaultModelToForm(editingJob.model),
         _scheduleMode:
           editingJob._scheduleMode === "agently"
@@ -132,48 +129,22 @@ export function JobDrawer({
       });
     } else {
       form.resetFields();
-      form.setFieldsValue(buildDefaultFormValues(cronTimezone));
+      form.setFieldsValue({
+        ...buildDefaultFormValues(cronTimezone),
+        project_id: defaultProjectId,
+      });
     }
-  }, [open, editingJob, cronTimezone, form]);
+  }, [open, editingJob, cronTimezone, defaultProjectId, form]);
 
   useEffect(() => {
     if (!open) return;
     setModelsLoading(true);
     void providerApi
-      .listResolvedModels(activeAgentId)
+      .listResolvedModels(selectedExpertId)
       .then((data) => setModels((data || []) as ModelPickerOption[]))
       .catch(() => setModels([]))
       .finally(() => setModelsLoading(false));
-  }, [open, activeAgentId]);
-
-  useEffect(() => {
-    if (!open || !activeAgentId) {
-      setSessionOptions([]);
-      return;
-    }
-    setSessionsLoading(true);
-    octopThreadsApi
-      .list(activeAgentId, 100)
-      .then((threads) => {
-        const seen = new Set<string>();
-        const options: Array<{ label: string; value: string }> = [];
-        for (const th of threads || []) {
-          if (!th.session_key || seen.has(th.session_key)) continue;
-          seen.add(th.session_key);
-          const channel = channelFromSessionKey(th.session_key);
-          const title = th.title?.trim();
-          options.push({
-            value: th.session_key,
-            label: title
-              ? `${channel} · ${title}`
-              : `${channel} · ${th.session_key}`,
-          });
-        }
-        setSessionOptions(options);
-      })
-      .catch(() => setSessionOptions([]))
-      .finally(() => setSessionsLoading(false));
-  }, [open, activeAgentId]);
+  }, [open, selectedExpertId]);
 
   useEffect(() => {
     if (!open) {
@@ -182,7 +153,7 @@ export function JobDrawer({
     }
     setConnectorsLoading(true);
     void connectorsApi
-      .listInstances(remote ? activeAgentId : undefined)
+      .listInstances()
       .then((instances) => {
         setMailOptions(
           (instances || [])
@@ -217,7 +188,7 @@ export function JobDrawer({
         setMailOptions([]);
       })
       .finally(() => setConnectorsLoading(false));
-  }, [open, activeAgentId, remote]);
+  }, [open]);
 
   const modelOptions = buildModelSelectOptions(
     models,
@@ -228,20 +199,11 @@ export function JobDrawer({
     <Drawer
       width={520}
       placement="right"
-      title={editingJob ? t("cronJobs.editJob") : t("cronJobs.createJob")}
+      title={editingJob?.id ? t("cronJobs.editJob") : t("cronJobs.createJob")}
       open={open}
       onClose={onClose}
       destroyOnHidden
     >
-      {remote ? (
-        <Alert
-          type="info"
-          showIcon
-          message={t("chat.remoteExpert.editBanner")}
-          description={t("chat.remoteExpert.editTasks")}
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
       <Form
         form={form}
         layout="vertical"
@@ -281,6 +243,60 @@ export function JobDrawer({
             maxLength={CRON_NAME_MAX_LEN}
             showCount
             placeholder={t("cronJobs.jobNamePlaceholder")}
+          />
+        </Form.Item>
+
+        <Form.Item
+          name="project_id"
+          label={t("cronJobs.project")}
+          extra={t("cronJobs.projectHint")}
+        >
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder={t("cronJobs.pleaseSelectProject")}
+            options={projects.map((project) => ({
+              value: project.project_id,
+              label: project.name,
+              disabled: project.archived,
+            }))}
+          />
+        </Form.Item>
+
+        <Form.Item
+          name="selected_expert_id"
+          label={t("cronJobs.expert")}
+          extra={t(
+            conversationPolicy === "task"
+              ? "cronJobs.targetTaskExpertHint"
+              : "cronJobs.expertHint",
+          )}
+        >
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder={t("cronJobs.generalAssistant")}
+            disabled={conversationPolicy === "task"}
+            options={[
+              ...experts.map((expert) => ({
+                value: expert.expert_id,
+                label: expert.name,
+              })),
+              ...(selectedExpertId &&
+              !experts.some((expert) => expert.expert_id === selectedExpertId)
+                ? [
+                    {
+                      value: selectedExpertId,
+                      label: `${selectedExpertId} (${t(
+                        "cronJobs.expertUnavailable",
+                      )})`,
+                      disabled: true,
+                    },
+                  ]
+                : []),
+            ]}
           />
         </Form.Item>
 
@@ -484,52 +500,50 @@ export function JobDrawer({
         </Form.Item>
 
         <Form.Item
-          name="fresh_thread"
-          label={t("cronJobs.form.freshThread")}
+          name="skip_confirmation"
+          label={t("cronJobs.form.skipConfirmation")}
           valuePropName="checked"
-          tooltip={t("cronJobs.form.freshThreadTooltip")}
+          extra={t("cronJobs.form.skipConfirmationHint")}
         >
-          <Switch
-            onChange={(checked) => {
-              if (checked) {
-                form.setFieldValue("session_key", undefined);
-              }
-            }}
-          />
+          <Switch />
         </Form.Item>
 
-        {!freshThread && (
-          <>
-            <SectionHeader
-              title={t("cronJobs.form.sectionRouting")}
-              description={t("cronJobs.form.sectionRoutingDesc")}
-            />
-
-            <Form.Item
-              name="session_key"
-              label={t("cronJobs.form.sessionKey")}
-              tooltip={t("cronJobs.form.sessionKeyTooltip")}
-              extra={
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {t("cronJobs.form.sessionKeyDefault")}
-                </Text>
-              }
-            >
-              <Select
-                allowClear
-                showSearch
-                loading={sessionsLoading}
-                placeholder={t("cronJobs.form.sessionKeyPlaceholder")}
-                options={sessionOptions}
-                filterOption={(input, option) =>
-                  (option?.label?.toString() || "")
-                    .toLowerCase()
-                    .includes(input.toLowerCase())
-                }
-              />
-            </Form.Item>
-          </>
-        )}
+        <Form.Item
+          name="conversation_policy"
+          label={t("cronJobs.conversationPolicy")}
+          extra={t("cronJobs.conversationPolicyHint")}
+        >
+          <Select
+            onChange={(policy) => {
+              form.setFieldValue("fresh_thread", policy === "per_run");
+              if (policy !== "task") form.setFieldValue("target_task_id", null);
+            }}
+            options={[
+              { value: "per_job", label: t("cronJobs.policyPerJob") },
+              { value: "per_run", label: t("cronJobs.policyPerRun") },
+              ...(editingJob?.conversation_policy === "continue_target"
+                ? [
+                    {
+                      value: "continue_target",
+                      label: t("cronJobs.policyContinueTarget"),
+                    },
+                  ]
+                : []),
+              ...(editingJob?.conversation_policy === "task"
+                ? [{ value: "task", label: t("cronJobs.policyTask") }]
+                : []),
+            ]}
+          />
+        </Form.Item>
+        <Form.Item name="fresh_thread" hidden valuePropName="checked">
+          <Switch />
+        </Form.Item>
+        <Form.Item name="target_task_id" hidden>
+          <Input />
+        </Form.Item>
+        <Form.Item name="session_key" hidden>
+          <Input />
+        </Form.Item>
 
         <Form.Item>
           <div

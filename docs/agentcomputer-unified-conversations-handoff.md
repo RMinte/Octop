@@ -453,15 +453,25 @@ capability 同时返回 max_request_bytes=16777216（16 MiB）；单次请求和
 
 ### 12.1 定时入口
 
-客户端若管理定时任务，使用 owner-scoped `GET/POST /api/cron`、`GET/PATCH/DELETE /api/cron/{cron_id}`、`POST /api/cron/{cron_id}/run-now`。POST 创建返回 201 CronResponse，GET/PATCH 返回 CronResponse，DELETE/run-now 返回 204。CLI 和 IM 的内部受理收据不是 APP 的消息 API。
+完整字段、清空规则及请求示例见[定时任务接口](cron-api.md)。
+
+本次 `skip_confirmation` 已部署到本机 8088 并核对在线 OpenAPI，执行与审批边界通过隔离运行测试验证；其他主机请核对其实际接口契约。APP Swift/UI 本轮未改动。
+
+客户端若管理定时任务，使用 owner-scoped `GET/POST /api/cron`、`GET/PATCH/DELETE /api/cron/{cron_id}`、`POST /api/cron/{cron_id}/run-now`。POST 创建返回 201 CronResponse，GET/PATCH 返回 CronResponse，DELETE/run-now 返回 204。`GET /api/cron?project_id=...` 仅返回本人在该项目下的定时任务；省略筛选返回本人全部定时任务，管理员也不越过 owner 隔离。CLI 和 IM 的内部受理收据不是 APP 的消息 API。
 
 创建最小示例：
 
 ```json
-{"name":"每日项目回顾","trigger":"cron:0 9 * * *","prompt":"总结项目变化","project_id":null,"selected_expert_id":null,"conversation_policy":"per_job"}
+{"name":"每日项目回顾","trigger":"cron:0 9 * * *","prompt":"总结项目变化","project_id":"<本人项目ID>","selected_expert_id":null,"conversation_policy":"per_job","task_type":"agent"}
 ```
 
-新增顶层入口默认 per_job；策略可选 per_run/per_job/task/continue_target。per_run 每次独立建 Task，per_job 复用此作业的 Task；task 必须指定本人 target_task_id，其他策略不能附 target_task_id。continue_target 保留已有来源绑定规则，不是客户端自行寻找“最近会话”。PATCH 省略可空绑定字段表示保留，明确 null 才清空；触发时间使用服务端时区。
+项目与执行专家均可选，独立选择。`project_id` 有值时必须是本人未归档项目；省略/null 表示不关联项目，执行使用任务独立空间。`selected_expert_id` 可空，null 使用通用助手，不建立隐含专家。`task_type:"agent"` 才请求模型执行，HTTP 创建默认的 `"text"` 只记录并投递原文。客户端不应继续以当前专家决定定时任务列表或创建 URL。
+
+新增顶层入口默认 per_job；策略可选 per_run/per_job/task/continue_target。per_run 每次独立建 Task，per_job 复用此作业在同一项目下的 Task；修改项目后下一次触发在新项目建 Task，原项目历史保留。task 必须指定本人 target_task_id，且与所选项目一致；该策略沿用目标 Task 当前配置的专家，定时任务上的专家字段不覆盖目标身份，客户端应禁用此策略的专家选择并说明。其他策略不能附 target_task_id。continue_target 保留已有来源绑定规则，不是客户端自行寻找“最近会话”。PATCH 省略可空绑定字段表示保留，明确 null 才清空；已受理的触发保留当时配置，后续触发读取新配置。触发时间使用服务端时区。
+
+POST、PATCH 与 CronResponse 增加 `skip_confirmation:boolean`，创建和旧记录迁移默认 false。PATCH 省略或 null 保留，false 关闭；不要把它与可空项目/专家字段的清空语义混用。true 是该定时器的独立显式授权，只让此 Cron 生成的 Octop 内置执行轮次跳过服务端工具确认，包括 execute、MCP、发送和发布；不修改账号全局审批模式。原安全规则必须允许 allow_once，管理员 require_human_tools、禁止及既有拒绝仍优先；客户端电脑授权、ACP 原生权限和提问均保留。每个受理 occurrence 与生成 turn 固定此选择，之后编辑不影响已受理轮次；同 Task 手动追问、fork、retry 不继承。实际批准按 allow_once、来源 cron_skip_confirmation 留审计。客户端不能在普通 Task 消息中自行传同名字段获得授权。POST true、PATCH false 示例及完整边界见[定时授权](cron-api.md#显式跳过工具确认)；CLI 本轮不新增选项。
+
+旧 `/api/agents/{agent_id}/cron` 路由保留兼容。通过旧路由创建时指定项目，或将旧定时任务明确绑定项目后，服务端清空旧生命周期字段 `agent_id`，会话键改为 `cron:{cron_id}`；`selected_expert_id` 作为可选执行配置独立保留或清空。删除原专家不会连带删除该项目定时任务。APP 本轮仅更新接线契约，Swift/UI 尚未修改。
 
 ## 13. 客户端审阅清单
 

@@ -65,6 +65,33 @@ def test_create_and_get(repo: CronJobRepo, agent_id: str, user_id: int):
     assert row.task_type == "agent"
     assert row.last_run_at is None
     assert row.to_public_dict()["name"] == "Morning report"
+    assert row.skip_confirmation is False
+    assert row.to_public_dict()["skip_confirmation"] is False
+
+
+@pytest.mark.parametrize("skip_confirmation", [False, True])
+def test_confirmation_setting_is_persisted_and_can_be_cleared(
+    repo: CronJobRepo, agent_id: str, user_id: int, skip_confirmation: bool
+):
+    cid = new_ulid()
+    repo.create(
+        cron_id=cid,
+        agent_id=agent_id,
+        user_id=user_id,
+        trigger="interval:3600",
+        prompt="scheduled work",
+        session_key=_session_key(agent_id, user_id),
+        skip_confirmation=skip_confirmation,
+    )
+    assert repo.get(cid).skip_confirmation is skip_confirmation
+    assert repo.get(cid).to_public_dict()["skip_confirmation"] is skip_confirmation
+    repo.update(cid, prompt="updated work")
+    repo.update(cid, skip_confirmation=None)
+    assert repo.get(cid).skip_confirmation is skip_confirmation
+    repo.update(cid, skip_confirmation=True)
+    assert repo.get(cid).skip_confirmation is True
+    repo.update(cid, skip_confirmation=False)
+    assert repo.get(cid).skip_confirmation is False
 
 
 def test_create_with_task_type(repo: CronJobRepo, agent_id: str, user_id: int):

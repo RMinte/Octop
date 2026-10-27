@@ -57,6 +57,7 @@ class CronCreateSpec:
     target_task_id: str | None = None
     project_id: str | None = None
     selected_expert_id: str | None | object = UNSET
+    skip_confirmation: bool = False
 
 
 class CronManager:
@@ -122,6 +123,15 @@ class CronManager:
     async def create(self, spec: CronCreateSpec | None = None, **kwargs: Any) -> CronJobRow:
         if spec is None:
             spec = CronCreateSpec(**kwargs)
+        if spec.project_id is not None and spec.agent_id is not None:
+            spec = replace(
+                spec,
+                selected_expert_id=spec.agent_id
+                if spec.selected_expert_id is UNSET
+                else spec.selected_expert_id,
+                agent_id=None,
+                session_key="cron:" + spec.cron_id,
+            )
         self._validate_selection(
             spec.user_id,
             spec.conversation_policy,
@@ -130,9 +140,10 @@ class CronManager:
             spec.selected_expert_id if spec.selected_expert_id is not UNSET else spec.agent_id,
         )
         self._mail_source(spec.trigger, spec.user_id)
-        session_key = spec.session_key or ThreadRegistry.dashboard_key(
-            agent_id=spec.agent_id or "general",
-            user_id=spec.user_id,
+        session_key = spec.session_key or (
+            ThreadRegistry.dashboard_key(agent_id=spec.agent_id, user_id=spec.user_id)
+            if spec.agent_id is not None
+            else "cron:" + spec.cron_id
         )
         await self._ensure_session(
             session_key,
@@ -157,6 +168,7 @@ class CronManager:
                 target_task_id=spec.target_task_id,
                 project_id=spec.project_id,
                 selected_expert_id=spec.selected_expert_id,
+                skip_confirmation=spec.skip_confirmation,
             )
             row = self._repos.cron_repo.get(spec.cron_id)
             assert row is not None
@@ -207,6 +219,7 @@ class CronManager:
         target_task_id: str | None | object = UNSET,
         project_id: str | None | object = UNSET,
         selected_expert_id: str | None | object = UNSET,
+        skip_confirmation: bool | None = None,
     ) -> CronJobRow:
         enabled_bool: bool | None = bool(enabled) if enabled is not None else None
         async with self._lock:
@@ -239,7 +252,11 @@ class CronManager:
                 "target_task_id": target_task_id,
                 "project_id": project_id,
                 "selected_expert_id": selected_expert_id,
+                "skip_confirmation": skip_confirmation,
             }
+            if project_id is not UNSET and project_id is not None and existing.agent_id:
+                repo_kwargs["agent_id"] = None
+                repo_kwargs["session_key"] = "cron:" + cron_id
             if task_type is not None:
                 repo_kwargs["task_type"] = normalize_cron_task_type(task_type)
             if model is not UNSET:
@@ -364,7 +381,6 @@ class CronManager:
 
             self._mail_watch.subscribe(source.instance_id, row.cron_id, creds, on_mail)
             return
-        job = self._make_job(row)
         if self._scheduler.get_job(row.cron_id):
             self._scheduler.remove_job(row.cron_id)
 
@@ -374,7 +390,10 @@ class CronManager:
             if not occurrences:
                 raise RuntimeError("scheduled occurrence identity unavailable")
             for occurred_at in occurrences:
-                await job.run(event_key="schedule:" + occurred_at.isoformat())
+                current = await asyncio.to_thread(self._repos.cron_repo.get, row.cron_id)
+                if current is None or not current.enabled:
+                    return
+                await self._make_job(current).run(event_key="schedule:" + occurred_at.isoformat())
 
         self._scheduler.add_job(
             run_scheduled,

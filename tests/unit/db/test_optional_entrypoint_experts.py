@@ -112,7 +112,7 @@ def test_optional_upgrade_preserves_rows_and_first_expert_backfill(
             )
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
             assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 58
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 59
     finally:
         db.close()
 
@@ -147,7 +147,9 @@ def test_partial_upgrade_retains_added_configuration_and_explicit_clear(tmp_path
             before = dict(conn.execute("SELECT * FROM cron_jobs").fetchone())
         migrate.run_migrations(db)
         with db.connect() as conn:
-            assert dict(conn.execute("SELECT * FROM cron_jobs").fetchone()) == before
+            after = dict(conn.execute("SELECT * FROM cron_jobs").fetchone())
+            assert after.pop("skip_confirmation") == 0
+            assert after == before
             assert conn.execute("SELECT COUNT(*) FROM unified_cron_occurrences").fetchone()[0] == 1
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:

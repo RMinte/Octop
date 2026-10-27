@@ -52,6 +52,7 @@ class CronDeliveryCommand:
     target_task_id: str | None = None
     project_id: str | None = None
     selected_expert_id: str | None = None
+    skip_confirmation: bool = False
 
 
 class CronDeliveryService:

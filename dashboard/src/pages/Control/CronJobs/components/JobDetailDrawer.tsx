@@ -12,7 +12,6 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { MessageSquare } from "lucide-react";
 import type { CronJobSpecOutput } from "../../../../api/types";
-import { setPendingPrefillText } from "../../../Chat/hooks/chatStore";
 import {
   channelFromSessionKey,
   extractPromptFromJob,
@@ -55,10 +54,14 @@ export function JobDetailDrawer({
       ? meta.octop_last_error
       : null;
 
-  const handleGoToChat = () => {
+  const targetTaskId =
+    typeof meta.octop_target_task_id === "string"
+      ? meta.octop_target_task_id
+      : null;
+  const handleGoToTask = () => {
+    if (!targetTaskId) return;
     onClose();
-    setPendingPrefillText(agentPrompt ?? "");
-    navigate("/chat", { state: { prefillInput: agentPrompt ?? "" } });
+    navigate(`/conversations/${encodeURIComponent(targetTaskId)}`);
   };
 
   return (
@@ -80,14 +83,14 @@ export function JobDetailDrawer({
       width={480}
       destroyOnHidden
       footer={
-        agentPrompt ? (
+        targetTaskId ? (
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <Button
               type="primary"
               icon={<MessageSquare size={14} />}
-              onClick={handleGoToChat}
+              onClick={handleGoToTask}
             >
-              {t("cronJobs.goToChat", "发送到聊天")}
+              {t("cronJobs.goToTask")}
             </Button>
           </div>
         ) : null
@@ -113,6 +116,12 @@ export function JobDetailDrawer({
         </Descriptions.Item>
         <Descriptions.Item label={t("cronJobs.col.name")}>
           {job.name || "—"}
+        </Descriptions.Item>
+        <Descriptions.Item label={t("cronJobs.project")}>
+          {job.project_name ?? t("cronJobs.noProject")}
+        </Descriptions.Item>
+        <Descriptions.Item label={t("cronJobs.expert")}>
+          {job.expert_name ?? t("cronJobs.generalAssistant")}
         </Descriptions.Item>
         <Descriptions.Item label={t("common.enabled")}>
           {job.enabled ? (
@@ -216,6 +225,9 @@ export function JobDetailDrawer({
             {String(job.model || meta.octop_model)}
           </Descriptions.Item>
         ) : null}
+        <Descriptions.Item label={t("cronJobs.form.skipConfirmation")}>
+          {job.skip_confirmation ? t("common.enabled") : t("common.disabled")}
+        </Descriptions.Item>
         <Descriptions.Item label={t("cronJobs.col.freshThread")}>
           {meta.octop_fresh_thread
             ? t("cronJobs.col.freshThreadOn")

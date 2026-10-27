@@ -849,6 +849,8 @@ plugin returns a large `octop_ui` payload, the backend offloads the envelope's
 
 ## Cron
 
+完整中文参数、响应、策略和调用示例见[定时任务接口](cron-api.md)，项目和专家均可选。本次 `skip_confirmation` 已部署到本机 8088 并核对在线 OpenAPI；其他主机以目标实例实际契约为准。
+
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | `GET`    | `/settings/timezone` | user | process-level `{timezone}` from `default_timezone` |
@@ -857,21 +859,66 @@ plugin returns a large `octop_ui` payload, the backend offloads the envelope's
 | `GET`    | `/settings/captcha` | `captcha` | `{active, available, providers, source, v3_min_score}`; secrets omitted |
 | `PUT`    | `/settings/captcha` | `captcha` | merge `{active?, providers?}`; empty secret keeps ciphertext; `null` removes a pair |
 | `GET`    | `/cron/settings` | user | compat alias of `/settings/timezone` |
+| `GET`    | `/cron` | owner | list your schedules; optional `project_id` filters by project |
+| `POST`   | `/cron` | owner | body `{name?, trigger, prompt, project_id?, selected_expert_id?, conversation_policy?, target_task_id?, enabled?, skip_confirmation?, task_type?, model?, mcp_servers?}` → `201 CronResponse` |
+| `GET`    | `/cron/{cid}` | owner | `CronResponse`; another owner's schedule returns `404` |
+| `PATCH`  | `/cron/{cid}` | owner | body subset → updated `CronResponse` |
+| `DELETE` | `/cron/{cid}` | owner | `204`; existing Task history is retained |
+| `POST`   | `/cron/{cid}/run-now` | owner | `204` (enqueue immediately, off-schedule) |
 | `GET`    | `/agents/{aid}/cron/examples` | agent access | `{task_examples}` from workspace `.octop/manifest.json` (`{zh,en}` string arrays, display-normalized to 3 or 6); `null` if the field is absent (dashboard keeps default cards). Prefer `GET /agents/{aid}/chat/welcome` which includes the same field. |
 | `GET`    | `/agents/{aid}/cron` | owner only | list cron rows; non-owners (including admin) get `[]` |
-| `POST`   | `/agents/{aid}/cron` | owner only | body `{name?, trigger, prompt, session_key?, fresh_thread?, enabled?, model?, task_type?}` → `201` |
+| `POST`   | `/agents/{aid}/cron` | owner only | body `{name?, trigger, prompt, session_key?, fresh_thread?, enabled?, skip_confirmation?, model?, task_type?}` → `201 CronResponse` |
 | `GET`    | `/agents/{aid}/cron/{cid}` | owner only | cron row |
 | `PATCH`  | `/agents/{aid}/cron/{cid}` | owner only | body subset → updated row |
 | `DELETE` | `/agents/{aid}/cron/{cid}` | owner only | `204` |
 | `POST`   | `/agents/{aid}/cron/{cid}/run-now` | owner only | `204` (fire immediately, off-schedule) |
 
-`task_type` is `"text"` (push prompt directly to the session) or
-`"agent"` (run the prompt through the LLM and push the reply).
-Default: `"agent"`. `trigger` accepts cron expressions
-(`"0 9 * * *"`) plus the `interval:N` / `date:ISO8601` aliases
+Use `/cron` for project schedules; an expert is optional and independent of the
+project. When provided, `project_id` must identify your active project.
+`selected_expert_id: null` uses the general assistant and does not create an expert.
+`project_id` may be omitted or null to use a Task's own workspace.
+`GET /cron` always limits results to the current
+owner, including for administrators, before applying the optional project filter.
+
+The top-level endpoint defaults `conversation_policy` to `"per_job"`, reusing one
+Task for that schedule and project. `"per_run"` creates a Task for each occurrence;
+`"task"` requires an owned `target_task_id` in the selected project and uses that
+Task's configured expert;
+`"continue_target"` retains the source binding rules. Only `"task"` accepts
+`target_task_id`. For `"per_job"`, changing a schedule's project starts a Task in the new project
+on the next occurrence, while retaining Tasks already created for the old project.
+PATCH omission keeps nullable bindings; explicit null clears them. Accepted
+occurrences retain the configuration captured when they were queued.
+
+`skip_confirmation` is a boolean accepted by POST/PATCH and included in
+`CronResponse`, defaulting to false for new and existing schedules. PATCH omission
+or null keeps its value; false disables it. True explicitly authorizes only that
+schedule's generated Octop turns to skip server tool confirmations, including
+`execute`, MCP, sending and publishing. It does not change the account approval
+policy or broaden account `full_access`. Original `allow_once` eligibility,
+administrator `require_human_tools`, prohibitions and previous denials still
+apply, as do client computer authorization, ACP native permissions and questions.
+Each accepted occurrence and turn freezes the setting; later edits do not change
+it, and manual follow-ups, forks and retries do not inherit it. Each granted action
+is audited as `allow_once` from `cron_skip_confirmation`. See the
+[approval boundaries](project-task-approval-modes.md#cron-独立显式授权) and
+[POST true / PATCH false examples](cron-api.md#显式跳过工具确认). The CLI adds no
+option for this field in this change.
+
+The `/agents/{aid}/cron` endpoints remain for compatibility. Creating or updating
+a legacy schedule with a project detaches its lifecycle from the original agent and gives it a
+`cron:{cid}` session key; its selected expert remains independently configurable.
+Deleting that expert does not delete the project schedule.
+
+`task_type` is `"text"` (record and deliver the prompt without a model call) or
+`"agent"` (run the prompt through the selected expert or general assistant and
+deliver the reply). The HTTP create default is `"text"`; pass `"agent"` to request
+model execution. `trigger` accepts `cron:EXPRESSION`
+(`"cron:0 9 * * *"`) plus the `interval:N` / `date:ISO8601` aliases
 documented in `infra/cron/trigger.py`. `prompt` must be non-empty and
 ≤ 2000 characters. `name` is an optional display label; when omitted,
-the server derives one from `prompt`.
+the server derives one from `prompt`. Trigger times and displayed timestamps use
+the server's `default_timezone`.
 
 ## Providers
 

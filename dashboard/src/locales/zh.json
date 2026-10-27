@@ -2251,6 +2251,23 @@
     "kindPackage": "技能包"
   },
   "cronJobs": {
+    "expertUnavailable": "暂不可用",
+    "targetTaskExpertHint": "此计划继续已绑定的任务，执行时使用该任务自身选择的专家。请在关联任务中调整专家。",
+    "project": "项目（可选）",
+    "expert": "执行专家（可选）",
+    "allProjects": "全部项目",
+    "noProject": "未关联项目",
+    "pleaseSelectProject": "选择项目（可选）",
+    "projectHint": "选择项目可使用其目录、行动指南和能力配置；留空时使用任务独立空间。",
+    "generalAssistant": "通用助手",
+    "expertHint": "留空使用通用助手，专家选择仅作用于此定时任务。",
+    "conversationPolicy": "执行上下文",
+    "conversationPolicyHint": "可沿用此定时任务的对话或每次创建新对话，历史记录保留。",
+    "policyPerJob": "沿用此定时任务的对话",
+    "policyPerRun": "每次创建新对话",
+    "policyContinueTarget": "保留原会话路由",
+    "policyTask": "继续已绑定的任务",
+    "goToTask": "查看关联任务",
     "title": "定时任务",
     "description": "配置和监控定时任务",
     "createJob": "创建定时任务",
@@ -2276,7 +2293,7 @@
     "triggeredSuccess": "任务已触发，结果稍后显示",
     "executeFailed": "触发执行失败",
     "totalItems": "共 {{count}} 项",
-    "loadingJobs": "正在加载当前专家的任务…",
+    "loadingJobs": "正在加载定时任务…",
     "syncing": "正在同步…",
     "noJobs": "开启你的第一个定时任务吧",
     "noJobsDesc": "选择下方示例，或点击「创建定时任务」从头开始",
@@ -2352,9 +2369,11 @@
       "modelTooltip": "指定此任务使用的 LLM 模型。留空则使用系统默认的活跃模型。",
       "modelPlaceholder": "使用默认模型",
       "connectors": "连接器",
-      "connectorsTooltip": "未选时跟随「默认打开」的连接器；若在此显式选择，则以本次选择为准（不再自动并入默认打开）。",
-      "connectorsHint": "仅已安装且对本账号可用的连接器会出现在列表中。留空 = 使用默认打开；有选择 = 仅用所选。",
+      "connectorsTooltip": "留空时继承项目和专家的 MCP 配置；显式选择后，本轮仅使用所选连接器。",
+      "connectorsHint": "仅已安装且对本账号可用的连接器会出现在列表中。留空继承项目和专家配置，有选择时仅使用所选。",
       "connectorsPlaceholder": "选择连接器（可多选）",
+      "skipConfirmation": "跳过确认",
+      "skipConfirmationHint": "开启后，此定时器发起的轮次可直接执行 Octop 内置运行时的服务端工具，包括命令、MCP、发送和发布，无需确认；不会修改账号审批设置。管理员强制人工确认、禁止动作、客户端本机授权、ACP 执行引擎自身权限和提问仍按原规则处理。",
       "freshThread": "每次执行新会话",
       "freshThreadTooltip": "开启后每次触发都会重置会话上下文，相当于在新对话中执行。",
       "sectionRouting": "执行路由",
@@ -6699,7 +6718,7 @@
     },
     "tasks": {
       "title": "自动化",
-      "subtitle": "配置专家定期执行的计划任务"
+      "subtitle": "配置定期执行的计划任务，项目和专家均可选"
     },
     "connectors": {
       "title": "连接器",
@@ -7301,6 +7320,7 @@
         "reviewing": "AI 正在审批",
         "auto_reviewer": "AI 审批记录",
         "full_access_mode": "完全访问记录",
+        "cron_skip_confirmation": "定时任务跳过确认记录",
         "previous_denial": "已拒绝动作记录",
         "reviewReason": {
           "review_allow": "Reviewer 已允许原操作一次。",

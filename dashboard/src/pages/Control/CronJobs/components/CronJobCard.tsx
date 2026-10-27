@@ -142,6 +142,16 @@ export function CronJobCard({
         />
       </div>
 
+      <div className={styles.cronCardInfo}>
+        <span className={styles.cronCardInfoItem}>
+          {t("cronJobs.project")}: {job.project_name ?? t("cronJobs.noProject")}
+        </span>
+        <span className={styles.cronCardInfoItem}>
+          {t("cronJobs.expert")}:{" "}
+          {job.expert_name ?? t("cronJobs.generalAssistant")}
+        </span>
+      </div>
+
       {/* Prompt / description */}
       <p className={styles.cronCardDesc}>{prompt || "\u00a0"}</p>
 

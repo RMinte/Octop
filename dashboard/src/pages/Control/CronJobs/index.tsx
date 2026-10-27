@@ -1,19 +1,8 @@
-import { useState, useEffect } from "react";
-import {
-  Button,
-  Card,
-  Empty,
-  Form,
-  Segmented,
-  Spin,
-  Tooltip,
-  Alert,
-} from "antd";
+import { useState, useEffect, useMemo } from "react";
+import { Button, Form, Segmented, Spin, Tooltip, Select } from "antd";
 import { LayoutGrid, List, RefreshCw } from "lucide-react";
 import type { CronJobSpecOutput } from "../../../api/types";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router-dom";
-import { setPendingPrefillText } from "../../Chat/hooks/chatStore";
 import {
   createColumns,
   CronJobCard,
@@ -28,9 +17,14 @@ import { showConfirmModal } from "../../../utils/confirmModal";
 import { OctopEmptyMascot } from "../../../components/EmptyState";
 import { ResizableTable } from "../../../components/ResizableTable";
 import PageShell from "../../../layouts/PageShell";
-import { useAgent } from "../../../context/AgentContext";
 import { taskExampleColumns } from "./taskExamples";
-import { useTaskExamples } from "./useTaskExamples";
+import {
+  projectsApi,
+  projectTasksApi,
+  type Project,
+  type TaskResources,
+} from "../../../api/modules/projects";
+import { buildDefaultFormValues } from "./components/constants";
 import styles from "./index.module.less";
 
 type CronJob = CronJobSpecOutput;
@@ -92,12 +86,36 @@ function CronJobsPage() {
   const { t } = useTranslation();
   const { isMobile, viewMode, setViewMode, showCardView } =
     useCardTableView("table");
-  const navigate = useNavigate();
-  const { activeAgentId, activeAgent } = useAgent();
-  const canManageJobs = activeAgent?.is_owner === true;
-  const taskExamples = useTaskExamples(activeAgentId);
+  const [experts, setExperts] = useState<NonNullable<TaskResources["experts"]>>(
+    [],
+  );
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectFilter, setProjectFilter] = useState<string>("all");
+  const taskExamples = [
+    t("cronJobs.noJobsSuggestion1"),
+    t("cronJobs.noJobsSuggestion2"),
+    t("cronJobs.noJobsSuggestion3"),
+  ];
+  useEffect(() => {
+    let cancelled = false;
+    void projectTasksApi
+      .resources()
+      .then((resources) => {
+        if (!cancelled) setExperts(resources.experts ?? []);
+      })
+      .catch(console.error);
+    void projectsApi
+      .list()
+      .then((rows) => {
+        if (!cancelled) setProjects(rows);
+      })
+      .catch(console.error);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const {
-    jobs,
+    jobs: allJobs,
     loading,
     listRefreshing,
     listStale,
@@ -123,15 +141,39 @@ function CronJobsPage() {
   const [executingJob, setExecutingJob] = useState<CronJob | null>(null);
   const [executing, setExecuting] = useState(false);
 
-  // Close transient UI when switching experts — avoid dangling drawers
-  // tied to the previous agent's jobs.
-  useEffect(() => {
-    setDrawerOpen(false);
-    setEditingJob(null);
-    setDetailDrawerOpen(false);
-    setDetailJob(null);
-    setExecutingJob(null);
-  }, [activeAgentId]);
+  const jobs = useMemo(
+    () =>
+      allJobs
+        .filter(
+          (job) =>
+            projectFilter === "all" ||
+            (projectFilter === "none"
+              ? !job.project_id
+              : job.project_id === projectFilter),
+        )
+        .map((job) => ({
+          ...job,
+          project_name:
+            projects.find((project) => project.project_id === job.project_id)
+              ?.name ??
+            job.project_id ??
+            t("cronJobs.noProject"),
+          expert_name:
+            experts.find(
+              (expert) => expert.expert_id === job.selected_expert_id,
+            )?.name ??
+            job.selected_expert_id ??
+            t("cronJobs.generalAssistant"),
+        })),
+    [allJobs, projectFilter, projects, experts, t],
+  );
+  const defaultProjectId =
+    projectFilter !== "all" && projectFilter !== "none"
+      ? projects.find(
+          (project) =>
+            project.project_id === projectFilter && !project.archived,
+        )?.project_id ?? null
+      : null;
 
   const handleDetail = (job: CronJob) => {
     setDetailJob(job);
@@ -157,8 +199,12 @@ function CronJobsPage() {
   };
 
   const handleSuggestionClick = (text: string) => {
-    setPendingPrefillText(text);
-    navigate("/chat", { state: { prefillInput: text } });
+    setEditingJob({
+      ...buildDefaultFormValues(cronTimezone),
+      prompt: text,
+      project_id: defaultProjectId,
+    });
+    setDrawerOpen(true);
   };
 
   const handleEdit = (job: CronJob) => {
@@ -244,45 +290,30 @@ function CronJobsPage() {
     stickyColumns: !isMobile,
   });
 
-  // Shared experts are not a task scope. Non-owners should see the same
-  // "pick an agent" empty as if nothing were selected — no shared-expert copy.
-  if (!activeAgentId || !canManageJobs) {
-    return (
-      <PageShell
-        title={t("pageShell.tasks.title")}
-        subtitle={t("pageShell.tasks.subtitle")}
-        agentScoped
-      >
-        <Card>
-          <Empty description={t("cronJobs.noAgentSelected")} />
-        </Card>
-      </PageShell>
-    );
-  }
-
-  // Keep list shell stable across expert switches, but do NOT show the
-  // table/card toolbar when there's nothing to manage (empty already has CTAs).
   const contentBusy = listRefreshing || refreshing || listStale;
   const showList = jobs.length > 0;
   const showEmpty = !loading && !listStale && jobs.length === 0;
   const showBodySpinner = loading || (contentBusy && !showList && !showEmpty);
-  const showToolbar = showList;
+  const showToolbar = true;
 
   return (
     <PageShell
       title={t("pageShell.tasks.title")}
       subtitle={t("pageShell.tasks.subtitle")}
-      agentScoped
     >
-      {activeAgent?.bridge ? (
-        <Alert
-          type="info"
-          showIcon
-          message={t("chat.remoteExpert.editBanner")}
-          description={t("chat.remoteExpert.editTasks")}
-          style={{ marginBottom: 12 }}
-        />
-      ) : null}
+      <Select
+        value={projectFilter}
+        onChange={setProjectFilter}
+        style={{ width: 280, maxWidth: "100%", marginBottom: 16 }}
+        options={[
+          { value: "all", label: t("cronJobs.allProjects") },
+          { value: "none", label: t("cronJobs.noProject") },
+          ...projects.map((project) => ({
+            value: project.project_id,
+            label: project.name,
+          })),
+        ]}
+      />
       {showToolbar ? (
         <div className={styles.gridToolbar}>
           <span className={styles.gridCount}>
@@ -394,7 +425,9 @@ function CronJobsPage() {
       <JobDrawer
         open={drawerOpen}
         editingJob={editingJob}
-        activeAgentId={activeAgentId}
+        projects={projects}
+        experts={experts}
+        defaultProjectId={defaultProjectId}
         cronTimezone={cronTimezone}
         form={form}
         onClose={handleDrawerClose}

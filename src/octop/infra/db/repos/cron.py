@@ -85,6 +85,7 @@ class CronJobRow:
     target_task_id: str | None = None
     project_id: str | None = None
     selected_expert_id: str | None = None
+    skip_confirmation: bool = False
 
     @classmethod
     def from_row(cls, r: DbRow) -> CronJobRow:
@@ -111,6 +112,7 @@ class CronJobRow:
             target_task_id=_optional_str(r, "target_task_id"),
             project_id=_optional_str(r, "project_id"),
             selected_expert_id=_optional_str(r, "selected_expert_id"),
+            skip_confirmation=bool(r["skip_confirmation"]),
         )
 
     def to_public_dict(self, *, include_agent: bool = False) -> dict[str, Any]:
@@ -131,6 +133,7 @@ class CronJobRow:
             "target_task_id": self.target_task_id,
             "project_id": self.project_id,
             "selected_expert_id": self.selected_expert_id,
+            "skip_confirmation": self.skip_confirmation,
         }
         if include_agent:
             out["agent_id"] = self.agent_id
@@ -161,14 +164,15 @@ class CronJobRepo:
         target_task_id: str | None = None,
         project_id: str | None = None,
         selected_expert_id: str | None | object = UNSET,
+        skip_confirmation: bool = False,
     ) -> str:
         ts = now_ts()
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO cron_jobs(cron_id, name, agent_id, user_id, schedule_spec, prompt, "
                 "session_key, model, fresh_thread, task_type, mcp_servers, enabled, "
-                "created_at, updated_at,conversation_policy,target_task_id,project_id,selected_expert_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?)",
+                "created_at, updated_at,conversation_policy,target_task_id,project_id,selected_expert_id,skip_confirmation) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?)",
                 (
                     cron_id,
                     (name or "").strip() or default_cron_name(prompt, cron_id),
@@ -188,6 +192,7 @@ class CronJobRepo:
                     target_task_id,
                     project_id,
                     agent_id if selected_expert_id is UNSET else selected_expert_id,
+                    bool_int(skip_confirmation),
                 ),
             )
         return cron_id
@@ -257,6 +262,8 @@ class CronJobRepo:
         target_task_id: str | None | object = UNSET,
         project_id: str | None | object = UNSET,
         selected_expert_id: str | None | object = UNSET,
+        agent_id: str | None | object = UNSET,
+        skip_confirmation: bool | None = None,
     ) -> None:
         fields, params = partial_updates(
             [
@@ -271,7 +278,11 @@ class CronJobRepo:
         if fresh_thread is not None:
             fields.append("fresh_thread = ?")
             params.append(bool_int(fresh_thread))
+        if skip_confirmation is not None:
+            fields.append("skip_confirmation = ?")
+            params.append(bool_int(skip_confirmation))
         for key, value in (
+            ("agent_id", agent_id),
             ("target_task_id", target_task_id),
             ("project_id", project_id),
             ("selected_expert_id", selected_expert_id),

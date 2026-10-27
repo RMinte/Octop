@@ -340,6 +340,13 @@ class UnifiedDeliveryRepo:
 
 class CronOccurrenceRepo:
     @staticmethod
+    def get(conn: Any, owner_id: int, occurrence_id: str) -> Any:
+        return conn.execute(
+            "SELECT * FROM unified_cron_occurrences WHERE owner_id=? AND occurrence_id=?",
+            (owner_id, occurrence_id),
+        ).fetchone()
+
+    @staticmethod
     def receive(
         conn: Any,
         *,
