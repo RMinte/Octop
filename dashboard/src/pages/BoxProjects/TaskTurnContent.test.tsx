@@ -9,6 +9,7 @@ import type {
 } from "../../api/modules/projects";
 import zh from "../../locales/zh.json";
 import TaskTurnContent from "./TaskTurnContent";
+import { engineCapabilities } from "./taskEngine";
 
 vi.mock("../../components/Markdown/LazyMarkdown", () => ({
   default: ({ content }: { content: string }) => <div>{content}</div>,
@@ -561,6 +562,46 @@ describe("过程区执行详情与旧记录", () => {
       within(screen.getByText("工具执行").closest("details")!).getByText(label),
     ).toBeVisible();
   });
+
+  it.each([
+    ["acp", "completed", "已完成"],
+    ["acp", "streaming", "未确认执行"],
+    ["octop", "completed", "未确认执行"],
+  ] as const)(
+    "%s 工具直接报告 %s 不补造开始时间或耗时",
+    (engineID, status, label) => {
+      const engine = {
+        engine_id: engineID,
+        connection_id: engineID === "acp" ? "codex" : null,
+        model_id: null,
+      };
+      render(
+        <TaskTurnContent
+          turn={{
+            ...turn,
+            plan: null,
+            execution_engine: {
+              ...engine,
+              label: engineID,
+              capabilities: engineCapabilities(engine),
+            },
+            content_blocks: [
+              {
+                ...block("direct-result", "tool", ""),
+                status,
+                tool_name: "read_file",
+                tool_label: "引擎报告的工具",
+              },
+            ],
+          }}
+        />,
+      );
+      const tool = screen.getByText("引擎报告的工具").closest("details")!;
+      expect(within(tool).getByText(label)).toBeVisible();
+      expect(tool.querySelector("time")).toBeNull();
+      expect(within(tool).queryByText(/毫秒/)).not.toBeInTheDocument();
+    },
+  );
 
   it("旧版无内容块时按当前开关保留 Thinking 和最终回答，面板优先时隐藏过程", () => {
     const legacy = {

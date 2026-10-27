@@ -27,7 +27,7 @@ interface ACPSetupGuideProps {
   job?: ACPSetupJob;
   host: string;
   timeZone: string;
-  operation?: "install" | "login" | "check" | "credentials";
+  operation?: "install" | "login" | "check" | "credentials" | "connect";
   busy?: boolean;
   inputLoading?: boolean;
   cancelLoading?: boolean;
@@ -35,6 +35,7 @@ interface ACPSetupGuideProps {
   onClose: () => void;
   onInstall: (runnerKey: string) => void;
   onLogin: (runnerKey: string) => void;
+  onConnect: (runnerKey: string) => void;
   onCheck: (runnerKey: string) => void;
   onCancel: (jobId: string) => void;
   onInput: (jobId: string, data: string) => Promise<void>;
@@ -133,6 +134,7 @@ export function ACPSetupGuide({
   onClose,
   onInstall,
   onLogin,
+  onConnect,
   onCheck,
   onCancel,
   onInput,
@@ -143,9 +145,19 @@ export function ACPSetupGuide({
   const output = useRef<HTMLPreElement | null>(null);
   const labelKey = runnerKey ? runnerLabelKey(runnerKey) : undefined;
   const pending = isACPJobPending(job);
+  const codex = runnerKey === "codex";
   const installed = setup?.installation === "installed";
+  const connected = setup?.enabled && setup.connection === "ready";
   const locked = Boolean(busy || operation || pending);
   const options = setup?.credential_options ?? [];
+  const jobMessage =
+    codex &&
+    pending &&
+    setup?.connection === "auth_required" &&
+    job?.message &&
+    job.message === setup.message
+      ? t("acp.codexAuthorizationHint")
+      : job?.message;
 
   useEffect(() => {
     setResponse("");
@@ -177,14 +189,34 @@ export function ACPSetupGuide({
       width={620}
       destroyOnHidden
       footer={
-        <Button
-          type="primary"
-          loading={operation === "check"}
-          disabled={!setup || !installed || locked}
-          onClick={() => runnerKey && onCheck(runnerKey)}
-        >
-          {t("acp.checkConnection")}
-        </Button>
+        codex ? (
+          !pending &&
+          (!connected ||
+            job?.status === "failed" ||
+            job?.status === "cancelled") ? (
+            <Button
+              type="primary"
+              loading={operation === "connect"}
+              disabled={!setup || locked}
+              onClick={() => runnerKey && onConnect(runnerKey)}
+            >
+              {t(
+                job?.status === "failed" || job?.status === "cancelled"
+                  ? "acp.retryConnectCodex"
+                  : "acp.connectCodex",
+              )}
+            </Button>
+          ) : null
+        ) : (
+          <Button
+            type="primary"
+            loading={operation === "check"}
+            disabled={!setup || !installed || locked}
+            onClick={() => runnerKey && onCheck(runnerKey)}
+          >
+            {t("acp.checkConnection")}
+          </Button>
+        )
       }
     >
       <Alert
@@ -193,8 +225,13 @@ export function ACPSetupGuide({
         message={t("acp.executionHost", { host: host || t("acp.currentHost") })}
         description={t("acp.hostHint")}
       />
-      <p className={styles.guideStep}>{t("acp.boxSetupHint")}</p>
-      {error ? (
+      <p className={styles.guideStep}>
+        {t(codex ? "acp.codexConnectHint" : "acp.boxSetupHint")}
+      </p>
+      {codex ? (
+        <p className={styles.scopeHint}>{t("acp.codexDeviceCodeHint")}</p>
+      ) : null}
+      {error && error !== job?.message ? (
         <Alert
           className={styles.hostAlert}
           type="error"
@@ -211,7 +248,7 @@ export function ACPSetupGuide({
           {job.phase ? (
             <p className={styles.setupMessage}>{t(`acp.phase_${job.phase}`)}</p>
           ) : null}
-          {job.message ? (
+          {jobMessage ? (
             <Alert
               className={styles.hostAlert}
               type={
@@ -222,7 +259,7 @@ export function ACPSetupGuide({
                   : "info"
               }
               showIcon
-              message={job.message}
+              message={jobMessage}
             />
           ) : null}
           {pending && job.authorization ? (
@@ -268,7 +305,10 @@ export function ACPSetupGuide({
               {stripAnsi(job.output)}
             </pre>
           ) : null}
-          {pending && job.kind === "login" && job.input_mode === "terminal" ? (
+          {!codex &&
+          pending &&
+          job.kind === "login" &&
+          job.input_mode === "terminal" ? (
             <div className={styles.loginResponse}>
               <label htmlFor="acp-login-response">
                 {t("acp.loginResponse")}
@@ -307,13 +347,14 @@ export function ACPSetupGuide({
           {pending ? (
             <Button
               danger
+              disabled={job.phase === "enabling"}
               loading={cancelLoading}
               onClick={() => onCancel(job.job_id)}
             >
               {t("acp.cancelJob")}
             </Button>
           ) : null}
-          {!pending && job.status === "failed" ? (
+          {!codex && !pending && job.status === "failed" ? (
             <Button
               disabled={locked}
               onClick={() =>
@@ -331,7 +372,7 @@ export function ACPSetupGuide({
           ) : null}
         </div>
       ) : null}
-      {!installed && setup?.can_install ? (
+      {!codex && !installed && setup?.can_install ? (
         <Button
           type="primary"
           loading={operation === "install"}
@@ -341,7 +382,7 @@ export function ACPSetupGuide({
           {t("acp.installOnBox")}
         </Button>
       ) : null}
-      {installed ? (
+      {!codex && installed ? (
         <>
           {setup?.can_login ? (
             <div className={styles.guideStep}>
@@ -380,7 +421,7 @@ export function ACPSetupGuide({
           ) : null}
         </>
       ) : null}
-      {!installed && !setup?.can_install ? (
+      {!codex && !installed && !setup?.can_install ? (
         <p>{t("acp.customSetupHint")}</p>
       ) : null}
       {setup?.docs_url ? (

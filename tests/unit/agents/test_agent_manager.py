@@ -699,6 +699,49 @@ def test_build_harness_config_defaults_local_shell_backend(manager: AgentManager
     assert cfg.permissions is not None
 
 
+def test_legacy_acp_uses_login_owner_home_without_inheriting_host_credentials(
+    manager: AgentManager,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from octop_harness.runtime_env import overlay_env
+
+    from octop.infra.agents.acp_setup import ACPSetupService
+
+    monkeypatch.setenv("OPENAI_API_KEY", "parent-process-secret")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "parent-ssh-socket")
+    config = {"workspace_dir": str(tmp_path / "legacy-work"), "acp": {"tool_enabled": True}}
+    row = _row(agent_id="LEGACY-ACP", config_json=json.dumps(config))
+    workspace = manager._backend_workspace_for_row(
+        row, cfg=config, workspace_dir=Path(config["workspace_dir"])
+    )
+    workspace.upload_bytes(".env", b"WORKSPACE_CREDENTIAL=owner-workspace-secret\n")
+    manager.acp_settings.save_runners(
+        1,
+        {
+            "codex": {
+                "command": "codex-acp",
+                "args": [],
+                "enabled": True,
+                "env": {"ANTHROPIC_API_KEY": "owner-explicit-secret"},
+            }
+        },
+    )
+    saved = manager.acp_settings.load_runners(1)
+    harness = manager._build_harness_config(row)
+    runner = harness.acp_runners["codex"]
+    expected = ACPSetupService(manager.acp_settings, manager.paths.root).runner_environment(
+        1, "codex", saved["codex"]
+    )
+    effective = overlay_env(os.environ, runner.env, protect=False)
+    assert effective["HOME"] == expected["HOME"]
+    assert effective["CODEX_HOME"] == expected["CODEX_HOME"]
+    assert effective["OPENAI_API_KEY"] == effective["SSH_AUTH_SOCK"] == ""
+    assert effective["ANTHROPIC_API_KEY"] == "owner-explicit-secret"
+    assert effective["WORKSPACE_CREDENTIAL"] == "owner-workspace-secret"
+    assert manager.acp_settings.load_runners(1) == saved
+
+
 @pytest.mark.asyncio
 async def test_boot_passes_process_log_dir_to_harness_manager(manager: AgentManager) -> None:
     await manager.boot()

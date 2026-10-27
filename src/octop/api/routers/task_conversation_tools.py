@@ -23,6 +23,7 @@ router = APIRouter(prefix="/project-tasks")
 
 
 class TaskCapabilityFlags(BaseModel):
+    execution_engines: bool = True
     tasks: bool
     projects: bool
     task_ws: bool
@@ -73,6 +74,7 @@ async def capabilities(
             "tool_ui": True,
             "memory": True,
             "migrations": True,
+            "execution_engines": True,
         },
     }
 

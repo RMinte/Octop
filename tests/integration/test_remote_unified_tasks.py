@@ -12,7 +12,7 @@ import pytest
 from octop.infra.bridge.task_streams import TaskStreamRelay
 from octop.infra.bridge.tasks import RemoteTasks
 from octop.infra.bridge.transport import BridgeSession
-from octop.infra.errors import OctopError
+from octop.infra.errors import ErrorCode, OctopError
 from tests.support.app import octop_client
 from tests.support.auth import auth_header, bootstrap_admin, resolve_user_id
 from tests.support.http import ws_connect, ws_token
@@ -234,6 +234,102 @@ async def test_remote_proxy_pins_peer_identity_caches_only_headers_and_scrubs_au
         await remote.proxy(owner, row.connection_id, "POST", "/api/project-tasks", "", {}, b"{}")
     assert peer_changed.value.status == 403
     assert manager.seen[-1]["path"] == "/api/project-tasks/capabilities"
+
+
+async def test_legacy_peer_accepts_default_octop_but_never_executes_new_engine_commands(env):
+    client, server, auth = env
+    owner = await resolve_user_id(client, auth, "admin")
+    row = server.services.bridge_connection_repo.create(
+        connection_id="legacy-engine-peer",
+        owner_user_id=owner,
+        peer_base_url="http://peer.example",
+        peer_username="peer-owner",
+        display_name="Legacy peer",
+    )
+    calls = []
+
+    class Manager:
+        def get_owned(self, connection_id, owner_id):
+            assert connection_id == row.connection_id and owner_id == owner
+            return row
+
+        async def tunnel_http(self, **kwargs):
+            if kwargs["path"] == "/api/project-tasks/capabilities":
+                return httpx.Response(
+                    200,
+                    json={
+                        "contract": "unified-task-conversations",
+                        "version": 1,
+                        "protocol_version": 3,
+                        "instance_id": "legacy-instance",
+                        "account_id": "legacy-account",
+                        "capabilities": {"tasks": True},
+                    },
+                )
+            payload = json.loads(kwargs["body"])
+            assert "engine" not in payload
+            calls.append((kwargs["path"], payload))
+            return httpx.Response(202, json={"accepted": True})
+
+    remote = RemoteTasks(server.services, Manager())
+    for method, path, payload in (
+        (
+            "POST",
+            "/api/project-tasks",
+            {
+                "request_id": "legacy-create",
+                "prompt": "work",
+                "engine": {"engine_id": "octop", "connection_id": None, "model_id": None},
+            },
+        ),
+        (
+            "POST",
+            "/api/project-tasks/task_one/messages",
+            {"request_id": "legacy-send", "prompt": "continue"},
+        ),
+        (
+            "POST",
+            "/api/project-tasks/task_one/forks",
+            {"request_id": "legacy-fork", "operation": "fork", "engine": None},
+        ),
+        (
+            "PATCH",
+            "/api/project-tasks/task_one",
+            {"expected_revision": 1, "title": "Changed", "engine": {"engine_id": "octop"}},
+        ),
+    ):
+        response = await remote.proxy(
+            owner, row.connection_id, method, path, "", {}, json.dumps(payload).encode()
+        )
+        assert response.status_code == 202
+    assert len(calls) == 4
+    for method, path, payload in (
+        (
+            "POST",
+            "/api/project-tasks",
+            {"prompt": "work", "engine": {"engine_id": "acp", "connection_id": "codex"}},
+        ),
+        (
+            "PATCH",
+            "/api/project-tasks/task_one",
+            {
+                "expected_revision": 1,
+                "expected_configuration_revision": 1,
+                "engine": {"engine_id": "octop"},
+            },
+        ),
+        (
+            "POST",
+            "/api/project-tasks/engines/inspect",
+            {"engine_id": "acp", "connection_id": "codex"},
+        ),
+    ):
+        with pytest.raises(OctopError) as error:
+            await remote.proxy(
+                owner, row.connection_id, method, path, "", {}, json.dumps(payload).encode()
+            )
+        assert error.value.code == ErrorCode.BRIDGE_REMOTE_UNSUPPORTED
+    assert len(calls) == 4
 
 
 async def test_internal_task_is_hidden_from_all_public_task_surfaces(env_with_provider):

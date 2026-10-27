@@ -41,6 +41,7 @@ vi.mock("../../api/modules/projects", async (importOriginal) => ({
     retry: vi.fn(),
     fork: vi.fn(),
     resources: vi.fn(),
+    inspectEngine: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
     downloadArtifact: vi.fn(),
@@ -3275,4 +3276,397 @@ it("新任务接收独立账号推送，无任务正文和旧资源门禁也能�
   );
   expect(api.updateApprovalPolicy).not.toHaveBeenCalled();
   expect(api.get).not.toHaveBeenCalled();
+});
+
+const octopEngine = {
+  engine_id: "octop",
+  connection_id: null,
+  model_id: null,
+} as const;
+const codexEngine = {
+  engine_id: "acp",
+  connection_id: "codex",
+  model_id: null,
+} as const;
+const nativeEngineCapabilities = {
+  action_modes: ["ask", "plan", "craft"],
+  images: true,
+  permissions: true,
+  native_resume: true,
+  pause: true,
+  cancel: true,
+  skills: true,
+  mcp: true,
+  plugins: true,
+  subagents: true,
+  knowledge: true,
+  memory: true,
+  compact: true,
+  model_selection: true,
+} as import("../../api/modules/projects").EngineCapabilities;
+const acpEngineCapabilities = {
+  ...nativeEngineCapabilities,
+  action_modes: ["craft"],
+  images: false,
+  native_resume: false,
+  pause: false,
+  plugins: false,
+  subagents: false,
+  knowledge: false,
+  compact: false,
+  model_selection: false,
+} as import("../../api/modules/projects").EngineCapabilities;
+async function withEngineResources() {
+  const resources = {
+    ...(await api.resources()),
+    execution_engines: [
+      {
+        engine: octopEngine,
+        label: "Octop",
+        available: true,
+        unavailable_reason: null,
+        capabilities: nativeEngineCapabilities,
+        models: [],
+      },
+      {
+        engine: codexEngine,
+        label: "Codex",
+        available: true,
+        unavailable_reason: null,
+        capabilities: acpEngineCapabilities,
+        models: [],
+      },
+    ],
+  };
+  api.resources.mockResolvedValue(resources);
+  return resources;
+}
+async function chooseEngine(label = "Codex") {
+  await userEvent.click(
+    await screen.findByRole("combobox", { name: zh.projects.tasks.engine }),
+  );
+  await userEvent.click(
+    await screen.findByText(label, {
+      selector: ".ant-select-item-option-content",
+    }),
+  );
+}
+
+describe("independent Task execution engines", () => {
+  it("creates with independent expert and engine choices without Octop model routing in ACP options", async () => {
+    await withEngineResources();
+    mount("", null);
+    await userEvent.click(
+      await screen.findByRole("combobox", { name: zh.projects.tasks.expert }),
+    );
+    await userEvent.click(
+      await screen.findByText("Finance expert", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("combobox", { name: zh.projects.tasks.model }),
+    );
+    await userEvent.click(
+      await screen.findByText("GLM · glm/glm", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+    await chooseEngine();
+    expect(
+      screen.queryByRole("combobox", { name: zh.projects.tasks.model }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(zh.projects.tasks.engineDefaultModel),
+    ).toBeInTheDocument();
+    await userEvent.type(
+      screen.getByRole("textbox", { name: zh.projects.tasks.message }),
+      "Use my expert with Codex",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: zh.projects.tasks.send }),
+    );
+    await waitFor(() =>
+      expect(api.create).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({
+          selected_expert_id: "expert_a",
+          engine: codexEngine,
+          action_mode: "craft",
+        }),
+      ),
+    );
+    expect(api.create.mock.calls[0][1].options?.model_ref).toBeUndefined();
+    expect(
+      api.create.mock.calls[0][1].options?.reasoning_effort,
+    ).toBeUndefined();
+    expect(api.inspectEngine).not.toHaveBeenCalled();
+  });
+
+  it("switches only the next turn’s engine on the same Task and preserves expert, draft and historic identity", async () => {
+    await withEngineResources();
+    const detail = {
+      ...fixture,
+      engine: octopEngine,
+      selected_expert_id: "expert_a",
+      action_mode: "ask" as const,
+      configuration_revision: 5,
+      turns: [
+        {
+          ...fixture.turns[0],
+          expert_name: "Original expert",
+          execution_engine: {
+            ...octopEngine,
+            label: "Original Octop engine",
+            capabilities: nativeEngineCapabilities,
+          },
+        },
+      ],
+    };
+    api.open.mockResolvedValue(detail);
+    api.update.mockImplementation(async (_id, changes) => ({
+      ...detail,
+      ...changes,
+      action_mode: "craft",
+      list_revision: 2,
+      configuration_revision: 6,
+    }));
+    mount("?task=task_a", "proj_a");
+    const input = await screen.findByRole("textbox", {
+      name: zh.projects.tasks.message,
+    });
+    await waitFor(() => expect(input).toBeEnabled());
+    await userEvent.type(input, "Continue in the same workspace");
+    await chooseEngine();
+    await waitFor(() =>
+      expect(api.update).toHaveBeenCalledWith("task_a", {
+        engine: codexEngine,
+        action_mode: "craft",
+        expected_revision: 1,
+        expected_configuration_revision: 5,
+      }),
+    );
+    expect(input).toHaveValue("Continue in the same workspace");
+    expect(screen.getByText("Original expert")).toBeInTheDocument();
+    expect(screen.getByText("Original Octop engine")).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: zh.projects.tasks.send }),
+    );
+    await waitFor(() =>
+      expect(api.send).toHaveBeenCalledWith(
+        "task_a",
+        expect.objectContaining({
+          expected_configuration_revision: 6,
+          expected_project_revision: null,
+        }),
+      ),
+    );
+    expect(api.create).not.toHaveBeenCalled();
+    expect(api.update.mock.calls[0][1]).not.toHaveProperty(
+      "selected_expert_id",
+    );
+    expect(api.update.mock.calls[0][1]).not.toHaveProperty("project_id");
+  });
+
+  it("keeps engine selection locked during an ACP turn and offers cancellation without pause", async () => {
+    await withEngineResources();
+    api.open.mockResolvedValue({
+      ...fixture,
+      engine: codexEngine,
+      status: "running",
+      active_turn_id: "turn_a",
+      turns: [
+        {
+          ...fixture.turns[0],
+          status: "running",
+          execution_engine: {
+            ...codexEngine,
+            label: "Codex",
+            capabilities: acpEngineCapabilities,
+          },
+        },
+      ],
+    });
+    mount("?task=task_a");
+    const selector = await screen.findByRole("combobox", {
+      name: zh.projects.tasks.engine,
+    });
+    await waitFor(() => expect(selector).toBeDisabled());
+    expect(
+      screen.queryByRole("button", { name: zh.projects.tasks.pause }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: zh.projects.tasks.stop }),
+    ).toBeEnabled();
+  });
+
+  it("preserves an unavailable selected engine instead of silently switching back to Octop", async () => {
+    const resources = await withEngineResources();
+    resources.execution_engines[1].available = false;
+    resources.execution_engines[1].unavailable_reason = "auth_required";
+    api.open.mockResolvedValue({ ...fixture, engine: codexEngine });
+    mount("?task=task_a");
+    await screen.findByRole("combobox", { name: zh.projects.tasks.engine });
+    expect(
+      (await screen.findAllByText(zh.projects.tasks.engineUnavailable)).length,
+    ).toBeGreaterThan(0);
+    await userEvent.type(
+      screen.getByRole("textbox", { name: zh.projects.tasks.message }),
+      "Keep my selection",
+    );
+    expect(
+      screen.getByRole("button", { name: zh.projects.tasks.send }),
+    ).toBeDisabled();
+    expect(api.update).not.toHaveBeenCalled();
+  });
+
+  it("inspects only on request and offers the actual native model ids separately", async () => {
+    const resources = await withEngineResources();
+    api.open.mockResolvedValue({ ...fixture, engine: codexEngine });
+    api.inspectEngine.mockImplementation(async () => {
+      const entry = {
+        ...resources.execution_engines[1],
+        capabilities: { ...acpEngineCapabilities, model_selection: true },
+        models: [{ model_id: "native-model", label: "Native engine model" }],
+      };
+      resources.execution_engines[1] = entry;
+      return entry;
+    });
+    api.update.mockImplementation(async (_id, changes) => ({
+      ...fixture,
+      engine: codexEngine,
+      ...changes,
+      list_revision: 2,
+      configuration_revision: 2,
+    }));
+    mount("?task=task_a");
+    const inspect = await screen.findByRole("button", {
+      name: zh.projects.tasks.inspectEngine,
+    });
+    expect(api.inspectEngine).not.toHaveBeenCalled();
+    await userEvent.click(inspect);
+    expect(api.inspectEngine).toHaveBeenCalledWith(codexEngine);
+    await userEvent.click(
+      await screen.findByRole("combobox", {
+        name: zh.projects.tasks.engineModel,
+      }),
+    );
+    await userEvent.click(
+      await screen.findByText("Native engine model", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+    await waitFor(() =>
+      expect(api.update).toHaveBeenCalledWith(
+        "task_a",
+        expect.objectContaining({
+          engine: { ...codexEngine, model_id: "native-model" },
+        }),
+      ),
+    );
+    expect(
+      screen.queryByRole("combobox", { name: zh.projects.tasks.model }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+it("rejects an ACP/client-directory draft without rewriting either project directory", async () => {
+  await withEngineResources();
+  api.open.mockResolvedValue({ ...fixture, engine: codexEngine });
+  render(
+    <MemoryRouter initialEntries={["?task=task_a"]}>
+      <TaskConversations projectID="proj_a" project={projectFixture} />
+    </MemoryRouter>,
+  );
+  expect(
+    await screen.findByText(zh.projects.tasks.engineClientDirectoryUnsupported),
+  ).toBeInTheDocument();
+  await userEvent.type(
+    screen.getByRole("textbox", { name: zh.projects.tasks.message }),
+    "Keep the directories",
+  );
+  expect(
+    screen.getByRole("button", { name: zh.projects.tasks.send }),
+  ).toBeDisabled();
+  expect(api.update).not.toHaveBeenCalled();
+  expect(projectFixture.directory).toBe("/server/before");
+  expect(projectFixture.client_directory).toBe("/client/before");
+});
+
+it("strips recovered Octop routing from an ACP send while keeping other draft overrides", async () => {
+  await withEngineResources();
+  const options = {
+    model_ref: "glm/glm",
+    routing: { mode: "hybrid" as const, level: 80 as const },
+    reasoning_mode: "enabled" as const,
+    reasoning_effort: "high",
+    skills: [],
+    mcp_servers: [],
+  };
+  const item = {
+    id: "queued-routing",
+    body: {
+      request_id: "queued-routing",
+      prompt: "Recovered routing draft",
+      options,
+    },
+    attachments: [],
+  };
+  const shared: import("./useTaskMessageQueue").TaskMessageQueue = {
+    drafts: { current: new Map() },
+    queues: {
+      task_a: {
+        items: [item],
+        projectID: "proj_a",
+        error: null,
+        sendingID: null,
+      },
+    },
+    delivered: {},
+    enqueue: vi.fn(() => "ok" as const),
+    remove: vi.fn(),
+    reclaim: vi.fn(() => {
+      shared.queues.task_a.items = [];
+      return item;
+    }),
+    clear: vi.fn(),
+    retry: vi.fn(),
+    hold: vi.fn(),
+    isHeld: vi.fn(() => false),
+  };
+  api.update.mockImplementation(async (_id, patch) => ({
+    ...fixture,
+    ...patch,
+    list_revision: 2,
+    configuration_revision: 2,
+  }));
+  render(
+    <MemoryRouter initialEntries={["?task=task_a"]}>
+      <TaskConversations projectID="proj_a" queue={shared} />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("textbox", { name: zh.projects.tasks.message });
+  await userEvent.click(
+    screen.getByRole("button", { name: zh.projects.composer.pendingCount }),
+  );
+  await userEvent.click(
+    await screen.findByRole("button", { name: zh.chat.queue.reclaim }),
+  );
+  expect(
+    screen.getByRole("textbox", { name: zh.projects.tasks.message }),
+  ).toHaveValue("Recovered routing draft");
+  await chooseEngine();
+  await userEvent.click(
+    screen.getByRole("button", { name: zh.projects.tasks.send }),
+  );
+  await waitFor(() =>
+    expect(api.send).toHaveBeenCalledWith(
+      "task_a",
+      expect.objectContaining({
+        prompt: "Recovered routing draft",
+        options: { skills: [], mcp_servers: [] },
+      }),
+    ),
+  );
+  expect(options.routing).toEqual({ mode: "hybrid", level: 80 });
 });

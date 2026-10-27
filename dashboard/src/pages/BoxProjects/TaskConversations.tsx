@@ -66,7 +66,17 @@ import {
   type TaskStatus,
   type TaskFork,
   type TaskTurn,
+  type EngineSelection,
 } from "../../api/modules/projects";
+import TaskEngineSelect from "./TaskEngineSelect";
+import {
+  engineCapabilities,
+  engineEntry,
+  engineKey,
+  engineLabel,
+  OCTOP_ENGINE,
+  taskOptionsForEngine,
+} from "./taskEngine";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { useTaskPresentationSettings } from "../../hooks/useTaskPresentationSettings";
 import { apiErrorMessage, parseApiError } from "../../utils/apiError";
@@ -146,6 +156,8 @@ export default function TaskConversations({
   const [resourceError, setResourceError] = useState("");
   const [resourceVersion, setResourceVersion] = useState(0);
   const [expertID, setExpertID] = useState<string | null>(defaultExpertID);
+  const [engine, setEngine] = useState<EngineSelection>(OCTOP_ENGINE);
+  const [inspectingEngine, setInspectingEngine] = useState(false);
   const [actionMode, setActionMode] = useState<TaskActionMode>("craft");
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
@@ -254,6 +266,8 @@ export default function TaskConversations({
   const selectedTaskID = useRef(taskID);
   selectedTaskID.current = taskID;
   const selectedProjectID = useRef(projectID);
+  const selectedHostID = useRef(hostID);
+  selectedHostID.current = hostID;
   selectedProjectID.current = projectID;
   useEffect(() => {
     alive.current = true;
@@ -356,6 +370,7 @@ export default function TaskConversations({
   };
   const projectArchived = !!project?.archived;
   const selectionDisabled =
+    inspectingEngine ||
     busy ||
     sending ||
     loading ||
@@ -368,6 +383,34 @@ export default function TaskConversations({
     webSearchSaving ||
     approvalSaving;
   const selectedExpert = taskID ? detail?.selected_expert_id ?? null : expertID;
+  const selectedEngine = taskID ? detail?.engine ?? OCTOP_ENGINE : engine;
+  const selectedEngineEntry = engineEntry(
+    selectedEngine,
+    resources?.execution_engines,
+  );
+  const capabilities = engineCapabilities(
+    selectedEngine,
+    resources?.execution_engines,
+  );
+  const activeCapabilities =
+    activeTurn?.execution_engine?.capabilities ?? capabilities;
+  const engineUnavailable =
+    !!resources?.execution_engines && !selectedEngineEntry?.available;
+  const externalEngine = selectedEngine.engine_id !== "octop";
+  const engineClientDirectoryConflict =
+    externalEngine && !!project?.client_directory;
+  const submissionOptions = taskOptionsForEngine(options, selectedEngine);
+  const engineImageConflict =
+    !capabilities.images && images.items.some((image) => image.isImage);
+  const addAttachments = (files: File[]) => {
+    if (
+      !capabilities.images &&
+      files.some((file) => file.type.startsWith("image/"))
+    ) {
+      setError(t("projects.tasks.engineImagesUnsupported"));
+      images.add(files.filter((file) => !file.type.startsWith("image/")));
+    } else images.add(files);
+  };
   const selectedExpertUnavailable =
     !!selectedExpert &&
     !resourceError &&
@@ -437,10 +480,12 @@ export default function TaskConversations({
     value: options,
     onChange: setOptions,
     resources,
+    skillsEnabled: capabilities.skills,
     disabled: composerDisabled || updating,
     getInputElement: getComposerInput,
   });
   const compactDisabled =
+    !capabilities.compact ||
     composerDisabled ||
     busy ||
     queuedItems.length > 0 ||
@@ -491,6 +536,7 @@ export default function TaskConversations({
     setWorkbenchTool(null);
     setDraft(queue.drafts.current.get(draftKey) ?? "");
     setExpertID(defaultExpertID);
+    setEngine(OCTOP_ENGINE);
     setActionMode("craft");
     const created = createdTaskSelection.current;
     setOptions(
@@ -605,6 +651,10 @@ export default function TaskConversations({
     if (
       (!prompt && !attachmentIDs.length) ||
       images.blocked ||
+      engineUnavailable ||
+      engineImageConflict ||
+      engineClientDirectoryConflict ||
+      inspectingEngine ||
       detail?.archived ||
       projectArchived ||
       deleteTarget ||
@@ -627,11 +677,14 @@ export default function TaskConversations({
         revisions.expected_project_revision ||
       (!taskID &&
         ((pending.current.body as TaskCreate).selected_expert_id !== expertID ||
+          JSON.stringify(
+            (pending.current.body as TaskCreate).engine ?? OCTOP_ENGINE,
+          ) !== JSON.stringify(selectedEngine) ||
           (pending.current.body as TaskCreate).action_mode !== actionMode)) ||
       JSON.stringify(pending.current.body.attachment_ids ?? []) !==
         JSON.stringify(attachmentIDs) ||
       JSON.stringify(pending.current.body.options ?? {}) !==
-        JSON.stringify(options) ||
+        JSON.stringify(submissionOptions) ||
       (!taskID &&
         (pending.current.body as TaskCreate).web_search_enabled !==
           webSearchEnabled)
@@ -645,13 +698,18 @@ export default function TaskConversations({
           ...(!taskID
             ? { selected_expert_id: expertID, action_mode: actionMode }
             : {}),
+          ...(!taskID && selectedEngine.engine_id !== "octop"
+            ? { engine: selectedEngine }
+            : {}),
           ...(attachmentIDs.length ? { attachment_ids: attachmentIDs } : {}),
           ...(!taskID
             ? {
                 web_search_enabled: webSearchEnabled,
               }
             : {}),
-          ...(JSON.stringify(options) !== "{}" ? { options } : {}),
+          ...(JSON.stringify(submissionOptions) !== "{}"
+            ? { options: submissionOptions }
+            : {}),
         },
       };
     }
@@ -865,7 +923,7 @@ export default function TaskConversations({
         taskID,
         turnID,
         retryRequest.current.requestID,
-        options,
+        submissionOptions,
         revisions,
       );
       if (
@@ -909,7 +967,8 @@ export default function TaskConversations({
       const result = await projectTasksApi.update(taskID, {
         ...changes,
         expected_revision: expectedRevision ?? detail.list_revision,
-        ...(changes.selected_expert_id !== undefined ||
+        ...(changes.engine !== undefined ||
+        changes.selected_expert_id !== undefined ||
         changes.action_mode !== undefined
           ? {
               expected_configuration_revision:
@@ -944,6 +1003,51 @@ export default function TaskConversations({
     }
   };
 
+  const changeEngine = (next: EngineSelection) => {
+    const modes = engineCapabilities(
+      next,
+      resources?.execution_engines,
+    ).action_modes;
+    const nextMode = modes.includes(selectedMode)
+      ? selectedMode
+      : modes[0] ?? "craft";
+    if (taskID)
+      void updateTask({
+        engine: next,
+        ...(nextMode !== selectedMode ? { action_mode: nextMode } : {}),
+      });
+    else {
+      setEngine(next);
+      setActionMode(nextMode);
+    }
+  };
+  const inspectEngine = async () => {
+    if (inspectingEngine) return;
+    setInspectingEngine(true);
+    try {
+      const entry = await projectTasksApi.inspectEngine(selectedEngine);
+      if (!alive.current || selectedHostID.current !== hostID) return;
+      setResources((previous) =>
+        previous
+          ? {
+              ...previous,
+              execution_engines: [
+                ...(previous.execution_engines ?? []).filter(
+                  (item) => engineKey(item.engine) !== engineKey(entry.engine),
+                ),
+                entry,
+              ],
+            }
+          : previous,
+      );
+      setResourceVersion((version) => version + 1);
+    } catch (error) {
+      setError(apiErrorMessage(error, t("projects.tasks.failure"), t));
+    } finally {
+      setInspectingEngine(false);
+    }
+  };
+
   const deleteTask = async () => {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
@@ -974,6 +1078,7 @@ export default function TaskConversations({
       turn_id: turn.turn_id,
       project_id: projectID,
       selected_expert_id: detail?.selected_expert_id ?? null,
+      ...(detail?.engine ? { engine: detail.engine } : {}),
       ...(operation !== "fork" ? { prompt: turn.prompt } : {}),
     });
     branchRequest.current = null;
@@ -1451,6 +1556,7 @@ export default function TaskConversations({
                             {t("projects.tasks.delete")}
                           </Button>
                           <TaskContextUsage
+                            engine={selectedEngine}
                             taskID={detail.task_id}
                             active={busy}
                             turns={detail.turns}
@@ -1534,6 +1640,10 @@ export default function TaskConversations({
                             (turn.selected_expert_id ||
                               t("projects.tasks.generalAssistant"))}
                         </Typography.Text>
+                        <Tag title={t("projects.tasks.engine")}>
+                          {turn.execution_engine?.label ||
+                            engineLabel(turn.execution_engine ?? OCTOP_ENGINE)}
+                        </Tag>
                         {turn.action_mode && (
                           <Tag title={t("projects.tasks.actionMode")}>
                             {t(
@@ -1552,9 +1662,20 @@ export default function TaskConversations({
                         </Tag>
                       </Space>
                       <Typography.Paragraph type="secondary">
-                        {t("projects.tasks.modelUsed", {
-                          model: turn.model_ref,
-                        })}
+                        {turn.execution_engine?.actual_model_id ??
+                        turn.execution_engine?.model_id ??
+                        (turn.execution_engine?.engine_id === "acp"
+                          ? null
+                          : turn.model_ref)
+                          ? t("projects.tasks.modelUsed", {
+                              model:
+                                turn.execution_engine?.actual_model_id ??
+                                turn.execution_engine?.model_id ??
+                                (turn.execution_engine?.engine_id === "acp"
+                                  ? null
+                                  : turn.model_ref),
+                            })
+                          : t("projects.tasks.engineDefaultModel")}
                         <TaskTurnUsage turn={turn} />
                       </Typography.Paragraph>
                       <TaskTurnContent
@@ -1678,7 +1799,8 @@ export default function TaskConversations({
                         <TaskRecoveryNotice
                           turn={turn}
                           onResume={
-                            turn.turn_id === detail.active_turn_id
+                            turn.turn_id === detail.active_turn_id &&
+                            turn.execution_engine?.engine_id !== "acp"
                               ? () => void control()
                               : undefined
                           }
@@ -1742,7 +1864,7 @@ export default function TaskConversations({
               if (!event.dataTransfer.files.length) return;
               event.preventDefault();
               if (!composerDisabled)
-                images.add(Array.from(event.dataTransfer.files));
+                addAttachments(Array.from(event.dataTransfer.files));
             }}
           >
             <TaskComposer
@@ -1754,9 +1876,45 @@ export default function TaskConversations({
                 disabled:
                   sending || updating || !!detail?.archived || projectArchived,
                 selectedExpertID: selectedExpert,
+                engine: selectedEngine,
+                engineCatalog: resources?.execution_engines,
+                onEngineChange: changeEngine,
               }}
               status={
                 <>
+                  {engineUnavailable ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t("projects.tasks.engineUnavailable")}
+                      description={
+                        hostID
+                          ? t("projects.tasks.remoteEngineManagement")
+                          : t("projects.tasks.engineSetupHint")
+                      }
+                    />
+                  ) : null}
+                  {engineImageConflict ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t("projects.tasks.engineImagesUnsupported")}
+                    />
+                  ) : null}
+                  {externalEngine && capabilities.action_modes.length === 1 ? (
+                    <Typography.Text type="secondary">
+                      {t("projects.tasks.engineCraftOnly")}
+                    </Typography.Text>
+                  ) : null}
+                  {engineClientDirectoryConflict ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t(
+                        "projects.tasks.engineClientDirectoryUnsupported",
+                      )}
+                    />
+                  ) : null}
                   {selectedExpertUnavailable && (
                     <Alert
                       type="warning"
@@ -1811,38 +1969,40 @@ export default function TaskConversations({
                   <div className={styles.composerRuntime}>
                     {busy && (
                       <>
-                        {activeTurn?.status !== "interrupted" && (
-                          <Button
-                            icon={
-                              activeTurn?.pause_requested ||
-                              activeTurn?.status === "paused" ? (
-                                <Play size={15} />
-                              ) : (
-                                <Pause size={15} />
-                              )
-                            }
-                            loading={controlling}
-                            disabled={
-                              compacting ||
-                              reconnecting ||
-                              stopping ||
-                              activeTurn?.cancel_requested
-                            }
-                            title={t("projects.tasks.controlHint")}
-                            onClick={() => void control()}
-                          >
-                            {t(
-                              activeTurn?.pause_requested ||
-                                activeTurn?.status === "paused"
-                                ? "projects.tasks.resume"
-                                : "projects.tasks.pause",
-                            )}
-                          </Button>
-                        )}
+                        {activeCapabilities.pause &&
+                          activeTurn?.status !== "interrupted" && (
+                            <Button
+                              icon={
+                                activeTurn?.pause_requested ||
+                                activeTurn?.status === "paused" ? (
+                                  <Play size={15} />
+                                ) : (
+                                  <Pause size={15} />
+                                )
+                              }
+                              loading={controlling}
+                              disabled={
+                                compacting ||
+                                reconnecting ||
+                                stopping ||
+                                activeTurn?.cancel_requested
+                              }
+                              title={t("projects.tasks.controlHint")}
+                              onClick={() => void control()}
+                            >
+                              {t(
+                                activeTurn?.pause_requested ||
+                                  activeTurn?.status === "paused"
+                                  ? "projects.tasks.resume"
+                                  : "projects.tasks.pause",
+                              )}
+                            </Button>
+                          )}
                         <Button
                           icon={<Square size={15} />}
                           loading={stopping}
                           disabled={
+                            !activeCapabilities.cancel ||
                             !!queued?.sendingID ||
                             detail?.turns.some(
                               (turn) =>
@@ -2000,6 +2160,29 @@ export default function TaskConversations({
                         else setExpertID(id || null);
                       }}
                     />
+                    <TaskEngineSelect
+                      value={selectedEngine}
+                      catalog={resources?.execution_engines}
+                      disabled={selectionDisabled || inspectingEngine}
+                      loading={!resources && !resourceError}
+                      hostID={hostID}
+                      onChange={changeEngine}
+                      onRefresh={() =>
+                        setResourceVersion((version) => version + 1)
+                      }
+                    />
+                    {externalEngine ? (
+                      <Button
+                        size="small"
+                        type="text"
+                        loading={inspectingEngine}
+                        title={t("projects.tasks.inspectEngineHint")}
+                        disabled={selectionDisabled || engineUnavailable}
+                        onClick={() => void inspectEngine()}
+                      >
+                        {t("projects.tasks.inspectEngine")}
+                      </Button>
+                    ) : null}
                   </Space>
                 </>
               }
@@ -2010,6 +2193,9 @@ export default function TaskConversations({
                   value={selectedMode}
                   options={["ask", "plan", "craft"].map((mode) => ({
                     value: mode,
+                    disabled: !capabilities.action_modes.includes(
+                      mode as TaskActionMode,
+                    ),
                     label: t(`projects.tasks.actionModes.${mode}`),
                   }))}
                   onChange={(mode) => {
@@ -2023,31 +2209,37 @@ export default function TaskConversations({
               }
               webSearch={
                 <>
-                  <TaskWebSearch
-                    compact
-                    key={`web-search:${projectID ?? ""}:${taskID ?? "new"}`}
-                    task={detail}
-                    draft={webSearchEnabled}
-                    onDraftChange={setWebSearchEnabled}
-                    onChange={(incoming) => {
-                      upsertTask(incoming);
-                      applyWrite(incoming);
-                    }}
-                    onBusyChange={(saving) => {
-                      if (taskID) queue.hold(taskID, saving);
-                    }}
-                    disabled={
-                      sending ||
-                      webSearchSaving ||
-                      approvalSaving ||
-                      updating ||
-                      !!queued?.sendingID ||
-                      reconnecting ||
-                      !!detail?.archived ||
-                      projectArchived ||
-                      !!(taskID && !detail)
-                    }
-                  />
+                  {externalEngine ? (
+                    <Typography.Text type="secondary">
+                      {t("projects.tasks.engineWebSearch")}
+                    </Typography.Text>
+                  ) : (
+                    <TaskWebSearch
+                      compact
+                      key={`web-search:${projectID ?? ""}:${taskID ?? "new"}`}
+                      task={detail}
+                      draft={webSearchEnabled}
+                      onDraftChange={setWebSearchEnabled}
+                      onChange={(incoming) => {
+                        upsertTask(incoming);
+                        applyWrite(incoming);
+                      }}
+                      onBusyChange={(saving) => {
+                        if (taskID) queue.hold(taskID, saving);
+                      }}
+                      disabled={
+                        sending ||
+                        webSearchSaving ||
+                        approvalSaving ||
+                        updating ||
+                        !!queued?.sendingID ||
+                        reconnecting ||
+                        !!detail?.archived ||
+                        projectArchived ||
+                        !!(taskID && !detail)
+                      }
+                    />
+                  )}
                 </>
               }
               approval={
@@ -2055,7 +2247,9 @@ export default function TaskConversations({
                   <TaskApprovalModePicker
                     compact
                     onBusyChange={setApprovalSaving}
-                    disabled={sending || webSearchSaving}
+                    disabled={
+                      sending || webSearchSaving || !capabilities.permissions
+                    }
                   />
                 </>
               }
@@ -2134,7 +2328,7 @@ export default function TaskConversations({
                         images.items.length >= MAX_TASK_IMAGES
                       }
                       onChange={(event) => {
-                        images.add(Array.from(event.target.files ?? []));
+                        addAttachments(Array.from(event.target.files ?? []));
                         event.target.value = "";
                       }}
                     />
@@ -2159,8 +2353,8 @@ export default function TaskConversations({
                     text={draft}
                     taskID={taskID ?? undefined}
                     expertID={selectedExpert}
-                    modelRef={options.model_ref}
-                    disabled={composerDisabled}
+                    modelRef={externalEngine ? undefined : options.model_ref}
+                    disabled={composerDisabled || externalEngine}
                     onApply={(text) => {
                       setDraft(text);
                       queue.drafts.current.set(draftKey, text);
@@ -2193,6 +2387,10 @@ export default function TaskConversations({
                     disabled={
                       (!draft.trim() && !images.attachmentIDs.length) ||
                       images.blocked ||
+                      engineUnavailable ||
+                      engineImageConflict ||
+                      engineClientDirectoryConflict ||
+                      inspectingEngine ||
                       approvalSaving ||
                       webSearchSaving ||
                       updating ||
@@ -2236,7 +2434,7 @@ export default function TaskConversations({
                   const files = Array.from(event.clipboardData.files);
                   if (files.length) {
                     event.preventDefault();
-                    if (!composerDisabled) images.add(files);
+                    if (!composerDisabled) addAttachments(files);
                   }
                 }}
                 onKeyDown={(event) => {
@@ -2318,6 +2516,33 @@ export default function TaskConversations({
               setBranch((current) =>
                 current
                   ? { ...current, selected_expert_id: id || null }
+                  : current,
+              )
+            }
+          />
+          <Typography.Text>{t("projects.tasks.engine")}</Typography.Text>
+          <TaskEngineSelect
+            branch
+            value={branch?.engine ?? detail?.engine ?? OCTOP_ENGINE}
+            catalog={resources?.execution_engines}
+            disabled={forking}
+            hostID={hostID}
+            onChange={(engine) =>
+              setBranch((current) =>
+                current
+                  ? {
+                      ...current,
+                      engine,
+                      action_mode: engineCapabilities(
+                        engine,
+                        resources?.execution_engines,
+                      ).action_modes.includes(selectedMode)
+                        ? selectedMode
+                        : engineCapabilities(
+                            engine,
+                            resources?.execution_engines,
+                          ).action_modes[0] ?? "craft",
+                    }
                   : current,
               )
             }

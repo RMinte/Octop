@@ -268,6 +268,11 @@ const processBlock = (block: TaskContentBlock) =>
 
 function toolStatus(block: TaskContentBlock, turn: TaskTurn) {
   if (block.status === "failed") return "failed";
+  if (
+    turn.execution_engine?.engine_id === "acp" &&
+    block.status === "completed"
+  )
+    return "completed";
   const nativeResult =
     block.status === "completed" &&
     block.output != null &&

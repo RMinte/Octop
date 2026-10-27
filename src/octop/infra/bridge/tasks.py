@@ -121,6 +121,37 @@ class RemoteTasks:
         if not is_task_tunnel_path_allowed(method, path):
             raise OctopError.localized(ErrorCode.BRIDGE_REMOTE_UNSUPPORTED)
         capability = await self.capabilities(owner_id, connection_id)
+        if not capability["capabilities"].get("execution_engines"):
+            requires_engines = path in {
+                "/api/project-tasks/engines",
+                "/api/project-tasks/engines/inspect",
+            }
+            if body and body.lstrip().startswith(b"{"):
+                try:
+                    payload = json.loads(body)
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict) and "engine" in payload:
+                    selection = payload["engine"]
+                    native_default = selection is None or (
+                        isinstance(selection, dict)
+                        and not selection.keys() - {"engine_id", "connection_id", "model_id"}
+                        and selection.get("engine_id", "octop") == "octop"
+                        and selection.get("connection_id") is None
+                        and selection.get("model_id") is None
+                    )
+                    if not native_default:
+                        requires_engines = True
+                    else:
+                        payload.pop("engine")
+                        if method.upper() == "PATCH" and not payload.keys() - {
+                            "expected_revision",
+                            "expected_configuration_revision",
+                        }:
+                            requires_engines = True
+                        body = json.dumps(payload, ensure_ascii=False).encode()
+            if requires_engines:
+                raise OctopError.localized(ErrorCode.BRIDGE_REMOTE_UNSUPPORTED)
         query = urlencode(
             [
                 (k, v)

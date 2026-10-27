@@ -49,7 +49,7 @@ class ACPSettingsStore:
         self._settings = settings_repo
         self._agents = agents_repo
 
-    def load_runners(self, user_id: int) -> dict[str, Any]:
+    def load_runners(self, user_id: int, *, migrate_legacy: bool = True) -> dict[str, Any]:
         """Return merged runner dict (built-ins + saved overrides)."""
         raw = self._settings.get(_settings_key(user_id))
         if raw:
@@ -64,7 +64,7 @@ class ACPSettingsStore:
                     return _runners_response(runners_raw)
                 return _runners_response(data)
 
-        migrated = self._migrate_legacy_from_agents(user_id)
+        migrated = self._migrate_legacy_from_agents(user_id) if migrate_legacy else None
         if migrated is not None:
             self._save_raw_runners(user_id, migrated)
             return _runners_response(migrated)
@@ -86,6 +86,38 @@ class ACPSettingsStore:
         self._settings.set(
             f"acp_setup:user:{user_id}:{runner}", json.dumps(status, ensure_ascii=False)
         )
+
+    def update_runner_if_matches(
+        self,
+        user_id: int,
+        runner: str,
+        expected: dict[str, Any],
+        changes: dict[str, Any],
+        *,
+        expected_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Merge one runner atomically, preserving concurrently changed peers."""
+        key = _settings_key(user_id)
+        for _ in range(8):
+            raw = self._settings.get(key)
+            document = _parse_config_json(raw)
+            stored = document.get("runners", document)
+            runners = _runners_response(stored if isinstance(stored, dict) else {})
+            if runners.get(runner) != expected:
+                return None
+            updated = {**expected, **changes}
+            runners[runner] = updated
+            checks: dict[str, str | None] = {}
+            if expected_status is not None:
+                status_key = f"acp_setup:user:{user_id}:{runner}"
+                status_raw = self._settings.get(status_key)
+                if _parse_config_json(status_raw) != expected_status:
+                    return None
+                checks[status_key] = status_raw
+            payload = json.dumps({"runners": runners}, ensure_ascii=False)
+            if self._settings.compare_and_set(key, raw, payload, checks=checks):
+                return dict(_runners_response(runners)[runner])
+        return None
 
     def _save_raw_runners(self, user_id: int, runners: dict[str, Any]) -> None:
         self._settings.set(

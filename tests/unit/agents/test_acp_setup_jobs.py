@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -15,8 +16,14 @@ from octop.infra.agents.acp_setup_jobs import ACPSetupJob, ACPSetupJobs, _Job, _
 from octop.infra.errors import ErrorCode, OctopError
 
 
-def setup_result(connection="unchecked", installation="installed"):
-    return ACPRunnerSetup(runner="codex", installation=installation, connection=connection)
+def setup_result(
+    connection="unchecked", installation="installed", *, configuration=None, enabled=False
+):
+    result = ACPRunnerSetup(
+        runner="codex", installation=installation, connection=connection, enabled=enabled
+    )
+    result._configuration = dict(configuration) if configuration is not None else None
+    return result
 
 
 @pytest.fixture
@@ -27,6 +34,7 @@ def jobs(monkeypatch):
     service._is_standard.return_value = True
     service._launch.return_value = ["codex-acp"]
     service._env.return_value = {"PATH": "opaque-bin-path"}
+    service.runner_environment.return_value = {"PATH": "opaque-bin-path"}
     service._managed_environment.side_effect = lambda runner, env: dict(env)
     service.install = AsyncMock(return_value=setup_result())
     service.check = AsyncMock(return_value=setup_result("ready"))
@@ -162,6 +170,60 @@ def test_output_is_bounded_and_auth_fields_do_not_expose_credentials(jobs):
     assert len(job.view.output) <= module._OUTPUT_LIMIT
 
 
+def test_codex_multiline_device_code_waits_for_complete_line_across_output_chunks(jobs):
+    job = _Job(1, "en", ACPSetupJob(job_id="codex-device", runner="codex", kind="login"))
+    jobs._append(job, "https://auth.openai.com/codex/device\n")
+    prompt = (
+        "2. Enter this one-time code (expires in 15 minutes)\r\n\r\n   \x1b[1mABCD-EFGHI\x1b[0m"
+    )
+    for character in prompt:
+        jobs._append(job, character)
+        assert job.view.authorization.user_code is None
+    jobs._append(job, "\r\n")
+    assert job.view.authorization.user_code == "ABCD-EFGHI"
+    assert job.view.status == "waiting_for_user"
+    jobs._append(job, "\nContinue only if you started this login in Codex.\n")
+    assert job.view.authorization.user_code == "ABCD-EFGHI"
+    jobs._append(job, "access_token=private-access-secret\nBearer private-bearer-secret\n")
+    assert "https://" not in job.view.output
+    assert "private-access-secret" not in job.view.output
+    assert "private-bearer-secret" not in job.view.output
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "User code: Please sign in to your account\n",
+        "Verification code:\n\nContinue only if you started this login.\n",
+        "Enter this one-time code (expires in 15 minutes)\n\n   Continue in your browser.\n",
+        "User code:\nPLEASE WAIT\n",
+        "User code: CONTINUE\n",
+        "Authorization code: ABCD-EFGHI-extra-suffix\n",
+    ],
+)
+def test_device_code_parser_does_not_capture_instructions_or_partial_tokens(jobs, output):
+    job = _Job(1, "en", ACPSetupJob(job_id="instructions", runner="codex", kind="login"))
+    jobs._append(job, "https://auth.openai.com/codex/device\n" + output)
+    assert job.view.authorization.user_code is None
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    [
+        ("User code:", "ABCD-1234"),
+        ("verification code=", "123456"),
+        ("Authorization code:", "AB12CD34"),
+    ],
+)
+def test_single_line_device_codes_still_work_with_fragmented_labels_and_values(jobs, label, code):
+    job = _Job(1, "en", ACPSetupJob(job_id="single-line", runner="codex", kind="login"))
+    jobs._append(job, label[:4])
+    jobs._append(job, label[4:] + " " + code[:3])
+    jobs._append(job, code[3:] + "\nhttps://auth.openai.com/codex/device\n")
+    assert job.view.authorization.user_code == code
+    assert "https://" not in job.view.output
+
+
 def test_install_output_redacts_http_and_npm_credentials(jobs):
     job = _Job(1, "en", ACPSetupJob(job_id="install", runner="codex", kind="install"))
     jobs._append(job, "Authorization: Basic dXNlcjpwYXNzd29yZA==\nBearer opaque-bearer-secret\n")
@@ -213,6 +275,9 @@ async def test_fixed_login_launch_uses_catalog_arguments_and_headless_environmen
     command, env = jobs._login_launch(_Job(1, "en", view))
     assert command == ["codex-acp", "cli", "login", "--device-auth"]
     assert env["NO_OPEN_BROWSER"] == "1" and env["BROWSER"] == "none"
+    jobs._service.runner_environment.assert_called_once_with(
+        1, "codex", jobs._service._load.return_value, ensure=True
+    )
     jobs._service._is_standard.return_value = False
     assert jobs._login_launch(_Job(1, "en", view)) is None
 
@@ -287,3 +352,147 @@ async def test_cancelling_login_reaps_process_and_clears_authorization(jobs, mon
     assert result.status == "cancelled" and result.input_mode == "none"
     assert result.authorization is None
     stop.assert_awaited_once_with(process)
+
+
+def connect_setup(jobs, connection="ready", installation="installed"):
+    config = jobs._service._load.return_value
+    jobs._service._status.return_value = setup_result(
+        installation=installation, configuration=config
+    )
+    jobs._service.check = AsyncMock(return_value=setup_result(connection, configuration=config))
+    jobs._service.enable_checked = AsyncMock(
+        return_value=setup_result("ready", configuration=config, enabled=True)
+    )
+    return config
+
+
+async def test_connect_reuses_existing_authorization_checks_and_enables(jobs, monkeypatch):
+    config = connect_setup(jobs)
+    login = AsyncMock()
+    monkeypatch.setattr(jobs, "_login", login)
+    job = await jobs.start(1, "codex", "connect", "en")
+    result = await finish(jobs, job)
+    assert result.kind == "connect" and result.status == "succeeded"
+    assert result.setup.connection == "ready" and result.setup.enabled
+    jobs._service.check.assert_awaited_once_with(1, "codex", "en", expected_configuration=config)
+    jobs._service.enable_checked.assert_awaited_once()
+    jobs._service.install.assert_not_awaited()
+    login.assert_not_awaited()
+    assert "_configuration" not in result.model_dump_json()
+
+
+async def test_connect_repairs_missing_managed_launch_before_checking_standard_profile(jobs):
+    original = connect_setup(jobs, installation="not_installed")
+    jobs._service._is_standard.return_value = False
+    repaired = {**original, "command": "managed-codex-acp", "enabled": False}
+    jobs._service.install.return_value = setup_result(configuration=repaired)
+    jobs._service.check.return_value = setup_result("ready", configuration=repaired)
+    job = await jobs.start(1, "codex", "connect", "en")
+    result = await finish(jobs, job)
+    assert result.status == "succeeded"
+    assert jobs._service.install.await_args.kwargs["expected_configuration"] == original
+    assert jobs._service.check.await_args.kwargs["expected_configuration"] == repaired
+
+
+async def test_connect_runs_real_login_job_path_only_for_missing_authorization(jobs, monkeypatch):
+    config = connect_setup(jobs)
+    jobs._service.check.side_effect = [
+        setup_result("auth_required", configuration=config),
+        setup_result("ready", configuration=config),
+    ]
+    chunks = [b"https://auth.openai.com/codex/device\nUser code: ABCD-1234\n", b""]
+    process = SimpleNamespace(
+        wait=AsyncMock(return_value=0),
+        stdout=SimpleNamespace(read=AsyncMock(side_effect=list(chunks))),
+    )
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(module, "_stop_process", AsyncMock())
+    monkeypatch.setattr(jobs, "_read_pty", AsyncMock(side_effect=list(chunks)))
+    job = await jobs.start(1, "codex", "connect", "en")
+    result = await finish(jobs, job)
+    assert result.status == "succeeded" and result.setup.enabled
+    assert jobs._service.check.await_count == 2
+    assert spawn.await_args.args == ("codex-acp", "cli", "login", "--device-auth")
+    assert result.authorization is None
+
+
+async def test_connect_does_not_replace_an_existing_install_or_login_job(jobs):
+    waiting = asyncio.Event()
+
+    async def install(*args, **kwargs):
+        await waiting.wait()
+
+    jobs._service.install.side_effect = install
+    original = await jobs.start(1, "codex", "install", "en")
+    with pytest.raises(OctopError):
+        await jobs.start(1, "codex", "connect", "en")
+    assert jobs.get(1, original.job_id).kind == "install"
+    await jobs.cancel(1, original.job_id)
+
+
+async def test_cancel_connect_before_enable_cannot_enable_later(jobs):
+    connect_setup(jobs)
+    started = asyncio.Event()
+
+    async def check(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    jobs._service.check.side_effect = check
+    job = await jobs.start(1, "codex", "connect", "en")
+    await started.wait()
+    result = await jobs.cancel(1, job.job_id)
+    assert result.status == "cancelled"
+    jobs._service.enable_checked.assert_not_awaited()
+
+
+async def test_cancel_during_final_thread_commit_waits_for_truthful_terminal_state(jobs):
+    config = connect_setup(jobs)
+    started, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+
+    async def enable(*args):
+        def commit():
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(3)
+            return setup_result("ready", configuration=config, enabled=True)
+
+        return await loop.run_in_executor(None, commit)
+
+    jobs._service.enable_checked.side_effect = enable
+    job = await jobs.start(1, "codex", "connect", "en")
+    await started.wait()
+    cancelling = asyncio.create_task(jobs.cancel(1, job.job_id))
+    await asyncio.sleep(0)
+    assert not cancelling.done() and jobs.get(1, job.job_id).phase == "enabling"
+    release.set()
+    result = await cancelling
+    assert result.status == "succeeded" and result.setup.enabled
+
+
+async def test_connect_check_failure_never_logs_in_or_enables(jobs, monkeypatch):
+    connect_setup(jobs, connection="error")
+    login = AsyncMock()
+    monkeypatch.setattr(jobs, "_login", login)
+    result = await finish(jobs, await jobs.start(1, "codex", "connect", "en"))
+    assert result.status == "failed"
+    login.assert_not_awaited()
+    jobs._service.enable_checked.assert_not_awaited()
+
+
+def test_codex_challenge_uses_its_login_deadline_without_extending_other_runners(jobs, monkeypatch):
+    monkeypatch.setattr(module.time, "time", lambda: 100)
+    for runner, seconds in [("codex", 900), ("claude_code", 600)]:
+        job = _Job(1, "en", ACPSetupJob(job_id=runner, runner=runner, kind="login"))
+        url = (
+            "https://auth.openai.com/codex/device"
+            if runner == "codex"
+            else "https://claude.ai/oauth/authorize"
+        )
+        jobs._append(job, url + "\n")
+        assert job.view.authorization.expires_at == (100 + seconds) * 1000
+        job.login_deadline = 123
+        job.view.authorization = None
+        jobs._append(job, "\n")
+        assert job.view.authorization.expires_at == 123_000

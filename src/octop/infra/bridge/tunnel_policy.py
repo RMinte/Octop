@@ -62,10 +62,13 @@ def is_task_tunnel_path_allowed(method: str, path: str) -> bool:
         return verb in {"GET", "POST"}
     if path == "/api/project-tasks/approval-policy":
         return verb in {"GET", "PUT"}
+    if path == "/api/project-tasks/engines/inspect":
+        return verb == "POST"
     if path in {
         "/api/projects/resources",
         "/api/projects/sync",
         "/api/project-tasks/resources",
+        "/api/project-tasks/engines",
         "/api/project-tasks/settings",
         "/api/project-tasks/capabilities",
         "/api/project-tasks/sync",

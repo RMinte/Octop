@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 
 from octop.api.app import build_app
-from octop.infra.agents.acp_setup import ACPRunnerSetup, ACPSetupService
+from octop.infra.agents.acp_setup import ACPRunnerSetup, ACPSetupService, ACPSetupView
 from octop.infra.agents.acp_setup_jobs import ACPSetupJob, ACPSetupJobs
 from tests.support.auth import create_user
 
@@ -35,7 +36,33 @@ async def test_setup_view_does_not_start_or_download_runners(env, monkeypatch) -
     assert all(row["checked_at"] is None for row in result["runners"].values())
 
 
-@pytest.mark.parametrize("operation", ["setup", "codex/install", "codex/check", "codex/login"])
+async def test_setup_view_retains_job_that_finishes_while_status_is_loading(env, monkeypatch):
+    client, _server, auth, _agent_id = env
+    loading = asyncio.Event()
+    finished = asyncio.Event()
+    job = ACPSetupJob(job_id="in-flight-connect", runner="codex", kind="connect")
+    active = Mock(side_effect=lambda *_: {} if finished.is_set() else {"codex": job})
+
+    async def load_view(*args):
+        loading.set()
+        await finished.wait()
+        return ACPSetupView(host="test-host", runners={})
+
+    monkeypatch.setattr(ACPSetupService, "view", load_view)
+    monkeypatch.setattr(ACPSetupJobs, "active", active)
+    request = asyncio.create_task(client.get("/api/acp/setup", headers=auth))
+    await loading.wait()
+    finished.set()
+    response = await request
+
+    assert response.status_code == 200
+    assert response.json()["active_jobs"]["codex"]["job_id"] == "in-flight-connect"
+    assert active.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "operation", ["setup", "codex/install", "codex/check", "codex/login", "codex/connect"]
+)
 async def test_setup_requires_admin(env, operation) -> None:
     client, _server, admin_auth, _agent_id = env
     user_auth = await create_user(client, admin_auth, username="acp-member")
@@ -58,6 +85,17 @@ async def test_install_returns_a_background_job_without_waiting_for_download(
     assert response.json()["job_id"] == "setup-test-job"
     assert response.json()["status"] == "running"
     start.assert_awaited_once()
+
+
+async def test_connect_returns_one_owner_scoped_background_job(env, monkeypatch):
+    client, _server, auth, _agent_id = env
+    start = AsyncMock(
+        return_value=ACPSetupJob(job_id="connect-test", runner="codex", kind="connect")
+    )
+    monkeypatch.setattr(ACPSetupJobs, "start", start)
+    response = await client.post("/api/acp/codex/connect", headers=auth)
+    assert response.status_code == 202 and response.json()["kind"] == "connect"
+    assert start.await_args.args[1:3] == ("codex", "connect")
 
 
 async def test_credentials_response_does_not_echo_key(env) -> None:
@@ -126,6 +164,7 @@ async def test_setup_openapi_has_response_schemas(env, monkeypatch) -> None:
     paths = response.json()["paths"]
     for path, method, status, model in (
         ("/api/acp/setup", "get", "200", "ACPHostSetupView"),
+        ("/api/acp/codex/connect", "post", "202", "ACPSetupJob"),
         ("/api/acp/{runner_name}/install", "post", "202", "ACPSetupJob"),
         ("/api/acp/{runner_name}/login", "post", "202", "ACPSetupJob"),
         ("/api/acp/{runner_name}/check", "post", "200", "ACPRunnerSetup"),

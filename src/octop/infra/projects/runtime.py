@@ -8,7 +8,6 @@ the same turn and release abandoned runs after a process crash.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import hashlib
 import json
@@ -118,7 +117,12 @@ from octop.infra.projects.recovery import (
     diagnostic,
     transient,
 )
-from octop.infra.projects.resource_snapshot import SnapshotError, load_snapshot, save_snapshot
+from octop.infra.projects.resource_snapshot import (
+    SnapshotError,
+    expert_skill_files,
+    load_snapshot,
+    save_snapshot,
+)
 from octop.infra.projects.service import _validate
 from octop.infra.projects.stream import TASK_PROTOCOL
 from octop.infra.projects.tasks import now_ms
@@ -300,7 +304,20 @@ async def run_turn(
         turn_id=turn.turn_id,
         submission_id=turn.request_id,
     ):
-        async with contextlib.aclosing(_run_turn(services, owner_id, turn, history)) as events:
+        from octop.infra.projects.engines.base import (
+            ACPTaskEngine,
+            EngineRequest,
+            NativeTaskEngine,
+            TaskEngine,
+        )
+
+        selection = json.loads(turn.configuration_json).get("execution_engine") or {}
+        engine: TaskEngine = (
+            ACPTaskEngine() if selection.get("engine_id") == "acp" else NativeTaskEngine(_run_turn)
+        )
+        async with contextlib.aclosing(
+            engine.stream(EngineRequest(services, owner_id, turn, history))
+        ) as events:
             async for event in events:
                 yield event
 
@@ -587,14 +604,7 @@ async def _run_turn(
             and cached_files is None
             and raw.get("execution_options", {}).get("skills") is None
         ):
-            for skill in profile.get("workspace_skills", []):
-                entries = []
-                for item in skill["files"]:
-                    skill_data = base64.b64decode(item["data"], validate=True)
-                    if hashlib.sha256(skill_data).hexdigest() != item["sha256"]:
-                        raise ValueError("expert skill snapshot changed")
-                    entries.append((item["path"], skill_data))
-                files.append((skill["slug"], entries))
+            files.extend(expert_skill_files(profile))
         if len({slug for slug, _ in files}) != len(files):
             raise ValueError("duplicate runtime skill name")
         if cached_files is None:
@@ -1503,7 +1513,10 @@ class ProjectTaskWorker:
                     or current.worker_id != turn.worker_id
                 ):
                     continue
-                uncertain = bool(
+                external_engine = (
+                    json.loads(current.configuration_json).get("execution_engine") or {}
+                ).get("engine_id") == "acp"
+                uncertain = external_engine or bool(
                     self.services.project_task_execution_receipt_repo.unfinished(conn, turn.turn_id)
                 )
                 maintenance = is_compaction(
@@ -1992,9 +2005,12 @@ class ProjectTaskWorker:
             user = await asyncio.to_thread(self.services.user_repo.get, task)
             locale = normalize_locale(user.locale if user else "zh")
             configuration = json.loads(turn.configuration_json)
-            if not is_compaction(
-                turn.prompt, configuration.get("attachment_ids", [])
-            ) and configuration.get("action_timeline_enabled", True):
+            if (
+                not is_compaction(turn.prompt, configuration.get("attachment_ids", []))
+                and configuration.get("action_timeline_enabled", True)
+                and (configuration.get("execution_engine") or {}).get("engine_id", "octop")
+                == "octop"
+            ):
 
                 async def record_narration_usage(input_tokens: int, output_tokens: int) -> None:
                     await asyncio.to_thread(

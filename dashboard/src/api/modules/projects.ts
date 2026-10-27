@@ -151,6 +151,41 @@ export interface TaskApprovalCapabilities {
   reviewer_ready: boolean;
   execution_profile: "host_process";
 }
+export interface EngineSelection {
+  engine_id: "octop" | "acp";
+  connection_id: string | null;
+  model_id: string | null;
+}
+export interface EngineCapabilities {
+  action_modes: TaskActionMode[];
+  images: boolean;
+  permissions: boolean;
+  native_resume: boolean;
+  pause: boolean;
+  cancel: boolean;
+  skills: boolean;
+  mcp: boolean;
+  plugins: boolean;
+  subagents: boolean;
+  knowledge: boolean;
+  memory: boolean;
+  compact: boolean;
+  model_selection: boolean;
+}
+export interface EngineCatalogEntry {
+  engine: EngineSelection;
+  label: string;
+  available: boolean;
+  unavailable_reason: string | null;
+  capabilities: EngineCapabilities;
+  models: { model_id: string; label: string }[];
+}
+export interface TaskEngineSnapshot extends EngineSelection {
+  label: string;
+  capabilities: EngineCapabilities;
+  actual_model_id?: string | null;
+  resumed?: boolean | null;
+}
 export interface TaskSummary {
   task_id: string;
   project_id: string | null;
@@ -160,6 +195,7 @@ export interface TaskSummary {
   active_turn_id: string | null;
   list_revision: number;
   selected_expert_id?: string | null;
+  engine?: EngineSelection;
   configuration_revision?: number;
   action_mode?: TaskActionMode;
   pinned?: boolean;
@@ -320,6 +356,7 @@ export interface TaskSourceEvent {
   restorable: false;
 }
 export interface TaskTurn {
+  execution_engine?: TaskEngineSnapshot;
   source_trajectory?: TaskSourceEvent[];
   history_only?: boolean;
   source_task_id?: string | null;
@@ -371,6 +408,8 @@ export interface TaskDetail extends TaskSummary {
     event_id: string;
     previous_expert_id: string | null;
     selected_expert_id: string | null;
+    engine?: EngineSelection;
+    previous_engine?: EngineSelection;
     previous_action_mode: TaskActionMode;
     action_mode: TaskActionMode;
     configuration_revision: number;
@@ -391,6 +430,10 @@ export interface TaskExecutionOptions {
   reasoning_mode?: "auto" | "enabled" | "disabled";
   reasoning_effort?: string;
   model_ref?: string;
+  routing?: {
+    mode: "box" | "hybrid";
+    level?: 0 | 20 | 40 | 60 | 80 | 100 | null;
+  } | null;
   skills?: ProjectSkill[];
   mcp_servers?: string[];
   plugins?: string[];
@@ -401,6 +444,7 @@ export interface TaskExecutionOptions {
   team_enabled?: boolean;
 }
 export interface TaskResources extends ProjectResources {
+  execution_engines?: EngineCatalogEntry[];
   experts?: {
     expert_id: string;
     name: string;
@@ -433,11 +477,13 @@ export interface TaskMessage {
 }
 export type TaskActionMode = "ask" | "plan" | "craft";
 export interface TaskCreate extends TaskMessage {
+  engine?: EngineSelection;
   web_search_enabled?: boolean;
   selected_expert_id?: string | null;
   action_mode?: TaskActionMode;
 }
 export interface TaskPatch {
+  engine?: EngineSelection;
   expected_revision: number;
   title?: string;
   archived?: boolean;
@@ -454,6 +500,8 @@ export interface TaskListFilters {
   q?: string;
 }
 export interface TaskFork {
+  engine?: EngineSelection;
+  action_mode?: TaskActionMode;
   request_id: string;
   turn_id?: string;
   operation: "fork" | "edit" | "regenerate";
@@ -596,6 +644,15 @@ export function createProjectTasksApi(hostID: string | null = null) {
       ),
     resources: () =>
       request<TaskResources>("/project-tasks/resources", { cache: "no-store" }),
+    engines: () =>
+      request<EngineCatalogEntry[]>("/project-tasks/engines", {
+        cache: "no-store",
+      }),
+    inspectEngine: (engine: EngineSelection) =>
+      request<EngineCatalogEntry>("/project-tasks/engines/inspect", {
+        method: "POST",
+        body: JSON.stringify(engine),
+      }),
     update: (id: string, body: TaskPatch) =>
       request<TaskDetail>(taskPath(id), {
         method: "PATCH",

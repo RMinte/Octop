@@ -22,7 +22,15 @@ import {
   type ProjectSkill,
   type TaskExecutionOptions,
   type TaskResources,
+  type EngineSelection,
+  type EngineCatalogEntry,
 } from "../../api/modules/projects";
+import {
+  engineCapabilities,
+  engineEntry,
+  OCTOP_ENGINE,
+  taskOptionsForEngine,
+} from "./taskEngine";
 import { apiErrorMessage } from "../../utils/apiError";
 import ProjectSkillsField, { projectSkillKey } from "./ProjectSkillsField";
 import TaskKnowledgeField from "./TaskKnowledgeField";
@@ -40,6 +48,9 @@ export interface TaskExecutionSettingsProps {
   project?: Project;
   disabled: boolean;
   selectedExpertID?: string | null;
+  engine?: EngineSelection;
+  onEngineChange?: (engine: EngineSelection) => void;
+  engineCatalog?: EngineCatalogEntry[];
   compact?: boolean;
   scopeKey?: string;
   onResourcesLoaded?: (resources: TaskResources) => void;
@@ -52,6 +63,9 @@ export default function TaskExecutionSettings({
   project,
   disabled,
   selectedExpertID,
+  engine = OCTOP_ENGINE,
+  onEngineChange,
+  engineCatalog,
   compact = false,
   scopeKey,
   onResourcesLoaded,
@@ -67,6 +81,15 @@ export default function TaskExecutionSettings({
   const resourceCallback = useRef(onResourcesLoaded);
   const skillConfirmation = useRef<ReturnType<typeof Modal.confirm>>();
   resourceCallback.current = onResourcesLoaded;
+  const external = engine.engine_id !== "octop";
+  const capabilities = engineCapabilities(
+    engine,
+    engineCatalog ?? resources?.execution_engines,
+  );
+  const currentEngine = engineEntry(
+    engine,
+    engineCatalog ?? resources?.execution_engines,
+  );
   useEffect(() => {
     setOpen(false);
     setSkillPickerOpen(false);
@@ -114,10 +137,10 @@ export default function TaskExecutionSettings({
         .map((model) => ({ value: model.model_ref, label: modelLabel(model) })),
     }))
     .filter((group) => group.options.length > 0);
-  const reasoning = selectedModel?.reasoning_config;
-  const overrideCount = Object.entries(value).filter(
-    ([key, option]) => key !== "model_ref" && option != null,
-  ).length;
+  const reasoning = external ? undefined : selectedModel?.reasoning_config;
+  const overrideCount = Object.entries(
+    taskOptionsForEngine(value, engine),
+  ).filter(([key, option]) => key !== "model_ref" && option != null).length;
   const modelHint =
     selectedExpertID && !value.model_ref
       ? t("projects.tasks.expertModelHint")
@@ -176,7 +199,7 @@ export default function TaskExecutionSettings({
                 key === "plugins" ? "Plugins" : "Subagents"
               }`,
             )}
-            disabled={disabled}
+            disabled={disabled || !capabilities[key]}
             checked={value[key] !== undefined}
             onChange={(checked) =>
               onChange({
@@ -198,7 +221,7 @@ export default function TaskExecutionSettings({
           mode="multiple"
           showSearch
           optionFilterProp="label"
-          disabled={disabled}
+          disabled={disabled || !capabilities[key]}
           aria-label={t(`projects.${key}`)}
           value={value[key]}
           options={
@@ -224,7 +247,10 @@ export default function TaskExecutionSettings({
       label={t(key === "memory_enabled" ? "projects.memory" : "projects.team")}
     >
       <Select
-        disabled={disabled}
+        disabled={
+          disabled ||
+          (key === "memory_enabled" ? !capabilities.memory : external)
+        }
         value={value[key] === undefined ? "inherit" : String(value[key])}
         aria-label={t(
           key === "memory_enabled" ? "projects.memory" : "projects.team",
@@ -265,6 +291,28 @@ export default function TaskExecutionSettings({
         {t("projects.composer.overrideHint")}
       </Typography.Paragraph>
       {error && <Alert type="error" message={error} />}
+      {external ? (
+        <Alert
+          type="info"
+          showIcon
+          message={t("projects.tasks.engineOptionsHint")}
+          description={t("projects.tasks.engineUnsupported", {
+            features: (
+              [
+                "skills",
+                "mcp",
+                "plugins",
+                "subagents",
+                "knowledge",
+                "memory",
+              ] as const
+            )
+              .filter((key) => !capabilities[key])
+              .map((key) => t(`projects.tasks.engineCapabilities.${key}`))
+              .join("、"),
+          })}
+        />
+      ) : null}
       {!resources && !error ? (
         <Spin />
       ) : (
@@ -277,6 +325,7 @@ export default function TaskExecutionSettings({
               items={[
                 {
                   key: "reasoning",
+                  collapsible: external ? "disabled" : undefined,
                   label: t("projects.composer.groups.reasoning"),
                   children: (
                     <>
@@ -377,7 +426,11 @@ export default function TaskExecutionSettings({
                           <Space>
                             <Switch
                               aria-label={t("projects.tasks.customSkills")}
-                              disabled={disabled || skillDefaultsUnavailable}
+                              disabled={
+                                disabled ||
+                                skillDefaultsUnavailable ||
+                                !capabilities.skills
+                              }
                               checked={value.skills !== undefined}
                               onChange={(checked) =>
                                 changeSkills(
@@ -403,7 +456,7 @@ export default function TaskExecutionSettings({
                             value={value.skills}
                             onChange={(skills) => changeSkills(skills)}
                             installed={resources.skills}
-                            disabled={disabled}
+                            disabled={disabled || !capabilities.skills}
                             active={open}
                             onPickerOpenChange={setSkillPickerOpen}
                           />
@@ -415,7 +468,7 @@ export default function TaskExecutionSettings({
                           <Space>
                             <Switch
                               aria-label={t("projects.tasks.customMcp")}
-                              disabled={disabled}
+                              disabled={disabled || !capabilities.mcp}
                               checked={value.mcp_servers !== undefined}
                               onChange={(checked) =>
                                 onChange({
@@ -439,7 +492,7 @@ export default function TaskExecutionSettings({
                             aria-label={t("projects.tasks.customMcp")}
                             mode="multiple"
                             value={value.mcp_servers}
-                            disabled={disabled}
+                            disabled={disabled || !capabilities.mcp}
                             options={resources.mcp_servers.map((mcp) => ({
                               value: mcp.server_name,
                               label: mcp.name,
@@ -458,7 +511,7 @@ export default function TaskExecutionSettings({
                           onChange({ ...value, knowledge_base_ids })
                         }
                         active={open}
-                        disabled={disabled}
+                        disabled={disabled || !capabilities.knowledge}
                       />
                       {listField("plugins")}
                     </>
@@ -484,7 +537,7 @@ export default function TaskExecutionSettings({
                         <Form.Item label={t("projects.tasks.expertMemory")}>
                           <Select
                             aria-label={t("projects.tasks.expertMemory")}
-                            disabled={disabled}
+                            disabled={disabled || !capabilities.memory}
                             value={
                               value.expert_memory_enabled === false
                                 ? "off"
@@ -532,7 +585,36 @@ export default function TaskExecutionSettings({
       )}
     </div>
   );
-  const model = (
+  const model = external ? (
+    <div className={compact ? styles.modelCompact : styles.modelFull}>
+      <Tooltip title={t("projects.tasks.engineModelHint")}>
+        {capabilities.model_selection && currentEngine?.models.length ? (
+          <Select
+            aria-label={t("projects.tasks.engineModel")}
+            className={styles.modelSelect}
+            size={compact ? "small" : "middle"}
+            variant={compact ? "borderless" : "outlined"}
+            disabled={disabled || !onEngineChange}
+            value={engine.model_id ?? ""}
+            options={[
+              { value: "", label: t("projects.tasks.engineDefaultModel") },
+              ...currentEngine.models.map((model) => ({
+                value: model.model_id,
+                label: model.label,
+              })),
+            ]}
+            onChange={(model_id) =>
+              onEngineChange?.({ ...engine, model_id: model_id || null })
+            }
+          />
+        ) : (
+          <Typography.Text type="secondary">
+            {engine.model_id || t("projects.tasks.engineDefaultModel")}
+          </Typography.Text>
+        )}
+      </Tooltip>
+    </div>
+  ) : (
     <div className={compact ? styles.modelCompact : styles.modelFull}>
       {!compact && (
         <Typography.Text>{t("projects.tasks.model")}</Typography.Text>

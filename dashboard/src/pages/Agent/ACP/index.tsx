@@ -29,6 +29,29 @@ import styles from "./index.module.less";
 
 const EMPTY_RUNNERS: Record<string, ACPRunnerConfig> = {};
 
+async function readHostState(runnersScopeId?: string | null) {
+  const [config, setup] = await Promise.allSettled([
+    acpApi.getGlobalRunners(runnersScopeId),
+    acpApi.getSetup(),
+  ]);
+  // A connect commit can land between these reads. Reconcile once when no job
+  // remains to poll; repeated changes must not create a background retry loop.
+  if (
+    config.status === "fulfilled" &&
+    setup.status === "fulfilled" &&
+    config.value.runners.codex &&
+    setup.value.runners.codex &&
+    config.value.runners.codex.enabled !== setup.value.runners.codex.enabled &&
+    !isACPJobPending(setup.value.active_jobs?.codex)
+  ) {
+    const [latestConfig] = await Promise.allSettled([
+      acpApi.getGlobalRunners(runnersScopeId),
+    ]);
+    return [latestConfig, setup] as const;
+  }
+  return [config, setup] as const;
+}
+
 interface ACPPanelProps {
   /** When set (Experts tools drawer), use this agent instead of the chat selection. */
   agentId?: string | null;
@@ -39,9 +62,9 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
   const { t } = useTranslation();
   const { modal, message } = App.useApp();
   const timeZone = useServerTimezone();
-  const { activeAgentId: contextAgentId, agents } = useAgent();
-  const activeAgentId =
-    agentIdProp !== undefined ? agentIdProp : contextAgentId;
+  const { agents } = useAgent();
+  const expertScoped = agentIdProp !== undefined;
+  const activeAgentId = agentIdProp ?? null;
   /** Local expert drawers retain their ownership scope; remote setup is gated below. */
   const runnersScopeId = agentIdProp;
   const [runners, setRunners] =
@@ -62,7 +85,7 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
   const [setupReload, setSetupReload] = useState(0);
   const [action, setAction] = useState<{
     key: string;
-    type: "install" | "login" | "check" | "credentials";
+    type: "install" | "login" | "check" | "credentials" | "connect";
   } | null>(null);
   const [jobs, setJobs] = useState<Record<string, ACPSetupJob>>({});
   const [inputLoading, setInputLoading] = useState(false);
@@ -79,9 +102,10 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
     [agents, activeAgentId],
   );
   const remoteDrawer =
-    agentIdProp !== undefined &&
+    expertScoped &&
     (isBridgeAgentId(agentIdProp) || Boolean(activeAgent?.bridge));
   const outboundBlocked =
+    expertScoped &&
     !activeAgent?.bridge &&
     blocksAcpOutboundFromConfig(activeAgent?.config ?? null);
   const setupScope = remoteDrawer ? "remote" : runnersScopeId ?? "local";
@@ -92,9 +116,8 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
     .sort()
     .join(",");
   const hostBusy = pendingJobs.length > 0;
-  // Under directory sandbox: lock runner enable/edit only. The per-agent
-  // acp_runner tool toggle stays available (host-spawned runners may already
-  // be enabled for other agents on this account).
+  // Expert drawers retain their sandbox restrictions. Standalone host setup is
+  // independent of the selected expert; its acp_runner toggle stays separate.
 
   useEffect(() => {
     activeAgentIdRef.current = activeAgentId;
@@ -126,10 +149,7 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
     let cancelled = false;
     setRunnersLoading(true);
     void (async () => {
-      const [configResult, setupResult] = await Promise.allSettled([
-        acpApi.getGlobalRunners(runnersScopeId),
-        acpApi.getSetup(),
-      ]);
+      const [configResult, setupResult] = await readHostState(runnersScopeId);
       if (cancelled) return;
       if (configResult.status === "fulfilled")
         setRunners(configResult.value.runners || EMPTY_RUNNERS);
@@ -155,11 +175,12 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
 
   const refreshHost = useCallback(async () => {
     if (!mounted.current || setupScopeRef.current !== setupScope) return null;
-    const [config, view] = await Promise.all([
-      acpApi.getGlobalRunners(runnersScopeId),
-      acpApi.getSetup(),
-    ]);
+    const [configResult, setupResult] = await readHostState(runnersScopeId);
     if (!mounted.current || setupScopeRef.current !== setupScope) return null;
+    if (configResult.status === "rejected") throw configResult.reason;
+    if (setupResult.status === "rejected") throw setupResult.reason;
+    const config = configResult.value;
+    const view = setupResult.value;
     setRunners(config.runners || EMPTY_RUNNERS);
     setSetup(view.runners);
     setHost(view.host);
@@ -235,7 +256,9 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
           if (job.status === "succeeded") {
             message.success(
               t(
-                job.kind === "install"
+                job.kind === "connect"
+                  ? "acp.connectSuccess"
+                  : job.kind === "install"
                   ? "acp.installSuccess"
                   : "acp.loginSuccess",
               ),
@@ -244,7 +267,9 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
             const text =
               job.message ||
               t(
-                job.kind === "install"
+                job.kind === "connect"
+                  ? "acp.connectFailed"
+                  : job.kind === "install"
                   ? "acp.installFailed"
                   : "acp.loginFailed",
               );
@@ -413,8 +438,9 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
 
   const handleSetupAction = async (
     runnerKey: string,
-    type: "install" | "login" | "check",
+    type: "install" | "login" | "check" | "connect",
   ) => {
+    if (type === "connect" && runnerKey !== "codex") return;
     if (
       remoteDrawer ||
       outboundBlocked ||
@@ -429,7 +455,9 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
       if (type === "check") {
         await checkConnection(runnerKey);
       } else {
-        const job = await (type === "install"
+        const job = await (type === "connect"
+          ? acpApi.connectCodex()
+          : type === "install"
           ? acpApi.installRunner(runnerKey)
           : acpApi.loginRunner(runnerKey));
         if (!mounted.current || setupScopeRef.current !== setupScope) return;
@@ -450,7 +478,9 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
         error instanceof Error
           ? error.message
           : t(
-              type === "install"
+              type === "connect"
+                ? "acp.connectFailed"
+                : type === "install"
                 ? "acp.installFailed"
                 : type === "login"
                 ? "acp.loginFailed"
@@ -739,6 +769,9 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
                   onInstall={(runnerKey) =>
                     void handleSetupAction(runnerKey, "install")
                   }
+                  onConnect={(runnerKey) =>
+                    void handleSetupAction(runnerKey, "connect")
+                  }
                   onCheck={(runnerKey) =>
                     void handleSetupAction(runnerKey, "check")
                   }
@@ -762,29 +795,22 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
         </>
       )}
 
-      <div className={styles.agentToolSection}>
-        {!remoteDrawer &&
-        (activeAgent?.bridge || isBridgeAgentId(activeAgentId)) ? (
-          <Alert
-            type="info"
-            showIcon
-            className={styles.hostAlert}
-            message={t("acp.remoteToolHint")}
-          />
-        ) : null}
-        <p className={styles.scopeHint}>{t("acp.toolEnabledHint")}</p>
-        {!activeAgentId ? (
-          <Empty
-            description={t("mbtiPage.pickAgent")}
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-          />
-        ) : (
-          <div className={styles.toolToggle}>
-            <span>{t("acp.toolEnabled")}</span>
-            {toolSwitch}
-          </div>
-        )}
-      </div>
+      {expertScoped ? (
+        <div className={styles.agentToolSection}>
+          <p className={styles.scopeHint}>{t("acp.toolEnabledHint")}</p>
+          {!activeAgentId ? (
+            <Empty
+              description={t("mbtiPage.pickAgent")}
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            />
+          ) : (
+            <div className={styles.toolToggle}>
+              <span>{t("acp.toolEnabled")}</span>
+              {toolSwitch}
+            </div>
+          )}
+        </div>
+      ) : null}
 
       <ACPDrawer
         open={drawerOpen}
@@ -820,6 +846,7 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
         onCheck={(runnerKey) => void handleSetupAction(runnerKey, "check")}
         onInstall={(runnerKey) => void handleSetupAction(runnerKey, "install")}
         onLogin={(runnerKey) => void handleSetupAction(runnerKey, "login")}
+        onConnect={(runnerKey) => void handleSetupAction(runnerKey, "connect")}
         onCredentials={handleCredentials}
         onCancel={(jobId) => void handleCancelJob(jobId)}
         onInput={handleJobInput}
@@ -835,7 +862,6 @@ export default function ACPPage() {
     <PageShell
       title={t("pageShell.acp.title")}
       subtitle={t("pageShell.acp.subtitle")}
-      agentScoped
     >
       <ACPPanel />
     </PageShell>

@@ -41,7 +41,7 @@ export interface ACPSetupView {
 export interface ACPSetupJob {
   job_id: string;
   runner: string;
-  kind: "install" | "login";
+  kind: "install" | "login" | "connect";
   status: "running" | "waiting_for_user" | "succeeded" | "failed" | "cancelled";
   phase: string;
   output: string;

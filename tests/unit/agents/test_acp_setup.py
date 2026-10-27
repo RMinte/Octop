@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,6 +98,85 @@ async def test_check_persists_per_user_and_invalidates_launch_changes(setup, mon
     assert "new-secret" not in raw
 
 
+def test_runner_environment_is_owner_scoped_and_never_adopts_host_credentials(
+    setup, monkeypatch, tmp_path
+):
+    service, store, _ = setup
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / "auth.json").write_text("real-host-token")
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setenv("OPENAI_API_KEY", "host-provider-secret")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "host-ssh-agent")
+    monkeypatch.setenv("HTTPS_PROXY", "https://proxy.invalid")
+    config = {
+        "env": {
+            "OPENAI_API_KEY": "owner-provider-secret",
+            "HOME": str(host_home),
+            "CODEX_HOME": str(host_home),
+            "XDG_CONFIG_HOME": str(host_home),
+        }
+    }
+    first = service.runner_environment(1, "codex", config)
+    other_owner = service.runner_environment(2, "codex", {})
+    other_runner = service.runner_environment(1, "claude_code", {})
+    assert len({first["HOME"], other_owner["HOME"], other_runner["HOME"]}) == 3
+    assert first["OPENAI_API_KEY"] == "owner-provider-secret"
+    assert "OPENAI_API_KEY" not in other_owner and "SSH_AUTH_SOCK" not in first
+    assert first["HTTPS_PROXY"] == "https://proxy.invalid"
+    assert not Path(first["HOME"]).exists()
+    created = service.runner_environment(1, "codex", config, ensure=True)
+    assert created == first and Path(created["HOME"]).is_dir()
+    assert created["CODEX_HOME"] != str(host_home)
+    assert created["XDG_CONFIG_HOME"] != str(host_home)
+    assert str(service._root / "codex" / "node_modules" / ".bin") in created["PATH"]
+    assert not (Path(created["HOME"]) / "auth.json").exists()
+    assert (host_home / "auth.json").read_text() == "real-host-token"
+
+
+async def test_old_host_login_check_is_not_reused_without_owner_auth_scope(setup, monkeypatch):
+    service, store, _ = setup
+    config = store.load_runners(1)["opencode"]
+    store.save_setup_status(
+        1, "opencode", {"fingerprint": acp_setup._fingerprint(config), "connection": "ready"}
+    )
+    assert (await service.view(1, "en")).runners["opencode"].connection == "unchecked"
+    probe = AsyncMock()
+    monkeypatch.setattr(service, "_probe", probe)
+    assert (await service.check(1, "opencode", "en")).connection == "ready"
+    assert store.load_setup_status(1, "opencode")["auth_scope_version"] == 1
+    checked_env = probe.await_args.args[1]
+    assert checked_env["HOME"] == service.runner_environment(1, "opencode", config)["HOME"]
+
+
+def test_legacy_environment_overrides_harness_parent_overlay_without_dropping_owner_dotenv(
+    setup, monkeypatch
+):
+    from octop_harness.runtime_env import overlay_env
+
+    service, _, _ = setup
+    monkeypatch.setenv("OPENAI_API_KEY", "host-openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "host-anthropic-secret")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "host-ssh-agent")
+    workspace_env = {
+        "OPENAI_API_KEY": "owner-dotenv-secret",
+        "PROJECT_VAR": "owner-project",
+        "HOME": "other-home",
+    }
+    config = {"env": {"ANTHROPIC_API_KEY": "owner-runner-secret"}}
+    runner_env = service.legacy_runner_environment(1, "codex", config, workspace_env=workspace_env)
+    simulated_harness_env = overlay_env(
+        overlay_env(os.environ, workspace_env, protect=True), runner_env, protect=False
+    )
+    assert simulated_harness_env["OPENAI_API_KEY"] == "owner-dotenv-secret"
+    assert simulated_harness_env["ANTHROPIC_API_KEY"] == "owner-runner-secret"
+    assert simulated_harness_env["PROJECT_VAR"] == "owner-project"
+    assert simulated_harness_env["SSH_AUTH_SOCK"] == ""
+    assert simulated_harness_env["HOME"] == service.runner_environment(1, "codex", config)["HOME"]
+    assert "host-openai-secret" not in simulated_harness_env.values()
+    assert "host-anthropic-secret" not in simulated_harness_env.values()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "expected", "message"),
@@ -131,6 +211,91 @@ async def test_check_does_not_save_observation_for_a_changed_configuration(setup
     assert result.connection == "unchecked"
     assert result.message == "en:acp_setup.config_changed"
     assert store.load_setup_status(1, "opencode") == {}
+
+
+async def test_connect_check_rejects_changed_configuration_before_starting_process(
+    setup, monkeypatch
+):
+    service, store, _ = setup
+    expected = store.load_runners(1)["opencode"]
+    current = store.load_runners(1)
+    current["opencode"]["trusted"] = not expected["trusted"]
+    store.save_runners(1, current)
+    probe = AsyncMock()
+    monkeypatch.setattr(service, "_probe", probe)
+
+    result = await service.check(1, "opencode", "en", expected_configuration=expected)
+
+    assert result.connection == "error"
+    assert result.message == "en:acp_setup.config_changed"
+    probe.assert_not_awaited()
+
+
+async def test_connect_check_rejects_tool_policy_change_during_probe(setup, monkeypatch):
+    service, store, _ = setup
+    expected = store.load_runners(1)["opencode"]
+
+    async def edit_tool_policy(*args):
+        current = store.load_runners(1)
+        current["opencode"]["trusted"] = not expected["trusted"]
+        store.save_runners(1, current)
+
+    monkeypatch.setattr(service, "_probe", edit_tool_policy)
+    result = await service.check(1, "opencode", "en", expected_configuration=expected)
+
+    assert result.connection == "error"
+    assert result.message == "en:acp_setup.config_changed"
+    assert store.load_setup_status(1, "opencode") == {}
+
+
+async def test_enable_checked_requires_matching_private_ready_fact_and_preserves_options(
+    setup, monkeypatch
+):
+    service, store, _ = setup
+    runners = store.load_runners(1)
+    runners["opencode"]["trusted"] = False
+    runners["opencode"]["tool_parse_mode"] = "update_detail"
+    runners["codex"]["env"] = {"OWNER_OPTION": "keep"}
+    store.save_runners(1, runners)
+    expected = store.load_runners(1)["opencode"]
+    monkeypatch.setattr(service, "_probe", AsyncMock())
+    checked = await service.check(1, "opencode", "en", expected_configuration=expected)
+    assert checked.connection == "ready" and not checked.enabled
+    assert "_configuration" not in checked.model_dump()
+
+    enabled = await service.enable_checked(1, "opencode", "en", checked._configuration)
+
+    assert enabled.connection == "ready" and enabled.enabled
+    assert enabled.message == "en:acp_setup.connected"
+    current = store.load_runners(1)
+    assert not current["opencode"]["trusted"]
+    assert current["opencode"]["tool_parse_mode"] == "update_detail"
+    assert current["codex"]["env"] == {"OWNER_OPTION": "keep"}
+
+
+@pytest.mark.parametrize("changed", ["configuration", "authorization", "auth_scope"])
+async def test_enable_checked_rejects_stale_ready_fact(setup, monkeypatch, changed):
+    service, store, _ = setup
+    monkeypatch.setattr(service, "_probe", AsyncMock())
+    checked = await service.check(1, "opencode", "en")
+    expected = checked._configuration
+    if changed == "configuration":
+        runners = store.load_runners(1)
+        runners["opencode"]["trusted"] = not runners["opencode"]["trusted"]
+        store.save_runners(1, runners)
+    else:
+        observation = store.load_setup_status(1, "opencode")
+        if changed == "authorization":
+            observation["connection"] = "auth_required"
+        else:
+            observation["auth_scope_version"] = 0
+        store.save_setup_status(1, "opencode", observation)
+
+    result = await service.enable_checked(1, "opencode", "en", expected)
+
+    assert result.connection == "error" and not result.enabled
+    assert result.message == "en:acp_setup.config_changed"
+    assert not store.load_runners(1)["opencode"]["enabled"]
 
 
 @pytest.mark.asyncio

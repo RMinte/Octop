@@ -154,6 +154,7 @@ def configure(
     change_expert: bool = False,
     mode: str | None = None,
     project_id: str | None = None,
+    engine: tasks.EngineSelection | None = None,
 ) -> None:
     task = tasks.detail(services, owner_id, task_id)
     if project_id is not None and task.project_id != project_id:
@@ -163,6 +164,8 @@ def configure(
         changes["selected_expert_id"] = expert_id
     if mode is not None and task.action_mode != mode:
         changes["action_mode"] = mode
+    if engine is not None and task.engine != engine:
+        changes["engine"] = engine
     if changes:
         tasks.patch(
             services,

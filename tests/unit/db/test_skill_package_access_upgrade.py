@@ -35,7 +35,7 @@ def test_existing56_upgrade_preserves_packages_and_adds_bridge_identity(
         repo.create(id="new-private", name="New", created_by="1")
         assert repo.get("new-private").shared is False
         with pool.connect() as conn:
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 57
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 58
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(bridge_connections)")}
             assert "peer_connection_id" in columns
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

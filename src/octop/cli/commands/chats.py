@@ -6,7 +6,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -52,6 +52,9 @@ def _options(function: Any) -> Any:
             click.option("--request-id", default=None),
             click.option("--session-key", default="default"),
             click.option("--model", default=None),
+            click.option("--engine", type=click.Choice(["octop", "acp"]), default=None),
+            click.option("--connection", default=None, help="ACP runner ID for --engine acp."),
+            click.option("--engine-model", default=None, help="Native engine model ID."),
             click.option(
                 "--mode",
                 "conversation_mode",
@@ -79,6 +82,9 @@ def _run_turn(
     request_id: str | None = None,
     project_id: str | None = None,
     no_expert: bool = False,
+    engine: Literal["octop", "acp"] | None = None,
+    connection: str | None = None,
+    engine_model: str | None = None,
 ) -> Any:
     from octop.cli.repl.render import ChunkRenderer
     from octop.cli.repl.runtime import run_chat_turn_async
@@ -101,6 +107,13 @@ def _run_turn(
                 request_id=request_id,
                 project_id=project_id,
                 no_expert=no_expert,
+                engine=tasks.EngineSelection(
+                    engine_id=engine or ("acp" if connection else "octop"),
+                    connection_id=connection,
+                    model_id=engine_model,
+                )
+                if engine or connection or engine_model
+                else None,
             )
         )
     except (OctopError, ValueError) as exc:
@@ -268,6 +281,9 @@ def repl(
     model: str | None,
     conversation_mode: str | None,
     plain: bool,
+    engine: Literal["octop", "acp"] | None,
+    connection: str | None,
+    engine_model: str | None,
 ) -> None:
     """Keep a Task conversation across interactive turns."""
     from prompt_toolkit import PromptSession
@@ -325,6 +341,13 @@ def repl(
                             request_id=next_request_id or uuid.uuid4().hex,
                             project_id=project_id,
                             no_expert=current_no_expert,
+                            engine=tasks.EngineSelection(
+                                engine_id=engine or ("acp" if connection else "octop"),
+                                connection_id=connection,
+                                model_id=engine_model,
+                            )
+                            if engine or connection or engine_model
+                            else None,
                         )
                         next_request_id = None
                     except (OctopError, ValueError) as exc:

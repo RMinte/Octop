@@ -222,8 +222,11 @@ async def get_acp_setup(
     user: Any = Depends(require_admin()),
     server: Any = Depends(get_server),
 ) -> ACPHostSetupView:
+    jobs = _setup_jobs(server)
+    active_before = jobs.active(user.id)
     view = await _setup_service(server).view(user.id, resolve_request_locale(request))
-    return ACPHostSetupView(**view.model_dump(), active_jobs=_setup_jobs(server).active(user.id))
+    active_after = jobs.active(user.id)
+    return ACPHostSetupView(**view.model_dump(), active_jobs={**active_before, **active_after})
 
 
 @router.post(
@@ -246,6 +249,23 @@ async def install_acp_runner(
 ) -> ACPSetupJob:
     return await _setup_jobs(server).start(
         user.id, runner_name, "install", resolve_request_locale(request)
+    )
+
+
+@router.post(
+    "/acp/codex/connect",
+    summary="Connect Codex on the Octop host",
+    response_model=ACPSetupJob,
+    status_code=202,
+    description="Admin-only background installation, existing authorization check, optional device sign-in and checked enablement. Poll or cancel the returned owner-scoped job; refreshing the page leaves it running. Custom or concurrently changed launch settings are preserved.",
+)
+async def connect_codex(
+    request: Request,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPSetupJob:
+    return await _setup_jobs(server).start(
+        user.id, "codex", "connect", resolve_request_locale(request)
     )
 
 

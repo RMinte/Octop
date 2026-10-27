@@ -20,7 +20,7 @@ interface ACPCardProps {
   timeZone: string;
   isHover: boolean;
   toggleLoading?: boolean;
-  actionLoading?: "install" | "login" | "check" | "credentials";
+  actionLoading?: "install" | "login" | "check" | "credentials" | "connect";
   busyElsewhere?: boolean;
   interactionDisabled?: boolean;
   onClick: () => void;
@@ -28,6 +28,7 @@ interface ACPCardProps {
   onMouseLeave: () => void;
   onToggleEnabled: (runnerKey: string, checked: boolean) => void;
   onInstall: (runnerKey: string) => void;
+  onConnect: (runnerKey: string) => void;
   onCheck: (runnerKey: string) => void;
   onGuide: (runnerKey: string) => void;
 }
@@ -48,6 +49,7 @@ export function ACPCard({
   onMouseLeave,
   onToggleEnabled,
   onInstall,
+  onConnect,
   onCheck,
   onGuide,
 }: ACPCardProps) {
@@ -59,13 +61,21 @@ export function ACPCard({
     command: config.command || t("acp.notSet"),
   });
   const ready = setup?.connection === "ready";
+  const codex = runnerKey === "codex";
   const pending = isACPJobPending(job);
+  const setupMessage =
+    codex && setup?.connection === "auth_required"
+      ? t(pending ? "acp.codexAuthorizationHint" : "acp.codexConnectHint")
+      : setup?.message;
   const busy = Boolean(actionLoading || toggleLoading || busyElsewhere);
-  const canEnable = ready && !interactionDisabled && !busy && !pending;
+  const canEnable =
+    !codex && ready && !interactionDisabled && !busy && !pending;
   const connectionKey =
-    pending && job?.kind === "login"
+    pending && (job?.kind === "login" || job?.kind === "connect")
       ? job.status === "waiting_for_user"
         ? "waitingAuthorization"
+        : job.kind === "connect"
+        ? "connectingCodex"
         : "authenticating"
       : setup?.connection === "auth_required"
       ? "authRequired"
@@ -81,6 +91,8 @@ export function ACPCard({
   const showLogin = setup?.connection === "auth_required" && canAuthenticate;
   const primaryAction = pending
     ? () => onGuide(runnerKey)
+    : codex
+    ? () => onConnect(runnerKey)
     : showInstall
     ? () => onInstall(runnerKey)
     : manualSetup || (setup?.connection === "auth_required" && !canAuthenticate)
@@ -91,9 +103,15 @@ export function ACPCard({
     ? () => onToggleEnabled(runnerKey, true)
     : () => onCheck(runnerKey);
   const primaryLabel = pending
-    ? job?.kind === "install"
+    ? job?.kind === "connect"
+      ? "openConnectProgress"
+      : job?.kind === "install"
       ? "openInstallProgress"
       : "openLoginProgress"
+    : codex
+    ? ready && config.enabled
+      ? "reconnectCodex"
+      : "connectCodex"
     : showInstall
     ? "install"
     : manualSetup || (setup?.connection === "auth_required" && !canAuthenticate)
@@ -104,7 +122,9 @@ export function ACPCard({
     ? "enableRunner"
     : "checkConnection";
   const installationLabel =
-    pending && job?.kind === "install"
+    pending && job?.kind === "connect"
+      ? t(`acp.phase_${job.phase}`)
+      : pending && job?.kind === "install"
       ? t("acp.installing")
       : setup
       ? t(`acp.installation_${setup.installation}`)
@@ -153,6 +173,8 @@ export function ACPCard({
               ? t(
                   interactionDisabled
                     ? "acp.outboundBlockedTooltip"
+                    : codex
+                    ? "acp.codexConnectHint"
                     : "acp.checkBeforeEnable",
                 )
               : undefined
@@ -187,8 +209,8 @@ export function ACPCard({
             : t(`acp.${connectionKey}`)}
         </span>
       </div>
-      {setup?.message ? (
-        <p className={acpStyles.setupMessage}>{setup.message}</p>
+      {setupMessage ? (
+        <p className={acpStyles.setupMessage}>{setupMessage}</p>
       ) : null}
       <div className={acpStyles.cardActions}>
         {primaryLabel !== "advancedConfig" ? (
@@ -201,7 +223,9 @@ export function ACPCard({
           >
             {t(
               `acp.${
-                actionLoading === "install"
+                actionLoading === "connect"
+                  ? "connectingCodex"
+                  : actionLoading === "install"
                   ? "installing"
                   : actionLoading === "check"
                   ? "checking"
@@ -214,7 +238,8 @@ export function ACPCard({
             )}
           </Button>
         ) : null}
-        {!pending &&
+        {!codex &&
+        !pending &&
         (showLogin || manualSetup || (ready && !config.enabled)) ? (
           <Button
             size="small"
@@ -224,7 +249,8 @@ export function ACPCard({
             {t("acp.checkConnection")}
           </Button>
         ) : null}
-        {!pending &&
+        {!codex &&
+        !pending &&
         canAuthenticate &&
         setup?.installation === "installed" &&
         setup.connection !== "auth_required" ? (

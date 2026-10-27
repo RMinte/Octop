@@ -979,6 +979,14 @@ Bundled experts live in `src/octop/infra/agents/experts/library/`
 |--------|------|------|-------|
 | `GET`    | `/acp` | user | current user's global runner list |
 | `PUT`    | `/acp` | user | replace global runners |
+| `GET`    | `/acp/setup` | admin | passive host installation/readiness and current account's active jobs |
+| `POST`   | `/acp/codex/connect` | admin | `202` job: install missing components, browser authorization if needed, check, and enable |
+| `POST`   | `/acp/{runner_name}/install` | admin | `202` managed installation job; individual install leaves disabled |
+| `POST`   | `/acp/{runner_name}/login` | admin | `202` login-only job followed by a connection check |
+| `GET`    | `/acp/jobs/{job_id}` | admin + job owner | bounded progress and authorization state |
+| `POST`   | `/acp/jobs/{job_id}/cancel` | admin + job owner | cancel and clean up an active setup job |
+| `POST`   | `/acp/jobs/{job_id}/input` | admin + job owner | input to an interactive login-only process |
+| `POST`   | `/acp/{runner_name}/check` | admin | explicit ACP connection check without a model prompt |
 | `GET`    | `/acp/{runner_name}` | user | one runner |
 | `PUT`    | `/acp/{runner_name}` | user | upsert one runner |
 | `DELETE` | `/acp/{runner_name}` | user | delete a custom runner (built-ins are protected) |
@@ -988,6 +996,13 @@ Bundled experts live in `src/octop/infra/agents/experts/library/`
 
 See [ACP integration](./acp.md) for the runner object schema and the
 Zed setup example.
+
+Codex connect uses `ACPSetupJob.kind="connect"` and the existing job polling/cancellation
+contract. A successful job has `setup.connection="ready"` and `setup.enabled=true`.
+The APP can call the same API on the execution box and open `authorization.url` in the
+system browser; package installation and login credentials stay on that box. Reloading
+the client recovers active jobs from `/acp/setup`; restarting the server requires starting
+unfinished jobs again. This round changes the API and dashboard, not APP Swift/UI.
 
 ## Storage backends
 
@@ -1236,3 +1251,7 @@ dashboard mirrors every code under `apiErrors.*` in
 | `INTERNAL_ERROR` | 500 | Unhandled exception (logged with traceback) |
 
 私人智能体完整服务端接口与客户端接入顺序见 [resident-server-capabilities.md](resident-server-capabilities.md)，包含统一管家身份、自然语言专业工作委派、可选高级执行范围、成果回流、授权跟进与定时任务、通知和共享已读水位、记忆候选及上下文整理。
+
+## Task 执行引擎（2026-10-27）
+
+Task 创建、配置修改与分支支持独立的 `engine: {engine_id, connection_id, model_id}`；旧记录缺省 `octop`，ACP 连接使用执行盒子上当前账号的 runner。`GET /api/project-tasks/engines` 为被动目录，`POST /api/project-tasks/engines/inspect` 显式读取真实能力和模型。每轮 `execution_engine` 保存该轮身份，切换不新建 Task 或移动工作目录。数据、权限与兼容边界见 [执行引擎协议](task-execution-engines.md)。

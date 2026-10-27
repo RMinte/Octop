@@ -23,6 +23,9 @@ export const acpApi = {
   /** Host setup operations stay on this Octop host and never use Bridge. */
   getSetup: () => request<ACPSetupView>("/acp/setup"),
 
+  connectCodex: () =>
+    request<ACPSetupJob>("/acp/codex/connect", { method: "POST" }),
+
   installRunner: (runnerName: string) =>
     request<ACPSetupJob>(`/acp/${encodeURIComponent(runnerName)}/install`, {
       method: "POST",

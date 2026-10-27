@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import UNSET, DbRow, strict_int
@@ -36,6 +37,7 @@ class ProjectTaskRow:
     action_mode: str = "craft"
     pinned: bool = False
     internal_kind: str = ""
+    execution_json: str = "{}"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ProjectTaskRow:
@@ -64,6 +66,7 @@ class ProjectTaskRow:
             str(row["action_mode"]),
             bool(row["pinned"]),
             str(row["internal_kind"]),
+            str(row["execution_json"]),
         )
 
 
@@ -277,8 +280,8 @@ class ProjectTaskRepo:
             "active_turn_id, created_at, updated_at, status, title_source, "
             "approval_mode, approval_revision, approval_updated_at, web_search_enabled, "
             "import_source, external_session_id, selected_expert_id, configuration_revision, "
-            "action_mode, pinned, archived, internal_kind) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "action_mode, pinned, archived, internal_kind, execution_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.task_id,
                 row.owner_id,
@@ -302,6 +305,7 @@ class ProjectTaskRepo:
                 int(row.pinned),
                 int(row.archived),
                 row.internal_kind,
+                row.execution_json,
             ),
         )
         record_change(conn, row.owner_id, task_scope(row.project_id), row.task_id, row)
@@ -431,9 +435,10 @@ class ProjectTaskRepo:
             or previous.list_revision != list_revision
         ):
             return None
-        if (previous.selected_expert_id, previous.action_mode) == (
+        if (previous.selected_expert_id, previous.action_mode, previous.execution_json) == (
             row.selected_expert_id,
             row.action_mode,
+            row.execution_json,
         ):
             unchanged = conn.execute(
                 "UPDATE project_tasks SET configuration_revision=configuration_revision "
@@ -443,13 +448,14 @@ class ProjectTaskRepo:
             ).fetchone()
             return ProjectTaskRow.from_row(unchanged) if unchanged is not None else None
         result = conn.execute(
-            "UPDATE project_tasks SET selected_expert_id=?, action_mode=?, updated_at=?, "
+            "UPDATE project_tasks SET selected_expert_id=?, action_mode=?, execution_json=?, updated_at=?, "
             "configuration_revision=configuration_revision+1, list_revision=list_revision+1 "
             "WHERE task_id=? AND owner_id=? AND configuration_revision=? "
             "AND list_revision=? AND active_turn_id IS NULL RETURNING *",
             (
                 row.selected_expert_id,
                 row.action_mode,
+                row.execution_json,
                 row.updated_at,
                 row.task_id,
                 row.owner_id,
@@ -480,6 +486,67 @@ class ProjectTaskRepo:
             conn, updated.owner_id, task_scope(updated.project_id), updated.task_id, updated
         )
         return updated
+
+    def load_engine_session(
+        self, owner_id: int, task_id: str, turn_id: str, worker_id: str, session_key: str
+    ) -> dict[str, Any] | None:
+        with self._db.connect() as conn:
+            row = self._engine_session_row(conn, owner_id, task_id, turn_id, worker_id)
+        if row is None:
+            return None
+        value = json.loads(str(row["execution_json"])).get("sessions", {}).get(session_key)
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _engine_session_row(
+        conn: Any, owner_id: int, task_id: str, turn_id: str, worker_id: str
+    ) -> DbRow | None:
+        row = conn.execute(
+            "SELECT t.execution_json FROM project_tasks t "
+            "JOIN project_task_turns r ON r.task_id=t.task_id AND r.turn_id=t.active_turn_id "
+            "JOIN users u ON u.id=t.owner_id "
+            "WHERE t.owner_id=? AND t.task_id=? AND r.turn_id=? AND r.worker_id=? "
+            "AND r.status='running' AND u.disabled=0 AND r.worker_id<>''",
+            (owner_id, task_id, turn_id, worker_id),
+        ).fetchone()
+        return cast(DbRow | None, row)
+
+    def save_engine_session(
+        self,
+        owner_id: int,
+        task_id: str,
+        turn_id: str,
+        worker_id: str,
+        session_key: str,
+        session: dict[str, Any],
+    ) -> bool:
+        if not session_key or len(session_key) > 512 or len(json.dumps(session)) > 65536:
+            raise ValueError("invalid engine session binding")
+        with self._db.transaction() as conn:
+            row = self._engine_session_row(conn, owner_id, task_id, turn_id, worker_id)
+            if row is None:
+                return False
+            previous = str(row["execution_json"])
+            document = json.loads(previous)
+            sessions = document.get("sessions", {})
+            document["sessions"] = {**sessions, session_key: session}
+            result = conn.execute(
+                "UPDATE project_tasks SET execution_json=? WHERE task_id=? AND owner_id=? "
+                "AND execution_json=? AND active_turn_id=? AND EXISTS "
+                "(SELECT 1 FROM project_task_turns WHERE turn_id=? AND worker_id=? AND status='running') "
+                "AND EXISTS (SELECT 1 FROM users WHERE id=? AND disabled=0)",
+                (
+                    json.dumps(document),
+                    task_id,
+                    owner_id,
+                    previous,
+                    turn_id,
+                    turn_id,
+                    worker_id,
+                    owner_id,
+                ),
+            )
+            return bool(result.rowcount)
 
     @staticmethod
     def configuration_events(conn: Any, task_id: str) -> list[ProjectTaskConfigurationEventRow]:

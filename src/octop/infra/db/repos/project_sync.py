@@ -34,6 +34,10 @@ def record_change(
         (owner_id, scope),
     ).fetchone()
     assert head is not None
+    payload = asdict(row)
+    if "execution_json" in payload:
+        document = json.loads(payload["execution_json"])
+        payload["execution_json"] = json.dumps({"engine": document.get("engine", {})})
     conn.execute(
         "INSERT INTO project_sync_changes(owner_id, scope, sequence, entity_id, payload_json) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -42,7 +46,7 @@ def record_change(
             scope,
             head["sequence"],
             entity_id,
-            json.dumps({**asdict(row), **({"deleted": True} if deleted else {})}),
+            json.dumps({**payload, **({"deleted": True} if deleted else {})}),
         ),
     )
     if scope.startswith("tasks:") and scope != all_task_scope():

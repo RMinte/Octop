@@ -33,6 +33,7 @@ const setup: ACPRunnerSetup = {
 
 function mount(
   overrides: {
+    runnerKey?: string;
     config?: Partial<ACPRunnerConfig>;
     setup?: Partial<ACPRunnerSetup>;
     interactionDisabled?: boolean;
@@ -44,12 +45,13 @@ function mount(
     onMouseLeave: vi.fn(),
     onToggleEnabled: vi.fn(),
     onInstall: vi.fn(),
+    onConnect: vi.fn(),
     onCheck: vi.fn(),
     onGuide: vi.fn(),
   };
   render(
     <ACPCard
-      runnerKey="custom"
+      runnerKey={overrides.runnerKey ?? "custom"}
       config={{ ...config, ...overrides.config }}
       setup={{ ...setup, ...overrides.setup }}
       timeZone="Asia/Shanghai"
@@ -62,6 +64,69 @@ function mount(
 }
 
 describe("ACPCard setup actions", () => {
+  it("replaces manual sign-in instructions for idle Codex", () => {
+    mount({
+      runnerKey: "codex",
+      setup: {
+        connection: "auth_required",
+        message: "请在此网页完成登录授权或配置 API Key，然后重新检测连接",
+      },
+    });
+    expect(screen.getByText("acp.codexConnectHint")).toBeInTheDocument();
+    expect(screen.queryByText(/然后重新检测连接/)).not.toBeInTheDocument();
+  });
+
+  it("retains the real Codex connection error", () => {
+    mount({
+      runnerKey: "codex",
+      setup: {
+        connection: "error",
+        message: "Provider connection was refused",
+      },
+    });
+    expect(
+      screen.getByText("Provider connection was refused"),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      installation: "not_installed",
+      connection: "unchecked",
+      can_install: true,
+    },
+    { installation: "installed", connection: "auth_required", can_login: true },
+    { installation: "installed", connection: "ready" },
+  ] as const)("offers only Connect Codex at setup state %j", async (state) => {
+    const events = mount({ runnerKey: "codex", setup: state });
+    expect(screen.getByRole("switch")).toBeDisabled();
+    expect(screen.getAllByRole("button")).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "acp.advancedConfig" }),
+    ).toBeEnabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "acp.connectCodex" }),
+    );
+    expect(events.onConnect).toHaveBeenCalledWith("codex");
+    expect(events.onInstall).not.toHaveBeenCalled();
+    expect(events.onCheck).not.toHaveBeenCalled();
+    expect(events.onToggleEnabled).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Codex disconnect switch and a single reconnect entry", async () => {
+    const events = mount({
+      runnerKey: "codex",
+      config: { enabled: true },
+      setup: { installation: "installed", connection: "ready", enabled: true },
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "acp.reconnectCodex" }),
+    );
+    expect(events.onConnect).toHaveBeenCalledWith("codex");
+    await userEvent.click(screen.getByRole("switch"));
+    expect(events.onToggleEnabled).toHaveBeenCalledWith("codex", false);
+  });
+
   it("offers manual setup for custom launchers without claiming they are installed", async () => {
     const events = mount();
     expect(screen.getByText("acp.installation_manual")).toBeInTheDocument();

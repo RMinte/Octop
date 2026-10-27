@@ -226,3 +226,72 @@ describe("任务上下文与计费用量", () => {
     expect(screen.queryByText(/本轮计费用量/)).toBeNull();
   });
 });
+
+it("does not present ACP compatibility zeros as measured turn usage", async () => {
+  const { engineCapabilities } = await import("./taskEngine");
+  const engine = {
+    engine_id: "acp",
+    connection_id: "codex",
+    model_id: null,
+  } as const;
+  render(
+    <TaskTurnUsage
+      turn={{
+        input_tokens: 0,
+        output_tokens: 0,
+        execution_engine: {
+          ...engine,
+          label: "Codex",
+          capabilities: engineCapabilities(engine),
+        },
+      }}
+    />,
+  );
+  expect(screen.getByText(/用量由执行引擎管理/)).toBeInTheDocument();
+  expect(screen.queryByText(/输入 0/)).not.toBeInTheDocument();
+});
+
+it("counts ACP as missing in mixed history and does not poll Octop context for an ACP task", async () => {
+  const { engineCapabilities } = await import("./taskEngine");
+  const engine = {
+    engine_id: "acp",
+    connection_id: "codex",
+    model_id: null,
+  } as const;
+  render(
+    <TaskContextUsage
+      taskID="mixed"
+      active
+      engine={engine}
+      turns={[
+        ...completed,
+        {
+          turn_id: "acp",
+          status: "completed",
+          input_tokens: 0,
+          output_tokens: 0,
+          execution_engine: {
+            ...engine,
+            label: "Codex",
+            capabilities: engineCapabilities(engine),
+          },
+        },
+      ]}
+    />,
+  );
+  await flush();
+  expect(
+    screen.getByText(zh.projects.tasks.contextUsage.engineContextManaged),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(/已加载 2 轮计费用量：输入 4,000 · 输出 500 tokens/),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/其中 1 轮未记录，未计入汇总/)).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+  expect(api.contextUsage).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("button", { name: "上下文占用细分" }),
+  ).not.toBeInTheDocument();
+});

@@ -83,3 +83,81 @@ it("模型无需展开设置即可选择，按来源分组并显示具体默认�
     expect(screen.getByText("本次使用：GLM · remote/glm")).toBeInTheDocument(),
   );
 });
+
+it("ACP native models stay separate and unsupported settings remain disabled without changing the draft", async () => {
+  const { engineCapabilities } = await import("./taskEngine");
+  const engine = {
+    engine_id: "acp",
+    connection_id: "codex",
+    model_id: null,
+  } as const;
+  const entry = {
+    engine,
+    label: "Codex",
+    available: true,
+    unavailable_reason: null,
+    capabilities: {
+      ...engineCapabilities(engine),
+      model_selection: true,
+      skills: true,
+      mcp: true,
+    },
+    models: [{ model_id: "native-model", label: "Native model" }],
+  };
+  const resources = {
+    models: [],
+    default_model_ref: null,
+    plugins: [],
+    subagents: [],
+    skills: [],
+    mcp_servers: [],
+    directory_roots: [],
+    approval: {
+      allowed_modes: [],
+      reviewer_ready: false,
+      execution_profile: "host_process" as const,
+    },
+    execution_engines: [entry],
+  };
+  vi.mocked(projectTasksApi.resources).mockResolvedValue(resources);
+  const changed = vi.fn();
+  const engineChanged = vi.fn();
+  render(
+    <TaskExecutionSettings
+      value={{
+        model_ref: "remote/glm",
+        reasoning_mode: "enabled",
+        plugins: ["custom"],
+      }}
+      onChange={changed}
+      disabled={false}
+      engine={engine}
+      engineCatalog={[entry]}
+      onEngineChange={engineChanged}
+    />,
+  );
+  expect(
+    screen.queryByRole("combobox", { name: "本轮模型" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("combobox", { name: zh.projects.tasks.engineModel }),
+  );
+  await userEvent.click(
+    await screen.findByText("Native model", {
+      selector: ".ant-select-item-option-content",
+    }),
+  );
+  expect(engineChanged).toHaveBeenCalledWith({
+    ...engine,
+    model_id: "native-model",
+  });
+  await userEvent.click(
+    screen.getByRole("button", { name: zh.projects.tasks.executionOptions }),
+  );
+  expect(
+    await screen.findByRole("switch", {
+      name: zh.projects.tasks.customPlugins,
+    }),
+  ).toBeDisabled();
+  expect(changed).not.toHaveBeenCalled();
+});

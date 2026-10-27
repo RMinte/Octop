@@ -1171,3 +1171,10 @@ TaskTurn 的 `attachments` 为上述元数据数组，无附件时为 `[]`；`ar
 断线只恢复 task.subscribe，无需重新上传或重发消息。失败、停止和手动重试都保留已提交附件。服务端仅在模型调用前临时构造图片 image_url data URI；上下文和原生检查点持久化 `task-image://<attachment_id>` 引用，恢复后按当前任务和账号重新鉴权读取原图。
 
 长对话压缩后，模型可以通过 `read_task_image(attachment_id?)` 重新查看历史图片：省略 ID 时仅列出当前任务视觉图片，指定 ID 时将该图加入下一次模型请求。普通文件不由这个工具读取，使用文件清单中的工作区路径。工具结果与持久化历史仍只含引用和元数据，不自动发布输出附件。
+## 可选执行引擎（2026-10-27 增量）
+
+`task.create` 的 TaskCreate 支持 `engine: {engine_id: "octop"|"acp", connection_id: string|null, model_id: string|null}`。省略使用 Octop；普通 `task.message`/`task.retry` 沿用 Task 已保存的选择，并使用既有配置版本校验。空闲时通过 Task PATCH 更换引擎，从下一轮生效，不增加另一个 Task 或改变工作目录。
+
+快照和 turn 事件中的 `execution_engine` 保存当轮路由；`actual_model_id`、`resumed` 是可选运行事实，未知为 null。客户端不能用 Task 当前选择覆盖旧轮次身份，也不能把 ACP 原生 model_id 当作 Octop model_ref。外部用量不进入 Octop Provider 单轮费用，兼容的零计数字段不能解释为真实零消耗。
+
+引擎目录与显式能力检测使用执行主机的 `/api/project-tasks/engines` 和 `/api/project-tasks/engines/inspect`。旧 peer 没有 `execution_engines` 能力时，默认 Octop 请求移除新增 engine 字段继续兼容；ACP 或显式引擎变更必须提示远端不支持。数据与审批边界详见 [Task 执行引擎](task-execution-engines.md)。

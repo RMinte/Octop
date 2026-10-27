@@ -87,6 +87,13 @@ def restrict_external_configuration(configuration: dict[str, Any]) -> dict[str, 
     result = copy.deepcopy(configuration)
     if not external_unverified(result):
         return result
+    if result.get("execution_engine", {}).get("engine_id") == "acp":
+        raise OctopError.localized(
+            ErrorCode.TASK_SETTINGS_INVALID,
+            status=409,
+            setting="engine",
+            details={"setting": "engine", "reason": "external_unverified"},
+        )
     result["expert_memory_enabled"] = False
     result["knowledge_base_ids"] = []
     result["knowledge_base_catalog"] = []

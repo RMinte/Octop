@@ -15,7 +15,7 @@ from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.gateway.media.attachment_hints import content_blocks_need_vision
-from octop.infra.projects import input_attachments, tasks
+from octop.infra.projects import engine_catalog, input_attachments, tasks
 from octop.infra.projects.context import is_compaction
 from octop.infra.projects.model_routing import (
     ModelRoutingDecision,
@@ -245,7 +245,19 @@ async def submit(
         "project_id": project_id,
         "retry_of_turn_id": retry_of_turn_id,
     }
-    if body.options.routing is None or body.options.model_ref:
+    selected_engine = (
+        body.engine
+        if isinstance(body, tasks.ProjectTaskCreate) and task_id is None
+        else engine_catalog.read_engine(row.execution_json)
+        if task_id
+        and (row := await asyncio.to_thread(services.project_task_repo.get, task_id, owner_id))
+        else engine_catalog.EngineSelection()
+    )
+    if (
+        body.options.routing is None
+        or body.options.model_ref
+        or selected_engine.engine_id != "octop"
+    ):
         if admission_hook is not None:
             return await asyncio.to_thread(
                 _send_with_hook, services, owner_id, body, admission_hook, **identity

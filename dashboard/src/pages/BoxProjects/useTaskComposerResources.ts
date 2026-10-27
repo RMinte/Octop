@@ -98,6 +98,7 @@ export interface TaskComposerResourcesProps {
   onChange: (value: TaskExecutionOptions) => void;
   resources: TaskResources | null;
   disabled: boolean;
+  skillsEnabled?: boolean;
   getInputElement: () => HTMLTextAreaElement | null;
 }
 
@@ -111,6 +112,7 @@ export function useTaskComposerResources({
   onChange,
   resources,
   disabled,
+  skillsEnabled = true,
   getInputElement,
 }: TaskComposerResourcesProps) {
   const { taskWorkbenchApi, projectsApi, hostID } = useTaskHost();
@@ -137,6 +139,7 @@ export function useTaskComposerResources({
     (entry) => entry.expert_id === selectedExpertID,
   );
   const skillsReady =
+    skillsEnabled &&
     resources !== null &&
     (value.skills != null ||
       !selectedExpertID ||
@@ -146,9 +149,13 @@ export function useTaskComposerResources({
     const cursor = getInputElement()?.selectionStart ?? text.length;
     const next = disabled ? null : composerResourceQuery(text, cursor);
     const key = JSON.stringify([text, cursor]);
-    setQuery(key === dismissed.current ? null : next);
+    setQuery(
+      key === dismissed.current || (next?.kind === "skill" && !skillsEnabled)
+        ? null
+        : next,
+    );
     setIndex(0);
-  }, [disabled, getInputElement, text]);
+  }, [disabled, getInputElement, text, skillsEnabled]);
   useEffect(onCursorChange, [onCursorChange]);
   useEffect(() => {
     setPendingSkill(null);

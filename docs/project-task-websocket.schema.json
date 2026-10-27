@@ -330,6 +330,52 @@
       "title": "CreateFrame",
       "type": "object"
     },
+    "EngineSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "engine_id": {
+          "default": "octop",
+          "enum": [
+            "octop",
+            "acp"
+          ],
+          "title": "Engine Id",
+          "type": "string"
+        },
+        "connection_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本用户的 ACP runner ID；Octop 引擎为 null。",
+          "title": "Connection Id"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "连接的原生模型 ID；null 使用该引擎自己的默认模型。",
+          "title": "Model Id"
+        }
+      },
+      "title": "EngineSelection",
+      "type": "object"
+    },
     "InteractionFrame": {
       "additionalProperties": false,
       "properties": {
@@ -941,6 +987,10 @@
         "options": {
           "$ref": "#/$defs/TaskExecutionOptions",
           "description": "本轮执行选项；省略时使用当前项目及默认模型，不修改项目。"
+        },
+        "engine": {
+          "$ref": "#/$defs/EngineSelection",
+          "description": "任务执行引擎，默认Octop；ACP连接须属于本人且已启用并检查就绪。"
         },
         "selected_expert_id": {
           "anyOf": [
@@ -1868,6 +1918,195 @@
         "expires_at"
       ],
       "title": "ApprovalReview",
+      "type": "object"
+    },
+    "EngineCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "action_modes": {
+          "default": [
+            "craft"
+          ],
+          "items": {
+            "enum": [
+              "ask",
+              "plan",
+              "craft"
+            ],
+            "type": "string"
+          },
+          "title": "Action Modes",
+          "type": "array"
+        },
+        "images": {
+          "default": true,
+          "title": "Images",
+          "type": "boolean"
+        },
+        "permissions": {
+          "default": true,
+          "title": "Permissions",
+          "type": "boolean"
+        },
+        "native_resume": {
+          "default": true,
+          "title": "Native Resume",
+          "type": "boolean"
+        },
+        "cancel": {
+          "default": true,
+          "title": "Cancel",
+          "type": "boolean"
+        },
+        "pause": {
+          "default": false,
+          "title": "Pause",
+          "type": "boolean"
+        },
+        "skills": {
+          "default": true,
+          "title": "Skills",
+          "type": "boolean"
+        },
+        "mcp": {
+          "default": true,
+          "title": "Mcp",
+          "type": "boolean"
+        },
+        "plugins": {
+          "default": false,
+          "title": "Plugins",
+          "type": "boolean"
+        },
+        "subagents": {
+          "default": false,
+          "title": "Subagents",
+          "type": "boolean"
+        },
+        "knowledge": {
+          "default": false,
+          "title": "Knowledge",
+          "type": "boolean"
+        },
+        "memory": {
+          "default": true,
+          "title": "Memory",
+          "type": "boolean"
+        },
+        "compact": {
+          "default": false,
+          "title": "Compact",
+          "type": "boolean"
+        },
+        "model_selection": {
+          "default": true,
+          "title": "Model Selection",
+          "type": "boolean"
+        }
+      },
+      "title": "EngineCapabilities",
+      "type": "object"
+    },
+    "ExecutionEngineSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "engine_id": {
+          "default": "octop",
+          "enum": [
+            "octop",
+            "acp"
+          ],
+          "title": "Engine Id",
+          "type": "string"
+        },
+        "connection_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "本用户的 ACP runner ID；Octop 引擎为 null。",
+          "title": "Connection Id"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "连接的原生模型 ID；null 使用该引擎自己的默认模型。",
+          "title": "Model Id"
+        },
+        "label": {
+          "default": "Octop",
+          "title": "Label",
+          "type": "string"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/EngineCapabilities"
+        },
+        "config_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Config Digest"
+        },
+        "workspace_scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Scope"
+        },
+        "actual_model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actual Model Id"
+        },
+        "resumed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resumed"
+        }
+      },
+      "title": "ExecutionEngineSnapshot",
       "type": "object"
     },
     "ImportActivity": {
@@ -3471,6 +3710,10 @@
     "TaskTurn": {
       "additionalProperties": false,
       "properties": {
+        "execution_engine": {
+          "$ref": "#/$defs/ExecutionEngineSnapshot",
+          "description": "本轮受理时冻结的引擎、连接、原生模型及适配能力；不含凭据和私有会话标识。"
+        },
         "history_only": {
           "default": false,
           "title": "History Only",
@@ -3922,6 +4165,10 @@
     "TaskDetail": {
       "additionalProperties": false,
       "properties": {
+        "engine": {
+          "$ref": "#/$defs/EngineSelection",
+          "description": "任务下一轮采用的持久引擎选择。"
+        },
         "selected_expert_id": {
           "anyOf": [
             {
@@ -4119,6 +4366,10 @@
     "TaskSummary": {
       "additionalProperties": false,
       "properties": {
+        "engine": {
+          "$ref": "#/$defs/EngineSelection",
+          "description": "任务下一轮采用的持久引擎选择。"
+        },
         "selected_expert_id": {
           "anyOf": [
             {

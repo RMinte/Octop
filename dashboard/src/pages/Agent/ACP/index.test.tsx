@@ -14,12 +14,13 @@ import type {
   ACPRunnerConfig,
   ACPRunnerSetup,
   ACPSetupJob,
+  ACPSetupView,
 } from "../../../api/types/acp";
 
 const { t, agentContext, api } = vi.hoisted(() => ({
   t: (key: string) => key,
   agentContext: {
-    activeAgentId: "local",
+    activeAgentId: "local" as string | null,
     agents: [{ agent_id: "local", bridge: false, config: {} }],
   },
   api: {
@@ -28,6 +29,7 @@ const { t, agentContext, api } = vi.hoisted(() => ({
     getConfig: vi.fn(),
     updateToolEnabled: vi.fn(),
     getSetup: vi.fn(),
+    connectCodex: vi.fn(),
     installRunner: vi.fn(),
     loginRunner: vi.fn(),
     checkRunner: vi.fn(),
@@ -45,13 +47,20 @@ vi.mock("../../../hooks/useServerTimezone", () => ({
   useServerTimezone: () => "Asia/Shanghai",
 }));
 vi.mock("../../../api/modules/acp", () => ({ acpApi: api }));
-vi.mock("../../Experts/components/agentBackendForm", () => ({
-  blocksAcpOutboundFromConfig: () => false,
-}));
 vi.mock("../../../layouts/PageShell", () => ({
-  default: ({ children }: { children: React.ReactNode }) => children,
+  default: ({
+    children,
+    agentScoped,
+  }: {
+    children: React.ReactNode;
+    agentScoped?: boolean;
+  }) => (
+    <div data-testid="acp-shell" data-agent-scoped={Boolean(agentScoped)}>
+      {children}
+    </div>
+  ),
 }));
-import { ACPPanel } from "./index";
+import ACPPage, { ACPPanel } from "./index";
 
 const config: ACPRunnerConfig = {
   command: "opencode",
@@ -111,7 +120,7 @@ beforeEach(() => {
   api.getGlobalRunners.mockImplementation(async () => ({ runners }));
   api.getSetup.mockImplementation(async () => ({
     host: "service@octop-box",
-    runners: { opencode: setup },
+    runners: { [setup.runner]: setup },
     active_jobs: activeJobs,
   }));
   api.getConfig.mockResolvedValue({ tool_enabled: false, runners: {} });
@@ -182,16 +191,428 @@ function mount(agentId?: string) {
     </App>,
   );
 }
-async function getCard() {
+async function getCard(runnerKey = "opencode") {
   return within(
-    await screen.findByRole("group", { name: "acp.runner_opencode" }),
+    await screen.findByRole("group", { name: `acp.runner_${runnerKey}` }),
   );
 }
 function getSetupPanel() {
   return within(screen.getByRole("dialog"));
 }
 
+function prepareCodex() {
+  setup = { ...initialSetup, runner: "codex", docs_url: null };
+  runners = { codex: { ...config, command: "npx" } };
+  currentJob = {
+    ...initialJob,
+    runner: "codex",
+    job_id: "connect-existing",
+    kind: "connect",
+    phase: "preparing",
+  };
+  api.connectCodex.mockImplementation(async () => {
+    currentJob = {
+      ...currentJob,
+      job_id: `connect-${api.connectCodex.mock.calls.length}`,
+      status: "running",
+      phase: "preparing",
+      authorization: null,
+    };
+    activeJobs = { codex: currentJob };
+    return currentJob;
+  });
+}
+
+describe("one-step Codex connection", () => {
+  it("replaces manual recheck copy in the Codex card and pending authorization guide", async () => {
+    prepareCodex();
+    const manualHint = "请在此网页完成登录授权或配置 API Key，然后重新检测连接";
+    setup = { ...setup, connection: "auth_required", message: manualHint };
+    currentJob = {
+      ...currentJob,
+      status: "waiting_for_user",
+      phase: "waiting_for_user",
+      message: manualHint,
+    };
+    activeJobs = { codex: currentJob };
+    mount();
+    const card = await getCard("codex");
+    expect(card.getByText("acp.codexAuthorizationHint")).toBeInTheDocument();
+    await userEvent.click(
+      card.getByRole("button", { name: "acp.openConnectProgress" }),
+    );
+    expect(
+      getSetupPanel().getByText("acp.codexAuthorizationHint"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(manualHint)).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])(
+    "rereads configuration once when setup observes a completed enable change from %s",
+    async (previouslyEnabled) => {
+      prepareCodex();
+      const before = {
+        codex: { ...runners.codex, enabled: previouslyEnabled },
+      };
+      const after = {
+        codex: { ...runners.codex, enabled: !previouslyEnabled },
+      };
+      const committedSetup = {
+        ...setup,
+        installation: "installed" as const,
+        connection: "ready" as const,
+        enabled: !previouslyEnabled,
+      };
+      let finishSetup!: (view: ACPSetupView) => void;
+      api.getGlobalRunners
+        .mockResolvedValueOnce({ runners: before })
+        .mockResolvedValueOnce({ runners: after });
+      api.getSetup.mockImplementationOnce(
+        () =>
+          new Promise<ACPSetupView>((resolve) => {
+            finishSetup = resolve;
+          }),
+      );
+      mount();
+      await waitFor(() =>
+        expect(api.getGlobalRunners).toHaveBeenCalledTimes(1),
+      );
+      await act(async () => {
+        finishSetup({
+          host: "service@octop-box",
+          runners: { codex: committedSetup },
+          active_jobs: {},
+        });
+      });
+      const card = await getCard("codex");
+      expect(card.getByRole("switch")).toHaveAttribute(
+        "aria-checked",
+        String(!previouslyEnabled),
+      );
+      expect(
+        card.getByRole("button", {
+          name: previouslyEnabled ? "acp.connectCodex" : "acp.reconnectCodex",
+        }),
+      ).toBeEnabled();
+      expect(api.getGlobalRunners).toHaveBeenCalledTimes(2);
+      expect(api.getSetup).toHaveBeenCalledTimes(1);
+      expect(api.getJob).not.toHaveBeenCalled();
+      expect(api.connectCodex).not.toHaveBeenCalled();
+    },
+  );
+
+  it("bounds the stable reread even when configuration and setup still disagree", async () => {
+    prepareCodex();
+    setup = {
+      ...setup,
+      installation: "installed",
+      connection: "ready",
+      enabled: true,
+    };
+    mount();
+    const card = await getCard("codex");
+    await userEvent.hover(
+      card.getByRole("button", { name: "acp.connectCodex" }),
+    );
+    expect(api.getGlobalRunners).toHaveBeenCalledTimes(2);
+    expect(api.getSetup).toHaveBeenCalledTimes(1);
+    expect(api.getJob).not.toHaveBeenCalled();
+    expect(card.getByRole("switch")).not.toBeChecked();
+  });
+
+  it("connects once, waits for browser authorization and reflects automatic enablement", async () => {
+    prepareCodex();
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    mount();
+    const card = await getCard("codex");
+    await userEvent.click(
+      card.getByRole("button", { name: "acp.connectCodex" }),
+    );
+    expect(api.connectCodex).toHaveBeenCalledTimes(1);
+    const panel = getSetupPanel();
+    expect(panel.getByText("acp.codexConnectHint")).toBeInTheDocument();
+    expect(panel.getByText("acp.codexDeviceCodeHint")).toBeInTheDocument();
+    expect(
+      panel.queryByRole("button", { name: "acp.startLogin" }),
+    ).not.toBeInTheDocument();
+    expect(
+      panel.queryByRole("button", { name: "acp.checkConnection" }),
+    ).not.toBeInTheDocument();
+    expect(card.getByRole("switch")).toBeDisabled();
+    currentJob = {
+      ...currentJob,
+      status: "waiting_for_user",
+      phase: "waiting_for_user",
+      input_mode: "terminal",
+      authorization: {
+        url: "https://auth.openai.com/codex/device",
+        user_code: "CODE-1234",
+        expires_at: 1792972800000,
+      },
+    };
+    expect(
+      await panel.findByText("CODE-1234", {}, { timeout: 2500 }),
+    ).toBeInTheDocument();
+    expect(
+      panel.getByRole("link", { name: "acp.openAuthorization" }),
+    ).toHaveAttribute("href", "https://auth.openai.com/codex/device");
+    expect(panel.queryByLabelText("acp.loginResponse")).not.toBeInTheDocument();
+    expect(open).not.toHaveBeenCalled();
+    setup = {
+      ...setup,
+      installation: "installed",
+      connection: "ready",
+      enabled: true,
+      checked_at: 1792972800000,
+    };
+    runners = {
+      ...runners,
+      codex: {
+        ...runners.codex,
+        command: "/managed/bin/codex-acp",
+        enabled: true,
+      },
+    };
+    activeJobs = {};
+    currentJob = {
+      ...currentJob,
+      status: "succeeded",
+      phase: "completed",
+      setup,
+    };
+    await waitFor(() => expect(card.getByRole("switch")).toBeChecked(), {
+      timeout: 2500,
+    });
+    expect(await screen.findByText("acp.connectSuccess")).toBeInTheDocument();
+    expect(
+      card.getByRole("button", { name: "acp.reconnectCodex" }),
+    ).toBeEnabled();
+    expect(api.installRunner).not.toHaveBeenCalled();
+    expect(api.loginRunner).not.toHaveBeenCalled();
+    expect(api.checkRunner).not.toHaveBeenCalled();
+    expect(api.updateGlobalRunners).not.toHaveBeenCalled();
+    expect(api.inputJob).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it("restores a connection job after refresh, allows cancellation and retries through Connect only", async () => {
+    prepareCodex();
+    activeJobs = { codex: currentJob };
+    mount();
+    const card = await getCard("codex");
+    await userEvent.click(
+      card.getByRole("button", { name: "acp.openConnectProgress" }),
+    );
+    const panel = getSetupPanel();
+    await waitFor(
+      () => expect(api.getJob).toHaveBeenCalledWith("connect-existing"),
+      { timeout: 2500 },
+    );
+    expect(api.connectCodex).not.toHaveBeenCalled();
+    await userEvent.click(panel.getByRole("button", { name: "acp.cancelJob" }));
+    expect(api.cancelJob).toHaveBeenCalledWith("connect-existing");
+    expect(
+      await panel.findByText("acp.job_connect_cancelled"),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      panel.getByRole("button", { name: "acp.retryConnectCodex" }),
+    );
+    expect(api.connectCodex).toHaveBeenCalledTimes(1);
+    expect(api.installRunner).not.toHaveBeenCalled();
+    expect(api.loginRunner).not.toHaveBeenCalled();
+    expect(api.checkRunner).not.toHaveBeenCalled();
+  });
+
+  it("does not offer cancellation while the final enable operation commits", async () => {
+    prepareCodex();
+    setup = {
+      ...setup,
+      installation: "installed",
+      connection: "ready",
+      enabled: true,
+    };
+    currentJob = { ...currentJob, phase: "enabling" };
+    activeJobs = { codex: currentJob };
+    mount();
+    const card = await getCard("codex");
+    await userEvent.click(
+      card.getByRole("button", { name: "acp.openConnectProgress" }),
+    );
+    const panel = getSetupPanel();
+    expect(panel.getByText("acp.phase_enabling")).toBeInTheDocument();
+    const cancel = panel.getByRole("button", { name: "acp.cancelJob" });
+    expect(cancel).toBeDisabled();
+    expect(api.getGlobalRunners).toHaveBeenCalledTimes(1);
+    await userEvent.click(cancel);
+    expect(api.cancelJob).not.toHaveBeenCalled();
+  });
+
+  it("shows a failed connection job without claiming it is enabled and retries the same entry", async () => {
+    prepareCodex();
+    setup = {
+      ...setup,
+      connection: "auth_required",
+      message: "请重新检测连接",
+    };
+    api.connectCodex.mockResolvedValueOnce({
+      ...currentJob,
+      status: "failed",
+      phase: "failed",
+      message: "Authorization was not completed",
+    });
+    mount();
+    const card = await getCard("codex");
+    await userEvent.click(
+      card.getByRole("button", { name: "acp.connectCodex" }),
+    );
+    const panel = getSetupPanel();
+    expect(
+      await panel.findByText("Authorization was not completed"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("acp.connectSuccess")).not.toBeInTheDocument();
+    expect(card.getByRole("switch")).not.toBeChecked();
+    expect(card.getByRole("switch")).toBeDisabled();
+    await userEvent.click(
+      panel.getByRole("button", { name: "acp.retryConnectCodex" }),
+    );
+    expect(api.connectCodex).toHaveBeenCalledTimes(2);
+    expect(api.updateGlobalRunners).not.toHaveBeenCalled();
+    expect(
+      panel.queryByRole("button", { name: "acp.retryJob" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the single connection entry retryable when its start request fails", async () => {
+    prepareCodex();
+    api.connectCodex.mockRejectedValueOnce(
+      new Error("Connect could not start"),
+    );
+    mount();
+    const card = await getCard("codex");
+    await userEvent.click(
+      card.getByRole("button", { name: "acp.connectCodex" }),
+    );
+    expect(
+      (await screen.findAllByText("Connect could not start")).length,
+    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        card.getByRole("button", { name: "acp.connectCodex" }),
+      ).toBeEnabled(),
+    );
+    await userEvent.click(
+      card.getByRole("button", { name: "acp.connectCodex" }),
+    );
+    expect(api.connectCodex).toHaveBeenCalledTimes(2);
+    expect(api.updateGlobalRunners).not.toHaveBeenCalled();
+    expect(card.getByRole("switch")).not.toBeChecked();
+  });
+});
+
 describe("ACP box setup flow", () => {
+  it("manages host engines without experts, an expert picker or delegation requests", async () => {
+    agentContext.activeAgentId = null;
+    agentContext.agents = [];
+    render(
+      <App>
+        <ACPPage />
+      </App>,
+    );
+    const card = await getCard();
+    expect(screen.getByTestId("acp-shell")).toHaveAttribute(
+      "data-agent-scoped",
+      "false",
+    );
+    expect(card.getByRole("button", { name: "acp.install" })).toBeEnabled();
+    expect(screen.queryByText("acp.toolEnabled")).not.toBeInTheDocument();
+    expect(screen.queryByText("acp.toolEnabledHint")).not.toBeInTheDocument();
+    expect(screen.queryByText("mbtiPage.pickAgent")).not.toBeInTheDocument();
+    expect(api.getSetup).toHaveBeenCalledWith();
+    expect(api.getGlobalRunners).toHaveBeenCalledWith(undefined);
+    expect(api.getConfig).not.toHaveBeenCalled();
+    expect(api.updateToolEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each(["install", "login", "check"] as const)(
+    "allows standalone host %s independently of the selected expert sandbox",
+    async (operation) => {
+      agentContext.agents = [
+        {
+          agent_id: "local",
+          bridge: false,
+          config: { backend: { type: "local_shell", root_dir: "/sandbox" } },
+        },
+      ];
+      if (operation !== "install")
+        setup = {
+          ...setup,
+          installation: "installed",
+          connection: operation === "login" ? "auth_required" : "unchecked",
+        };
+      mount();
+      const card = await getCard();
+      expect(
+        screen.queryByText("acp.outboundBlockedHint"),
+      ).not.toBeInTheDocument();
+      await userEvent.click(
+        card.getByRole("button", {
+          name:
+            operation === "install"
+              ? "acp.install"
+              : operation === "login"
+              ? "acp.login"
+              : "acp.checkConnection",
+        }),
+      );
+      if (operation === "login")
+        await userEvent.click(
+          getSetupPanel().getByRole("button", { name: "acp.startLogin" }),
+        );
+      expect(
+        operation === "install"
+          ? api.installRunner
+          : operation === "login"
+          ? api.loginRunner
+          : api.checkRunner,
+      ).toHaveBeenCalledWith("opencode");
+    },
+  );
+
+  it("retains expert sandbox restrictions while allowing its delegation toggle", async () => {
+    agentContext.agents = [
+      {
+        agent_id: "local",
+        bridge: false,
+        config: { backend: { type: "local_shell", root_dir: "/sandbox" } },
+      },
+    ];
+    setup = {
+      ...setup,
+      installation: "installed",
+      connection: "auth_required",
+    };
+    api.updateToolEnabled.mockResolvedValue({ tool_enabled: true });
+    mount("local");
+    const card = await getCard();
+    expect(screen.getByText("acp.outboundBlockedHint")).toBeInTheDocument();
+    expect(card.getByRole("button", { name: "acp.login" })).toBeDisabled();
+    expect(
+      card.getByRole("button", { name: "acp.checkConnection" }),
+    ).toBeDisabled();
+    expect(
+      card.getByRole("button", { name: "acp.advancedConfig" }),
+    ).toBeDisabled();
+    const permission = within(
+      screen.getByText("acp.toolEnabled").parentElement!,
+    );
+    await waitFor(() => expect(permission.getByRole("switch")).toBeEnabled());
+    await userEvent.click(permission.getByRole("switch"));
+    expect(api.updateToolEnabled).toHaveBeenCalledWith("local", true);
+    expect(api.installRunner).not.toHaveBeenCalled();
+    expect(api.loginRunner).not.toHaveBeenCalled();
+    expect(api.checkRunner).not.toHaveBeenCalled();
+  });
+
   it("installs on explicit Install, then requires a check and explicit enable", async () => {
     mount();
     const card = await getCard();
@@ -583,6 +1004,8 @@ describe("ACP box setup flow", () => {
     await getCard();
     expect(api.getGlobalRunners).toHaveBeenCalledWith(undefined);
     expect(api.getSetup).toHaveBeenCalledWith();
+    expect(api.getConfig).not.toHaveBeenCalled();
+    expect(screen.queryByText("acp.toolEnabled")).not.toBeInTheDocument();
     expect(screen.queryByText("acp.remoteHostHint")).not.toBeInTheDocument();
   });
 });

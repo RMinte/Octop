@@ -154,6 +154,7 @@ class CliChatSession:
         request_id: str | None = None,
         project_id: str | None = None,
         no_expert: bool = False,
+        engine: tasks.EngineSelection | None = None,
     ) -> ChatTurnResult:
         started = time.monotonic()
         user = await asyncio.to_thread(self.services.user_repo.get, self.user_id)
@@ -174,6 +175,7 @@ class CliChatSession:
                 "project": project_id,
                 "model": model,
                 "mode": conversation_mode,
+                **({"engine": engine.model_dump()} if engine else {}),
             },
         )
         if source.legacy_thread_id:
@@ -206,7 +208,16 @@ class CliChatSession:
                 saved=saved,
                 on_chunk=on_chunk,
             )
-        options = tasks.TaskExecutionOptions(model_ref=model or saved.get("model_ref"))
+        selected_engine = engine
+        if selected_engine is None and self.task_id:
+            selected_engine = (
+                await asyncio.to_thread(tasks.detail, self.services, self.user_id, self.task_id)
+            ).engine
+        selected_engine = selected_engine or tasks.EngineSelection()
+        options = tasks.TaskExecutionOptions(
+            model_ref=model
+            or (saved.get("model_ref") if selected_engine.engine_id == "octop" else None)
+        )
         if previous is None and command in controls:
             if not self.task_id:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
@@ -265,6 +276,7 @@ class CliChatSession:
                 change_expert=no_expert or agent_id is not None or "selected_expert_id" in saved,
                 mode=conversation_mode or saved.get("action_mode"),
                 project_id=project_id,
+                engine=engine,
             )
         message = tasks.TaskCreate(
             request_id=source.event_id,
@@ -275,6 +287,7 @@ class CliChatSession:
                 tasks.ActionMode, conversation_mode or saved.get("action_mode") or "craft"
             ),
             options=options,
+            engine=selected_engine,
         )
         receipt = previous or await ingress.submit(self.services, self.user_id, source, message)
         task_worker = self.server.project_task_worker
@@ -400,6 +413,7 @@ async def run_chat_turn_async(
     request_id: str | None = None,
     project_id: str | None = None,
     no_expert: bool = False,
+    engine: tasks.EngineSelection | None = None,
 ) -> ChatTurnResult:
     async with embedded_task_runtime() as server:
         user_id = resolve_embedded_user_id(server, agent_id=agent_id, as_user=as_user)
@@ -417,6 +431,7 @@ async def run_chat_turn_async(
                 request_id=request_id,
                 project_id=project_id,
                 no_expert=no_expert,
+                engine=engine,
             )
         finally:
             session.close()

@@ -472,3 +472,8 @@ capability 同时返回 max_request_bytes=16777216（16 MiB）；单次请求和
 - 文件/浏览器/终端的 scope 与授权，Skill 草稿审阅，记忆/语音/导出的实际返回类型。
 - TaskRef 主机隔离、远端媒体 URL 解析、peer 身份变更、离线只读缓存和错误局部处理。
 - 本机旧链接解析、显式单条续接、批迁逐项结果，以及跨桥迁移暂不开放。
+## 执行引擎接线增量（2026-10-27）
+
+服务端新增独立于专家的 Task.engine 和每轮 execution_engine；详情、创建、PATCH、Fork 与 WebSocket schema 已同步。读取执行盒子的 execution_engines 能力和引擎目录后，按其 capabilities 显示入口，不能使用控制端本机 ACP 状态。模型须区分 Octop Provider/model_ref 与 ACP connection/model_id；历史身份优先使用当轮 actual_model_id。APP Swift/UI 本轮未修改，后续接线按 [执行引擎协议](task-execution-engines.md) 和 [WebSocket 增量](project-task-websocket.md) 实施。
+
+Codex 的一键连接接口为管理员调用执行盒子的 `POST /api/acp/codex/connect`，返回 `202 ACPSetupJob`，`kind="connect"`。盒子连续完成缺失组件安装、已有授权检测、必要时设备码授权、连接检测及启用；APP 只需轮询 `GET /api/acp/jobs/{job_id}`、显示设备码，并用系统浏览器打开 `authorization.url`。用户关闭连接面板或重进 APP 后，可从 `GET /api/acp/setup.active_jobs` 恢复进度；取消沿用 `/api/acp/jobs/{job_id}/cancel`。成功以 `status="succeeded"` 且 `setup.connection="ready", setup.enabled=true` 为准，不另发启用请求，不在用户电脑下载安装 Codex，不搬运宿主凭据。进度 job 不跨服务重启恢复，重启后重新点击连接会检查现有安装和授权。APP 的 Swift/UI 接线仍留待后续实施。

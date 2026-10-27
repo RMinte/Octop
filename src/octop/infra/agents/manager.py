@@ -3645,6 +3645,30 @@ class AgentManager:
             runners_dict = (
                 self._acp_settings.load_runners(acp_user_id) if acp_user_id is not None else {}
             )
+            if acp_user_id is not None and any(
+                runner.get("enabled", False) for runner in runners_dict.values()
+            ):
+                from octop_harness.runtime_env import backend_workspace_dotenv_reader
+
+                from octop.infra.agents.acp_setup import ACPSetupService
+
+                setup = ACPSetupService(self._acp_settings, self._paths.root)
+                workspace_env = backend_workspace_dotenv_reader(ws)()
+                runners_dict = {
+                    name: {
+                        **runner,
+                        "env": setup.legacy_runner_environment(
+                            acp_user_id,
+                            name,
+                            runner,
+                            workspace_env=workspace_env,
+                            ensure=True,
+                        ),
+                    }
+                    if runner.get("enabled", False)
+                    else runner
+                    for name, runner in runners_dict.items()
+                }
             acp_config = ACPConfig.from_dict({"runners": runners_dict})
 
         system_prompt = row.system_prompt

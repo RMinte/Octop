@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -19,7 +20,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from octop.i18n import tr
 from octop.infra.agents.acp_install_runtime import (
@@ -36,6 +37,40 @@ Installation = Literal["not_installed", "installed", "missing_dependency", "manu
 Connection = Literal["unchecked", "ready", "auth_required", "error"]
 _CHECK_TIMEOUT = 25.0
 _INSTALL_TIMEOUT = 240.0
+AUTH_SCOPE_VERSION = 1
+_RUNTIME_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "SHELL",
+        "OS",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_ARCHITEW6432",
+        "NUMBER_OF_PROCESSORS",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LANGUAGE",
+        "TERM",
+        "COLORTERM",
+        "TZ",
+        "NO_COLOR",
+        "FORCE_COLOR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
 
 _CREDENTIALS = {
     "pi": {
@@ -58,6 +93,7 @@ class ACPCredentialOption(BaseModel):
 
 
 class ACPRunnerSetup(BaseModel):
+    _configuration: dict[str, Any] | None = PrivateAttr(default=None)
     runner: str
     installation: Installation = Field(
         description="Passive installation state on the execution host"
@@ -158,6 +194,81 @@ class ACPSetupService:
 
     def _env(self, config: dict[str, Any]) -> dict[str, str]:
         return runtime_environment(self._root.parent, _environment(config))
+
+    def runner_environment(
+        self, user_id: int, runner: str, config: dict[str, Any], *, ensure: bool = False
+    ) -> dict[str, str]:
+        """Give login, inspection and execution the same owner/runner credential scope.
+
+        Executables remain shared. Existing host CLI tokens and provider environment
+        credentials are never adopted into this account's private login directory.
+        """
+        if user_id < 1:
+            raise ValueError("ACP requires an account owner")
+        token = hashlib.sha256(runner.encode()).hexdigest()
+        home = self._root.parent / "users" / str(user_id) / token / "home"
+        identity = {
+            "HOME": home,
+            "USERPROFILE": home,
+            "APPDATA": home / "AppData" / "Roaming",
+            "LOCALAPPDATA": home / "AppData" / "Local",
+            "XDG_CONFIG_HOME": home / ".config",
+            "XDG_DATA_HOME": home / ".local" / "share",
+            "XDG_CACHE_HOME": home / ".cache",
+            "XDG_STATE_HOME": home / ".local" / "state",
+            "XDG_RUNTIME_DIR": home / ".run",
+            "CODEX_HOME": home / ".codex",
+            "CLAUDE_CONFIG_DIR": home / ".claude",
+            "PI_CODING_AGENT_DIR": home / ".pi" / "agent",
+            "OPENCODE_CONFIG_DIR": home / ".config" / "opencode",
+        }
+        reserved = {*identity, "HOMEDRIVE", "HOMEPATH", "OPENCODE_CONFIG", "KIMI_CONFIG_FILE"}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() in _RUNTIME_ENV_KEYS or key.upper().startswith("LC_")
+        }
+        env.update(
+            {
+                str(key): str(value)
+                for key, value in config.get("env", {}).items()
+                if str(key).upper() not in reserved
+            }
+        )
+        env.update({key: str(path) for key, path in identity.items()})
+        if os.name == "nt":
+            env["HOMEDRIVE"], env["HOMEPATH"] = home.drive, str(home)[len(home.drive) :]
+        if ensure:
+            for path in set(identity.values()):
+                path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        return self._managed_environment(runner, env)
+
+    def legacy_runner_environment(
+        self,
+        user_id: int,
+        runner: str,
+        config: dict[str, Any],
+        *,
+        workspace_env: dict[str, str] | None = None,
+        ensure: bool = False,
+    ) -> dict[str, str]:
+        """Close the legacy Harness parent-env overlay without persisting credentials.
+
+        Harness applies runner.env after its cwd .env. Owner workspace values are
+        captured with the same protected-key rules; explicit runner values win.
+        """
+        from octop_harness.runtime_env import overlay_env
+
+        explicit = {**overlay_env({}, workspace_env or {}, protect=True), **config.get("env", {})}
+        scoped = self.runner_environment(
+            user_id, runner, {**config, "env": explicit}, ensure=ensure
+        )
+        cleared = {
+            key: ""
+            for key in os.environ
+            if key.upper() not in _RUNTIME_ENV_KEYS and not key.upper().startswith("LC_")
+        }
+        return {**cleared, **scoped}
 
     async def view(self, user_id: int, locale: str) -> ACPSetupView:
         return await asyncio.get_running_loop().run_in_executor(
@@ -326,6 +437,7 @@ class ACPSetupService:
             ],
             docs_url=spec.docs_url if spec else None,
         )
+        result._configuration = copy.deepcopy(config)
         if spec:
             if spec.login_args is not None:
                 login = launch or [spec.binary, *spec.default_args]
@@ -344,7 +456,11 @@ class ACPSetupService:
                         *spec.npm_packages,
                     ]
                 )
-        if launch and observation.get("fingerprint") == _fingerprint(config):
+        if (
+            launch
+            and observation.get("fingerprint") == _fingerprint(config)
+            and observation.get("auth_scope_version") == AUTH_SCOPE_VERSION
+        ):
             value = observation.get("connection")
             if value in {"unchecked", "ready", "auth_required", "error"}:
                 result.connection = cast(Connection, value)
@@ -391,9 +507,20 @@ class ACPSetupService:
 
         return await asyncio.get_running_loop().run_in_executor(None, save)
 
-    async def check(self, user_id: int, runner: str, locale: str) -> ACPRunnerSetup:
+    async def check(
+        self,
+        user_id: int,
+        runner: str,
+        locale: str,
+        *,
+        expected_configuration: dict[str, Any] | None = None,
+    ) -> ACPRunnerSetup:
         loop = asyncio.get_running_loop()
         config = await loop.run_in_executor(None, self._load, user_id, runner)
+        if expected_configuration is not None and config != expected_configuration:
+            result = await self._configuration_changed(user_id, runner, locale)
+            result.connection = "error"
+            return result
         result = await loop.run_in_executor(None, self._status, user_id, runner, config, locale)
         launch = await loop.run_in_executor(None, self._launch, runner, config)
         if launch is None:
@@ -415,6 +542,9 @@ class ACPSetupService:
         message_key = "ready"
         connection: Connection = "ready"
         try:
+            env = await loop.run_in_executor(
+                None, partial(self.runner_environment, user_id, runner, config, ensure=True)
+            )
             spec = RUNNER_SETUP_SPECS.get(runner)
             if (
                 spec
@@ -422,8 +552,8 @@ class ACPSetupService:
                 and runner in {"claude_code", "codex"}
                 and await loop.run_in_executor(None, self._is_standard, spec, config)
             ):
-                await self._check_auth(spec, launch, self._env(config))
-            await asyncio.wait_for(self._probe(launch, self._env(config)), _CHECK_TIMEOUT)
+                await self._check_auth(spec, launch, env)
+            await asyncio.wait_for(self._probe(launch, env), _CHECK_TIMEOUT)
         except TimeoutError:
             connection, message_key = "error", "check_timeout"
         except Exception as exc:
@@ -435,9 +565,15 @@ class ACPSetupService:
                 else ("error", "check_failed")
             )
         latest = await loop.run_in_executor(None, self._load, user_id, runner)
-        if _fingerprint(latest) != _fingerprint(config):
+        if (
+            latest != config
+            if expected_configuration is not None
+            else _fingerprint(latest) != _fingerprint(config)
+        ):
             result = await loop.run_in_executor(None, self._status, user_id, runner, latest, locale)
             result.message = tr("acp_setup.config_changed", locale)
+            if expected_configuration is not None:
+                result.connection = "error"
             return result
         checked_at = time.time_ns() // 1_000_000
         await loop.run_in_executor(
@@ -448,6 +584,7 @@ class ACPSetupService:
             {
                 "fingerprint": _fingerprint(config),
                 "connection": connection,
+                "auth_scope_version": AUTH_SCOPE_VERSION,
                 "checked_at": checked_at,
             },
         )
@@ -484,17 +621,50 @@ class ACPSetupService:
             env = dict(latest.get("env", {}))
             env["PATH"] = self._managed_environment(runner, self._env(latest))["PATH"]
             updated["env"] = env
-        runners[runner] = updated
-        self._settings.save_runners(user_id, runners)
+        saved = self._settings.update_runner_if_matches(user_id, runner, expected, updated)
+        if saved is None:
+            raise RuntimeError("ACP configuration changed")
         if managed:
             self._save_setup_status(user_id, runner, {"managed_launch": launch})
-        return updated
+        return saved
+
+    async def enable_checked(
+        self, user_id: int, runner: str, locale: str, expected_configuration: dict[str, Any]
+    ) -> ACPRunnerSetup:
+        def commit() -> ACPRunnerSetup:
+            config = self._load(user_id, runner)
+            result = self._status(user_id, runner, config, locale)
+            observation = self._settings.load_setup_status(user_id, runner)
+            if (
+                config != expected_configuration
+                or result.connection != "ready"
+                or observation.get("connection") != "ready"
+                or observation.get("fingerprint") != _fingerprint(config)
+                or observation.get("auth_scope_version") != AUTH_SCOPE_VERSION
+            ):
+                result.connection = "error"
+                result.message = tr("acp_setup.config_changed", locale)
+                return result
+            saved = self._settings.update_runner_if_matches(
+                user_id, runner, config, {"enabled": True}, expected_status=observation
+            )
+            if saved is None:
+                result.connection = "error"
+                result.message = tr("acp_setup.config_changed", locale)
+                return result
+            result.enabled = True
+            result._configuration = saved
+            result.message = tr("acp_setup.connected", locale)
+            return result
+
+        return await asyncio.get_running_loop().run_in_executor(None, commit)
 
     async def _capture(self, command: list[str], env: dict[str, str]) -> tuple[int, bytes]:
         """Read bounded local CLI status output; it is never included in the API response."""
         process = await asyncio.create_subprocess_exec(
             *command,
             env=env,
+            cwd=env.get("HOME"),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -588,6 +758,8 @@ class ACPSetupService:
         runner: str,
         locale: str,
         on_progress: Callable[[str], None] | None = None,
+        *,
+        expected_configuration: dict[str, Any] | None = None,
     ) -> ACPRunnerSetup:
         progress = on_progress or (lambda _stage: None)
         lock = self._install_locks.setdefault(runner, asyncio.Lock())
@@ -602,6 +774,10 @@ class ACPSetupService:
             loop = asyncio.get_running_loop()
             config = await loop.run_in_executor(None, self._load, user_id, runner)
             result = await loop.run_in_executor(None, self._status, user_id, runner, config, locale)
+            if expected_configuration is not None and config != expected_configuration:
+                result.connection = "error"
+                result.message = tr("acp_setup.config_changed", locale)
+                return result
             if not result.can_install:
                 result.connection = "error"
                 result.message = tr("acp_setup.unsupported_install", locale)
@@ -673,7 +849,7 @@ class ACPSetupService:
                 return result
             try:
                 saved = await loop.run_in_executor(
-                    None, self._save_launch, user_id, runner, latest, launch, True, True
+                    None, self._save_launch, user_id, runner, config, launch, True, True
                 )
             except RuntimeError:
                 result = await self._configuration_changed(user_id, runner, locale)

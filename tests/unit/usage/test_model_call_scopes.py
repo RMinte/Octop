@@ -101,6 +101,7 @@ def turn(owner: int = 7) -> SimpleNamespace:
         turn_id=f"turn-{owner}",
         request_id=f"request-{owner}",
         model_ref="ActualProvider/actual-model",
+        configuration_json="{}",
     )
 
 

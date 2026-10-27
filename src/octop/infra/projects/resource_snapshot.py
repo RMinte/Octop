@@ -16,6 +16,20 @@ _FILENAME = "skills.json"
 _VERSION = 1
 
 
+def expert_skill_files(profile: dict[str, Any]) -> list[tuple[str, list[tuple[str, bytes]]]]:
+    """Decode the frozen expert's local skills without reopening its workspace."""
+    result = []
+    for skill in profile.get("workspace_skills", []):
+        entries = []
+        for item in skill["files"]:
+            data = base64.b64decode(item["data"], validate=True)
+            if hashlib.sha256(data).hexdigest() != item["sha256"]:
+                raise SnapshotError("expert skill snapshot changed")
+            entries.append((item["path"], data))
+        result.append((skill["slug"], entries))
+    return result
+
+
 class SnapshotError(ValueError):
     """A turn's saved skills are invalid or do not match its resource selection."""
 

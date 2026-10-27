@@ -81,3 +81,25 @@ it("never accepts arbitrary origins as remote API targets", () => {
   );
   expect(taskTransport(null)).toBeDefined();
 });
+it("inspects engine capabilities and patches selections only on the selected box", async () => {
+  const api = createProjectTasksApi("engine-box");
+  const engine = {
+    engine_id: "acp" as const,
+    connection_id: "codex",
+    model_id: null,
+  };
+  await api.inspectEngine(engine);
+  expect(request).toHaveBeenCalledWith(
+    "/bridge/connections/engine-box/task-api/project-tasks/engines/inspect",
+    expect.objectContaining({ method: "POST", body: JSON.stringify(engine) }),
+  );
+  await api.update("same-task", {
+    engine,
+    expected_revision: 2,
+    expected_configuration_revision: 4,
+  });
+  expect(request).toHaveBeenCalledWith(
+    "/bridge/connections/engine-box/task-api/project-tasks/same-task",
+    expect.objectContaining({ method: "PATCH" }),
+  );
+});

@@ -21,6 +21,17 @@ The cards distinguish installation, connection readiness, and enablement. Loadin
 page does not download packages or start an agent. Built-in runners are installed by
 background jobs on the **box running Octop**; users do not need SSH or host terminal commands.
 
+**Connect Codex** is a single operation: Octop installs missing components, checks for an
+existing authorization, displays the browser authorization step when needed, then checks
+the connection and enables Codex automatically. Users do not install Codex on their own
+computer or separately click sign in, check, and enable. Existing valid authorization is
+reused. If ChatGPT has device code sign-in disabled, the user must enable it in ChatGPT's
+security settings before retrying; Octop cannot accept provider authorization on their behalf.
+Progress can be reopened after closing or refreshing the page. Cancellation, failed checks,
+or a concurrent launch configuration change do not automatically enable the runner.
+
+The following individual installation/login/check actions remain available for other runners.
+
 | Status | Meaning | Next action |
 |--------|---------|-------------|
 | Not installed | The runner or required component is missing | Install on the box |
@@ -40,8 +51,9 @@ report an error. Node archives are checked against pinned official SHA256 values
 are safely unpacked, and incomplete downloads do not count as installed. System folders
 and the service account's `HOME` are not changed. Custom launch profiles are preserved.
 
-After installation, the runner stays disabled until connection checking and explicit
-enablement. Installation does not accept provider terms or complete OAuth authorization.
+An individual **Install** operation leaves the runner disabled until connection checking
+and explicit enablement. **Connect Codex** includes the subsequent check and enablement in
+the same job. Installation does not accept provider terms or complete OAuth authorization.
 
 **Sign in** starts the runner's fixed login-specific process on the box. The page displays
 its approved authorization URL, device code, or interactive authentication response
@@ -49,7 +61,7 @@ field. Users complete the provider authorization in their own browser. No genera
 shell is opened. Pi and CodeBuddy use a web provider/API-key form because their interactive
 entrypoints launch the full agent rather than a login-only command; Cursor also provides
 an API-key alternative. Secrets are not echoed in setup responses or retained job output.
-The runner's normal OS service-account credential scope still applies.
+Credentials stay in the current Octop user's private runner HOME on the execution box.
 
 Closing the drawer leaves the operation running; reopening or refreshing recovers active
 jobs. Explicit cancellation or Octop shutdown terminates the operation and its child
@@ -97,7 +109,7 @@ installation uses the current supported adapter packages and a direct local exec
 
 ### Enable delegation in chat
 
-1. Install a runner on `/acp`, authorize or configure its provider, check its connection, then enable it.
+1. Use **Connect Codex** on `/acp` and confirm any browser authorization. For other runners, install, authorize/configure, check, then enable.
 2. Switch agent in the top bar and turn on **Enable acp_runner tool** for that agent.
 3. In chat, ask the agent to use `acp_runner`, or let it delegate when appropriate.
 
@@ -192,6 +204,7 @@ Interactive docs: `/api/docs` (tag **agents**).
 | `GET` | `/api/acp` | — |
 | `PUT` | `/api/acp` | `{ "runners": { "<id>": { … } } }` |
 | `GET` | `/api/acp/setup` | passive host installation status and last connection checks |
+| `POST` | `/api/acp/codex/connect` | start the complete install → browser authorization if needed → check → enable job (`202`) |
 | `POST` | `/api/acp/{runner_name}/install` | start a managed background installation (`202`) |
 | `POST` | `/api/acp/{runner_name}/login` | start a login-specific background authorization (`202`) |
 | `GET` | `/api/acp/jobs/{job_id}` | owner-only progress and authorization state |
@@ -202,6 +215,15 @@ Interactive docs: `/api/docs` (tag **agents**).
 | `GET` | `/api/acp/{runner_name}` | — |
 | `PUT` | `/api/acp/{runner_name}` | runner object |
 | `DELETE` | `/api/acp/{runner_name}` | custom runners only |
+
+Setup and job operations require the existing administrator permission and remain scoped
+to the current account and execution host. The Codex connect response is an `ACPSetupJob`
+with `kind: "connect"`. Poll its owner-only job URL, or recover active jobs from
+`GET /api/acp/setup`; the server continues each stage without additional client requests.
+`succeeded` means Codex passed the final connection check and is enabled. Connection checks
+do not send a model prompt or verify model quota. These HTTP operations can also be used
+by the APP: open `authorization.url` in the system browser and display/copy `user_code`;
+do not invoke the local computer's Codex or copy its credentials to the box.
 
 ### Per-agent tool toggle
 
@@ -229,7 +251,7 @@ Runner shape:
 
 ## Prerequisites
 
-- **octop-harness `[acp]` extra** — pulls in `agent-client-protocol` (included in the Octop wheel dependency on octop-harness).
+- **ACP dependencies** — Octop includes the octop-harness `[acp]` extra and requires `agent-client-protocol>=0.11.0`; Task engines use its public notification queue and dispatcher hooks.
 - **Outbound:** prepare the runner with the card's managed installation, or use an existing CLI on the Octop host.
 - **Inbound:** agent must start successfully (provider + model configured).
 
@@ -244,13 +266,15 @@ Runner shape:
 | External runner returns no text | Check CLI auth/quota (e.g. `codebuddy auth status`) |
 | `octop acp` fails immediately | Agent not running or invalid `--agent`; create/start agent in dashboard first |
 | Command not found | Use absolute path in runner `command` if `PATH` for the server process differs from your shell |
-| Kimi Code fails to start | Install [kimi-code](https://github.com/MoonshotAI/kimi-code) and run `kimi` login on the host |
-| Cursor CLI fails to start | Install Cursor CLI; run `agent login` or set `CURSOR_API_KEY` |
+| Kimi Code fails to start | Use managed installation, then authorize Kimi from the runner card on the execution box |
+| Cursor CLI fails to start | Use managed installation and the card's web authorization or account-specific API key form |
 | Pi runner fails to start | Retry managed installation and inspect its progress; both the Pi runtime and ACP adapter are required |
 
 ---
 
 ## Related
+
+- [Task execution engines](task-execution-engines.md): expert/engine separation, same-task switching, box-side authorization and recovery boundaries.
 
 - Dashboard: `/acp`
 - CLI: `octop acp --help`

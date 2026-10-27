@@ -48,10 +48,9 @@ class ProjectTaskTurnRow:
 
     @property
     def is_waiting(self) -> bool:
-        return (
-            self.status == "running"
-            and not self.worker_id
-            and bool(self.checkpoint_id or self.wait_kind == "interrupted")
+        return self.status == "running" and (
+            (not self.worker_id and bool(self.checkpoint_id or self.wait_kind == "interrupted"))
+            or (bool(self.worker_id) and self.wait_kind == "engine_approval")
         )
 
     @classmethod
@@ -424,6 +423,46 @@ class ProjectTaskTurnRepo:
             "UPDATE project_task_turns SET interactions_json=?,interaction_revision=interaction_revision+1,updated_at=? WHERE turn_id=?",
             (interactions_json, now, turn_id),
         )
+
+    @staticmethod
+    def engine_wait(conn: Any, turn: ProjectTaskTurnRow, waiting: bool, now: int) -> bool:
+        """Keep a live native permission RPC under the current worker's lease."""
+        return bool(
+            conn.execute(
+                "UPDATE project_task_turns SET wait_kind=?,updated_at=? "
+                "WHERE turn_id=? AND worker_id=? AND status='running' AND cancel_requested=0",
+                ("engine_approval" if waiting else "", now, turn.turn_id, turn.worker_id),
+            ).rowcount
+            == 1
+        )
+
+    def save_engine_facts(self, turn: ProjectTaskTurnRow, facts: dict[str, Any], now: int) -> bool:
+        """Append non-sensitive runtime observations without changing the chosen route."""
+        if not set(facts) <= {"actual_model_id", "resumed", "workspace_scope"}:
+            raise ValueError("invalid engine facts")
+        with self._db.transaction() as conn:
+            row = self.get_in_transaction(conn, turn.turn_id)
+            if row is None or row.worker_id != turn.worker_id or row.status != "running":
+                return False
+            configuration = json.loads(row.configuration_json)
+            configuration["execution_engine"] = {
+                **configuration.get("execution_engine", {}),
+                **facts,
+            }
+            return bool(
+                conn.execute(
+                    "UPDATE project_task_turns SET configuration_json=?,updated_at=? "
+                    "WHERE turn_id=? AND worker_id=? AND status='running' AND cancel_requested=0 "
+                    "AND configuration_json=?",
+                    (
+                        json.dumps(configuration),
+                        now,
+                        turn.turn_id,
+                        turn.worker_id,
+                        row.configuration_json,
+                    ),
+                ).rowcount
+            )
 
     @staticmethod
     def save_request(conn: Any, turn_id: str, requests_json: str, pause_requested: bool) -> None:

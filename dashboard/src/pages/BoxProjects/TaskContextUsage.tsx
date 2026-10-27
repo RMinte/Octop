@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import {
   type TaskContextUsage as ContextUsage,
   type TaskTurn,
+  type EngineSelection,
 } from "../../api/modules/projects";
 import { apiErrorMessage } from "../../utils/apiError";
 
@@ -20,7 +21,7 @@ const segmentKeys: Record<string, string> = {
 };
 type UsageTurn = Pick<
   TaskTurn,
-  "turn_id" | "status" | "input_tokens" | "output_tokens"
+  "turn_id" | "status" | "input_tokens" | "output_tokens" | "execution_engine"
 >;
 
 function tokens(value: number) {
@@ -30,9 +31,16 @@ function tokens(value: number) {
 export function TaskTurnUsage({
   turn,
 }: {
-  turn: Pick<TaskTurn, "input_tokens" | "output_tokens">;
+  turn: Pick<TaskTurn, "input_tokens" | "output_tokens" | "execution_engine">;
 }) {
   const { t } = useTranslation();
+  if (turn.execution_engine?.engine_id === "acp")
+    return (
+      <span>
+        {" · "}
+        {t(`${prefix}.engineUsageManaged`)}
+      </span>
+    );
   if (turn.input_tokens === undefined && turn.output_tokens === undefined)
     return null;
   return (
@@ -56,14 +64,17 @@ export default function TaskContextUsage({
   taskID,
   active,
   turns,
+  engine,
 }: {
   taskID: string;
   active: boolean;
   turns: UsageTurn[];
+  engine?: EngineSelection;
 }) {
   const { projectTasksApi } = useTaskHost();
   const { t } = useTranslation();
   const [attempt, setAttempt] = useState(0);
+  const external = engine?.engine_id === "acp";
   const [state, setState] = useState<{
     taskID: string;
     usage: ContextUsage | null;
@@ -73,6 +84,7 @@ export default function TaskContextUsage({
   const refreshKey = `${latest?.turn_id ?? ""}:${latest?.status ?? ""}`;
 
   useEffect(() => {
+    if (external) return;
     let disposed = false;
     let timer: number | undefined;
     const controller = new AbortController();
@@ -100,13 +112,15 @@ export default function TaskContextUsage({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [taskID, active, refreshKey, attempt, projectTasksApi]);
+  }, [taskID, active, refreshKey, attempt, projectTasksApi, external]);
 
   const usage = state.taskID === taskID ? state.usage : null;
   const error = state.taskID === taskID ? state.error : null;
   const measured = turns.filter(
     (turn) =>
-      turn.input_tokens !== undefined && turn.output_tokens !== undefined,
+      turn.execution_engine?.engine_id !== "acp" &&
+      turn.input_tokens !== undefined &&
+      turn.output_tokens !== undefined,
   );
   const input = measured.reduce((total, turn) => total + turn.input_tokens!, 0);
   const output = measured.reduce(
@@ -129,13 +143,18 @@ export default function TaskContextUsage({
       aria-label={t(`${prefix}.label`)}
     >
       <Space wrap size="small">
-        {!usage && !error && <Spin size="small" />}
-        {usage?.source === "empty" && (
+        {external ? (
+          <Typography.Text type="secondary">
+            {t(`${prefix}.engineContextManaged`)}
+          </Typography.Text>
+        ) : null}
+        {!external && !usage && !error && <Spin size="small" />}
+        {!external && usage?.source === "empty" && (
           <Typography.Text type="secondary">
             {t(`${prefix}.empty`)}
           </Typography.Text>
         )}
-        {usage?.source === "model_request" && (
+        {!external && usage?.source === "model_request" && (
           <Popover
             trigger="click"
             title={t(`${prefix}.details`)}
@@ -196,7 +215,7 @@ export default function TaskContextUsage({
             </Button>
           </Popover>
         )}
-        {!!error && (
+        {!external && !!error && (
           <>
             <Typography.Text type="danger">
               {apiErrorMessage(error, t(`${prefix}.failure`), t)}

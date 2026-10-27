@@ -202,6 +202,11 @@ def control(
     now = int(time.time() * 1000)
     with services.db.transaction() as conn:
         turn = _load_owned(services, conn, owner, task_id, body.turn_id)
+        if (
+            json.loads(turn.configuration_json).get("execution_engine", {}).get("engine_id")
+            == "acp"
+        ):
+            raise OctopError.localized(ErrorCode.TASK_CONTROL_INVALID)
         requests = _request(
             turn,
             body.request_id,

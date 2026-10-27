@@ -19,15 +19,25 @@ from octop.infra.projects import approval_policy, input_attachments
 from octop.infra.projects.content import TaskContentBlock
 from octop.infra.projects.conversation_import_models import ImportedTurnHistory
 from octop.infra.projects.deletion_state import assert_project_writable
+from octop.infra.projects.engine_catalog import (
+    EngineSelection,
+    execution_json,
+    read_engine,
+    validate_engine,
+)
 from octop.infra.projects.expert_profiles import resolve_expert_profile
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.legacy_conversation_models import LegacySourceAttachment
 from octop.infra.projects.models import ProjectModel, Reference
-from octop.infra.projects.tasks import Prompt, RequestID, now_ms
+from octop.infra.projects.tasks import ActionMode, Prompt, RequestID, now_ms
 from octop.infra.utils.ulid import new_ulid
 
 
 class TaskFork(ProjectModel):
+    engine: EngineSelection | None = Field(
+        default=None, description="省略继承来源执行引擎；分支创建新的原生会话。"
+    )
+    action_mode: ActionMode | None = Field(default=None, description="分支执行模式；省略继承来源。")
     request_id: RequestID = Field(description="分支创建的幂等标识；相同标识必须重发相同请求。")
     operation: Literal["fork", "edit", "regenerate"] = Field(
         default="fork", description="fork 包含锚点；edit 和 regenerate 从锚点前继续。"
@@ -279,6 +289,10 @@ def create(
             if project.archived:
                 raise OctopError.localized(ErrorCode.PROJECT_ARCHIVED)
         resolve_expert_profile(services, owner_id, selected)
+        engine = body.engine or read_engine(source.execution_json)
+        action_mode = body.action_mode or source.action_mode
+        if body.engine is not None or body.action_mode is not None:
+            validate_engine(services, owner_id, engine, action_mode=action_mode)
         policy = approval_policy.in_transaction(conn, services, owner_id)
         task_id, now = "task_" + new_ulid(), now_ms()
         continuation = anchor.prompt if body.operation == "regenerate" else body.prompt
@@ -297,7 +311,8 @@ def create(
                 now,
                 status="completed",
                 selected_expert_id=selected,
-                action_mode=source.action_mode,
+                action_mode=action_mode,
+                execution_json=execution_json(engine),
                 web_search_enabled=source.web_search_enabled,
                 approval_mode=policy.mode,
                 approval_revision=policy.revision,

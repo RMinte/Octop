@@ -105,6 +105,7 @@ class TaskControl(ProjectModel):
 
 WAIT_STATUSES = {
     "approval": "waiting_approval",
+    "engine_approval": "waiting_approval",
     "answer": "waiting_answer",
     "client_tool": "waiting_client_tool",
     "user": "paused",

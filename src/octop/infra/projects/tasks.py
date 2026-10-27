@@ -19,7 +19,13 @@ from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.knowledge.tools import SEARCH_KNOWLEDGE_TOOL
-from octop.infra.projects import approval_policy, artifacts, input_attachments, interactions
+from octop.infra.projects import (
+    approval_policy,
+    artifacts,
+    engine_catalog,
+    input_attachments,
+    interactions,
+)
 from octop.infra.projects.approval_models import (
     ApprovalCapabilities,
     ApprovalMode,
@@ -32,6 +38,11 @@ from octop.infra.projects.context import is_compaction
 from octop.infra.projects.conversation_import_models import ImportedTurnHistory, ImportSource
 from octop.infra.projects.cursors import cursor_codec, cursor_reset
 from octop.infra.projects.deletion_state import assert_project_writable
+from octop.infra.projects.engine_catalog import (
+    EngineCatalogEntry,
+    ExecutionEngineSnapshot,
+)
+from octop.infra.projects.engine_catalog import EngineSelection as EngineSelection
 from octop.infra.projects.file_changes import TaskFileChange
 from octop.infra.projects.image_tools import READ_TASK_IMAGE
 from octop.infra.projects.input_attachment_models import TaskInputAttachment
@@ -234,6 +245,7 @@ class TaskExpertOption(ProjectModel):
 
 
 class TaskResources(ProjectResources):
+    execution_engines: list[EngineCatalogEntry] = Field(default_factory=list)
     experts: list[TaskExpertOption] = Field(
         default_factory=list,
         description="本人可用的本地专家、本人团队及已授权共享专家；不含私人管家。",
@@ -251,6 +263,9 @@ class TaskResources(ProjectResources):
 
 
 class TaskPatch(ProjectModel):
+    engine: EngineSelection | SkipJsonSchema[None] = Field(
+        default=None, description="空闲时选择下一轮执行引擎；必须提供配置版本，历史快照不变。"
+    )
     expected_revision: Annotated[StrictInt, Field(ge=1)] = Field(
         description="详情或摘要的 list_revision；冲突返回 409。"
     )
@@ -284,6 +299,7 @@ class TaskPatch(ProjectModel):
         if {
             "selected_expert_id",
             "action_mode",
+            "engine",
         } & changes.keys() and self.expected_configuration_revision is None:
             raise ValueError(
                 "expected_configuration_revision is required for configuration changes"
@@ -342,6 +358,10 @@ class TaskCancel(ProjectModel):
 
 
 class ProjectTaskCreate(TaskMessage):
+    engine: EngineSelection = Field(
+        default_factory=EngineSelection,
+        description="任务执行引擎，默认Octop；ACP连接须属于本人且已启用并检查就绪。",
+    )
     selected_expert_id: Reference | None = Field(
         default=None,
         description="可选本人专家、本人团队或已授权共享专家的 agent_id；null 使用通用助手。",
@@ -364,6 +384,10 @@ class TaskCreate(ProjectTaskCreate):
 
 
 class TaskTurn(ProjectModel):
+    execution_engine: ExecutionEngineSnapshot = Field(
+        default_factory=ExecutionEngineSnapshot,
+        description="本轮受理时冻结的引擎、连接、原生模型及适配能力；不含凭据和私有会话标识。",
+    )
     history_only: bool = False
     source_task_id: str | None = None
     source_turn_id: str | None = None
@@ -462,6 +486,9 @@ class TaskTurn(ProjectModel):
 
 
 class TaskSummary(ProjectModel):
+    engine: EngineSelection = Field(
+        default_factory=EngineSelection, description="任务下一轮采用的持久引擎选择。"
+    )
     selected_expert_id: str | None = None
     configuration_revision: int = 1
     action_mode: ActionMode = "craft"
@@ -523,6 +550,7 @@ def _datetime(value: int) -> datetime:
 
 def summary(row: ProjectTaskRow, policy: TaskApprovalPolicy) -> TaskSummary:
     return TaskSummary(
+        engine=engine_catalog.read_engine(row.execution_json),
         selected_expert_id=row.selected_expert_id,
         configuration_revision=row.configuration_revision,
         action_mode=cast(ActionMode, row.action_mode),
@@ -554,6 +582,9 @@ def turn_view(t: ProjectTaskTurnRow, attachments: list[TaskArtifact] | None = No
             if block.status == "streaming":
                 block.status = "interrupted"
     return TaskTurn(
+        execution_engine=ExecutionEngineSnapshot.model_validate(
+            configuration.get("execution_engine") or {}
+        ),
         history_only=origin.get("history_only", False),
         source_task_id=origin.get("source_task_id"),
         source_turn_id=origin.get("source_turn_id"),
@@ -845,7 +876,10 @@ def _configuration(
     selected_expert_id: str | None = None,
     action_mode: ActionMode = "craft",
     configuration_revision: int = 1,
+    engine: EngineSelection | None = None,
 ) -> tuple[str, str]:
+    engine = engine or EngineSelection()
+    entry = engine_catalog.validate_engine(services, owner_id, engine, action_mode=action_mode)
     snapshot = _base_configuration(
         services,
         owner_id,
@@ -855,6 +889,17 @@ def _configuration(
         action_mode,
         configuration_revision,
     )
+    snapshot["execution_engine"] = engine_catalog.snapshot_engine(entry)
+    if engine.engine_id == "acp":
+        engine_catalog.validate_configuration(snapshot)
+        if options.routing is not None or options.model_ref:
+            raise OctopError.localized(
+                ErrorCode.TASK_SETTINGS_INVALID,
+                status=409,
+                setting="model_ref",
+                details={"setting": "model_ref", "reason": "native_engine_model"},
+            )
+        return json.dumps(snapshot), ""
     if options.routing is not None and options.model_ref and routing_decision is None:
         routing_decision = decide_model(
             ProviderStore(services.provider_repo),
@@ -917,6 +962,14 @@ def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: s
                 saved.get("web_search_enabled", True) != body.web_search_enabled
                 or (saved.get("expert_profile") or {}).get("expert_id") != body.selected_expert_id
                 or saved.get("action_mode", "craft") != body.action_mode
+                or EngineSelection.model_validate(
+                    {
+                        key: (saved.get("execution_engine") or {}).get(key)
+                        for key in ("engine_id", "connection_id", "model_id")
+                        if key in (saved.get("execution_engine") or {})
+                    }
+                )
+                != body.engine
             )
         )
     ):
@@ -932,6 +985,20 @@ def _input_configuration(
     configuration: str,
     model_ref: str,
 ) -> str:
+    selected_engine = json.loads(configuration).get("execution_engine") or {}
+    if selected_engine.get("engine_id") == "acp" and is_compaction(
+        body.prompt, body.attachment_ids
+    ):
+        raise OctopError.localized(
+            ErrorCode.TASK_SETTINGS_INVALID,
+            status=409,
+            setting="engine",
+            details={
+                "setting": "engine",
+                "reason": "unsupported_capability",
+                "capability": "compact",
+            },
+        )
     attached = input_attachments.bind(services, conn, owner_id, task_id, body.attachment_ids)
     has_images = any(
         input_attachments.is_image(row.media_type)
@@ -939,7 +1006,24 @@ def _input_configuration(
     )
     if (
         has_images
+        and selected_engine.get("engine_id") == "acp"
+        and not selected_engine.get("capabilities", {}).get("images", False)
+    ):
+        raise OctopError.localized(
+            ErrorCode.TASK_SETTINGS_INVALID,
+            status=409,
+            setting="engine",
+            details={
+                "setting": "engine",
+                "reason": "unsupported_capability",
+                "capability": "images",
+            },
+        )
+    if (
+        has_images
         and not is_compaction(body.prompt, body.attachment_ids)
+        and json.loads(configuration).get("execution_engine", {}).get("engine_id", "octop")
+        == "octop"
         and not ProviderStore(services.provider_repo).is_model_ref_multimodal(model_ref)
     ):
         raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
@@ -1078,6 +1162,7 @@ def send_in_transaction(
             selected_expert_id=task.selected_expert_id,
             action_mode=cast(ActionMode, task.action_mode),
             configuration_revision=task.configuration_revision,
+            engine=engine_catalog.read_engine(task.execution_json),
         )
         configuration = json.dumps(
             {
@@ -1129,6 +1214,7 @@ def send_in_transaction(
             body.selected_expert_id if isinstance(body, ProjectTaskCreate) else None
         )
         action_mode = body.action_mode if isinstance(body, ProjectTaskCreate) else "craft"
+        selected_engine = body.engine if isinstance(body, ProjectTaskCreate) else EngineSelection()
         configuration, model_ref = _configuration(
             services,
             owner_id,
@@ -1137,6 +1223,7 @@ def send_in_transaction(
             routing_decision,
             selected_expert_id=selected_expert_id,
             action_mode=action_mode,
+            engine=selected_engine,
         )
         task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
         web_search_enabled = (
@@ -1174,6 +1261,7 @@ def send_in_transaction(
                 web_search_enabled=web_search_enabled,
                 selected_expert_id=selected_expert_id,
                 action_mode=action_mode,
+                execution_json=engine_catalog.execution_json(selected_engine),
             ),
         )
         configuration = _input_configuration(
@@ -1299,6 +1387,7 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
         default_model_ref=resolve_model_ref(services),
         routing=routing_capabilities(services),
         approval=approval_policy.capabilities(services),
+        execution_engines=engine_catalog.catalog(services, owner_id),
     )
 
 
@@ -1313,7 +1402,7 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
         assert_project_writable(services, conn, owner_id, current.project_id)
         if current.list_revision != body.expected_revision:
             raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
-        if {"selected_expert_id", "action_mode"} & body.model_fields_set:
+        if {"selected_expert_id", "action_mode", "engine"} & body.model_fields_set:
             from octop.infra.projects.expert_profiles import resolve_expert_profile
 
             selected = (
@@ -1324,12 +1413,19 @@ def patch(services: SharedServices, owner_id: int, task_id: str, body: TaskPatch
             if current.active_turn_id:
                 raise OctopError.localized(ErrorCode.TASK_BUSY)
             resolve_expert_profile(services, owner_id, selected)
+            selection = body.engine or engine_catalog.read_engine(current.execution_json)
+            engine_catalog.validate_engine(
+                services, owner_id, selection, action_mode=body.action_mode or current.action_mode
+            )
             updated = repo.update_configuration(
                 conn,
                 replace(
                     current,
                     selected_expert_id=selected,
                     action_mode=body.action_mode or current.action_mode,
+                    execution_json=engine_catalog.execution_json(selection, current.execution_json)
+                    if selection != engine_catalog.read_engine(current.execution_json)
+                    else current.execution_json,
                     updated_at=now_ms(),
                 ),
                 body.expected_configuration_revision or 1,

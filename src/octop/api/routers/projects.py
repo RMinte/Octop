@@ -26,6 +26,7 @@ from octop.infra.projects import (
     branches,
     composer_resources,
     deletion,
+    engine_catalog,
     expert_memory_management,
     input_attachments,
     interactions,
@@ -379,6 +380,41 @@ def _task_worker(server: OctopServer) -> ProjectTaskWorker:
 
 
 task_router = APIRouter(prefix="/project-tasks")
+
+
+@task_router.get(
+    "/engines",
+    response_model=list[engine_catalog.EngineCatalogEntry],
+    summary="列出当前账号可用的任务执行引擎",
+    description="只读已保存的安装、连接检查及启用状态；不会启动进程、下载组件或发起登录。远端引擎在所属主机解析。",
+)
+async def task_engines(
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> list[engine_catalog.EngineCatalogEntry]:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(
+        engine_catalog.catalog, _services(server), user.id, user.locale or "zh"
+    )
+
+
+@task_router.post(
+    "/engines/inspect",
+    response_model=engine_catalog.EngineCatalogEntry,
+    summary="发现执行引擎原生模型和会话能力",
+    description="显式启动当前账号已启用且连接就绪的引擎，进行无消息的协议握手并关闭；不执行用户任务。",
+)
+async def inspect_task_engine(
+    body: engine_catalog.EngineSelection,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(current_user),
+) -> engine_catalog.EngineCatalogEntry:
+    from octop.infra.projects.engines.runtime import inspect_engine
+
+    response.headers["Cache-Control"] = "no-store"
+    return await inspect_engine(_services(server), user.id, body)
 
 
 def _artifact_library_query(
@@ -791,8 +827,8 @@ async def continue_legacy_conversation(
 @task_router.patch(
     "/{task_id}",
     response_model=tasks.TaskDetail,
-    summary="修改统一会话的标题、专家、模式或归档状态",
-    description="必须提供 expected_revision（list_revision）；切换专家或行动模式还须提供 expected_configuration_revision 且任务空闲，历史轮次身份不变。置顶、网络搜索和归档随任务保存；归档保留会话，恢复后可继续。版本冲突返回 409。",
+    summary="修改统一会话的标题、专家、引擎、模式或归档状态",
+    description="必须提供 expected_revision（list_revision）；切换专家、引擎或行动模式还须提供 expected_configuration_revision 且任务空闲，仅影响下一轮，历史快照不变。置顶、网络搜索和归档随任务保存；归档保留会话，恢复后可继续。版本冲突返回 409。",
 )
 async def patch_task(
     task_id: str,
@@ -803,7 +839,10 @@ async def patch_task(
 ) -> tasks.TaskDetail:
     response.headers["Cache-Control"] = "no-store"
     result = await asyncio.to_thread(tasks.patch, _services(server), user.id, task_id, body)
-    if body.archived is True or {"selected_expert_id", "action_mode"} & body.model_fields_set:
+    if (
+        body.archived is True
+        or {"selected_expert_id", "action_mode", "engine"} & body.model_fields_set
+    ):
         from octop.api.routers.project_task_workbench import close_task_sessions
 
         await close_task_sessions(task_id, user.id)
