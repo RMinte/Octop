@@ -588,7 +588,14 @@ export function createProjectTasksApi(hostID: string | null = null) {
       }),
     approvalEvents: projectTaskSocket.approvalEvents.bind(projectTaskSocket),
     settings: () =>
-      request<TaskPresentationSettings>("/project-tasks/settings"),
+      request<TaskPresentationSettings>("/project-tasks/settings", {
+        cache: "no-store",
+      }),
+    updateSettings: (body: TaskPresentationSettings) =>
+      request<TaskPresentationSettings>("/project-tasks/settings", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
     contextUsage: (id: string, signal?: AbortSignal) =>
       request<TaskContextUsage>(`${taskPath(id)}/context-usage`, {
         signal,

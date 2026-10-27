@@ -18,6 +18,12 @@ export function PageHeader({ className }: PageHeaderProps) {
           <>
             {t("environments.description")}
             <p style={{ marginTop: 8, marginBottom: 0, fontSize: 13 }}>
+              {t("advancedSettings.tasks.envHint")}{" "}
+              <a href="/admin/advanced?tab=tasks">
+                {t("advancedSettings.tasks.openSettings")}
+              </a>
+            </p>
+            <p style={{ marginTop: 8, marginBottom: 0, fontSize: 13 }}>
               {t("environments.secretGuide")}{" "}
               <a
                 href="https://console.cloud.tencent.com/cam/capi"

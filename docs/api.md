@@ -360,6 +360,8 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 
 `TaskTurn.presentation` 是本轮入队时冻结的动作链路和步骤面板展示配置，REST、历史分页、WebSocket 与导出返回相同对象。动作值采用本轮有效 `options.action_timeline_enabled`（显式布尔值优先，否则取全局默认），步骤面板值取入队时全局默认；两项默认均为 `true`。`GET /api/project-tasks/settings` 仅返回新轮默认值，网页已按轮展示，修改设置不影响已有轮次。暂停恢复和相同 `request_id` 重传保留原值，普通追问和手动重试创建新快照，分叉的历史轮保留源值。旧记录无快照时固定按原轮动作配置（缺失为 `true`）及步骤面板 `true` 兼容，不读当前全局设置，也不补写历史；未保存过的步骤面板偏好无法准确重建。本次不修改 APP，当前 APP 仍读全局值，后续接线须在 DTO、合并、缓存与展示中保留并使用本轮对象，详见[任务过程配置](project-task-websocket.md#任务过程配置)。
 
+“应用设置 → 任务设置”通过 `PUT /api/project-tasks/settings` 管理当前服务的新轮默认值，需要 `envs` 权限。请求必须包含 `action_timeline_enabled`、`step_panel_enabled` 两个严格布尔值，缺失、非布尔值或多余字段返回 422；响应为保存后的同名布尔字段，且 `Cache-Control: no-store`。保存仅合并两个任务配置键，保留其他环境变量和密钥，立即对新轮次生效，无需重启或重载专家；已有轮次保留原快照。原环境变量 API 和部署配置继续兼容，环境变量页面不再列出这两项，Bridge 仍只开放读取。
+
 任务列表返回 `{items: TaskSummary[], next_page_cursor: string|null, sync_cursor: string|null}`；摘要为上例移除 `turns`、`next_page_cursor` 和 `event_cursor` 后的字段，包含任务级 `status` 和单调递增的 `list_revision`，详情和写入响应也携带这两个字段。`status` 表示当前或最近一轮的状态，取值与下表一致；首条消息或追问进入 `queued`，开始执行变为 `running`，结束后更新为对应结果。服务端持久保存摘要，每次状态变化与版本递增、列表增量记录原子提交。正文、工具活动、用量和租约心跳不递增列表版本。
 
 每页直接批量返回所有任务状态，客户端用列表缓存绘制侧栏，通过现有 `/tasks/sync` 或 `/project-tasks/sync` 获取变化；加载一页只需一次列表请求，禁止逐个读取详情补状态。打开任务才读取正文详情。仅第一页返回同步基线，后续历史分页不推进同步位置。

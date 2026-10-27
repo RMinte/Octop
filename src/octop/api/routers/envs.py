@@ -11,7 +11,7 @@ from fastapi import APIRouter, Body, Depends
 
 from octop.api.deps import get_server, require_permission
 from octop.infra.errors import ErrorCode, OctopError
-from octop.infra.projects.settings import validate_env_values
+from octop.infra.projects.settings import preserve_env_values, validate_env_values
 from octop.infra.utils.env_file import (
     apply_env_file_replace,
     env_file_path,
@@ -84,7 +84,9 @@ async def list_envs(
     summary="Replace global environment variables",
     description=(
         "Overwrite ~/.octop/env and align the Octop process environment "
-        "(including deleting keys removed from the list). Running execute "
+        "(including deleting editable keys removed from the list). The two task "
+        "defaults managed by Task Settings are preserved when omitted; explicit "
+        "values remain supported. Running execute "
         "shells and Docker sandboxes pick up keys on the next command without "
         "an agent reload. Agents reload in the background only when search "
         "API keys (Tavily, Brave, …) change."
@@ -106,6 +108,7 @@ async def batch_save_envs(
     validate_env_values(cleaned)
     path = env_file_path(server.paths.root)
     previous = load_env_file(path)
+    cleaned = preserve_env_values(cleaned, previous, env_file_exists=path.exists())
     _restore_secret_sentinel(cleaned, previous)
     save_env_file(path, cleaned)
     apply_env_file_replace(path, previous=previous)
@@ -116,7 +119,10 @@ async def batch_save_envs(
 @router.delete(
     "/{key}",
     summary="Delete one global environment variable",
-    description="Remove a key from ~/.octop/env and the process environment.",
+    description=(
+        "Remove a key from ~/.octop/env and the process environment. "
+        "Other task defaults are preserved; deleting a task default restores its default value."
+    ),
 )
 async def delete_env(
     key: str,
@@ -128,6 +134,7 @@ async def delete_env(
         raise OctopError(ErrorCode.SLASH_BAD_ARGS, f"invalid env key: {k!r}")
     path = env_file_path(server.paths.root)
     previous = load_env_file(path)
+    previous = preserve_env_values(previous, previous, env_file_exists=path.exists())
     values = dict(previous)
     values.pop(k, None)
     save_env_file(path, values)

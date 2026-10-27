@@ -12,7 +12,15 @@ export function useEnvVars() {
     setError(null);
     try {
       const data = await api.listEnvs();
-      if (data) setEnvVars(data);
+      if (data) {
+        setEnvVars(
+          data.filter(
+            ({ key }) =>
+              key !== "OCTOP_TASK_ACTION_TIMELINE_ENABLED" &&
+              key !== "OCTOP_TASK_STEP_PANEL_ENABLED",
+          ),
+        );
+      }
     } catch (err) {
       const msg =
         err instanceof Error

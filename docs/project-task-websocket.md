@@ -516,7 +516,7 @@ REST 同样使用 `POST /api/project-tasks/{task_id}/messages`。沿用原有鉴
 
 ### 任务过程配置
 
-“应用设置 → 环境变量”提供两个全局默认值，缺省均为 true；本机本轮核对两项均已设为 true，实际值未改动。
+“应用设置 → 任务设置”（`/admin/advanced?tab=tasks`）提供两个全局开关，缺省均为 true，管理当前 Octop 服务；原环境变量 API 和部署配置继续兼容，环境变量页面不再列出这两项。
 
 | 环境变量 | 生效范围 |
 | --- | --- |
@@ -524,6 +524,8 @@ REST 同样使用 `POST /api/project-tasks/{task_id}/messages`。沿用原有鉴
 | `OCTOP_TASK_STEP_PANEL_ENABLED` | 新轮已有计划的步骤面板展示默认值，不控制计划是否创建或执行 |
 
 接受 true/false、1/0、yes/no、on/off，忽略大小写和两端空白。环境保存先校验这两键，非法值返回 `400 TASK_SETTINGS_INVALID`，不保存本次环境修改，错误只含设置名。
+
+配置页使用 `PUT /api/project-tasks/settings`，需要 `envs` 权限，并同时提交 `{action_timeline_enabled, step_panel_enabled}` 两个严格布尔值；缺失、非布尔值或未知字段返回 422。保存仅合并这两个键，保留其他变量和密钥，返回保存后的默认值且响应 no-store，无需重启或重载专家。只影响新轮次，已有轮次继续使用快照。Bridge 保持只读，不开放远端配置写入。
 
 已登录客户端读取 `GET /api/project-tasks/settings`，使用现有 Bearer 凭据，无需管理员权限：
 

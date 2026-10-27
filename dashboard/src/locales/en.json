@@ -3509,6 +3509,20 @@
   },
   "advancedSettings": {
     "description": "Manage runtime configuration and environment variables.",
+    "tasks": {
+      "title": "Task Settings",
+      "description": "Set defaults for new turns for all users on this Octop instance.",
+      "actions": "Generate and show task progress",
+      "actionsHint": "Generate progress updates during execution and show tool calls in the action timeline. Tasks still run and return replies when this is off.",
+      "steps": "Show plan steps",
+      "stepsHint": "Show steps and completion status when a task has an execution plan. This only changes the display; planning and execution continue as usual.",
+      "effectHint": "Saved changes apply immediately to new turns without a restart. Running and past turns keep their original settings.",
+      "loadFailed": "Failed to load task settings",
+      "saveFailed": "Failed to save task settings",
+      "saved": "Task settings saved for new turns.",
+      "envHint": "Use switches to configure task progress and plan steps:",
+      "openSettings": "Open task settings"
+    },
     "bridge": {
       "title": "Cloud collaboration",
       "description": "Link this Octop to another instance. Browse peer experts and chat across instances; conversation history stays on the expert’s side.",
@@ -6757,7 +6771,7 @@
     },
     "adminAdvanced": {
       "title": "Application Settings",
-      "subtitle": "Environment variables, backup, HTTPS, and updates"
+      "subtitle": "Task settings, environment variables, backup, HTTPS, and updates"
     },
     "bridge": {
       "title": "Cloud collaboration",

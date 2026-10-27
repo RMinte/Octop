@@ -59,6 +59,7 @@ export const USERS_TAB_PERMISSIONS = {
 } as const;
 
 export const ADVANCED_TAB_PERMISSIONS = {
+  tasks: "envs",
   "env-vars": "envs",
   observability: "observability",
   backup: "backup",

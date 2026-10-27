@@ -1,0 +1,47 @@
+.panel {
+  max-width: 720px;
+}
+
+.switches {
+  border: 1px solid var(--fn-border-primary);
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 20px;
+
+  & + & {
+    border-top: 1px solid var(--fn-border-primary);
+  }
+
+  :global(.ant-switch) {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+}
+
+.copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fn-text-primary);
+}
+
+.hint {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fn-text-tertiary);
+}
+
+.actions {
+  margin: 20px 0;
+}

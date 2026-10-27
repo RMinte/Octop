@@ -3509,6 +3509,20 @@
   },
   "advancedSettings": {
     "description": "管理运行配置和环境变量等高级选项。",
+    "tasks": {
+      "title": "任务设置",
+      "description": "配置这台 Octop 上所有用户的新轮次默认行为。",
+      "actions": "生成并展示任务进展",
+      "actionsHint": "执行任务时生成进展说明，并展示工具调用等动作链路。关闭后仍会正常执行任务并返回回复。",
+      "steps": "显示计划步骤",
+      "stepsHint": "任务有执行计划时，显示步骤与完成状态。此开关仅影响展示，规划和执行照常进行。",
+      "effectHint": "保存后立即对新轮次生效，无需重启。正在执行和历史轮次保留原设置。",
+      "loadFailed": "加载任务设置失败",
+      "saveFailed": "保存任务设置失败",
+      "saved": "任务设置已保存，将用于新轮次。",
+      "envHint": "任务进展与计划步骤可直接通过开关配置：",
+      "openSettings": "前往任务设置"
+    },
     "bridge": {
       "title": "云端协同",
       "description": "将本机 Octop 连接到另一实例。可浏览对端专家并跨实例对话；对话记录保留在专家所在侧。",
@@ -6757,7 +6771,7 @@
     },
     "adminAdvanced": {
       "title": "应用设置",
-      "subtitle": "环境变量、备份、HTTPS 与更新"
+      "subtitle": "任务设置、环境变量、备份、HTTPS 与更新"
     },
     "bridge": {
       "title": "云端协同",

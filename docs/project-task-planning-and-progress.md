@@ -191,16 +191,18 @@ flowchart TD
 
 ## 全局配置与轮次快照
 
-管理员可直接在“应用设置 → 环境变量”维护以下两项，默认均为 true；本机本轮核对时两项都已配置为 true，未修改实际值。
+管理员可在“应用设置 → 任务设置”（`/admin/advanced?tab=tasks`）通过开关维护以下两项，默认均为 true。页面管理当前 Octop 服务，复用环境变量管理权限；原环境变量 API 和部署配置继续兼容，环境变量页面不再列出这两项。
 
 | 环境变量 | 职责 |
 | --- | --- |
 | `OCTOP_TASK_ACTION_TIMELINE_ENABLED` | 新轮宿主进展及异步公开进展/动作说明的生成默认值，同时作为新轮动作链路展示默认值 |
 | `OCTOP_TASK_STEP_PANEL_ENABLED` | 新轮已有计划的面板展示默认值，不控制是否规划或执行 |
 
-支持 true/false、1/0、yes/no、on/off，大小写不敏感且忽略两端空白。环境变量保存前校验这两项，非法值返回 `TASK_SETTINGS_INVALID` 且不保存本次修改。其他环境变量沿用现有规则。
+支持 true/false、1/0、yes/no、on/off，大小写不敏感且忽略两端空白。环境变量保存前校验这两项，非法值返回 `TASK_SETTINGS_INVALID` 且不保存本次修改。其他环境变量沿用现有规则。 `PUT /api/envs` 省略任务开关时保留保存时的当前值，其他省略的普通变量仍会删除；显式提交这两键仍可更新。仅环境文件不存在时保留进程中的任务开关回退值，文件存在但缺键时维持默认 true。`DELETE /api/envs/{key}` 仅删除指定键，其他任务开关保持原值；删除任务开关键会使该项恢复默认 true。
 
 登录用户通过 `GET /api/project-tasks/settings` 读取新轮默认值 `{action_timeline_enabled, step_panel_enabled}`，均为布尔值，响应 no-store，无需管理员权限。该接口不返回任意环境变量或密钥，APP 不应读取整个环境列表，也不应使用该响应重新选择历史轮次的展示方式。
+
+配置页通过 `PUT /api/project-tasks/settings` 保存，必须同时提供两个严格布尔值；需要 `envs` 权限，缺失、非布尔值或未知字段返回 422。服务端仅合并这两个键，保留其他环境变量和密钥，返回保存后的两个默认值及 `Cache-Control: no-store`，无需重启或重载专家。Bridge 继续只开放读取，远端配置应在对端的管理页面修改。
 
 每次读取持久化 `OCTOP_HOME/env`。文件存在时，该文件对两键权威，缺键回默认 true；仅文件不存在时回退进程环境，再缺省为 true。因此保存和删除键可对后续请求热生效，多 worker 不会被另一进程残留的旧环境值覆盖，也不依赖 agent 重载或服务重启。
 

@@ -59,7 +59,12 @@ from octop.infra.projects.models import (
     ProjectView,
 )
 from octop.infra.projects.runtime import ProjectTaskWorker
-from octop.infra.projects.settings import TaskSettings, load_settings
+from octop.infra.projects.settings import (
+    TaskSettings,
+    TaskSettingsUpdate,
+    load_settings,
+    save_settings,
+)
 from octop.infra.projects.usage import TaskContextUsage, read_usage
 from octop.infra.projects.workbench import WorkspaceEntry
 from octop.infra.server import OctopServer
@@ -515,6 +520,22 @@ async def task_settings(
 ) -> TaskSettings:
     response.headers["Cache-Control"] = "no-store"
     return await asyncio.to_thread(load_settings, _services(server))
+
+
+@task_router.put(
+    "/settings",
+    response_model=TaskSettings,
+    summary="保存新轮次的过程显示与生成默认值",
+    description="需要环境变量管理权限，必须提交两个布尔值；仅更新任务过程配置并保留其他环境变量，不重载专家。保存后立即影响新轮次，已有轮次及暂停恢复保留原快照。步骤面板不改变计划生成或执行。",
+)
+async def update_task_settings(
+    body: TaskSettingsUpdate,
+    response: Response,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(require_permission("envs")),
+) -> TaskSettings:
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(save_settings, _services(server), body)
 
 
 @task_router.post(

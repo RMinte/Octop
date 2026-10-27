@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   Variable,
   Activity,
+  ListChecks,
 } from "lucide-react";
 import EnvironmentsPage from "../Environments";
 import { ObservabilitySettingsPanel } from "../Observability";
@@ -14,6 +15,7 @@ import BackupRestorePanel from "../BackupRestore";
 import { HttpsSettingsPanel } from "../HttpsSettings";
 import UpdateConfig from "./UpdateConfig";
 import CaptchaSettingsPanel from "./CaptchaSettings";
+import TaskSettingsPanel from "./TaskSettings";
 import PageShell from "../../../layouts/PageShell";
 import TabBar, { type TabBarItem } from "../../../components/TabLabel/TabBar";
 import tabStyles from "./tabContent.module.less";
@@ -23,6 +25,7 @@ import { ADVANCED_TAB_PERMISSIONS } from "../../../utils/permissions";
 
 type TabKey =
   | "env-vars"
+  | "tasks"
   | "observability"
   | "backup"
   | "https"
@@ -31,6 +34,7 @@ type TabKey =
 
 const TABS: TabBarItem<TabKey>[] = [
   { key: "env-vars", labelKey: "nav.environments", icon: Variable },
+  { key: "tasks", labelKey: "advancedSettings.tasks.title", icon: ListChecks },
   { key: "observability", labelKey: "nav.observability", icon: Activity },
   { key: "backup", labelKey: "nav.backupRestore", icon: Archive },
   { key: "https", labelKey: "nav.https", icon: Lock },
@@ -40,6 +44,7 @@ const TABS: TabBarItem<TabKey>[] = [
 
 function parseTab(raw: string | null): TabKey {
   if (
+    raw === "tasks" ||
     raw === "observability" ||
     raw === "backup" ||
     raw === "https" ||
@@ -73,6 +78,8 @@ export default function AdvancedSettingsPage() {
 
   const renderTab = () => {
     switch (activeTab) {
+      case "tasks":
+        return <TaskSettingsPanel />;
       case "env-vars":
         return <EnvironmentsPage />;
       case "observability":

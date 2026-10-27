@@ -11,6 +11,7 @@ from octop.infra.projects.settings import (
     STEP_PANEL_ENV,
     load_settings,
     presentation_for_turn,
+    preserve_env_values,
     validate_env_values,
 )
 from octop.infra.projects.tasks import TaskExecutionOptions
@@ -70,6 +71,16 @@ def test_invalid_switch_values_do_not_disclose_the_value(key, value):
 
 def test_unrelated_environment_values_are_not_boolean_validated():
     validate_env_values({"UNRELATED_SETTING": "arbitrary"})
+
+
+@pytest.mark.parametrize("env_file_exists", [False, True])
+def test_env_replacement_keeps_implicit_defaults_out_of_the_file(monkeypatch, env_file_exists):
+    monkeypatch.delenv(ACTION_TIMELINE_ENV, raising=False)
+    monkeypatch.delenv(STEP_PANEL_ENV, raising=False)
+    monkeypatch.setenv("UNRELATED_SETTING", "process value")
+    assert preserve_env_values(
+        {"OTHER": "replacement"}, {"REMOVED": "old value"}, env_file_exists=env_file_exists
+    ) == {"OTHER": "replacement"}
 
 
 @pytest.mark.parametrize("value", ["true", 1, 0, [], {}])

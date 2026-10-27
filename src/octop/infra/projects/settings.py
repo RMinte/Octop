@@ -6,12 +6,12 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.models import ProjectModel
-from octop.infra.utils.env_file import env_file_path, load_env_file
+from octop.infra.utils.env_file import env_file_path, load_env_file, save_env_file
 
 ACTION_TIMELINE_ENV = "OCTOP_TASK_ACTION_TIMELINE_ENABLED"
 STEP_PANEL_ENV = "OCTOP_TASK_STEP_PANEL_ENABLED"
@@ -34,6 +34,15 @@ class TaskSettings(ProjectModel):
     )
     step_panel_enabled: bool = Field(
         default=True, description="新轮次的步骤面板显示默认值；已有轮次保留入队快照。"
+    )
+
+
+class TaskSettingsUpdate(ProjectModel):
+    action_timeline_enabled: StrictBool = Field(
+        description="新轮次是否生成公开进展及动作说明，并默认展示动作链路。"
+    )
+    step_panel_enabled: StrictBool = Field(
+        description="新轮次是否默认显示已有计划的步骤面板，不改变计划生成或执行。"
     )
 
 
@@ -80,6 +89,15 @@ def validate_env_values(values: Mapping[str, str]) -> None:
         _boolean(values, key)
 
 
+def preserve_env_values(
+    values: Mapping[str, str], previous: Mapping[str, str], *, env_file_exists: bool
+) -> dict[str, str]:
+    """Keep omitted task settings when replacing the editable environment list."""
+    source = previous if env_file_exists else os.environ
+    retained = {key: source[key] for key in (ACTION_TIMELINE_ENV, STEP_PANEL_ENV) if key in source}
+    return {**retained, **values}
+
+
 def load_settings(services: SharedServices) -> TaskSettings:
     """Read shared file defaults afresh, ignoring stale worker environment values.
 
@@ -92,3 +110,16 @@ def load_settings(services: SharedServices) -> TaskSettings:
         action_timeline_enabled=_boolean(values, ACTION_TIMELINE_ENV),
         step_panel_enabled=_boolean(values, STEP_PANEL_ENV),
     )
+
+
+def save_settings(services: SharedServices, settings: TaskSettingsUpdate) -> TaskSettings:
+    """Save the two task defaults without replacing unrelated environment values."""
+    path = env_file_path(services.paths.root)
+    values = load_env_file(path)
+    updates = {
+        ACTION_TIMELINE_ENV: "true" if settings.action_timeline_enabled else "false",
+        STEP_PANEL_ENV: "true" if settings.step_panel_enabled else "false",
+    }
+    save_env_file(path, {**values, **updates})
+    os.environ.update(updates)
+    return TaskSettings(**settings.model_dump())

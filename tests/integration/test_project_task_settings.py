@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import replace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from octop.infra.projects import runtime
 from octop.infra.projects.settings import ACTION_TIMELINE_ENV, STEP_PANEL_ENV
 from octop.infra.projects.tasks import turn_view
-from octop.infra.utils.env_file import save_env_file
+from octop.infra.utils.env_file import load_env_file, save_env_file
 from tests.integration.test_project_task_checkpoints import parked
 from tests.integration.test_project_tasks import settled
 from tests.support.auth import create_user
@@ -45,6 +47,78 @@ async def test_settings_are_public_to_authenticated_users_without_env_permission
     }
 
 
+async def test_saving_settings_requires_env_permission_and_preserves_unrelated_values(
+    env, monkeypatch
+):
+    client, server, admin = env
+    monkeypatch.setenv(ACTION_TIMELINE_ENV, "true")
+    monkeypatch.setenv(STEP_PANEL_ENV, "true")
+    monkeypatch.setenv("TAVILY_API_KEY", "process-secret")
+    path = server.paths.root / "env"
+    other_values = {"TAVILY_API_KEY": "persisted-secret", "OCTOP_CAPTCHA_SECRET": "captcha-secret"}
+    save_env_file(path, {**other_values, ACTION_TIMELINE_ENV: "true"})
+    before = path.read_bytes()
+    body = {"action_timeline_enabled": False, "step_panel_enabled": True}
+    reader = await create_user(client, admin, username="task-settings-readonly", permissions=[])
+    assert (await client.put("/api/project-tasks/settings", json=body)).status_code == 401
+    assert (
+        await client.put("/api/project-tasks/settings", headers=reader, json=body)
+    ).status_code == 403
+    assert path.read_bytes() == before
+    editor = await create_user(client, admin, username="task-settings-editor", permissions=["envs"])
+    assert server.app_runtime is not None
+    reload_all = AsyncMock()
+    monkeypatch.setattr(server.app_runtime.agent_registry, "reload_all", reload_all)
+    response = await client.put("/api/project-tasks/settings", headers=editor, json=body)
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == body
+    assert load_env_file(path) == {
+        **other_values,
+        ACTION_TIMELINE_ENV: "false",
+        STEP_PANEL_ENV: "true",
+    }
+    assert os.environ[ACTION_TIMELINE_ENV] == "false"
+    assert os.environ[STEP_PANEL_ENV] == "true"
+    assert os.environ["TAVILY_API_KEY"] == "process-secret"
+    reload_all.assert_not_called()
+    assert (await client.get("/api/project-tasks/settings", headers=reader)).json() == body
+    operation = client._octop_app.openapi()["paths"]["/api/project-tasks/settings"]["put"]
+    assert operation["summary"]
+    assert operation["requestBody"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TaskSettingsUpdate"
+    )
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TaskSettings"
+    )
+    schema = client._octop_app.openapi()["components"]["schemas"]["TaskSettingsUpdate"]
+    assert set(schema["required"]) == set(body)
+    assert all(field["type"] == "boolean" for field in schema["properties"].values())
+
+
+async def test_settings_update_requires_both_strict_booleans_before_any_write(env, monkeypatch):
+    client, server, auth = env
+    monkeypatch.setenv(ACTION_TIMELINE_ENV, "true")
+    monkeypatch.setenv(STEP_PANEL_ENV, "false")
+    path = server.paths.root / "env"
+    save_env_file(path, {ACTION_TIMELINE_ENV: "true", STEP_PANEL_ENV: "false"})
+    before = path.read_bytes()
+    valid = {"action_timeline_enabled": True, "step_panel_enabled": False}
+    bodies = [
+        {},
+        {"action_timeline_enabled": True},
+        {"step_panel_enabled": False},
+        {**valid, "unrelated": True},
+        *[{**valid, key: value} for key in valid for value in ["true", "false", 0, 1, None]],
+    ]
+    for body in bodies:
+        response = await client.put("/api/project-tasks/settings", headers=auth, json=body)
+        assert response.status_code == 422, response.text
+        assert path.read_bytes() == before
+        assert os.environ[ACTION_TIMELINE_ENV] == "true"
+        assert os.environ[STEP_PANEL_ENV] == "false"
+
+
 @pytest.mark.parametrize("key", [ACTION_TIMELINE_ENV, STEP_PANEL_ENV])
 async def test_invalid_env_switch_is_rejected_before_any_write_or_process_change(
     env, monkeypatch, key
@@ -69,12 +143,118 @@ async def test_invalid_env_switch_is_rejected_before_any_write_or_process_change
     ]
 
 
+async def test_env_save_preserves_latest_task_settings_and_replaces_other_variables(
+    env, monkeypatch
+):
+    client, server, auth = env
+    monkeypatch.setenv(ACTION_TIMELINE_ENV, "true")
+    monkeypatch.setenv(STEP_PANEL_ENV, "true")
+    monkeypatch.setenv("OTHER", "before")
+    monkeypatch.setenv("REMOVED", "before")
+    path = server.paths.root / "env"
+    save_env_file(
+        path,
+        {
+            ACTION_TIMELINE_ENV: "true",
+            STEP_PANEL_ENV: "true",
+            "OTHER": "before",
+            "REMOVED": "before",
+        },
+    )
+    assert (await client.get("/api/envs", headers=auth)).status_code == 200
+    latest = {"action_timeline_enabled": False, "step_panel_enabled": False}
+    assert (
+        await client.put("/api/project-tasks/settings", headers=auth, json=latest)
+    ).status_code == 200
+    # The environment form submits ordinary rows without its earlier task-setting snapshot.
+    response = await client.put("/api/envs", headers=auth, json={"OTHER": "after"})
+    assert response.status_code == 200
+    assert load_env_file(path) == {
+        ACTION_TIMELINE_ENV: "false",
+        STEP_PANEL_ENV: "false",
+        "OTHER": "after",
+    }
+    assert os.environ[ACTION_TIMELINE_ENV] == "false"
+    assert os.environ[STEP_PANEL_ENV] == "false"
+    assert os.environ["OTHER"] == "after"
+    assert "REMOVED" not in os.environ
+    assert (await client.get("/api/project-tasks/settings", headers=auth)).json() == latest
+
+
+@pytest.mark.parametrize("env_file_exists", [False, True])
+async def test_env_save_uses_process_task_defaults_only_before_the_file_exists(
+    env, monkeypatch, env_file_exists
+):
+    client, server, auth = env
+    monkeypatch.setenv(ACTION_TIMELINE_ENV, "false")
+    monkeypatch.setenv(STEP_PANEL_ENV, "false")
+    monkeypatch.setenv("OTHER", "before")
+    path = server.paths.root / "env"
+    if env_file_exists:
+        save_env_file(path, {ACTION_TIMELINE_ENV: "false"})
+    else:
+        assert not path.exists()
+    response = await client.put("/api/envs", headers=auth, json={"OTHER": "after"})
+    assert response.status_code == 200
+    expected = {ACTION_TIMELINE_ENV: "false", "OTHER": "after"}
+    if not env_file_exists:
+        expected[STEP_PANEL_ENV] = "false"
+    assert load_env_file(path) == expected
+    assert (await client.get("/api/project-tasks/settings", headers=auth)).json() == {
+        "action_timeline_enabled": False,
+        "step_panel_enabled": env_file_exists,
+    }
+
+
+@pytest.mark.parametrize("key", [ACTION_TIMELINE_ENV, STEP_PANEL_ENV])
+async def test_env_save_can_explicitly_change_one_task_default(env, monkeypatch, key):
+    client, server, auth = env
+    monkeypatch.setenv(ACTION_TIMELINE_ENV, "false")
+    monkeypatch.setenv(STEP_PANEL_ENV, "false")
+    path = server.paths.root / "env"
+    save_env_file(path, {ACTION_TIMELINE_ENV: "false", STEP_PANEL_ENV: "false"})
+    response = await client.put("/api/envs", headers=auth, json={key: "on"})
+    assert response.status_code == 200
+    expected = {ACTION_TIMELINE_ENV: "false", STEP_PANEL_ENV: "false"}
+    expected[key] = "on"
+    assert load_env_file(path) == expected
+    assert (await client.get("/api/project-tasks/settings", headers=auth)).json() == {
+        "action_timeline_enabled": key == ACTION_TIMELINE_ENV,
+        "step_panel_enabled": key == STEP_PANEL_ENV,
+    }
+
+
+@pytest.mark.parametrize("env_file_exists", [False, True])
+@pytest.mark.parametrize("key", [ACTION_TIMELINE_ENV, STEP_PANEL_ENV, "OTHER"])
+async def test_env_delete_preserves_other_task_defaults(env, monkeypatch, env_file_exists, key):
+    client, server, auth = env
+    monkeypatch.setenv(ACTION_TIMELINE_ENV, "false")
+    monkeypatch.setenv(STEP_PANEL_ENV, "false")
+    path = server.paths.root / "env"
+    if env_file_exists:
+        save_env_file(path, {ACTION_TIMELINE_ENV: "false", STEP_PANEL_ENV: "false"})
+    else:
+        assert not path.exists()
+    response = await client.delete("/api/envs/" + key, headers=auth)
+    assert response.status_code == 200
+    expected = {ACTION_TIMELINE_ENV: "false", STEP_PANEL_ENV: "false"}
+    expected.pop(key, None)
+    assert load_env_file(path) == expected
+    if key in {ACTION_TIMELINE_ENV, STEP_PANEL_ENV}:
+        assert key not in os.environ
+    assert (await client.get("/api/project-tasks/settings", headers=auth)).json() == {
+        "action_timeline_enabled": key == ACTION_TIMELINE_ENV,
+        "step_panel_enabled": key == STEP_PANEL_ENV,
+    }
+
+
 async def test_saved_and_deleted_keys_are_visible_despite_a_stale_worker_environment(
     env, monkeypatch
 ):
     client, server, auth = env
     monkeypatch.setenv(ACTION_TIMELINE_ENV, "true")
     monkeypatch.setenv(STEP_PANEL_ENV, "true")
+    save_env_file(server.paths.root / "env", {ACTION_TIMELINE_ENV: "true", STEP_PANEL_ENV: "true"})
     response = await client.put(
         "/api/envs", headers=auth, json={ACTION_TIMELINE_ENV: "off", STEP_PANEL_ENV: "no"}
     )
@@ -100,6 +280,8 @@ async def test_per_turn_snapshot_survives_global_change_retransmission_pause_and
     env_with_provider, monkeypatch
 ):
     client, server, auth = env_with_provider
+    monkeypatch.setenv(ACTION_TIMELINE_ENV, "false")
+    monkeypatch.setenv(STEP_PANEL_ENV, "false")
     save_env_file(
         server.paths.root / "env", {ACTION_TIMELINE_ENV: "false", STEP_PANEL_ENV: "false"}
     )
@@ -143,7 +325,12 @@ async def test_per_turn_snapshot_survives_global_change_retransmission_pause_and
     assert configuration["action_timeline_enabled"] is False
     assert configuration["presentation"] == original_presentation
     assert configuration["execution_options"] == {}
-    save_env_file(server.paths.root / "env", {ACTION_TIMELINE_ENV: "true", STEP_PANEL_ENV: "true"})
+    updated = await client.put(
+        "/api/project-tasks/settings",
+        headers=auth,
+        json={"action_timeline_enabled": True, "step_panel_enabled": True},
+    )
+    assert updated.status_code == 200, updated.text
     repeat = await client.post("/api/project-tasks", headers=auth, json=body)
     assert repeat.status_code == 202
     assert repeat.json()["task_id"] == task_id
