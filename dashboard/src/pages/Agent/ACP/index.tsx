@@ -4,15 +4,20 @@ import { Alert, App, Button, Empty, Form, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 import PageShell from "../../../layouts/PageShell";
 import { CardSkeleton } from "../../../components/Skeleton";
-import PeerOnlyRemoteAlert from "../../../components/PeerOnlyRemoteAlert";
 import { acpApi } from "../../../api/modules/acp";
 import {
   ACP_DEFAULT_STDIO_BUFFER_LIMIT_BYTES,
   type ACPRunnerConfig,
+  type ACPRunnerSetup,
+  type ACPSetupJob,
+  isACPJobPending,
 } from "../../../api/types/acp";
 import { useAgent } from "../../../context/AgentContext";
 import { blocksAcpOutboundFromConfig } from "../../Experts/components/agentBackendForm";
 import { ACPCard } from "./components/ACPCard";
+import { ACPSetupGuide } from "./components/ACPSetupGuide";
+import { isBridgeAgentId } from "../../../utils/remoteExpert";
+import { useServerTimezone } from "../../../hooks/useServerTimezone";
 import {
   ACPDrawer,
   formValuesToRunner,
@@ -33,10 +38,11 @@ interface ACPPanelProps {
 export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
   const { t } = useTranslation();
   const { modal, message } = App.useApp();
+  const timeZone = useServerTimezone();
   const { activeAgentId: contextAgentId, agents } = useAgent();
   const activeAgentId =
     agentIdProp !== undefined ? agentIdProp : contextAgentId;
-  /** Only the Experts tools drawer should tunnel account-global ACP runners. */
+  /** Local expert drawers retain their ownership scope; remote setup is gated below. */
   const runnersScopeId = agentIdProp;
   const [runners, setRunners] =
     useState<Record<string, ACPRunnerConfig>>(EMPTY_RUNNERS);
@@ -50,16 +56,42 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isCreateMode, setIsCreateMode] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [setup, setSetup] = useState<Record<string, ACPRunnerSetup>>({});
+  const [host, setHost] = useState("");
+  const [setupFailed, setSetupFailed] = useState(false);
+  const [setupReload, setSetupReload] = useState(0);
+  const [action, setAction] = useState<{
+    key: string;
+    type: "install" | "login" | "check" | "credentials";
+  } | null>(null);
+  const [jobs, setJobs] = useState<Record<string, ACPSetupJob>>({});
+  const [inputLoading, setInputLoading] = useState(false);
+  const [cancelLoading, setCancelLoading] = useState(false);
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [guideKey, setGuideKey] = useState<string | null>(null);
   const [form] = Form.useForm();
   const activeAgentIdRef = useRef(activeAgentId);
+  const completedJobs = useRef(new Set<string>());
+  const mounted = useRef(true);
 
   const activeAgent = useMemo(
     () => agents.find((row) => row.agent_id === activeAgentId) ?? null,
     [agents, activeAgentId],
   );
-  const outboundBlocked = blocksAcpOutboundFromConfig(
-    activeAgent?.config ?? null,
-  );
+  const remoteDrawer =
+    agentIdProp !== undefined &&
+    (isBridgeAgentId(agentIdProp) || Boolean(activeAgent?.bridge));
+  const outboundBlocked =
+    !activeAgent?.bridge &&
+    blocksAcpOutboundFromConfig(activeAgent?.config ?? null);
+  const setupScope = remoteDrawer ? "remote" : runnersScopeId ?? "local";
+  const setupScopeRef = useRef(setupScope);
+  const pendingJobs = Object.values(jobs).filter(isACPJobPending);
+  const pendingJobKey = pendingJobs
+    .map((job) => job.job_id)
+    .sort()
+    .join(",");
+  const hostBusy = pendingJobs.length > 0;
   // Under directory sandbox: lock runner enable/edit only. The per-agent
   // acp_runner tool toggle stays available (host-spawned runners may already
   // be enabled for other agents on this account).
@@ -69,28 +101,179 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
   }, [activeAgentId]);
 
   useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setupScopeRef.current = setupScope;
+    setGuideKey(null);
+    setDrawerOpen(false);
+    setJobs({});
+    setActionErrors({});
+    completedJobs.current.clear();
+  }, [setupScope]);
+
+  useEffect(() => {
+    if (remoteDrawer) {
+      setRunners(EMPTY_RUNNERS);
+      setSetup({});
+      setRunnersLoading(false);
+      return;
+    }
     let cancelled = false;
     setRunnersLoading(true);
     void (async () => {
-      try {
-        const data = await acpApi.getGlobalRunners(runnersScopeId);
-        if (!cancelled) {
-          setRunners(data.runners || EMPTY_RUNNERS);
-        }
-      } catch {
-        if (!cancelled) {
-          message.error(t("acp.loadFailed"));
-        }
-      } finally {
-        if (!cancelled) {
-          setRunnersLoading(false);
-        }
+      const [configResult, setupResult] = await Promise.allSettled([
+        acpApi.getGlobalRunners(runnersScopeId),
+        acpApi.getSetup(),
+      ]);
+      if (cancelled) return;
+      if (configResult.status === "fulfilled")
+        setRunners(configResult.value.runners || EMPTY_RUNNERS);
+      else message.error(t("acp.loadFailed"));
+      if (setupResult.status === "fulfilled") {
+        setSetup(setupResult.value.runners);
+        setHost(setupResult.value.host);
+        setJobs((previous) => ({
+          ...previous,
+          ...(setupResult.value.active_jobs ?? {}),
+        }));
+        setSetupFailed(false);
+      } else {
+        setSetup({});
+        setSetupFailed(true);
       }
+      setRunnersLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [t, runnersScopeId]);
+  }, [t, message, runnersScopeId, remoteDrawer, setupReload]);
+
+  const refreshHost = useCallback(async () => {
+    if (!mounted.current || setupScopeRef.current !== setupScope) return null;
+    const [config, view] = await Promise.all([
+      acpApi.getGlobalRunners(runnersScopeId),
+      acpApi.getSetup(),
+    ]);
+    if (!mounted.current || setupScopeRef.current !== setupScope) return null;
+    setRunners(config.runners || EMPTY_RUNNERS);
+    setSetup(view.runners);
+    setHost(view.host);
+    setSetupFailed(false);
+    setJobs((previous) => ({ ...previous, ...(view.active_jobs ?? {}) }));
+    return view;
+  }, [runnersScopeId, setupScope]);
+
+  useEffect(() => {
+    if (remoteDrawer || !pendingJobKey) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      const results = await Promise.allSettled(
+        pendingJobs.map((job) => acpApi.getJob(job.job_id)),
+      );
+      if (stopped) return;
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          setJobs((previous) => ({
+            ...previous,
+            [result.value.runner]: result.value,
+          }));
+          setActionErrors((previous) =>
+            previous[result.value.runner] === t("acp.jobPollFailed")
+              ? { ...previous, [result.value.runner]: "" }
+              : previous,
+          );
+        } else if (
+          result.reason instanceof Error &&
+          /^Request failed:\s*404(?:\s|$)/.test(result.reason.message)
+        ) {
+          const lost = pendingJobs[index];
+          setJobs((previous) => ({
+            ...previous,
+            [lost.runner]: {
+              ...(previous[lost.runner] ?? lost),
+              status: "failed",
+              phase: "failed",
+              message: t("acp.jobInterrupted"),
+              authorization: null,
+              input_mode: "none",
+            },
+          }));
+        } else {
+          setActionErrors((previous) => ({
+            ...previous,
+            [pendingJobs[index].runner]: t("acp.jobPollFailed"),
+          }));
+        }
+      });
+      timer = setTimeout(() => void poll(), 1000);
+    };
+    timer = setTimeout(() => void poll(), 1000);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+    // The same job ids keep one sequential polling loop as output changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingJobKey, remoteDrawer, t]);
+
+  useEffect(() => {
+    if (remoteDrawer) return;
+    for (const job of Object.values(jobs)) {
+      if (isACPJobPending(job) || completedJobs.current.has(job.job_id))
+        continue;
+      completedJobs.current.add(job.job_id);
+      void (async () => {
+        try {
+          const view = await refreshHost();
+          if (!view) return;
+          if (job.status === "succeeded") {
+            message.success(
+              t(
+                job.kind === "install"
+                  ? "acp.installSuccess"
+                  : "acp.loginSuccess",
+              ),
+            );
+          } else if (job.status === "failed") {
+            const text =
+              job.message ||
+              t(
+                job.kind === "install"
+                  ? "acp.installFailed"
+                  : "acp.loginFailed",
+              );
+            setActionErrors((previous) => ({
+              ...previous,
+              [job.runner]: text,
+            }));
+            message.error(text);
+          }
+        } catch {
+          if (mounted.current && setupScopeRef.current === setupScope) {
+            setSetupFailed(true);
+            setSetup((previous) => ({
+              ...previous,
+              [job.runner]: {
+                ...previous[job.runner],
+                connection: "unchecked",
+                checked_at: null,
+              },
+            }));
+            setActionErrors((previous) => ({
+              ...previous,
+              [job.runner]: t("acp.setupLoadFailed"),
+            }));
+          }
+        }
+      })();
+    }
+  }, [jobs, message, refreshHost, remoteDrawer, setupScope, t]);
 
   useEffect(() => {
     if (!activeAgentId) {
@@ -123,7 +306,7 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
     return () => {
       cancelled = true;
     };
-  }, [activeAgentId, t]);
+  }, [activeAgentId, t, message]);
 
   const orderedKeys = useMemo(() => {
     const keys = Object.keys(runners || {});
@@ -180,11 +363,19 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
 
   const handleToggleEnabled = async (runnerKey: string, checked: boolean) => {
     // Runners are account-global; only block *enabling* under sandbox.
-    if (runnersLoading || (outboundBlocked && checked)) return;
+    if (
+      remoteDrawer ||
+      runnersLoading ||
+      action ||
+      toggleLoadingKey ||
+      hostBusy ||
+      (outboundBlocked && checked)
+    )
+      return;
     const runner = runners[runnerKey];
     if (!runner) return;
-    if (!runner.command?.trim() && checked) {
-      message.warning(t("acp.commandRequired"));
+    if (checked && setup[runnerKey]?.connection !== "ready") {
+      message.warning(t("acp.checkBeforeEnable"));
       return;
     }
     setToggleLoadingKey(runnerKey);
@@ -199,6 +390,159 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
       message.error(t("acp.configFailed"));
     } finally {
       setToggleLoadingKey(null);
+    }
+  };
+
+  const checkConnection = async (runnerKey: string) => {
+    const result = await acpApi.checkRunner(runnerKey);
+    const view = await refreshHost();
+    if (!view) return;
+    setSetup((previous) => ({ ...previous, [runnerKey]: result }));
+    if (result.connection === "ready") {
+      message.success(t("acp.checkSuccess"));
+      setGuideKey(null);
+    } else if (result.connection === "auth_required") {
+      if (result.message) message.warning(result.message);
+      setGuideKey(runnerKey);
+    } else {
+      const text = result.message || t("acp.checkFailed");
+      setActionErrors((previous) => ({ ...previous, [runnerKey]: text }));
+      message.error(text);
+    }
+  };
+
+  const handleSetupAction = async (
+    runnerKey: string,
+    type: "install" | "login" | "check",
+  ) => {
+    if (
+      remoteDrawer ||
+      outboundBlocked ||
+      action ||
+      toggleLoadingKey ||
+      hostBusy
+    )
+      return;
+    setAction({ key: runnerKey, type });
+    setActionErrors((previous) => ({ ...previous, [runnerKey]: "" }));
+    try {
+      if (type === "check") {
+        await checkConnection(runnerKey);
+      } else {
+        const job = await (type === "install"
+          ? acpApi.installRunner(runnerKey)
+          : acpApi.loginRunner(runnerKey));
+        if (!mounted.current || setupScopeRef.current !== setupScope) return;
+        setJobs((previous) => ({ ...previous, [runnerKey]: job }));
+        setSetup((previous) => ({
+          ...previous,
+          [runnerKey]: {
+            ...previous[runnerKey],
+            connection: "unchecked",
+            checked_at: null,
+          },
+        }));
+        setGuideKey(runnerKey);
+      }
+    } catch (error) {
+      if (!mounted.current || setupScopeRef.current !== setupScope) return;
+      const text =
+        error instanceof Error
+          ? error.message
+          : t(
+              type === "install"
+                ? "acp.installFailed"
+                : type === "login"
+                ? "acp.loginFailed"
+                : "acp.checkFailed",
+            );
+      setActionErrors((previous) => ({ ...previous, [runnerKey]: text }));
+      setSetup((previous) =>
+        previous[runnerKey]
+          ? {
+              ...previous,
+              [runnerKey]: {
+                ...previous[runnerKey],
+                connection: "unchecked",
+                checked_at: null,
+              },
+            }
+          : previous,
+      );
+      message.error(text);
+    } finally {
+      if (mounted.current) setAction(null);
+    }
+  };
+
+  const handleCredentials = async (
+    runnerKey: string,
+    provider: string,
+    apiKey: string,
+  ) => {
+    if (
+      remoteDrawer ||
+      outboundBlocked ||
+      action ||
+      toggleLoadingKey ||
+      hostBusy
+    )
+      return;
+    setAction({ key: runnerKey, type: "credentials" });
+    setActionErrors((previous) => ({ ...previous, [runnerKey]: "" }));
+    try {
+      const result = await acpApi.saveCredentials(runnerKey, provider, apiKey);
+      if (!mounted.current || setupScopeRef.current !== setupScope) return;
+      setSetup((previous) => ({ ...previous, [runnerKey]: result }));
+      await checkConnection(runnerKey);
+    } catch (error) {
+      if (!mounted.current || setupScopeRef.current !== setupScope) return;
+      const text =
+        error instanceof Error ? error.message : t("acp.credentialsFailed");
+      setActionErrors((previous) => ({ ...previous, [runnerKey]: text }));
+      message.error(text);
+    } finally {
+      if (mounted.current) setAction(null);
+    }
+  };
+
+  const handleCancelJob = async (jobId: string) => {
+    if (remoteDrawer || cancelLoading) return;
+    setCancelLoading(true);
+    try {
+      const job = await acpApi.cancelJob(jobId);
+      if (mounted.current && setupScopeRef.current === setupScope)
+        setJobs((previous) => ({ ...previous, [job.runner]: job }));
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : t("acp.cancelJobFailed"),
+      );
+    } finally {
+      if (mounted.current) setCancelLoading(false);
+    }
+  };
+
+  const handleJobInput = async (jobId: string, data: string) => {
+    const current = Object.values(jobs).find((job) => job.job_id === jobId);
+    if (
+      remoteDrawer ||
+      inputLoading ||
+      current?.kind !== "login" ||
+      !isACPJobPending(current) ||
+      current.input_mode !== "terminal"
+    )
+      return;
+    setInputLoading(true);
+    try {
+      const job = await acpApi.inputJob(jobId, data);
+      if (mounted.current && setupScopeRef.current === setupScope)
+        setJobs((previous) => ({ ...previous, [job.runner]: job }));
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : t("acp.loginInputFailed"),
+      );
+    } finally {
+      if (mounted.current) setInputLoading(false);
     }
   };
 
@@ -218,7 +562,7 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
     form.resetFields();
     form.setFieldsValue({
       runnerKey: "",
-      enabled: true,
+      enabled: false,
       command: "",
       argsText: "",
       envText: "",
@@ -236,6 +580,14 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
       return;
     }
     const runner = formValuesToRunner(values);
+    const previous = activeKey ? runners[activeKey] : undefined;
+    const launchChanged =
+      !previous ||
+      targetKey !== activeKey ||
+      runner.command !== previous.command ||
+      JSON.stringify(runner.args) !== JSON.stringify(previous.args) ||
+      JSON.stringify(runner.env) !== JSON.stringify(previous.env);
+    runner.enabled = launchChanged ? false : Boolean(previous?.enabled);
     setSaving(true);
     try {
       const nextRunners = { ...runners };
@@ -244,6 +596,15 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
       }
       nextRunners[targetKey] = runner;
       await persistRunners(nextRunners);
+      if (launchChanged) {
+        setSetup((previousSetup) => {
+          const next = { ...previousSetup };
+          if (activeKey) delete next[activeKey];
+          delete next[targetKey];
+          return next;
+        });
+      }
+      setSetupReload((previousReload) => previousReload + 1);
       setDrawerOpen(false);
       message.success(
         isCreateMode ? t("acp.createSuccess") : t("acp.configSaved"),
@@ -287,50 +648,130 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
 
   return (
     <>
-      {agentIdProp === undefined ? (
-        <PeerOnlyRemoteAlert hintKey="peerOnlyAcp" />
-      ) : null}
-      <div className={styles.toolbar}>
-        <div className={styles.toolbarText}>
-          <div className={styles.description}>{t("acp.description")}</div>
-          <p className={styles.scopeHint}>{t("acp.globalRunnersHint")}</p>
-        </div>
-        <Button type="primary" onClick={openCreate}>
-          {t("acp.create")}
-        </Button>
-      </div>
-
-      {activeAgentId && outboundBlocked ? (
+      {remoteDrawer ? (
         <Alert
           type="info"
           showIcon
-          className={styles.outboundBlockedAlert}
-          message={t("acp.outboundBlockedHint")}
+          message={t("acp.remoteHostTitle")}
+          description={t("acp.remoteHostHint")}
         />
-      ) : null}
-
-      {runnersLoading && cards.length === 0 ? (
-        <CardSkeleton count={4} />
       ) : (
-        <div className={channelStyles.channelsGrid}>
-          {cards.map(({ key, cfg }) => (
-            <ACPCard
-              key={key}
-              runnerKey={key}
-              config={cfg}
-              isHover={hoverKey === key}
-              toggleLoading={toggleLoadingKey === key}
-              interactionDisabled={outboundBlocked}
-              onClick={() => openEdit(key)}
-              onMouseEnter={() => setHoverKey(key)}
-              onMouseLeave={() => setHoverKey(null)}
-              onToggleEnabled={handleToggleEnabled}
+        <>
+          <div className={styles.toolbar}>
+            <div className={styles.toolbarText}>
+              <div className={styles.description}>{t("acp.description")}</div>
+              <p className={styles.scopeHint}>{t("acp.globalRunnersHint")}</p>
+            </div>
+            <Button
+              type="primary"
+              disabled={Boolean(
+                action || toggleLoadingKey || saving || hostBusy,
+              )}
+              onClick={openCreate}
+            >
+              {t("acp.create")}
+            </Button>
+          </div>
+
+          <Alert
+            className={styles.hostAlert}
+            type="info"
+            showIcon
+            message={t("acp.executionHost", {
+              host: host || t("acp.currentHost"),
+            })}
+            description={t("acp.hostHint")}
+          />
+          <p className={styles.scopeHint}>{t("acp.flowHint")}</p>
+          {setupFailed ? (
+            <Alert
+              className={styles.hostAlert}
+              type="warning"
+              showIcon
+              message={t("acp.setupLoadFailed")}
+              action={
+                <Button
+                  size="small"
+                  onClick={() => setSetupReload((value) => value + 1)}
+                >
+                  {t("acp.reloadSetup")}
+                </Button>
+              }
             />
-          ))}
-        </div>
+          ) : null}
+
+          {activeAgentId && outboundBlocked ? (
+            <Alert
+              type="info"
+              showIcon
+              className={styles.outboundBlockedAlert}
+              message={t("acp.outboundBlockedHint")}
+            />
+          ) : null}
+
+          {runnersLoading && cards.length === 0 ? (
+            <CardSkeleton count={4} />
+          ) : (
+            <div className={channelStyles.channelsGrid}>
+              {cards.map(({ key, cfg }) => (
+                <ACPCard
+                  key={key}
+                  runnerKey={key}
+                  config={cfg}
+                  setup={setup[key]}
+                  job={jobs[key]}
+                  timeZone={timeZone}
+                  isHover={hoverKey === key}
+                  toggleLoading={toggleLoadingKey === key}
+                  actionLoading={action?.key === key ? action.type : undefined}
+                  busyElsewhere={Boolean(
+                    (action && action.key !== key) ||
+                      (toggleLoadingKey && toggleLoadingKey !== key) ||
+                      saving ||
+                      runnersLoading ||
+                      (hostBusy && !isACPJobPending(jobs[key])),
+                  )}
+                  interactionDisabled={outboundBlocked}
+                  onClick={() => openEdit(key)}
+                  onMouseEnter={() => setHoverKey(key)}
+                  onMouseLeave={() => setHoverKey(null)}
+                  onToggleEnabled={handleToggleEnabled}
+                  onInstall={(runnerKey) =>
+                    void handleSetupAction(runnerKey, "install")
+                  }
+                  onCheck={(runnerKey) =>
+                    void handleSetupAction(runnerKey, "check")
+                  }
+                  onGuide={setGuideKey}
+                />
+              ))}
+            </div>
+          )}
+          {Object.entries(actionErrors)
+            .filter(([, text]) => text)
+            .map(([key, text]) => (
+              <Alert
+                className={styles.hostAlert}
+                key={key}
+                type="error"
+                showIcon
+                message={key}
+                description={text}
+              />
+            ))}
+        </>
       )}
 
       <div className={styles.agentToolSection}>
+        {!remoteDrawer &&
+        (activeAgent?.bridge || isBridgeAgentId(activeAgentId)) ? (
+          <Alert
+            type="info"
+            showIcon
+            className={styles.hostAlert}
+            message={t("acp.remoteToolHint")}
+          />
+        ) : null}
         <p className={styles.scopeHint}>{t("acp.toolEnabledHint")}</p>
         {!activeAgentId ? (
           <Empty
@@ -360,6 +801,28 @@ export function ACPPanel({ agentId: agentIdProp }: ACPPanelProps = {}) {
         onClose={() => setDrawerOpen(false)}
         onSubmit={handleSubmit}
         onDelete={handleDelete}
+      />
+      <ACPSetupGuide
+        runnerKey={guideKey}
+        setup={guideKey ? setup[guideKey] : undefined}
+        timeZone={timeZone}
+        host={host}
+        job={guideKey ? jobs[guideKey] : undefined}
+        operation={action?.key === guideKey ? action.type : undefined}
+        busy={Boolean(
+          outboundBlocked ||
+            (hostBusy && (!guideKey || !isACPJobPending(jobs[guideKey]))),
+        )}
+        inputLoading={inputLoading}
+        cancelLoading={cancelLoading}
+        error={guideKey ? actionErrors[guideKey] : undefined}
+        onClose={() => setGuideKey(null)}
+        onCheck={(runnerKey) => void handleSetupAction(runnerKey, "check")}
+        onInstall={(runnerKey) => void handleSetupAction(runnerKey, "install")}
+        onLogin={(runnerKey) => void handleSetupAction(runnerKey, "login")}
+        onCredentials={handleCredentials}
+        onCancel={(jobId) => void handleCancelJob(jobId)}
+        onInput={handleJobInput}
       />
     </>
   );

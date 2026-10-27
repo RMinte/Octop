@@ -22,12 +22,6 @@
   margin: 0 0 16px;
 }
 
-.runnerCardDisabled {
-  opacity: 0.55;
-  pointer-events: auto;
-  cursor: default;
-}
-
 .toolbar {
   display: flex;
   justify-content: space-between;
@@ -66,4 +60,104 @@
 /* Pi mark is near-black on transparent; invert so it stays visible on dark cards. */
 :global(html[data-theme="dark"]) .invertOnDark {
   filter: invert(1);
+}
+
+.hostAlert {
+  margin-bottom: 16px;
+}
+
+.runnerCard {
+  cursor: default;
+
+  &:active {
+    transform: none;
+  }
+}
+
+.runnerStatus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.installationStatus {
+  color: var(--fn-text-secondary);
+  font-size: 12px;
+}
+
+.statusWarning {
+  color: var(--fn-color-warning, #d97706);
+  background: rgba(217, 119, 6, 0.08);
+}
+
+.setupMessage {
+  margin: 0 0 12px;
+  color: var(--fn-text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.checkedAt {
+  margin: 0 0 12px;
+  color: var(--fn-text-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.cardActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: auto;
+}
+
+.guideStep {
+  margin-top: 20px;
+}
+
+.jobPanel {
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--fn-border-primary);
+  border-radius: var(--fn-radius-sm, 6px);
+}
+
+.jobHeading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.jobOutput {
+  max-height: 300px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--fn-radius-sm, 4px);
+  background: var(--fn-bg-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.authorizationBox {
+  margin: 16px 0;
+}
+
+.deviceCode {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: 3px;
+}
+
+.loginResponse {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
 }

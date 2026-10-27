@@ -76,6 +76,17 @@ class ACPSettingsStore:
         self._save_raw_runners(user_id, filtered)
         return self.load_runners(user_id)
 
+    def load_setup_status(self, user_id: int, runner: str) -> dict[str, Any]:
+        """Read a connection observation separately from runner configuration."""
+        raw = self._settings.get(f"acp_setup:user:{user_id}:{runner}")
+        return _parse_config_json(raw)
+
+    def save_setup_status(self, user_id: int, runner: str, status: dict[str, Any]) -> None:
+        """Persist only the observation, never CLI output or credentials."""
+        self._settings.set(
+            f"acp_setup:user:{user_id}:{runner}", json.dumps(status, ensure_ascii=False)
+        )
+
     def _save_raw_runners(self, user_id: int, runners: dict[str, Any]) -> None:
         self._settings.set(
             _settings_key(user_id), json.dumps({"runners": runners}, ensure_ascii=False)

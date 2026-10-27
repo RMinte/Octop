@@ -1,4 +1,38 @@
 {
+  "acp_setup": {
+    "unchecked": "Connection not checked yet. Checking does not send a task message.",
+    "not_installed": "This runner is not installed on the Octop execution host.",
+    "missing_dependency": "The box needs a runtime. Install will download and configure it automatically.",
+    "manual": "Follow the official guide to install on the Octop host and configure its launch command.",
+    "auth_required": "Log in or configure credentials under the OS account running Octop, then check the connection again.",
+    "ready": "ACP session connected. No model message was sent; actual requests still depend on account access and quota.",
+    "check_failed": "Connection check failed. Check the launch command and login configuration, then retry.",
+    "check_timeout": "Connection check timed out. Check the host setup, then retry.",
+    "install_failed": "Installation failed. Check the Octop host network and directory permissions, then retry.",
+    "install_timeout": "Installation timed out. Check the host network, then retry.",
+    "unsupported_install": "This launch configuration requires manual installation. Keep the custom launch command and follow the official guide.",
+    "config_changed": "The launch configuration changed during the operation. Check the connection again.",
+    "installed": "Installation complete. Log in or configure a model, then check the connection and enable the runner.",
+    "busy": "This runner is being installed or checked. Try again shortly.",
+    "credentials_saved": "Credentials saved. Check the connection before enabling the runner.",
+    "job_running": "Installing or signing in on the box.",
+    "job_succeeded": "Operation complete. Review the connection status.",
+    "job_failed": "Operation failed. Review its progress and retry.",
+    "job_cancelled": "Operation cancelled.",
+    "login_not_supported": "Configure this runner using its provider and API key in this page.",
+    "login_unavailable": "The runner is not installed, or this custom launch profile does not support web sign-in.",
+    "login_platform_unsupported": "This host cannot run the interactive authentication flow. Use the web API key form.",
+    "login_timeout": "Sign-in timed out. Start again.",
+    "login_failed": "Sign-in did not complete. Try again.",
+    "job_closed": "The service is stopping and cannot start an operation.",
+    "unsupported_runtime_platform": "Automatic runtime setup requires a Linux x64 or arm64 box.",
+    "unsupported_runtime_architecture": "This package does not support the box architecture. Linux x64 or arm64 is required.",
+    "runtime_checksum_mismatch": "Runtime download verification failed. Installation stopped; check the network and retry.",
+    "runtime_not_executable": "The runtime cannot start on this box. Check system and runtime-library compatibility.",
+    "runtime_unsafe_archive": "The downloaded archive failed validation. Installation stopped; retry the operation.",
+    "credential_codebuddy_cn": "CodeBuddy China",
+    "credential_codebuddy_global": "CodeBuddy International"
+  },
   "slash": {
     "error": {
       "unknown_command": "Unknown command: /{name}. Type /help for available commands."

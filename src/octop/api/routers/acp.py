@@ -10,12 +10,15 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Body, Depends, Request
+from pydantic import BaseModel, Field, SecretStr
 
 from octop.api.common.agent import assert_agent_owner as _assert_agent_owner
 from octop.api.deps import current_user, get_server, require_admin
+from octop.infra.agents.acp_setup import ACPRunnerSetup, ACPSetupService, ACPSetupView
+from octop.infra.agents.acp_setup_jobs import ACPSetupJob, ACPSetupJobs
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.utils.locale import resolve_request_locale
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +63,44 @@ class ACPAgentToolBody(BaseModel):
     )
 
 
+class ACPHostSetupView(ACPSetupView):
+    active_jobs: dict[str, ACPSetupJob] = Field(
+        default_factory=dict,
+        description="Current user's active host installation or login operations",
+    )
+
+
+class ACPCredentialsBody(BaseModel):
+    provider: str = Field(description="Credential option ID advertised by the runner setup status")
+    api_key: SecretStr = Field(description="Provider API key; never echoed by setup responses")
+
+
+class ACPLoginInputBody(BaseModel):
+    data: str = Field(description="Response sent only to the active login-only process")
+
+
 def _registry(server: Any) -> Any:
     assert server.app_runtime is not None
     return server.app_runtime.agent_registry
+
+
+def _setup_service(server: Any) -> ACPSetupService:
+    service = getattr(server, "_acp_setup_service", None)
+    if not isinstance(service, ACPSetupService):
+        service = ACPSetupService(_registry(server).acp_settings, server.paths.root)
+        server._acp_setup_service = service
+    return service
+
+
+def _setup_jobs(server: Any) -> ACPSetupJobs:
+    jobs = getattr(server, "_acp_setup_jobs", None)
+    if not isinstance(jobs, ACPSetupJobs):
+        jobs = ACPSetupJobs(
+            _setup_service(server),
+            on_complete=lambda user_id: _schedule_reload_user_agents(server, user_id),
+        )
+        server._acp_setup_jobs = jobs
+    return jobs
 
 
 def _validate_runner(name: str, runner: ACPRunnerBody) -> None:
@@ -167,6 +205,161 @@ async def put_global_acp_runners(
     saved = registry.acp_settings.save_runners(user.id, runners)
     _schedule_reload_user_agents(server, user.id)
     return {"runners": saved}
+
+
+@router.get(
+    "/acp/setup",
+    summary="Get ACP installation and connection status",
+    response_model=ACPHostSetupView,
+    description=(
+        "Admin-only status for this Octop execution host. Checks executable presence and "
+        "reads the last connection check without starting agents, downloading packages, "
+        "or sending model messages. Runner enablement is separate from readiness."
+    ),
+)
+async def get_acp_setup(
+    request: Request,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPHostSetupView:
+    view = await _setup_service(server).view(user.id, resolve_request_locale(request))
+    return ACPHostSetupView(**view.model_dump(), active_jobs=_setup_jobs(server).active(user.id))
+
+
+@router.post(
+    "/acp/{runner_name}/install",
+    summary="Install a supported ACP runner on the Octop host",
+    response_model=ACPSetupJob,
+    status_code=202,
+    description=(
+        "Admin-only installation of a built-in runner from its supported package source. "
+        "Prepares a supported Node.js runtime if needed and installs into Octop's managed directory. "
+        "Returns a background operation immediately; poll its status to see progress or cancel it. "
+        "Does not log in or enable delegation. Custom launch configurations are preserved."
+    ),
+)
+async def install_acp_runner(
+    runner_name: str,
+    request: Request,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPSetupJob:
+    return await _setup_jobs(server).start(
+        user.id, runner_name, "install", resolve_request_locale(request)
+    )
+
+
+@router.post(
+    "/acp/{runner_name}/login",
+    summary="Start an ACP runner login on the Octop host",
+    response_model=ACPSetupJob,
+    status_code=202,
+    description=(
+        "Starts only a supported login-specific command. The user's operation exposes "
+        "an authorization URL, device code, or bounded interactive authentication output. "
+        "Does not open a host shell or start the full agent for login. API-key-only "
+        "profiles use the credentials endpoint instead. Login does not enable delegation."
+    ),
+)
+async def login_acp_runner(
+    runner_name: str,
+    request: Request,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPSetupJob:
+    return await _setup_jobs(server).start(
+        user.id, runner_name, "login", resolve_request_locale(request)
+    )
+
+
+@router.get(
+    "/acp/jobs/{job_id}",
+    summary="Get ACP installation or login progress",
+    response_model=ACPSetupJob,
+)
+async def get_acp_setup_job(
+    job_id: str,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPSetupJob:
+    return _setup_jobs(server).get(user.id, job_id)
+
+
+@router.post(
+    "/acp/jobs/{job_id}/cancel", summary="Cancel an ACP setup operation", response_model=ACPSetupJob
+)
+async def cancel_acp_setup_job(
+    job_id: str,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPSetupJob:
+    return await _setup_jobs(server).cancel(user.id, job_id)
+
+
+@router.post(
+    "/acp/jobs/{job_id}/input",
+    summary="Respond to ACP login interaction",
+    response_model=ACPSetupJob,
+)
+async def input_acp_setup_job(
+    job_id: str,
+    body: ACPLoginInputBody,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPSetupJob:
+    return await _setup_jobs(server).input(user.id, job_id, body.data)
+
+
+@router.post(
+    "/acp/{runner_name}/credentials",
+    summary="Configure a supported ACP model credential",
+    response_model=ACPRunnerSetup,
+    description=(
+        "Saves an advertised provider credential to this user's runner environment. "
+        "The response never echoes the key. Disables the runner and invalidates the "
+        "previous check; check the connection before enabling it."
+    ),
+)
+async def save_acp_credentials(
+    runner_name: str,
+    body: ACPCredentialsBody,
+    request: Request,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPRunnerSetup:
+    result = await _setup_service(server).save_credentials(
+        user.id,
+        runner_name,
+        body.provider,
+        body.api_key.get_secret_value(),
+        resolve_request_locale(request),
+    )
+    _schedule_reload_user_agents(server, user.id)
+    return result
+
+
+@router.post(
+    "/acp/{runner_name}/check",
+    summary="Check a local ACP runner connection",
+    response_model=ACPRunnerSetup,
+    description=(
+        "Admin-only, bounded check of an already installed runner on this Octop host. "
+        "Starts a temporary ACP process and establishes a session without sending a prompt "
+        "or granting file, terminal, or tool permissions. Explicit authentication failures "
+        "are reported separately. A successful connection does not verify model quota."
+    ),
+)
+async def check_acp_runner(
+    runner_name: str,
+    request: Request,
+    user: Any = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> ACPRunnerSetup:
+    result = await _setup_service(server).check(
+        user.id, runner_name, resolve_request_locale(request)
+    )
+    _schedule_reload_user_agents(server, user.id)
+    return result
 
 
 @router.get("/acp/{runner_name}", summary="Get global ACP runner")

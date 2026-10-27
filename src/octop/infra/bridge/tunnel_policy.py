@@ -194,6 +194,8 @@ def is_tunnel_path_allowed(method: str, path: str) -> bool:
         return verb == "GET"
 
     if _ACP_GLOBAL.fullmatch(raw):
+        if raw == "/api/acp/setup":
+            return False
         return verb in {"GET", "PUT", "DELETE"}
 
     if _CRON_SETTINGS.fullmatch(raw):

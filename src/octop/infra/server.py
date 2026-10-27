@@ -817,6 +817,11 @@ class OctopServer:
             raise asyncio.CancelledError
 
     async def _stop(self) -> None:
+        acp_jobs = getattr(self, "_acp_setup_jobs", None)
+        if acp_jobs is not None:
+            await acp_jobs.close()
+            self._acp_setup_jobs = None
+        self._acp_setup_service = None
         if self.conversation_migration_worker is not None:
             await self.conversation_migration_worker.close()
             self.conversation_migration_worker = None

@@ -17,6 +17,48 @@ export interface ACPConfig {
   runners: Record<string, ACPRunnerConfig>;
 }
 
+export interface ACPRunnerSetup {
+  runner: string;
+  installation: "not_installed" | "installed" | "missing_dependency" | "manual";
+  connection: "unchecked" | "ready" | "auth_required" | "error";
+  enabled: boolean;
+  can_install: boolean;
+  can_login: boolean;
+  credential_options: Array<{ id: string; label: string }>;
+  install_command: string | null;
+  login_command: string | null;
+  docs_url: string | null;
+  message: string | null;
+  checked_at: number | null;
+}
+
+export interface ACPSetupView {
+  host: string;
+  runners: Record<string, ACPRunnerSetup>;
+  active_jobs: Record<string, ACPSetupJob>;
+}
+
+export interface ACPSetupJob {
+  job_id: string;
+  runner: string;
+  kind: "install" | "login";
+  status: "running" | "waiting_for_user" | "succeeded" | "failed" | "cancelled";
+  phase: string;
+  output: string;
+  message: string | null;
+  authorization: {
+    url: string | null;
+    user_code: string | null;
+    expires_at: number | null;
+  } | null;
+  input_mode: "none" | "terminal";
+  setup: ACPRunnerSetup | null;
+}
+
+export function isACPJobPending(job?: ACPSetupJob): boolean {
+  return job?.status === "running" || job?.status === "waiting_for_user";
+}
+
 export function parseArgsText(value: unknown): string[] {
   return String(value || "")
     .split("\n")

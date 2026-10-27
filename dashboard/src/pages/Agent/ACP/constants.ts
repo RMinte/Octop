@@ -58,8 +58,8 @@ export function runnerIcon(key: string): string {
   return RUNNER_ICONS[key] ?? customRunnerIcon;
 }
 
-export function runnerLabelKey(key: string): string {
-  return RUNNER_LABEL_KEYS[key] ?? "acp.runner_custom";
+export function runnerLabelKey(key: string): string | undefined {
+  return RUNNER_LABEL_KEYS[key];
 }
 
 export function runnerIntroKey(key: string): string {

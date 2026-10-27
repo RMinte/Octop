@@ -85,6 +85,24 @@ def test_denies_management_and_auth_paths() -> None:
     assert not is_tunnel_path_allowed("DELETE", "/api/setup/password")
 
 
+@pytest.mark.parametrize("method", ["GET", "POST", "PUT", "DELETE"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/acp/setup",
+        "/api/acp/codex/install",
+        "/api/acp/codex/check",
+        "/api/acp/codex/login",
+        "/api/acp/pi/credentials",
+        "/api/acp/jobs/operation-id",
+        "/api/acp/jobs/operation-id/input",
+        "/api/acp/jobs/operation-id/cancel",
+    ],
+)
+def test_acp_host_setup_is_not_available_through_bridge(method: str, path: str) -> None:
+    assert not is_tunnel_path_allowed(method, path)
+
+
 def test_denies_retired_agentcomputer_protocol() -> None:
     resources = [
         "/capabilities",

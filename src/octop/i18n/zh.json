@@ -1,4 +1,38 @@
 {
+  "acp_setup": {
+    "unchecked": "尚未检测连接。检测不会发送任务消息。",
+    "not_installed": "Octop 运行主机尚未安装此 Runner。",
+    "missing_dependency": "盒子尚未准备所需运行环境，点击安装会自动下载并配置。",
+    "manual": "请按官方文档在 Octop 运行主机安装，并配置启动命令。",
+    "auth_required": "请在运行 Octop 的服务账号下登录或配置凭证，然后重新检测连接。",
+    "ready": "ACP 会话连接成功。检测未发送模型消息，实际调用仍取决于账户权限和额度。",
+    "check_failed": "连接检测失败，请核对启动命令和登录配置后重试。",
+    "check_timeout": "连接检测超时，请检查主机环境后重试。",
+    "install_failed": "安装失败，请检查 Octop 运行主机的网络及目录权限后重试。",
+    "install_timeout": "安装超时，请检查主机网络后重试。",
+    "unsupported_install": "此启动配置需要手动安装，请保留自定义启动命令并参考官方文档。",
+    "config_changed": "操作期间启动配置已变化，请重新检测连接。",
+    "installed": "安装完成。请完成登录或模型配置，再检测连接并启用。",
+    "busy": "此 Runner 正在安装或检测，请稍后重试。",
+    "credentials_saved": "凭据已保存。请检测连接后启用 Runner。",
+    "job_running": "正在盒子内执行安装或登录流程。",
+    "job_succeeded": "操作已完成，请查看连接状态。",
+    "job_failed": "操作失败，请查看进度并重试。",
+    "job_cancelled": "操作已取消。",
+    "login_not_supported": "此 Runner 使用网页凭证配置。请选择提供商并保存 API Key。",
+    "login_unavailable": "Runner 尚未安装，或当前自定义启动配置不支持网页登录。",
+    "login_platform_unsupported": "当前主机不支持此交互认证流程，请使用网页 API Key 配置。",
+    "login_timeout": "登录等待超时，请重新开始。",
+    "login_failed": "登录未完成，请重试。",
+    "job_closed": "服务正在停止，无法开始操作。",
+    "unsupported_runtime_platform": "当前系统不支持自动准备此运行环境，盒子需使用 Linux x64 或 arm64。",
+    "unsupported_runtime_architecture": "当前盒子架构尚不支持此安装包，需要 Linux x64 或 arm64。",
+    "runtime_checksum_mismatch": "运行环境下载校验失败，已停止安装。请检查网络后重试。",
+    "runtime_not_executable": "运行环境无法在盒子上启动，请检查系统和运行库兼容性。",
+    "runtime_unsafe_archive": "下载包结构校验失败，已停止安装。请重试。",
+    "credential_codebuddy_cn": "CodeBuddy 中国区",
+    "credential_codebuddy_global": "CodeBuddy 国际区"
+  },
   "slash": {
     "error": {
       "unknown_command": "未知指令：/{name}。输入 /help 查看可用指令。"

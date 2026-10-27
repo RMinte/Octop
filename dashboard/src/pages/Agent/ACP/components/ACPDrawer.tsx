@@ -82,6 +82,7 @@ export function ACPDrawer({
       }
     >
       <Form form={form} layout="vertical" onFinish={onSubmit}>
+        <p className={styles.drawerHint}>{t("acp.advancedConfigHint")}</p>
         <Form.Item
           name="runnerKey"
           label={t("acp.runnerKey")}
@@ -91,13 +92,6 @@ export function ACPDrawer({
           ]}
         >
           <Input placeholder="my_custom_runner" disabled={!canEditKey} />
-        </Form.Item>
-        <Form.Item
-          name="enabled"
-          label={t("common.enabled")}
-          valuePropName="checked"
-        >
-          <Switch />
         </Form.Item>
         <Form.Item
           name="command"
