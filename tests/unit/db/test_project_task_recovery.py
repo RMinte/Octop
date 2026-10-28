@@ -317,7 +317,7 @@ def test_recovery_migration_repairs_missing_schema_and_preserves_saved_facts(
     with db.connect() as conn:
         after = dict(conn.execute("SELECT * FROM project_task_turns").fetchone())
         assert after.pop("recovery_json") == "" and after == before
-        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 59
+        assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 60
         assert start_receipt(conn, ProjectTaskExecutionReceiptRepo())
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 

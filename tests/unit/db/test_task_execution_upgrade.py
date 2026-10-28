@@ -56,7 +56,7 @@ def test_v57_upgrade_keeps_task_identity_and_repairs_repeated_runs(
                 "keep-session"
                 in conn.execute("SELECT execution_json FROM project_tasks").fetchone()[0]
             )
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 59
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 60
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         db.close()

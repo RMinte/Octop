@@ -413,6 +413,7 @@
   },
   "errors": {
     "RESIDENT_REQUEST_CONFLICT": "此请求编号已用于不同的会话内容或操作。",
+    "RESIDENT_SETTINGS_CONFLICT": "会话设置已更新，请刷新后重试。",
     "RESIDENT_TEXT_ONLY": "此会话暂不支持该输入或操作，请检查当前可用的消息类型；执行工作可交给任务。",
     "RESIDENT_INTERRUPTED": "本轮对话已中断，已收到的正文已保留，不会自动重新执行。",
     "RESIDENT_MODEL_UNAVAILABLE": "此会话没有可用模型，请先配置可用的模型服务和模型。",

@@ -12,7 +12,9 @@ from octop.infra.agents.resident_conversation import (
     ResidentCancel,
     ResidentCapabilities,
     ResidentConversationRuntime,
+    ResidentConversationSettings,
     ResidentMessage,
+    ResidentSettingsPatch,
     ResidentSnapshot,
     ResidentTurn,
     binding_view,
@@ -102,12 +104,47 @@ async def conversation(
     )
 
 
+@router.get(
+    _THREAD + "/conversation/settings",
+    response_model=ResidentConversationSettings,
+    summary="Read persistent resident conversation settings",
+    description="Owner-only. New messages inherit these settings when accepted. Existing turn receipts keep their frozen values.",
+)
+async def conversation_settings(
+    agent_id: str,
+    thread_id: str,
+    response: Response,
+    user: User = Depends(current_user),
+    server: OctopServer = Depends(get_server),
+) -> ResidentConversationSettings:
+    response.headers["Cache-Control"] = "no-store"
+    return await _runtime(server).settings(user.id, agent_id, thread_id)
+
+
+@router.patch(
+    _THREAD + "/conversation/settings",
+    response_model=ResidentConversationSettings,
+    summary="Update persistent resident search settings for subsequent turns",
+    description="Owner-only optimistic update using the configuration revision. Changing settings during execution does not alter admitted turns. Stale revisions return RESIDENT_SETTINGS_CONFLICT. A current-revision update to the same value is a no-op.",
+)
+async def update_conversation_settings(
+    agent_id: str,
+    thread_id: str,
+    body: ResidentSettingsPatch,
+    response: Response,
+    user: User = Depends(current_user),
+    server: OctopServer = Depends(get_server),
+) -> ResidentConversationSettings:
+    response.headers["Cache-Control"] = "no-store"
+    return await _runtime(server).update_settings(user.id, agent_id, thread_id, body)
+
+
 @router.post(
     _THREAD + "/messages",
     response_model=ResidentTurn,
     status_code=202,
     summary="Durably accept text, images and files for the resident conversation",
-    description="Reuse request_id after a lost response. Text and owned attachment_ids are frozen together; changed input conflicts. Upload images and files through /api/project-tasks/attachments. Uploaded files are readable only through the private conversation attachment reader and are not automatically delegated to tasks. Disconnecting does not cancel execution.",
+    description="Reuse request_id after a lost response. Text and owned attachment_ids are frozen together; changed input conflicts. New messages inherit the persistent conversation search setting when accepted; original requests retain their frozen search selection on retries. Upload images and files through /api/project-tasks/attachments. Uploaded files are readable only through the private conversation attachment reader and are not automatically delegated to tasks. Disconnecting does not cancel execution.",
 )
 async def send_message(
     agent_id: str,

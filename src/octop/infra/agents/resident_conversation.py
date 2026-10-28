@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from octop_gateway.models import ChannelSubject, InboundMessage, TextContent
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints
 
 from octop.i18n import error_message, tr
 from octop.infra.agents.manager import AgentManager
@@ -119,6 +119,10 @@ class ResidentCapabilities(ResidentModel):
     web_search: bool = Field(
         default=True, description="Built-in web search is available directly in new resident turns."
     )
+    conversation_settings: bool = Field(
+        default=True,
+        description="Persistent conversation settings are available through GET/PATCH conversation/settings; new turns freeze the current settings.",
+    )
     history_days_search_location: bool = True
     memory_management: bool = True
     memory_capture: Literal["explicit_opt_in_raw_events"] = "explicit_opt_in_raw_events"
@@ -164,6 +168,26 @@ class ResidentCancel(ResidentModel):
     turn_id: str = Field(min_length=1, max_length=200, description="Exact turn to cancel.")
 
 
+class ResidentConversationSettings(ResidentModel):
+    web_search_enabled: bool = Field(
+        default=True,
+        description="Persistent built-in search selection, inherited by new turns; does not change already accepted turns or delegated Task settings.",
+    )
+    revision: int = Field(
+        default=1, ge=1, description="Current conversation configuration revision."
+    )
+
+
+class ResidentSettingsPatch(ResidentModel):
+    expected_revision: StrictInt = Field(
+        ge=1,
+        description="Configuration revision returned by conversation/settings or snapshot.settings.",
+    )
+    web_search_enabled: StrictBool = Field(
+        description="Enable built-in search for subsequent turns. Already accepted turns keep their frozen setting."
+    )
+
+
 class ResidentTurn(ResidentModel):
     turn_id: str
     revision: int = Field(
@@ -177,6 +201,10 @@ class ResidentTurn(ResidentModel):
     )
     prompt: str
     reply: str
+    web_search_enabled: bool = Field(
+        default=False,
+        description="Effective built-in search selection frozen for this turn. Legacy receipts without a search capability snapshot return false.",
+    )
     attachments: list[TaskInputAttachment] = Field(default_factory=list)
     status: TurnStatus
     created_at: datetime
@@ -195,7 +223,14 @@ class ResidentSnapshot(ResidentModel):
     revision: int
     active_turn_id: str | None
     has_earlier: bool
+    settings: ResidentConversationSettings = Field(default_factory=ResidentConversationSettings)
     turns: list[ResidentTurn]
+
+
+def settings_view(row: ResidentConversationRow) -> ResidentConversationSettings:
+    return ResidentConversationSettings(
+        web_search_enabled=row.web_search_enabled, revision=row.configuration_revision
+    )
 
 
 def _task_context(row: ResidentRequestRow) -> ResidentTaskContext | None:
@@ -217,6 +252,9 @@ def turn_view(row: ResidentRequestRow, locale: str) -> ResidentTurn:
         assistant_message_id=f"resident:{row.turn_id}:assistant",
         prompt=row.prompt,
         reply=row.reply,
+        web_search_enabled=bool(
+            json.loads(row.configuration_json).get("web_search_enabled", False)
+        ),
         attachments=turn_attachments(row.configuration_json),
         status=cast(TurnStatus, row.status),
         created_at=datetime.fromtimestamp(row.created_at / 1000, UTC),
@@ -367,17 +405,57 @@ class ResidentConversationRuntime:
         self, owner_id: int, agent_id: str, thread_id: str, limit: int, locale: str
     ) -> ResidentSnapshot:
         await asyncio.to_thread(self._require, owner_id, agent_id, thread_id)
-        revision, rows = await asyncio.to_thread(
+        binding, rows = await asyncio.to_thread(
             self.services.resident_request_repo.snapshot, owner_id, thread_id, limit + 1
         )
         return ResidentSnapshot(
             agent_id=agent_id,
             thread_id=thread_id,
-            revision=revision,
+            revision=binding.revision,
             active_turn_id=next((row.turn_id for row in rows if row.status in ACTIVE), None),
             has_earlier=len(rows) > limit,
+            settings=settings_view(binding),
             turns=[turn_view(row, locale) for row in rows[-limit:]],
         )
+
+    async def settings(
+        self, owner_id: int, agent_id: str, thread_id: str
+    ) -> ResidentConversationSettings:
+        binding = await asyncio.to_thread(self._require, owner_id, agent_id, thread_id)
+        return settings_view(binding)
+
+    async def update_settings(
+        self, owner_id: int, agent_id: str, thread_id: str, body: ResidentSettingsPatch
+    ) -> ResidentConversationSettings:
+        await asyncio.to_thread(self._require, owner_id, agent_id, thread_id)
+
+        def update() -> ResidentConversationRow:
+            with self.services.db.transaction() as conn:
+                if not self.services.project_task_repo.lock_owner(conn, owner_id):
+                    raise OctopError.localized(ErrorCode.FORBIDDEN)
+                binding = self.services.resident_conversation_repo.get_by_thread_in_transaction(
+                    conn, owner_id, thread_id
+                )
+                if binding is None or binding.agent_id != agent_id:
+                    raise OctopError.localized(ErrorCode.NOT_FOUND)
+                if binding.status != "ready":
+                    raise OctopError.localized(ErrorCode.AGENT_NOT_RUNNING)
+                updated = self.services.resident_conversation_repo.update_settings_in_transaction(
+                    conn,
+                    owner_id=owner_id,
+                    agent_id=agent_id,
+                    thread_id=thread_id,
+                    expected_revision=body.expected_revision,
+                    web_search_enabled=body.web_search_enabled,
+                    now=now_ms(),
+                )
+                if updated is None:
+                    raise OctopError.localized(ErrorCode.RESIDENT_SETTINGS_CONFLICT)
+                return updated
+
+        binding = await _settled_io(update)
+        self._updates.notify(thread_id)
+        return settings_view(binding)
 
     async def request(
         self, owner_id: int, agent_id: str, thread_id: str, request_id: str
@@ -428,7 +506,6 @@ class ResidentConversationRuntime:
             )
         configuration = await asyncio.to_thread(self._configuration, owner_id, agent_id)
         configuration["resident_input"] = json.loads(input_json)
-        configuration["web_search_enabled"] = True
         configuration["attachment_read_enabled"] = True
         if binding.role == "primary":
             user = await asyncio.to_thread(self.services.user_repo.get, owner_id)
@@ -462,6 +539,17 @@ class ResidentConversationRuntime:
                     ):
                         raise ResidentRequestConflict("request input changed")
                     return existing, False
+                current_binding = (
+                    self.services.resident_conversation_repo.get_by_thread_in_transaction(
+                        conn, owner_id, thread_id
+                    )
+                )
+                if current_binding is None or current_binding.agent_id != agent_id:
+                    raise OctopError.localized(ErrorCode.NOT_FOUND)
+                configuration["web_search_enabled"] = current_binding.web_search_enabled
+                configuration["conversation_configuration_revision"] = (
+                    current_binding.configuration_revision
+                )
                 if body.attachment_ids:
                     attached = input_attachments.bind(
                         self.services,

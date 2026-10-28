@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+from dataclasses import replace
 
 import pytest
 
@@ -12,6 +13,7 @@ from octop.config import OctopConfig
 from octop.infra.agents.resident_identity import ensure_resident_identity
 from octop.infra.db import migrate
 from octop.infra.db.pool import SqlitePool
+from octop.infra.db.repos.resident_conversations import ResidentConversationRepo
 from octop.infra.db.repos.resident_requests import ResidentRequestBusy, ResidentRequestConflict
 from octop.infra.db.services import build_shared_services
 from octop.infra.utils.paths import PathLayout
@@ -41,7 +43,7 @@ def test_retries_keep_one_turn_and_do_not_repeat_or_change_input(services):
     )
     assert created and first.configuration_json == '{"model_ref":"first"}'
     revision, rows = repo.snapshot(1, binding.thread_id)
-    assert revision > before and rows == [first]
+    assert revision.revision > before.revision and rows == [first]
     duplicate, created = repo.create(1, binding.thread_id, "request", "new-turn", "Hello", 2000)
     assert not created and duplicate == first
     assert repo.snapshot(1, binding.thread_id)[0] == revision
@@ -64,13 +66,13 @@ def test_progress_is_fenced_and_thread_revision_survives_turn_changes(services):
     assert not repo.update_reply("turn-1", "other-worker", "bad", 1200)
     revision = repo.snapshot(1, thread_id)[0]
     assert repo.update_reply("turn-1", "worker", "Partial", 1200)
-    assert repo.snapshot(1, thread_id)[0] > revision
+    assert repo.snapshot(1, thread_id)[0].revision > revision.revision
     assert repo.renew("turn-1", "worker", 2000, 5000)
     assert repo.finish("turn-1", "worker", "completed", "Full", "", 3100)
     previous = repo.snapshot(1, thread_id)[0]
     second, _ = repo.create(1, thread_id, "second", "turn-2", "Continue", 3200)
     revision, rows = repo.snapshot(1, thread_id, limit=1)
-    assert revision > previous
+    assert revision.revision > previous.revision
     assert rows == [second]
     assert [row.turn_id for row in repo.list(thread_id, 1, before=second.pk)] == ["turn-1"]
     assert not repo.finish("turn-1", "worker", "failed", "stale", "bad", 3300)
@@ -163,7 +165,7 @@ def test_migration_from_50_preserves_existing_records(tmp_path, monkeypatch):
             assert after.pop("config_revision") == 1
             assert after == before
             assert conn.execute("SELECT COUNT(*) FROM resident_conversations").fetchone()[0] == 0
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 59
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 60
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         pool.close()
@@ -177,3 +179,126 @@ def test_postgres_and_sqlite_resident_schema_have_matching_constraints():
     )
     postgres = postgres.replace("owner_id BIGINT", "owner_id INTEGER")
     assert re.sub(r"\s+", " ", postgres).strip() == re.sub(r"\s+", " ", sqlite).strip()
+
+
+def test_settings_compare_and_swap_preserves_old_rows_and_accepted_turn_configuration(services):
+    repo = services.resident_conversation_repo
+    binding = repo.get(1)
+    requests = services.resident_request_repo
+    accepted, _ = requests.create(
+        1,
+        binding.thread_id,
+        "settings-request",
+        "settings-turn",
+        "Question",
+        1000,
+        '{"web_search_enabled":true}',
+        input_json='{"read_tools":false}',
+    )
+    before = repo.get(1)
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE users SET id=id WHERE id=1")
+        assert repo.get_by_thread_in_transaction(conn, 1, binding.thread_id) == before
+        assert repo.get_by_thread_in_transaction(conn, 2, binding.thread_id) is None
+        assert (
+            repo.update_settings_in_transaction(
+                conn, 1, binding.agent_id, binding.thread_id, 1, True, 2000
+            )
+            == before
+        )
+        for owner_id, agent_id, thread_id, revision in (
+            (1, binding.agent_id, binding.thread_id, 0),
+            (1, binding.agent_id, binding.thread_id, 2),
+            (2, binding.agent_id, binding.thread_id, 1),
+            (999, binding.agent_id, binding.thread_id, 1),
+            (1, "wrong-agent", binding.thread_id, 1),
+            (1, binding.agent_id, "wrong-thread", 1),
+        ):
+            assert (
+                repo.update_settings_in_transaction(
+                    conn, owner_id, agent_id, thread_id, revision, False, 2000
+                )
+                is None
+            )
+        changed = repo.update_settings_in_transaction(
+            conn, 1, binding.agent_id, binding.thread_id, 1, False, 3000
+        )
+        assert changed == replace(
+            before,
+            web_search_enabled=False,
+            configuration_revision=2,
+            revision=before.revision + 1,
+            updated_at=3000,
+        )
+        # Stale writes fail even when their desired value already matches.
+        assert (
+            repo.update_settings_in_transaction(
+                conn, 1, binding.agent_id, binding.thread_id, 1, False, 4000
+            )
+            is None
+        )
+        assert (
+            repo.update_settings_in_transaction(
+                conn, 1, binding.agent_id, binding.thread_id, 2, False, 4000
+            )
+            == changed
+        )
+    assert before.web_search_enabled is True and before.configuration_revision == 1
+    assert requests.get(1, "settings-request") == accepted
+    assert requests.snapshot(1, binding.thread_id) == (changed, [accepted])
+    assert repo.get(2).web_search_enabled is True
+
+
+@pytest.mark.parametrize("status", ["initializing", "failed"])
+def test_settings_only_update_ready_conversation(services, status):
+    repo = services.resident_conversation_repo
+    binding = repo.get(1)
+    with services.db.transaction() as conn:
+        conn.execute("UPDATE users SET id=id WHERE id=1")
+        conn.execute("UPDATE resident_conversations SET status=? WHERE owner_id=1", (status,))
+        before = repo.get_by_thread_in_transaction(conn, 1, binding.thread_id)
+        assert (
+            repo.update_settings_in_transaction(
+                conn, 1, binding.agent_id, binding.thread_id, 1, False, 2000
+            )
+            is None
+        )
+        assert repo.get_by_thread_in_transaction(conn, 1, binding.thread_id) == before
+
+
+def test_snapshot_reads_binding_settings_and_turns_from_one_database_snapshot(
+    services, monkeypatch
+):
+    binding = services.resident_conversation_repo.get(1)
+    requests = services.resident_request_repo
+    accepted, _ = requests.create(
+        1, binding.thread_id, "snapshot", "snapshot-turn", "Question", 1000
+    )
+    before = services.resident_conversation_repo.get(1)
+    writer = SqlitePool(services.paths.db)
+    original = ResidentConversationRepo.get_by_thread_in_transaction
+
+    def update_between_reads(conn, owner_id, thread_id):
+        row = original(conn, owner_id, thread_id)
+        with writer.transaction() as other:
+            other.execute(
+                "UPDATE resident_conversations SET web_search_enabled=0,configuration_revision=2,revision=revision+1 "
+                "WHERE owner_id=? AND thread_id=?",
+                (owner_id, thread_id),
+            )
+            other.execute(
+                "UPDATE resident_requests SET reply='concurrent reply' WHERE request_id='snapshot'"
+            )
+        return row
+
+    monkeypatch.setattr(
+        ResidentConversationRepo, "get_by_thread_in_transaction", staticmethod(update_between_reads)
+    )
+    try:
+        snapshot_binding, rows = requests.snapshot(1, binding.thread_id)
+        assert snapshot_binding == before
+        assert rows == [accepted]
+        assert requests.get(1, "snapshot").reply == "concurrent reply"
+        assert services.resident_conversation_repo.get(1).configuration_revision == 2
+    finally:
+        writer.close()

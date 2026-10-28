@@ -413,6 +413,7 @@
   },
   "errors": {
     "RESIDENT_REQUEST_CONFLICT": "This request ID was already used for different conversation input.",
+    "RESIDENT_SETTINGS_CONFLICT": "Conversation settings have changed. Refresh them and try again.",
     "RESIDENT_TEXT_ONLY": "This input or action is unavailable in this conversation. Check its supported message types; execution work can be delegated to a task.",
     "RESIDENT_INTERRUPTED": "The conversation turn was interrupted. Its saved reply is preserved; it will not be replayed automatically.",
     "RESIDENT_MODEL_UNAVAILABLE": "No usable model is configured for this conversation. Configure an available provider and model first.",

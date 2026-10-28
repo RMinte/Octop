@@ -5,7 +5,7 @@
 | 能力 | 私人助手 | 普通任务 |
 | --- | --- | --- |
 | 多轮交流 | 用户固定的私人身份与常驻会话 | 每个任务独立多轮，可关联项目及专家 |
-| 内置网络搜索 | 新受理轮次默认可用，复用已配置的搜索服务及免配置搜索；已受理旧轮次保留原能力 | 默认开启，可通过任务的网络搜索开关关闭；每轮固定发送时的值 |
+| 内置网络搜索 | 默认开启，通过会话设置持久保存开关；后续新轮继承，每轮冻结，旧轮保留原能力 | 默认开启，通过任务设置持久保存开关；后续新轮继承，每轮冻结 |
 | 上传图片识图 | 支持选图、粘贴、图文和仅图片输入；沿用任务的图片校验和模型入参转换 | 支持相同的图片输入链路 |
 | 图片限制 | 每条附件合计最多 9 个，每个不超过 25 MiB 及服务端上传限制；图片支持 JPEG、PNG、WebP、GIF，模型须支持视觉 | 同一限制 |
 | 图片历史与追问 | 原发送回执、快照及历史保留附件；模型上下文保留图片引用 | 任务详情、历史与模型上下文保留图片引用 |
@@ -31,6 +31,8 @@
 ## 搜索与双向附件的接入约定
 
 客户端先读取 `GET /api/agents/resident-capabilities`：`message_types` 包含 `image` 表示图片输入已接入，包含 `file` 表示普通文件输入已接入，`web_search=true` 表示新消息可使用内置搜索。具体搜索服务仍取决于服务端配置；工具真实返回结果后才能据此回答。
+
+`conversation_settings=true` 表示可使用 `GET/PATCH /api/agents/{agent_id}/threads/{thread_id}/conversation/settings` 读取和修改搜索开关。字段名与普通任务相同，均为 `web_search_enabled`；默认开启，后续新轮继承。PATCH 携带当前 `revision` 作为 `expected_revision`，实际改变后版本递增。当前设置见 `ResidentSnapshot.settings`，每轮实际值见 `ResidentTurn.web_search_enabled`；同一原请求重试保留原冻结值。App 菜单接线及错误处理见[服务端能力说明](resident-server-capabilities.md#搜索开关与-app-菜单接线)。
 
 图片和普通文件上传复用 `POST /api/project-tasks/attachments`，预览或下载复用 `GET /api/project-tasks/attachments/{attachment_id}`。这两个接口校验当前账号，不在客户端直接拼主机路径或使用未鉴权附件地址。
 

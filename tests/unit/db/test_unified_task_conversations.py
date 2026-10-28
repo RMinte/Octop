@@ -322,7 +322,7 @@ def test_upgrade_from_55_preserves_existing_data(tmp_path, monkeypatch, direct_s
         with db.connect() as conn:
             after = dict(conn.execute("SELECT * FROM project_tasks").fetchone())
             assert {key: after[key] for key in before} == before
-            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 59
+            assert conn.execute("SELECT version FROM _schema_version").fetchone()[0] == 60
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert AgentRepo(db).get("old-expert").config_revision == 1
         assert ProjectTaskRepo(db).get("old-task", owner).selected_expert_id is None

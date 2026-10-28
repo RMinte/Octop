@@ -9,6 +9,10 @@ from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, strict_int
+from octop.infra.db.repos.resident_conversations import (
+    ResidentConversationRepo,
+    ResidentConversationRow,
+)
 from octop.infra.db.repos.resident_inbox import ResidentInboxRepo
 
 
@@ -90,21 +94,18 @@ class ResidentRequestRepo:
 
     def snapshot(
         self, owner_id: int, thread_id: str, limit: int = 51
-    ) -> tuple[int, builtins.list[ResidentRequestRow]]:
+    ) -> tuple[ResidentConversationRow, builtins.list[ResidentRequestRow]]:
         with self._db.read_snapshot() as conn:
-            binding = conn.execute(
-                "SELECT revision FROM resident_conversations WHERE owner_id=? AND thread_id=?",
-                (owner_id, thread_id),
-            ).fetchone()
+            binding = ResidentConversationRepo.get_by_thread_in_transaction(
+                conn, owner_id, thread_id
+            )
             if binding is None:
                 raise ResidentRequestConflict("resident binding unavailable")
             rows = conn.execute(
                 "SELECT * FROM resident_requests WHERE owner_id=? AND thread_id=? ORDER BY id DESC LIMIT ?",
                 (owner_id, thread_id, limit),
             ).fetchall()
-            return strict_int(binding["revision"]), [
-                ResidentRequestRow.from_row(row) for row in reversed(rows)
-            ]
+            return binding, [ResidentRequestRow.from_row(row) for row in reversed(rows)]
 
     @staticmethod
     def get_in_transaction(conn: Any, owner_id: int, request_id: str) -> ResidentRequestRow | None:

@@ -19,6 +19,7 @@
 | 能力 | `GET /api/agents/resident-capabilities` | 类型化能力声明，读取不创建资源或授权。 |
 | 管家身份 | `GET /api/agents/resident-conversation`；`PUT` 同一路径用于显式重试或修复 | 服务端自动准备唯一 primary，客户端读取绑定即可；GET 不创建资源。 |
 | 连续会话 | `POST B/messages`、`GET B/requests/{request_id}`、`GET B/conversation`、`POST B/cancel` | 受理收据、部分回复、断线查询和精确停止。 |
+| 会话设置 | `GET/PATCH B/conversation/settings` | 持久保存内置搜索开关；后续新轮继承，已受理轮次保持原值。 |
 | 历史 | `GET B/conversation/history` 及其 `days/search/items/{item_id}` 路由 | 按日、有界分页、搜索、定位，包括回报和主动消息。 |
 | 记忆 | `B/memory` 下的事实、policy、candidates、sources | 查看、更正、废弃、原始采集开关、显式提炼、候选确认与来源。 |
 | 委派 | `POST B/messages`；`POST/GET B/conversation/delegations` | 自然语言工作请求可由模型按需创建普通 Task；独立接口也可显式创建，均持久关联并回流成果。 |
@@ -37,7 +38,7 @@
 
 ## 内置搜索与双向附件
 
-新受理的私人助手消息默认开放内置网络搜索，复用普通任务已配置的搜索服务与免配置搜索工具；查询事实和近期信息可直接回答，无需仅为搜索创建任务。已受理旧轮次仍沿用原能力快照。此能力不代表放开浏览器、任意网页或主机文件读取、命令或 MCP。
+私人助手复用普通任务已配置的搜索服务与免配置搜索工具；查询事实和近期信息可直接回答，无需仅为搜索创建任务。搜索开关与普通任务采用相同语义：默认开启、持久保存，后续新轮继承当前值，每轮在受理时冻结；修改不影响已受理、执行中或原请求重试的轮次。此能力不代表放开浏览器、任意网页或主机文件读取、命令或 MCP。
 
 `ResidentCapabilities.web_search=true`，`message_types` 包含 `text/image/file`。附件上传和预览或下载复用 `/api/project-tasks/attachments`，发送时把附件 ID 放入 `ResidentMessage.attachment_ids`；每条最多 9 个、单个最多 25 MiB，仍受服务端上传限制。可仅发附件；JPEG、PNG、WebP、GIF 图片需视觉模型，普通文件不要求视觉。`ResidentTurn.attachments` 在回执、快照、实时更新与历史中返回同一份附件元数据。重传原请求须保留正文与附件 ID；附件不自动转交委派任务。
 
@@ -46,6 +47,30 @@
 委派任务发布的真实成果通过回报 `artifacts` 回到原会话与历史。Dashboard 直接展示文件名、大小和下载按钮，使用回报 `task_id`、`artifact_id` 调用鉴权的 `GET /api/project-tasks/{task_id}/artifacts/{artifact_id}/download`。文件产出仍由普通 Task 完成；私人会话不直接执行任意文件写入或命令。
 
 完整差异与示例见[私人助手与任务能力对照](resident-task-capabilities.md)。
+
+### 搜索开关与 App 菜单接线
+
+`ResidentCapabilities.web_search=true` 表示具备内置搜索能力，`conversation_settings=true` 表示可读取和修改持久会话设置。App 只在后一个能力明确为 true 时开放菜单操作；旧服务端没有此声明时继续沿用原行为，不发送未支持的请求。
+
+`GET B/conversation/settings` 返回：
+
+```json
+{"web_search_enabled":true,"revision":1}
+```
+
+关闭搜索使用 `PATCH B/conversation/settings`：
+
+```json
+{"expected_revision":1,"web_search_enabled":false}
+```
+
+实际改变后返回新版本，例如 `{"web_search_enabled":false,"revision":2}`。两个字段均严格校验类型；`web_search_enabled` 只接受 JSON 布尔值，`expected_revision` 是大于等于 1 的整数。旧版本写入返回 `409 RESIDENT_SETTINGS_CONFLICT`；当前版本写相同值不增加版本。读取和更新均限本人绑定，不创建会话，也不调用模型。
+
+`ResidentSnapshot.settings` 与当前会话 `revision` 在同一数据库快照读取；设置变化也会通过已有 `resident.snapshot` 推送。菜单以 `settings.web_search_enabled` 显示当前选择，并用 `settings.revision` 修改；它独立于随回答增量更新的会话版本。切换成功后采用服务器回执；冲突或写入结果未知时重新读取设置核对，不用旧菜单状态自动覆盖另一个设备的更新。
+
+发送 `ResidentMessage` 无须携带开关参数，与普通任务追问一样，服务端在受理事务中读取当前设置。`ResidentTurn.web_search_enabled` 是该轮实际冻结值，在受理回执、原请求查询、快照、历史和实时更新中一致；不能用当前菜单状态改写历史。升级前没有搜索能力快照的旧轮次仍返回 false，不因重传或恢复增权。
+
+关闭控制私人助手本轮的内置搜索工具，保留此前资料上下文；委派任务继续遵守自己的任务设置，开关不跨任务隐式继承。App Swift/UI 菜单接线仍是后续工作，本轮提供服务端接口、类型和文档。
 
 ## 按轮授权的助手工具
 

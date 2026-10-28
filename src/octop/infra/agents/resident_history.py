@@ -139,6 +139,9 @@ def _item(row: ResidentHistoryRow, locale: str) -> ResidentHistoryItem:
             assistant_message_id=f"resident:{row.source_id}:assistant",
             prompt=row.prompt,
             reply=row.reply,
+            web_search_enabled=bool(
+                json.loads(row.configuration_json).get("web_search_enabled", False)
+            ),
             attachments=turn_attachments(row.configuration_json),
             status=cast(TurnStatus, row.status),
             created_at=created,

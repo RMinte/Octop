@@ -27,6 +27,7 @@ export interface ResidentCapabilities {
   };
   message_types: ("text" | "image" | "file")[];
   web_search?: boolean;
+  conversation_settings?: boolean;
   history_days_search_location: boolean;
   memory_management: boolean;
   memory_capture: "explicit_opt_in_raw_events";
@@ -50,6 +51,14 @@ export interface ResidentMessage extends ResidentAuthorization {
   prompt: string;
   attachment_ids?: string[];
 }
+export interface ResidentConversationSettings {
+  web_search_enabled: boolean;
+  revision: number;
+}
+export interface ResidentSettingsPatch {
+  expected_revision: number;
+  web_search_enabled: boolean;
+}
 export interface ResidentTurn {
   turn_id: string;
   revision: number;
@@ -58,6 +67,7 @@ export interface ResidentTurn {
   assistant_message_id: string;
   prompt: string;
   reply: string;
+  web_search_enabled?: boolean;
   status:
     | "queued"
     | "running"
@@ -76,6 +86,7 @@ export interface ResidentSnapshot extends ResidentScope {
   revision: number;
   active_turn_id: string | null;
   has_earlier: boolean;
+  settings?: ResidentConversationSettings;
   turns: ResidentTurn[];
 }
 export interface ResidentReportArtifact {
@@ -240,6 +251,18 @@ export const residentApi = {
   binding: () => request<ResidentBinding>("/agents/resident-conversation"),
   capabilities: () =>
     request<ResidentCapabilities>("/agents/resident-capabilities"),
+  settings: (scope: ResidentScope) =>
+    request<ResidentConversationSettings>(
+      `${residentScopePath(scope)}/conversation/settings`,
+    ),
+  updateSettings: (scope: ResidentScope, body: ResidentSettingsPatch) =>
+    request<ResidentConversationSettings>(
+      `${residentScopePath(scope)}/conversation/settings`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      },
+    ),
   repair: () =>
     request<ResidentBinding>("/agents/resident-conversation", {
       method: "PUT",

@@ -2,6 +2,8 @@
 
 本说明以 2026 年 10 月 21 日的服务端会话实现为基础，已补齐内置搜索、图片与普通文件输入及成果下载。服务端自动准备用户的唯一管家，客户端读取绑定后即可发送文字、查询受理结果、读取最近会话快照和停止指定轮次；无需用户创建或配置管家，也无需客户端先调用初始化接口。本轮没有修改 AgentComputer 客户端。
 
+搜索开关与普通任务采用相同的持久设置语义：通过 `GET/PATCH .../conversation/settings` 修改，默认开启，后续新轮继承，已受理轮次与重试保持原快照。新能力声明为 `conversation_settings=true`，快照附带当前 `settings`，每轮回显实际 `web_search_enabled`；App 接线见[搜索开关](resident-server-capabilities.md#搜索开关与-app-菜单接线)。
+
 完整能力汇总见[服务端能力与接入顺序](resident-server-capabilities.md)。用户通过唯一 `primary` 身份与生活工作管家持续交流，专业工作通过普通 Task 委派，结果回到同一会话；授权主动跟进使用独立接口。
 
 首版闭环现已追加[历史与基本记忆接口](resident-history-memory.md)和[任务委派与成果回流](resident-delegation-results.md)。下列六个接口继续保留原职责；新 primary 消息默认支持自然语言任务委派，统一历史使用新增 `/conversation/history`，显式委派与记忆管理仍保留各自入口。
@@ -130,6 +132,7 @@ Content-Type: application/json
 | `assistant_message_id` | string | 受理记录的稳定展示 ID，用于客户端合并本轮回复；不等同于 Provider/Harness 产生的正式 AI 消息 ID。 |
 | `prompt`、`reply` | string | 原始用户文字与当前已保存的完整回答；仅附件消息的 `prompt` 可为空，`reply` 可为空或为部分正文。 |
 | `attachments` | array | 本轮上传图片或文件的 `TaskInputAttachment` 元数据，文字消息为空数组。 |
+| `web_search_enabled` | boolean | 本轮受理时冻结的内置搜索开关；升级前无搜索能力快照的旧轮次为 false，后续修改会话设置不改写此值。 |
 | `status` | string enum | `queued / running / completed / failed / cancelled / interrupted`。 |
 | `created_at`、`updated_at` | datetime | UTC ISO 8601 时间。 |
 | `error_code`、`error_message` | string 或 null | 安全错误码及本地化说明；无错误时为 null。 |
