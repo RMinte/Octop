@@ -601,14 +601,25 @@ class TaskIngressWorker:
             await asyncio.sleep(1)
 
     async def _loop(self) -> None:
+        after, through = 0, 0
         while True:
             self._event.clear()
 
-            def pending() -> list[UnifiedInbox]:
+            def pending(
+                position: int = after, boundary: int = through
+            ) -> tuple[list[UnifiedInbox], int]:
                 with self.services.db.connect() as conn:
-                    return UnifiedSourceInboxRepo.pending(conn)
+                    boundary = boundary or UnifiedSourceInboxRepo.pending_high_watermark(conn)
+                    return (
+                        UnifiedSourceInboxRepo.pending(conn, after=position, through=boundary),
+                        boundary,
+                    )
 
-            for row in await asyncio.to_thread(pending):
+            rows, through = await asyncio.to_thread(pending)
+            for row in rows:
+                # Busy inputs keep their durable FIFO position, but cannot pin
+                # every scan to the same batch. Controls remain eligible too.
+                after = row.pk
                 try:
                     await admit(self.services, row.owner_id, row.inbox_id)
                     if self.task_worker is not None:
@@ -628,5 +639,9 @@ class TaskIngressWorker:
                         await asyncio.to_thread(failed)
                 except Exception:
                     logger.exception("Source admission failed: inbox=%s", row.inbox_id)
+            if not rows or after >= through:
+                # Bound each sweep so new arrivals cannot prevent retrying a
+                # previously busy source when it becomes idle.
+                after, through = 0, 0
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._event.wait(), timeout=0.5)

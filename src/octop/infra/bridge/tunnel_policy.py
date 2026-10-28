@@ -161,6 +161,16 @@ def is_task_tunnel_path_allowed(method: str, path: str) -> bool:
 
 def is_tunnel_path_allowed(method: str, path: str) -> bool:
     """Return True when ``method`` + ``path`` may run via an inbound tunnel."""
+    # Check the route exactly as it will be dispatched. HTTPX normalizes dot
+    # segments and ASGI decodes percent escapes after this policy runs; neither
+    # may turn an allowed agent path into a different resource or control plane.
+    # Query parameters travel in a separate field of the tunnel frame.
+    if any(char in path for char in ("%", "\\", "?", "#")):
+        return False
+    if any(part in {".", ".."} for part in path.split("/")):
+        return False
+    if any(ord(char) <= 32 or ord(char) == 127 for char in path):
+        return False
     verb = (method or "GET").upper()
     raw = (path or "").split("?", 1)[0].strip() or "/"
     if not raw.startswith("/"):

@@ -1797,7 +1797,7 @@ class BridgeManager:
         if row is None:
             return
         user = self._users.get(row.owner_user_id)
-        if user is None:
+        if user is None or user.disabled:
             await sess.send_json(
                 {
                     "type": "browser.error",

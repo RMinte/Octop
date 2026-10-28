@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from langchain_core.messages import messages_from_dict
 
@@ -65,6 +65,7 @@ def _prepare_in_transaction(
     conn: Any,
     owner_id: int,
     body: tasks.TaskMessage | tasks.TaskRetry,
+    preparation: tasks.PreparedSubmission,
     *,
     task_id: str | None,
     project_id: str | None,
@@ -82,26 +83,8 @@ def _prepare_in_transaction(
     if previous is not None:
         assert task is not None
         return task.task_id
-    configuration = tasks._base_configuration(
-        services,
-        owner_id,
-        task.project_id if task else project_id,
-        message.options,
-        selected_expert_id=task.selected_expert_id
-        if task
-        else message.selected_expert_id
-        if isinstance(message, tasks.ProjectTaskCreate)
-        else None,
-        action_mode=cast(
-            tasks.ActionMode,
-            task.action_mode
-            if task
-            else message.action_mode
-            if isinstance(message, tasks.ProjectTaskCreate)
-            else "craft",
-        ),
-        configuration_revision=task.configuration_revision if task else 1,
-    )
+    tasks.validate_preparation(services, conn, owner_id, preparation, task)
+    configuration = preparation.configuration
     assert message.options.routing is not None
     settings = load_settings(services)
     attached = [
@@ -181,10 +164,17 @@ def _prepare(
     admission_hook: AdmissionHook | None = None,
     **identity: Any,
 ) -> _PreparedRouting | str:
+    preparation = tasks.prepare_submission(
+        services,
+        owner_id,
+        body,
+        before=(lambda conn: admission_hook(conn, None, None)) if admission_hook else None,
+        **identity,
+    )
     with services.db.transaction() as conn:
         if admission_hook is not None:
             admission_hook(conn, None, None)
-        return _prepare_in_transaction(services, conn, owner_id, body, **identity)
+        return _prepare_in_transaction(services, conn, owner_id, body, preparation, **identity)
 
 
 def _admit(
@@ -196,21 +186,45 @@ def _admit(
     admission_hook: AdmissionHook | None = None,
     **identity: Any,
 ) -> tasks.TaskDetail:
+    preparation = tasks.prepare_submission(
+        services,
+        owner_id,
+        body,
+        before=(lambda conn: admission_hook(conn, None, None)) if admission_hook else None,
+        **identity,
+    )
+    configuration = (
+        tasks.submission_configuration(services, owner_id, preparation, decision)
+        if preparation.previous_turn_id is None
+        else None
+    )
     with services.db.transaction() as conn:
         if admission_hook is not None:
             admission_hook(conn, None, None)
-        current = _prepare_in_transaction(services, conn, owner_id, body, **identity)
+        current = _prepare_in_transaction(services, conn, owner_id, body, preparation, **identity)
         if isinstance(current, str):
             task_id = current
         else:
             if current.digest != prepared.digest:
                 raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
             task_id, _ = tasks.send_in_transaction(
-                services, conn, owner_id, body, routing_decision=decision, **identity
+                services,
+                conn,
+                owner_id,
+                body,
+                prepared=preparation,
+                prepared_configuration=configuration,
+                **identity,
             )
         if admission_hook is not None:
             _, turn_id = tasks.send_in_transaction(
-                services, conn, owner_id, body, routing_decision=decision, **identity
+                services,
+                conn,
+                owner_id,
+                body,
+                prepared=preparation,
+                prepared_configuration=configuration,
+                **identity,
             )
             admission_hook(conn, task_id, turn_id)
     return tasks.detail(services, owner_id, task_id)
@@ -223,9 +237,25 @@ def _send_with_hook(
     hook: AdmissionHook,
     **identity: Any,
 ) -> tasks.TaskDetail:
+    prepared = tasks.prepare_submission(
+        services, owner_id, body, before=lambda conn: hook(conn, None, None), **identity
+    )
+    configuration = (
+        tasks.submission_configuration(services, owner_id, prepared)
+        if prepared.previous_turn_id is None
+        else None
+    )
     with services.db.transaction() as conn:
         hook(conn, None, None)
-        task_id, turn_id = tasks.send_in_transaction(services, conn, owner_id, body, **identity)
+        task_id, turn_id = tasks.send_in_transaction(
+            services,
+            conn,
+            owner_id,
+            body,
+            prepared=prepared,
+            prepared_configuration=configuration,
+            **identity,
+        )
         hook(conn, task_id, turn_id)
     return tasks.detail(services, owner_id, task_id)
 

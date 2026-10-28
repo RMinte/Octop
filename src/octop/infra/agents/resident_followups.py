@@ -490,22 +490,48 @@ def cancel_followup(
         return _view(updated)
 
 
+def _task_request(
+    row: ResidentFollowupRow,
+) -> tuple[FollowupTaskPayload, tasks.TaskMessage, str]:
+    payload = FollowupTaskPayload.model_validate_json(row.payload_json)
+    digest = hashlib.sha256(
+        f"{row.followup_id}:{row.authorization_version}:{row.next_fire_at}".encode()
+    ).hexdigest()
+    message = payload.message.model_copy(update={"request_id": "followup_" + digest})
+    return payload, message, "scheduled_" + digest
+
+
+def _prepare_task(
+    services: SharedServices, row: ResidentFollowupRow
+) -> tuple[tasks.PreparedSubmission | None, tuple[str, str] | None]:
+    payload, message, delegation_request = _task_request(row)
+    with services.db.connect() as conn:
+        if services.resident_delegation_repo.by_request(conn, row.owner_id, delegation_request):
+            return None, None
+    prepared = tasks.prepare_submission(
+        services, row.owner_id, message, project_id=payload.project_id
+    )
+    configuration = (
+        tasks.submission_configuration(services, row.owner_id, prepared)
+        if prepared.previous_turn_id is None
+        else None
+    )
+    return prepared, configuration
+
+
 def _admit_task(
     services: SharedServices,
     conn: Any,
     row: ResidentFollowupRow,
     now: int,
+    prepared: tasks.PreparedSubmission | None,
+    configuration: tuple[str, str] | None,
 ) -> dict[str, Any]:
-    payload = FollowupTaskPayload.model_validate_json(row.payload_json)
+    payload, message, delegation_request = _task_request(row)
     if not services.resident_followup_repo.source_exists(
         conn, row.owner_id, row.thread_id, payload.source_turn_id
     ):
         raise OctopError.localized(ErrorCode.NOT_FOUND)
-    digest = hashlib.sha256(
-        f"{row.followup_id}:{row.authorization_version}:{row.next_fire_at}".encode()
-    ).hexdigest()
-    message = payload.message.model_copy(update={"request_id": "followup_" + digest})
-    delegation_request = "scheduled_" + digest
     fingerprint = hashlib.sha256(
         _json(
             {
@@ -531,8 +557,15 @@ def _admit_task(
         }
     if services.project_task_repo.by_request(conn, row.owner_id, message.request_id) is not None:
         raise OctopError.localized(ErrorCode.TASK_REQUEST_CONFLICT)
+    assert prepared is not None
     task_id, turn_id = tasks.send_in_transaction(
-        services, conn, row.owner_id, message, project_id=payload.project_id
+        services,
+        conn,
+        row.owner_id,
+        message,
+        project_id=payload.project_id,
+        prepared=prepared,
+        prepared_configuration=configuration,
     )
     delegation_id = "delegation_" + new_ulid()
     services.resident_delegation_repo.insert(
@@ -566,6 +599,18 @@ def poll_followups(services: SharedServices, now: int | None = None) -> int:
     now = _now() if now is None else now
     captured = 0
     for pending in services.resident_followup_repo.due(now):
+        prepared, configuration = None, None
+        preparation_error: ErrorCode | None = None
+        if pending.kind == "task":
+            try:
+                prepared, configuration = _prepare_task(services, pending)
+            except OctopError as exc:
+                preparation_error = exc.code
+            except Exception:
+                logger.exception(
+                    "Scheduled resident task preparation failed: %s", pending.followup_id
+                )
+                preparation_error = ErrorCode.INTERNAL_ERROR
         with services.db.transaction() as conn:
             if not services.project_task_repo.lock_owner(conn, pending.owner_id):
                 continue
@@ -573,6 +618,10 @@ def poll_followups(services: SharedServices, now: int | None = None) -> int:
             if (
                 row is None
                 or row.status != "enabled"
+                or row.authorization_version != pending.authorization_version
+                or row.payload_json != pending.payload_json
+                or row.kind != pending.kind
+                or row.next_fire_at != pending.next_fire_at
                 or row.next_fire_at is None
                 or row.next_fire_at > now
             ):
@@ -607,10 +656,11 @@ def poll_followups(services: SharedServices, now: int | None = None) -> int:
             elif row.kind == "task":
                 user = services.user_repo.get(row.owner_id)
                 locale = user.locale if user else "en"
-                code: ErrorCode | None = None
+                code = preparation_error
                 try:
-                    with services.resident_followup_repo.task_admission(conn):
-                        payload = _admit_task(services, conn, row, now)
+                    if code is None:
+                        with services.resident_followup_repo.task_admission(conn):
+                            payload = _admit_task(services, conn, row, now, prepared, configuration)
                 except OctopError as exc:
                     code = exc.code
                 except Exception:

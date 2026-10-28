@@ -85,6 +85,50 @@ def test_denies_management_and_auth_paths() -> None:
     assert not is_tunnel_path_allowed("DELETE", "/api/setup/password")
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/agents/unused/workspace/../../../plugins/install",
+        "/api/agents/unused/workspace/./../../../plugins/install",
+        "/api/agents/unused/workspace/%2e%2e/%2e%2e/%2e%2e/plugins/install",
+        "/api/agents/unused/workspace/..%2F..%2F..%2Fplugins/install",
+        "/api/agents/unused/workspace/%5c..%5c..%5cplugins/install",
+        "/api/agents/unused/workspace/..\\..\\..\\plugins/install",
+        "/api/agents/unused/workspace/..\t/../../../plugins/install",
+        "/api/agents/unused/workspace?path=../private",
+        "/api/agents/unused/workspace#fragment",
+    ],
+)
+def test_denies_paths_that_change_during_url_processing(path: str) -> None:
+    assert not is_tunnel_path_allowed("POST", path)
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_cannot_dispatch_to_management_route() -> None:
+    from fastapi import FastAPI
+
+    from octop.infra.bridge.http_tunnel import execute_local_http
+    from octop.infra.errors import ErrorCode, OctopError
+
+    app = FastAPI()
+    installed: list[bool] = []
+
+    @app.post("/api/plugins/install")
+    async def install_plugin() -> dict[str, bool]:
+        installed.append(True)
+        return {"installed": True}
+
+    with pytest.raises(OctopError) as exc:
+        await execute_local_http(
+            app=app,
+            method="POST",
+            path="/api/agents/unused/workspace/../../../plugins/install",
+            access_token="connection-owner-token",
+        )
+    assert exc.value.code == ErrorCode.BRIDGE_REMOTE_UNSUPPORTED
+    assert not installed
+
+
 @pytest.mark.parametrize("method", ["GET", "POST", "PUT", "DELETE"])
 @pytest.mark.parametrize(
     "path",

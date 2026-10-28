@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
@@ -163,7 +164,7 @@ async def current_user(
     raw = extract_raw_token(authorization=authorization, access_token=access_token)
     if not raw:
         raise OctopError(ErrorCode.AUTH_FAILED, "missing credentials")
-    return resolve_user_from_token(server, raw)
+    return await asyncio.to_thread(resolve_user_from_token, server, raw)
 
 
 def require_permission(key: str) -> Callable[..., Awaitable[User]]:

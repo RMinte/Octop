@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -18,6 +19,7 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.services import RepoBundle, SharedServices
 from octop.infra.errors import OctopError
 from octop.infra.projects import runtime
+from octop.infra.projects import tasks as task_records
 from octop.infra.projects.expert_memory import ExpertMemory, memory_namespace
 from octop.infra.projects.expert_profiles import (
     ExpertAccessMiddleware,
@@ -62,6 +64,93 @@ def services(tmp_path):
 
 def profile(services):
     return resolve_expert_profile(services, 1, "expert-one")
+
+
+@pytest.mark.parametrize("mutation", [None, "project", "expert"])
+async def test_slow_expert_snapshot_releases_database_and_rechecks_versions(
+    services, monkeypatch, mutation
+):
+    from octop.infra.projects import expert_profiles, service
+
+    services.provider_repo.create(
+        name="test",
+        kind="openai",
+        base_url="http://test.invalid/v1",
+        api_key="test-key",
+        models_json=json.dumps([{"id": "model", "enabled": True}]),
+    )
+    services.secret_repo.get_or_create("jwt", lambda: b"test-only-snapshot-secret")
+    project = service.create_project(services, 1, ProjectFields(name="Project"), "project-request")
+    entered, release = threading.Event(), threading.Event()
+    original = expert_profiles._workspace
+
+    class SlowWorkspace:
+        def __init__(self, workspace):
+            self.workspace = workspace
+
+        def read_text(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(5), "snapshot test did not release content read"
+            return self.workspace.read_text(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.workspace, name)
+
+    monkeypatch.setattr(
+        expert_profiles,
+        "_workspace",
+        lambda *args: SlowWorkspace(original(*args)),
+    )
+    body = task_records.ProjectTaskCreate(
+        request_id="snapshot-request",
+        prompt="Work",
+        selected_expert_id="expert-one",
+        options=task_records.TaskExecutionOptions(model_ref="test/model"),
+    )
+    pending = asyncio.create_task(
+        asyncio.to_thread(task_records.send, services, 1, body, project_id=project.project_id)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        # An independent control-plane write must settle while content I/O is blocked.
+        await asyncio.wait_for(
+            asyncio.to_thread(services.settings_repo.set, "snapshot-probe", "saved"), 5
+        )
+        assert not pending.done()
+        if mutation == "project":
+            await asyncio.to_thread(
+                services.project_repo.update,
+                replace(services.project_repo.get(project.project_id, 1), instructions="Changed"),
+                project.revision,
+            )
+        elif mutation == "expert":
+            await asyncio.to_thread(
+                services.agent_repo.update_config, "expert-one", system_prompt="Changed"
+            )
+    finally:
+        release.set()
+    if mutation:
+        with pytest.raises(OctopError) as error:
+            await pending
+        assert error.value.code.value == (
+            "PROJECT_REVISION_CONFLICT" if mutation == "project" else "TASK_REVISION_CONFLICT"
+        )
+        with services.db.connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM project_tasks").fetchone()[0] == 0
+    else:
+        result = await pending
+        saved = json.loads(
+            services.project_task_turn_repo.list(result.task_id)[0].configuration_json
+        )
+        assert saved["expert_profile"]["system_prompt"] == "Financial method"
+        # A replay uses its accepted receipt even if source content is now unavailable.
+        monkeypatch.setattr(
+            expert_profiles, "_workspace", lambda *args: pytest.fail("replayed snapshot")
+        )
+        replay = await asyncio.to_thread(
+            task_records.send, services, 1, body, project_id=project.project_id
+        )
+        assert replay.task_id == result.task_id
 
 
 def test_profile_reads_content_hashes_without_adopting_expert_directory(services):

@@ -159,6 +159,16 @@ def create_delegation(
     fingerprint = hashlib.sha256(
         json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+    with services.db.connect() as conn:
+        existing = services.resident_delegation_repo.by_request(conn, owner_id, body.request_id)
+    prepared: tasks.PreparedSubmission | None = None
+    configuration: tuple[str, str] | None = None
+    if existing is None:
+        prepared = tasks.prepare_submission(
+            services, owner_id, body.message, project_id=body.project_id
+        )
+        if prepared.previous_turn_id is None:
+            configuration = tasks.submission_configuration(services, owner_id, prepared)
     with services.db.transaction() as conn:
         if not services.project_task_repo.lock_owner(conn, owner_id):
             raise OctopError.localized(ErrorCode.FORBIDDEN)
@@ -201,8 +211,16 @@ def create_delegation(
             ZoneInfo(timezone)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise OctopError.localized(ErrorCode.INTERNAL_ERROR) from exc
+        if prepared is None:
+            raise OctopError.localized(ErrorCode.RESIDENT_REQUEST_CONFLICT)
         task_id, turn_id = tasks.send_in_transaction(
-            services, conn, owner_id, body.message, project_id=body.project_id
+            services,
+            conn,
+            owner_id,
+            body.message,
+            project_id=body.project_id,
+            prepared=prepared,
+            prepared_configuration=configuration,
         )
         now = tasks.now_ms()
         row = ResidentDelegationRow(

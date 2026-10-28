@@ -7,6 +7,7 @@ from pathlib import Path
 
 import click
 
+from octop.cli.support.errors import fail_octop
 from octop.config import load_config
 from octop.infra.backup.auto import create_and_store_auto_backup
 from octop.infra.backup.store import place_backup_file
@@ -14,6 +15,7 @@ from octop.infra.backup.system_archive import create_system_backup, restore_syst
 from octop.infra.db.factory import open_database
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.services import build_shared_services
+from octop.infra.errors import OctopError
 from octop.infra.utils.paths import PathLayout
 
 
@@ -176,13 +178,17 @@ def restore(
     paths = _paths(home)
     config = load_config(paths.config)
     db = open_database(config, paths)
-    result = restore_system_backup(
-        archive,
-        paths=paths,
-        pool=db,
-        db_config=config.database,
-        restore_config=not no_config,
-        owner_user_id=owner_user_id,
-    )
-    db.close()
+    try:
+        result = restore_system_backup(
+            archive,
+            paths=paths,
+            pool=db,
+            db_config=config.database,
+            restore_config=not no_config,
+            owner_user_id=owner_user_id,
+        )
+    except OctopError as exc:
+        fail_octop(exc)
+    finally:
+        db.close()
     click.echo(f"restored: {result}")

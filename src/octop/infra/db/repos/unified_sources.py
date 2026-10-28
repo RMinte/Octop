@@ -160,6 +160,7 @@ class UnifiedInbox:
     task_id: str | None
     turn_id: str | None
     error_code: str = ""
+    pk: int = 0
 
     @classmethod
     def from_row(cls, row: DbRow) -> UnifiedInbox:
@@ -179,6 +180,7 @@ class UnifiedInbox:
             owner_id=strict_int(row["owner_id"]),
             task_id=str(row["task_id"]) if row["task_id"] is not None else None,
             turn_id=str(row["turn_id"]) if row["turn_id"] is not None else None,
+            pk=strict_int(row["id"]),
         )
 
 
@@ -216,12 +218,25 @@ class UnifiedSourceInboxRepo:
         return UnifiedInbox.from_row(row)
 
     @staticmethod
-    def pending(conn: Any, limit: int = 100) -> list[UnifiedInbox]:
+    def pending_high_watermark(conn: Any) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(id),0) AS position FROM unified_source_inbox"
+        ).fetchone()
+        return strict_int(row["position"])
+
+    @staticmethod
+    def pending(
+        conn: Any, limit: int = 100, *, after: int = 0, through: int | None = None
+    ) -> list[UnifiedInbox]:
+        boundary = " AND i.id<=?" if through is not None else ""
+        params = (after, through, limit) if through is not None else (after, limit)
         return [
             UnifiedInbox.from_row(row)
             for row in conn.execute(
-                "SELECT i.* FROM unified_source_inbox i JOIN unified_source_routes r ON r.route_id=i.route_id WHERE i.status='received' AND r.state IN ('task','draft') ORDER BY i.id LIMIT ?",
-                (limit,),
+                "SELECT i.* FROM unified_source_inbox i JOIN unified_source_routes r "
+                "ON r.route_id=i.route_id WHERE i.status='received' "
+                "AND r.state IN ('task','draft') AND i.id>?" + boundary + " ORDER BY i.id LIMIT ?",
+                params,
             ).fetchall()
         ]
 

@@ -9,6 +9,7 @@ attached as ``X-Octop-Access-Token`` on the response.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -48,7 +49,9 @@ def install(app: Any, server: Any) -> None:
             access_token=request.query_params.get("access_token"),
         )
         try:
-            request.state.octop_user = authenticate_request(request, server)
+            request.state.octop_user = await asyncio.to_thread(
+                authenticate_request, request, server
+            )
         except OctopError as exc:
             # Middleware returns directly (skips FastAPI exception handlers).
             if exc.status >= 500:
@@ -64,7 +67,9 @@ def install(app: Any, server: Any) -> None:
         response = await call_next(request)
         if raw is not None:
             try:
-                renewed = maybe_sliding_renew_token(server, raw, request.state.octop_user)
+                renewed = await asyncio.to_thread(
+                    maybe_sliding_renew_token, server, raw, request.state.octop_user
+                )
             except OctopError:
                 renewed = None
             if renewed:

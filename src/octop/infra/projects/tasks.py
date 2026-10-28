@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, replace
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Self, cast
 
@@ -886,17 +887,22 @@ def _configuration(
     configuration_revision: int = 1,
     engine: EngineSelection | None = None,
     requires_images: bool = False,
+    base_configuration: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     engine = engine or EngineSelection()
     entry = engine_catalog.validate_engine(services, owner_id, engine, action_mode=action_mode)
-    snapshot = _base_configuration(
-        services,
-        owner_id,
-        project_id,
-        options,
-        selected_expert_id,
-        action_mode,
-        configuration_revision,
+    snapshot = (
+        dict(base_configuration)
+        if base_configuration is not None
+        else _base_configuration(
+            services,
+            owner_id,
+            project_id,
+            options,
+            selected_expert_id,
+            action_mode,
+            configuration_revision,
+        )
     )
     snapshot["execution_engine"] = engine_catalog.snapshot_engine(entry)
     if engine.engine_id == "acp":
@@ -1154,6 +1160,119 @@ def _submission_state(
     return task, body, None
 
 
+@dataclass(frozen=True)
+class PreparedSubmission:
+    task: ProjectTaskRow | None
+    message: TaskMessage
+    configuration: dict[str, Any]
+    requires_images: bool
+    previous_turn_id: str | None = None
+
+
+def prepare_submission(
+    services: SharedServices,
+    owner_id: int,
+    body: TaskMessage | TaskRetry,
+    *,
+    task_id: str | None = None,
+    project_id: str | None = None,
+    retry_of_turn_id: str | None = None,
+    before: Callable[[Any], None] | None = None,
+) -> PreparedSubmission:
+    """Read admission state briefly, then freeze content without a SQL transaction."""
+    with services.db.transaction() as conn:
+        if before is not None:
+            before(conn)
+        task, message, previous = _submission_state(
+            services,
+            conn,
+            owner_id,
+            body,
+            task_id=task_id,
+            project_id=project_id,
+            retry_of_turn_id=retry_of_turn_id,
+        )
+        if previous is not None:
+            return PreparedSubmission(task, message, {}, False, previous.turn_id)
+        requires_images = _requires_images(
+            services, conn, owner_id, task.task_id if task else None, message
+        )
+    configuration = _base_configuration(
+        services,
+        owner_id,
+        task.project_id if task else project_id,
+        message.options,
+        selected_expert_id=task.selected_expert_id
+        if task
+        else (message.selected_expert_id if isinstance(message, ProjectTaskCreate) else None),
+        action_mode=cast(ActionMode, task.action_mode)
+        if task
+        else (message.action_mode if isinstance(message, ProjectTaskCreate) else "craft"),
+        configuration_revision=task.configuration_revision if task else 1,
+    )
+    return PreparedSubmission(task, message, configuration, requires_images)
+
+
+def submission_configuration(
+    services: SharedServices,
+    owner_id: int,
+    prepared: PreparedSubmission,
+    routing_decision: ModelRoutingDecision | None = None,
+) -> tuple[str, str]:
+    task, message = prepared.task, prepared.message
+    engine = (
+        engine_catalog.read_engine(task.execution_json)
+        if task
+        else (message.engine if isinstance(message, ProjectTaskCreate) else EngineSelection())
+    )
+    return _configuration(
+        services,
+        owner_id,
+        task.project_id if task else None,
+        message.options,
+        routing_decision,
+        action_mode=cast(ActionMode, prepared.configuration["action_mode"]),
+        engine=engine,
+        requires_images=prepared.requires_images,
+        base_configuration=prepared.configuration,
+    )
+
+
+def validate_preparation(
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    prepared: PreparedSubmission,
+    task: ProjectTaskRow | None,
+) -> None:
+    """Recheck SQL versions and access without reopening any content backend."""
+    if (task is None) != (prepared.task is None) or (
+        task is not None
+        and prepared.task is not None
+        and (task.task_id, task.list_revision)
+        != (prepared.task.task_id, prepared.task.list_revision)
+    ):
+        raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+    project_id = prepared.configuration.get("project_id")
+    if project_id:
+        project = services.project_repo.get_in_transaction(conn, project_id, owner_id)
+        if (
+            project is None
+            or project.archived
+            or project.revision != prepared.configuration["revision"]
+        ):
+            raise OctopError.localized(ErrorCode.PROJECT_REVISION_CONFLICT)
+    profile = prepared.configuration.get("expert_profile")
+    if profile:
+        from octop.infra.projects.expert_profiles import assert_profile_access, expert_configuration
+
+        assert_profile_access(services, owner_id, profile)
+        for selected in [profile, *((profile.get("team") or {}).get("members") or [])]:
+            row, _ = expert_configuration(services, owner_id, selected["expert_id"])
+            if row.config_revision != selected["config_revision"]:
+                raise OctopError.localized(ErrorCode.TASK_REVISION_CONFLICT)
+
+
 def send(
     services: SharedServices,
     owner_id: int,
@@ -1163,6 +1282,19 @@ def send(
     project_id: str | None = None,
     retry_of_turn_id: str | None = None,
 ) -> TaskDetail:
+    prepared = prepare_submission(
+        services,
+        owner_id,
+        body,
+        task_id=task_id,
+        project_id=project_id,
+        retry_of_turn_id=retry_of_turn_id,
+    )
+    configuration = (
+        submission_configuration(services, owner_id, prepared)
+        if prepared.previous_turn_id is None
+        else None
+    )
     with services.db.transaction() as conn:
         task_id, _ = send_in_transaction(
             services,
@@ -1172,6 +1304,8 @@ def send(
             task_id=task_id,
             project_id=project_id,
             retry_of_turn_id=retry_of_turn_id,
+            prepared=prepared,
+            prepared_configuration=configuration,
         )
     return detail(services, owner_id, task_id)
 
@@ -1185,7 +1319,8 @@ def send_in_transaction(
     task_id: str | None = None,
     project_id: str | None = None,
     retry_of_turn_id: str | None = None,
-    routing_decision: ModelRoutingDecision | None = None,
+    prepared: PreparedSubmission,
+    prepared_configuration: tuple[str, str] | None,
 ) -> tuple[str, str]:
     """Admit one task turn inside the caller's transaction; never start execution."""
     task, body, previous = _submission_state(
@@ -1201,22 +1336,10 @@ def send_in_transaction(
     if previous is not None:
         assert task is not None
         return task.task_id, previous.turn_id
-    requires_images = _requires_images(
-        services, conn, owner_id, task.task_id if task else None, body
-    )
+    validate_preparation(services, conn, owner_id, prepared, task)
+    assert prepared_configuration is not None
+    configuration, model_ref = prepared_configuration
     if task:
-        configuration, model_ref = _configuration(
-            services,
-            owner_id,
-            task.project_id,
-            body.options,
-            routing_decision,
-            selected_expert_id=task.selected_expert_id,
-            action_mode=cast(ActionMode, task.action_mode),
-            configuration_revision=task.configuration_revision,
-            engine=engine_catalog.read_engine(task.execution_json),
-            requires_images=requires_images,
-        )
         configuration = json.dumps(
             {
                 **json.loads(configuration),
@@ -1268,17 +1391,6 @@ def send_in_transaction(
         )
         action_mode = body.action_mode if isinstance(body, ProjectTaskCreate) else "craft"
         selected_engine = body.engine if isinstance(body, ProjectTaskCreate) else EngineSelection()
-        configuration, model_ref = _configuration(
-            services,
-            owner_id,
-            project_id,
-            body.options,
-            routing_decision,
-            selected_expert_id=selected_expert_id,
-            action_mode=action_mode,
-            engine=selected_engine,
-            requires_images=requires_images,
-        )
         task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
         web_search_enabled = (
             body.web_search_enabled if isinstance(body, ProjectTaskCreate) else True

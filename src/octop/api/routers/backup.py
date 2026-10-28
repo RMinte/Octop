@@ -323,17 +323,15 @@ async def restore_backup_file(
 ) -> dict[str, Any]:
     """Restore database and workspaces from a file in ``backups_dir``.
 
-    After the archive is applied, providers/agents, IM channels, and cron jobs
-    are reloaded in-process so experts, messaging, and schedules can run without
-    a full service restart.
-    Restored ``config.json`` / ``env`` still require a process restart to take effect.
+    Restore requires exclusive ownership of the data directory. A running
+    daemon or resident worker causes a 409 ``BACKUP_OFFLINE_REQUIRED`` before
+    any data changes. Stop Octop and use ``octop backup restore`` for recovery.
 
     LightClaw migration archives reassign imported ownership to the restoring admin.
 
-    Heavy disk/DB work runs in a worker thread so the asyncio event loop stays
-    responsive; concurrent create/restore/auto backup is rejected via
-    ``BACKUP_LOCK``. SQLite restore still holds the shared DB lock for the
-    merge window, so DB-backed APIs may briefly queue during that phase.
+    Heavy disk/DB work runs in a worker thread. Concurrent backup operations
+    are rejected via ``BACKUP_LOCK``; process locks exclude task writers for
+    the entire database and file restore.
     """
     assert server.services is not None
     _raise_if_backup_busy()

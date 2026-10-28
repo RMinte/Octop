@@ -33,6 +33,8 @@ class BackupManifest:
     includes_plugins: bool = False
     includes_knowledge: bool = False
     includes_chats: bool = True
+    includes_task_state: bool = False
+    includes_task_workspaces: bool = False
 
     def to_json(self) -> str:
         payload: dict[str, Any] = {
@@ -50,6 +52,8 @@ class BackupManifest:
             "includes_plugins": self.includes_plugins,
             "includes_knowledge": self.includes_knowledge,
             "includes_chats": self.includes_chats,
+            "includes_task_state": self.includes_task_state,
+            "includes_task_workspaces": self.includes_task_workspaces,
             "agents": [asdict(a) for a in self.agents],
         }
         return json.dumps(payload, indent=2, ensure_ascii=False)
@@ -89,6 +93,9 @@ class BackupManifest:
             ),
             # Legacy archives dumped the full database; missing key means chats are present.
             includes_chats=bool(data["includes_chats"]) if "includes_chats" in data else True,
+            # Older archives did not pack the independent Task filesystem state.
+            includes_task_state=bool(data.get("includes_task_state", False)),
+            includes_task_workspaces=bool(data.get("includes_task_workspaces", False)),
         )
 
     @classmethod

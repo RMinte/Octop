@@ -28,6 +28,7 @@ from octop.infra.backup.chats import (
 )
 from octop.infra.backup.manifest import MANIFEST_VERSION, AgentBackupEntry, BackupManifest
 from octop.infra.backup.pg_dump import dump_postgres, restore_postgres
+from octop.infra.backup.restore_lock import offline_restore_guard
 from octop.infra.backup.snapshot import (
     capture_jwt_secret_from_pool,
     capture_users_from_pool,
@@ -39,6 +40,7 @@ from octop.infra.backup.snapshot import (
     snapshot_sqlite_file,
     upsert_users_into_pool,
 )
+from octop.infra.backup.task_files import add_task_files, restore_task_files
 from octop.infra.db.migrate import _current_version, _max_discovered_version, run_migrations
 from octop.infra.db.pool import DatabasePool, SqlitePool
 from octop.infra.db.repos.agents import AgentRepo
@@ -181,6 +183,8 @@ def _build_manifest(
         includes_plugins=include_plugins,
         includes_knowledge=include_knowledge,
         includes_chats=include_chats,
+        includes_task_state=True,
+        includes_task_workspaces=include_workspaces,
     )
 
 
@@ -200,11 +204,14 @@ def create_system_backup(
 ) -> str:
     """Write a ``.tar.gz`` archive to *dest* (streamed to disk).
 
-    Configuration, agent workspaces, skill packages, plugins, and knowledge
+    Configuration, agent/task workspaces, skill packages, plugins, and knowledge
     files can be omitted independently. ``include_chats`` defaults to False
-    because thread/session history usually dominates archive size. Restore
-    keeps live chats and omitted directories when the manifest says they were
-    not packed.
+    and controls legacy agent thread/session history. Independent Task rows and
+    their runtime/resources/checkpoints/memory are always included; only Task
+    default workspace content follows ``include_workspaces``. Project and client
+    directory contents are not read. Restore keeps live legacy chats and omitted
+    directories when the manifest says they were not packed. Pause task writers
+    for a single point-in-time snapshot across the main DB and Task files.
 
     Returns the suggested basename (``octop-backup-….tar.gz``). Callers that
     need a different name should rename/move *dest* afterward.
@@ -294,6 +301,12 @@ def create_system_backup(
                     )
                 if include_config and env_path.is_file():
                     tf.add(root / _CONFIG_DIR / "env", arcname=f"{_CONFIG_DIR}/env")
+                add_task_files(
+                    tf,
+                    paths.root,
+                    root / "task-snapshots",
+                    include_workspaces=include_workspaces,
+                )
                 if include_workspaces:
                     for row in agent_rows:
                         agent_id = str(row.agent_id)
@@ -429,6 +442,8 @@ def restore_system_backup(
     """Restore database, workspaces, and optional config from a tar.gz archive.
 
     *source* may be a filesystem path (preferred) or in-memory bytes (tests / legacy).
+    Daemon and embedded resident writers must be stopped. Their lifetime locks
+    are held throughout restore so a new writer cannot start before completion.
 
     ``preserve_users`` controls whether the *current* Octop instance's login
     credentials (``users`` rows + ``secrets.jwt``) are written back after the
@@ -446,7 +461,7 @@ def restore_system_backup(
     performing the restore) receives all imported ``user_id`` ownership. When
     omitted, the first preserved admin (else first preserved user) is used.
     """
-    with tempfile.TemporaryDirectory() as tmp:
+    with offline_restore_guard(paths), tempfile.TemporaryDirectory() as tmp:
         extracted = Path(tmp) / "extracted"
         _extract_archive(source, extracted)
         manifest = _extract_manifest_from_dir(extracted)
@@ -630,6 +645,16 @@ def restore_system_backup(
                 _KNOWLEDGE_DIR,
             )
 
+        restored_task_state = restored_task_workspaces = restored_expert_memory = 0
+        if manifest.includes_task_state:
+            restored_task_state, restored_task_workspaces, restored_expert_memory = (
+                restore_task_files(
+                    extracted,
+                    paths.root,
+                    include_workspaces=manifest.includes_task_workspaces,
+                )
+            )
+
         preserved_chat_rows, skipped_chat_rows = (
             restore_preserved_chats(pool, saved_chats) if saved_chats is not None else (0, 0)
         )
@@ -643,6 +668,9 @@ def restore_system_backup(
         "skill_package_files": restored_skill_package_files,
         "plugin_files": restored_plugin_files,
         "knowledge_files": restored_knowledge_files,
+        "task_state_files": restored_task_state,
+        "task_workspace_files": restored_task_workspaces,
+        "expert_memory_files": restored_expert_memory,
         "restore_config": restore_config,
         "chats_restored": manifest.includes_chats,
         "preserved_chat_rows": preserved_chat_rows,
