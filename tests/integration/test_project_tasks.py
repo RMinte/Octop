@@ -651,6 +651,93 @@ async def test_task_status_is_in_list_and_deltas_through_follow_up(
     await check_list("completed", 6)
 
 
+@pytest.mark.parametrize("scope", ["standalone", "project", "all"])
+@pytest.mark.parametrize("deleted", [False, True])
+async def test_task_sync_reads_legacy_execution_snapshot(env, scope, deleted):
+    from octop.infra.db.repos.project_tasks import ProjectTaskRow
+
+    client, server, auth = env
+    services = server.services
+    owner = await resolve_user_id(client, auth, "admin")
+    project_id = None
+    if scope != "standalone":
+        project_id = (
+            await client.post(
+                "/api/projects",
+                headers={**auth, "Idempotency-Key": str(uuid4())},
+                json={"name": "Legacy task sync"},
+            )
+        ).json()["project_id"]
+    base = f"/api/projects/{project_id}/tasks" if scope == "project" else "/api/project-tasks"
+    params = {"scope": "all"} if scope == "all" else {}
+    baseline = (await client.get(base, headers=auth, params=params)).json()["sync_cursor"]
+    engine = {"engine_id": "acp", "connection_id": "saved-runner", "model_id": "saved-model"}
+    legacy = ProjectTaskRow(
+        "legacy-execution",
+        owner,
+        project_id,
+        "Historical title",
+        "legacy-request",
+        None,
+        1000,
+        1000,
+    )
+    modern = ProjectTaskRow(
+        "modern-execution",
+        owner,
+        project_id,
+        "Modern title",
+        "modern-request",
+        None,
+        1000,
+        1000,
+        execution_json=json.dumps({"engine": engine}),
+    )
+    with services.db.transaction() as conn:
+        services.project_task_repo.insert(conn, legacy)
+        services.project_task_repo.insert(conn, modern)
+        if deleted:
+            services.project_task_repo.delete(conn, legacy)
+        else:
+            # The current row can change without rewriting its older journal snapshot.
+            conn.execute(
+                "UPDATE project_tasks SET title='Current title',status='completed',execution_json=? "
+                "WHERE task_id=?",
+                (modern.execution_json, legacy.task_id),
+            )
+        changes = conn.execute(
+            "SELECT scope,sequence,payload_json FROM project_sync_changes WHERE entity_id=?",
+            (legacy.task_id,),
+        ).fetchall()
+        for change in changes:
+            payload = json.loads(change["payload_json"])
+            payload.pop("execution_json")
+            conn.execute(
+                "UPDATE project_sync_changes SET payload_json=? WHERE owner_id=? AND scope=? "
+                "AND sequence=?",
+                (json.dumps(payload), owner, change["scope"], change["sequence"]),
+            )
+    response = await client.get(
+        base + "/sync", headers=auth, params={**params, "sync_cursor": baseline}
+    )
+    assert response.status_code == 200, response.text
+    changes = {change["task_id"]: change for change in response.json()["changes"]}
+    assert changes[modern.task_id]["data"]["engine"] == engine
+    change = changes[legacy.task_id]
+    assert change["operation"] == ("delete" if deleted else "upsert")
+    assert change["list_revision"] == (2 if deleted else 1)
+    if deleted:
+        assert change["data"] is None
+    else:
+        assert change["data"]["engine"] == {
+            "engine_id": "octop",
+            "connection_id": None,
+            "model_id": None,
+        }
+        assert change["data"]["title"] == "Historical title"
+        assert change["data"]["status"] == "queued"
+
+
 async def test_task_status_delta_pagination_preserves_cutoff(task_env):
     client, server, auth, _ = task_env
     worker, services = server.project_task_worker, server.services
