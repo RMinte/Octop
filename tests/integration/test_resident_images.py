@@ -10,7 +10,8 @@ from threading import Event
 from unittest.mock import Mock
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, message_to_dict
 
 from octop.infra.projects import input_attachments, resident_tasks, runtime
 from tests.integration.test_project_task_artifacts import real_model as real_model
@@ -23,7 +24,7 @@ from tests.integration.test_project_task_images import (
 from tests.integration.test_project_tasks_ws import connected
 from tests.integration.test_resident_conversations import _base, _binding, _turn
 from tests.integration.test_resident_stream_delivery import subscribe
-from tests.support.auth import create_user
+from tests.support.auth import create_provider, create_user
 from tests.support.harness import patch_resident_stream
 
 
@@ -119,6 +120,180 @@ async def test_image_only_and_followup_preserve_private_receipts_history_and_mod
     assert preview.status_code == 200 and preview.content == image_bytes()
     capabilities = await client.get("/api/agents/resident-capabilities", headers=auth)
     assert capabilities.json()["message_types"] == ["text", "image", "file"]
+
+
+@pytest.mark.parametrize("selection", ["preference", "pin", "explicit-task-context"])
+async def test_image_turn_temporarily_upgrades_current_model_and_freezes_actual_scope(
+    env_with_provider, real_model, monkeypatch, selection
+):
+    client, server, auth = env_with_provider
+    observed = resident_model(
+        real_model,
+        monkeypatch,
+        [AIMessage(content="Hello."), AIMessage(content="Blue."), AIMessage(content="Still blue.")],
+    )
+    await create_provider(
+        client,
+        auth,
+        name="selected",
+        base_url="https://selected.example/v1",
+        models=[
+            {"id": "text-one", "input": ["text"]},
+            {"id": "text-two", "input": ["text"]},
+            {"id": "image-reader", "input": ["text", "image"]},
+        ],
+    )
+    binding = await _binding(client, auth)
+    base = _base(binding)
+    owner = server.services.agent_repo.get(binding["agent_id"]).user_id
+    preferred = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_model": "selected/text-one"}
+    )
+    assert preferred.status_code == 200, preferred.text
+    if selection == "pin":
+        server.services.agent_repo.update_config(
+            binding["agent_id"], default_model="selected/text-one"
+        )
+    text_body = {"request_id": uuid4().hex, "prompt": "Hello."}
+    sent = await client.post(base + "/messages", headers=auth, json=text_body)
+    assert sent.status_code == 202, sent.text
+    text_turn = await _turn(client, auth, base, text_body["request_id"], "completed")
+    text_receipt = server.services.resident_request_repo.get(owner, text_body["request_id"])
+    assert json.loads(text_receipt.configuration_json)["model_ref"] == "selected/text-one"
+    assert image_urls(observed[0]) == []
+
+    image = await upload(client, auth)
+    image_body = {
+        "request_id": uuid4().hex,
+        "prompt": "Describe this image.",
+        "attachment_ids": [image["attachment_id"]],
+    }
+    if selection == "explicit-task-context":
+        image_body["task_context"] = {
+            "project_id": None,
+            "message": {
+                "request_id": uuid4().hex,
+                "prompt": "An explicitly selected task.",
+                "options": {"model_ref": "selected/text-one"},
+            },
+        }
+    sent = await client.post(base + "/messages", headers=auth, json=image_body)
+    assert sent.status_code == 202, sent.text
+    await _turn(client, auth, base, image_body["request_id"], "completed")
+    receipt = server.services.resident_request_repo.get(owner, image_body["request_id"])
+    frozen = json.loads(receipt.configuration_json)
+    assert frozen["model_ref"] == "selected/image-reader"
+    assert frozen["automatic_model_route"] is True
+    delegated_model = frozen["resident_task_context"]["message"]["options"]["model_ref"]
+    assert delegated_model == (
+        "selected/text-one" if selection == "explicit-task-context" else "selected/image-reader"
+    )
+    assert image_urls(observed[1])
+    assert json.loads(server.services.user_repo.get(owner).preferences_json)["preferred_model"] == (
+        "selected/text-one"
+    )
+    assert server.services.agent_repo.get(binding["agent_id"]).default_model == (
+        "selected/text-one" if selection == "pin" else None
+    )
+    changed = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_model": "selected/text-two"}
+    )
+    assert changed.status_code == 200, changed.text
+    if selection == "pin":
+        server.services.agent_repo.update_config(
+            binding["agent_id"], default_model="selected/text-two"
+        )
+    followup = {"request_id": uuid4().hex, "prompt": "What color was it?"}
+    sent = await client.post(base + "/messages", headers=auth, json=followup)
+    assert sent.status_code == 202, sent.text
+    await _turn(client, auth, base, followup["request_id"], "completed")
+    followup_receipt = server.services.resident_request_repo.get(owner, followup["request_id"])
+    assert json.loads(followup_receipt.configuration_json)["model_ref"] == "selected/image-reader"
+    assert image_urls(observed[2]) == image_urls(observed[1])
+    repeated = await client.post(base + "/messages", headers=auth, json=text_body)
+    assert repeated.status_code == 202 and repeated.json() == text_turn
+    assert server.services.resident_request_repo.get(owner, text_body["request_id"]) == text_receipt
+
+
+async def test_imported_private_image_context_also_upgrades_a_text_followup(
+    env_with_provider, real_model, monkeypatch
+):
+    from octop.infra.history import migration_source
+
+    client, server, auth = env_with_provider
+    observed = resident_model(real_model, monkeypatch, [AIMessage(content="Still blue.")])
+    await create_provider(
+        client,
+        auth,
+        name="selected",
+        base_url="https://selected.example/v1",
+        models=[{"id": "text", "input": ["text"]}],
+    )
+    changed = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_model": "selected/text"}
+    )
+    assert changed.status_code == 200, changed.text
+    binding = await _binding(client, auth)
+    image_url = "data:image/png;base64," + base64.b64encode(image_bytes()).decode()
+    wires = [
+        message_to_dict(
+            HumanMessage(content=[{"type": "image_url", "image_url": {"url": image_url}}])
+        ),
+        message_to_dict(AIMessage(content="A blue image.")),
+    ]
+
+    async def read_source(*_args, **_kwargs):
+        return migration_source.SourceSnapshot(wires, "imported-image-history", {}, [], [])
+
+    monkeypatch.setattr(migration_source, "read_source", read_source)
+    request_id = uuid4().hex
+    sent = await client.post(
+        _base(binding) + "/messages",
+        headers=auth,
+        json={"request_id": request_id, "prompt": "What color was the previous image?"},
+    )
+    assert sent.status_code == 202, sent.text
+    turn = await _turn(client, auth, _base(binding), request_id, "completed")
+    assert turn["attachments"] == []
+    assert image_urls(observed[0]) == [image_url]
+    owner = server.services.agent_repo.get(binding["agent_id"]).user_id
+    receipt = server.services.resident_request_repo.get(owner, request_id)
+    assert json.loads(receipt.configuration_json)["model_ref"] == "openai/gpt-4o"
+
+
+async def test_missing_vision_candidate_rejects_without_binding_private_image(env_with_provider):
+    client, server, auth = env_with_provider
+    await create_provider(
+        client,
+        auth,
+        name="selected",
+        base_url="https://selected.example/v1",
+        models=[{"id": "text", "input": ["text"]}],
+    )
+    provider = server.services.provider_repo.get_by_name("openai")
+    server.services.provider_repo.update(provider.id, enabled=False)
+    changed = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_model": "selected/text"}
+    )
+    assert changed.status_code == 200, changed.text
+    binding = await _binding(client, auth)
+    image = await upload(client, auth)
+    request_id = uuid4().hex
+    sent = await client.post(
+        _base(binding) + "/messages",
+        headers=auth,
+        json={"request_id": request_id, "attachment_ids": [image["attachment_id"]]},
+    )
+    assert sent.status_code == 422 and sent.json()["error"]["code"] == "TASK_IMAGE_MODEL_REQUIRED"
+    owner = server.services.agent_repo.get(binding["agent_id"]).user_id
+    assert server.services.resident_request_repo.get(owner, request_id) is None
+    with server.services.db.read_snapshot() as conn:
+        assert (
+            server.services.project_task_attachment_repo.get(
+                conn, owner, image["attachment_id"]
+            ).task_id
+            is None
+        )
 
 
 async def test_image_admission_is_owner_scoped_and_rejected_inputs_remain_unbound(

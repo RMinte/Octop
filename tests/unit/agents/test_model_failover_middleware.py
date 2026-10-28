@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 
 from octop.infra.agents.middleware import model_failover
@@ -90,6 +90,115 @@ async def test_auto_route_switches_after_retry_exhaustion(monkeypatch) -> None:
     assert attempts == [("p/a", "p/a"), ("p/a", "p/a"), ("p/b", "p/b")]
     assert configurable["model"] == "p/b"
     assert not health.is_routable("p/a")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("historical_message", "needs_multimodal"),
+    [
+        (
+            HumanMessage(
+                content=[{"type": "image_url", "image_url": {"url": "task-image://input_photo"}}]
+            ),
+            True,
+        ),
+        (
+            HumanMessage(
+                content=[
+                    {"type": "image_url", "image_url": {"url": "workspace://inbound/photo.png"}}
+                ]
+            ),
+            True,
+        ),
+        (
+            HumanMessage(
+                content=[
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}
+                ]
+            ),
+            True,
+        ),
+        (
+            HumanMessage(
+                content=[{"type": "input_image", "image_url": "https://example.test/photo.png"}]
+            ),
+            True,
+        ),
+        (
+            ToolMessage(
+                content=[{"type": "image", "url": "https://example.test/photo.png"}],
+                tool_call_id="photo",
+            ),
+            True,
+        ),
+        (
+            HumanMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": "Mention task-image://input_photo and workspace://inbound/photo.png",
+                    }
+                ]
+            ),
+            False,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_failover_preserves_modalities_from_history(
+    monkeypatch, asynchronous, historical_message, needs_multimodal
+) -> None:
+    models = {
+        "p/current": _model("p/current", 100_000),
+        "q/text": _model("q/text", 100_000),
+        "r/vision": _model("r/vision", 100_000),
+    }
+    required_modalities: list[bool] = []
+
+    def candidates(_current: str, vision: bool) -> list[AutoRouteCandidate]:
+        required_modalities.append(vision)
+        return [AutoRouteCandidate("r/vision" if vision else "q/text", 100_000)]
+
+    middleware = SafeModelFailoverMiddleware(
+        health=ModelHealthRegistry(),
+        candidates=candidates,
+        model_for_ref=models.__getitem__,
+        max_retries=0,
+        initial_delay=0,
+        max_delay=0,
+    )
+    configurable = {"model": "p/current", "octop_auto_route": True}
+    monkeypatch.setattr(model_failover, "_configurable", lambda _request: configurable)
+    attempts: list[str] = []
+
+    def handler(request: ModelRequest) -> ModelResponse:
+        attempts.append(request.model.model)
+        if request.model.model == "p/current":
+            raise RuntimeError("HTTP 503 service unavailable")
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    request = ModelRequest(
+        model=models["p/current"],
+        messages=[
+            historical_message,
+            AIMessage(content="I have inspected the image."),
+            HumanMessage(content="Please explain that again."),
+        ],
+    )
+    if asynchronous:
+
+        async def async_handler(request: ModelRequest) -> ModelResponse:
+            return handler(request)
+
+        response = await middleware.awrap_model_call(request, async_handler)
+    else:
+        response = middleware.wrap_model_call(request, handler)
+
+    expected = "r/vision" if needs_multimodal else "q/text"
+    assert response.result[0].content == "ok"
+    assert required_modalities == [needs_multimodal]
+    assert attempts == ["p/current", expected]
+    assert configurable["model"] == expected
 
 
 @pytest.mark.asyncio

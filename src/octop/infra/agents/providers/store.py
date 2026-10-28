@@ -233,14 +233,19 @@ class ProviderStore:
         *,
         needs_multimodal: bool,
     ) -> str | None:
-        """Keep explicit ref when it supports vision; else upgrade to a vision model."""
+        """Keep a usable vision ref; prefer its provider when an upgrade is needed."""
         if not needs_multimodal:
             return model_ref
         ref = (model_ref or "").strip() or None
-        if ref and self.is_model_ref_multimodal(ref):
+        if ref and self.is_model_ref_usable(ref) and self.is_model_ref_multimodal(ref):
             return ref
-        upgraded = self.resolve_multimodal_model_ref()
-        return upgraded or ref
+        candidates = self.list_auto_route_candidates(needs_multimodal=True)
+        if ref:
+            prefix = ref.partition("/")[0] + "/"
+            for candidate in candidates:
+                if candidate.ref.startswith(prefix):
+                    return candidate.ref
+        return candidates[0].ref if candidates else ref
 
     def resolve_first_model_ref(self) -> str | None:
         """First chat-eligible enabled model across usable providers."""

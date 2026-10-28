@@ -93,6 +93,28 @@ def environment(tmp_path, monkeypatch):
         ({}, False),
         ({"execution_options": {}}, True),
         ({"execution_options": {"model_ref": "box/local"}}, False),
+        (
+            {
+                "execution_options": {"model_ref": "cloud/text"},
+                "capability_model_route": True,
+            },
+            True,
+        ),
+        (
+            {
+                "execution_options": {"model_ref": "cloud/text", "routing": {"mode": "box"}},
+                "capability_model_route": True,
+            },
+            False,
+        ),
+        (
+            {
+                "execution_options": {"model_ref": "cloud/text"},
+                "routing": {"target": "explicit"},
+                "capability_model_route": True,
+            },
+            False,
+        ),
         ({"execution_options": {}, "expert_profile": {"default_model": "box/local"}}, False),
         ({"execution_options": {}, "routing": {"target": "box"}}, True),
         ({"execution_options": {}, "routing": {"target": "explicit"}}, False),

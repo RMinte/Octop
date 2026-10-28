@@ -15,7 +15,7 @@ from langchain_core.outputs import LLMResult
 from langgraph.errors import GraphBubbleUp
 from octop_harness.context_usage import breakdown_from_model_request
 from octop_harness.middleware.runtime import runtime_config
-from octop_harness.middleware.turn_model import latest_human_needs_multimodal
+from octop_harness.middleware.turn_model import content_has_non_text
 
 from octop.i18n.domains.stream import model_retry_failure_prompt
 from octop.infra.agents.providers.health import (
@@ -143,7 +143,10 @@ class SafeModelFailoverMiddleware(AgentMiddleware[Any, Any]):
         )
 
     def _fallbacks(self, request: ModelRequest[Any], current_ref: str) -> list[AutoRouteCandidate]:
-        needs_multimodal = latest_human_needs_multimodal(list(request.messages or []))
+        # A text follow-up can still send images from earlier messages to the model.
+        needs_multimodal = any(
+            content_has_non_text(message.content) for message in request.messages or []
+        )
         estimated = _estimated_input_tokens(request)
         raw_route_cap = _configurable(request).get(CONFIGURABLE_MAX_INPUT_TOKENS)
         route_cap = raw_route_cap if isinstance(raw_route_cap, int) else None

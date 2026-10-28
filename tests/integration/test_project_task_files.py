@@ -255,7 +255,7 @@ async def test_file_followups_preserve_edits_and_restore_after_project_directory
     assert context is not None and path in str(json.loads(context[1]))
 
 
-async def test_files_and_images_keep_vision_gate(task_env):
+async def test_routed_files_and_images_keep_vision_gate(task_env):
     client, _, auth, calls = task_env
     await text_provider(client, auth)
     document = await upload(client, auth)
@@ -263,7 +263,7 @@ async def test_files_and_images_keep_vision_gate(task_env):
     body = {
         "request_id": "mixed-input-001",
         "attachment_ids": [document["attachment_id"], image["attachment_id"]],
-        "options": {"model_ref": "text-only/plain-chat"},
+        "options": {"model_ref": "text-only/plain-chat", "routing": {"mode": "box"}},
     }
     response = await client.post("/api/project-tasks", headers=auth, json=body)
     assert response.status_code == 422

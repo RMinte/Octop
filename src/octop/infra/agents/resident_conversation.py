@@ -13,6 +13,7 @@ from functools import partial
 from typing import Annotated, Any, Literal, cast
 from zoneinfo import ZoneInfo
 
+from langchain_core.messages import messages_from_dict
 from octop_gateway.models import ChannelSubject, InboundMessage, TextContent
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints
 
@@ -45,6 +46,7 @@ from octop.infra.db.repos.resident_requests import (
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.gateway.gateway import Gateway
+from octop.infra.gateway.media.attachment_hints import content_blocks_need_vision
 from octop.infra.gateway.threads import ThreadRegistry
 from octop.infra.gateway.ws import WS_CHANNEL_ID
 from octop.infra.history.service import HistoryArchive
@@ -315,6 +317,7 @@ class ResidentConversationRuntime:
         self._active: dict[str, asyncio.Task[None]] = {}
         self._active_threads: set[str] = set()
         self._thread_locks: dict[str, asyncio.Lock] = {}
+        self._task_initialization_locks: dict[str, asyncio.Lock] = {}
         self._followup_locks: dict[str, asyncio.Lock] = {}
         self._notification_retry: dict[str, float] = {}
         self._last_followup_poll = 0.0
@@ -507,20 +510,18 @@ class ResidentConversationRuntime:
         configuration = await asyncio.to_thread(self._configuration, owner_id, agent_id)
         configuration["resident_input"] = json.loads(input_json)
         configuration["attachment_read_enabled"] = True
+        task_prompt = body.prompt
         if binding.role == "primary":
             user = await asyncio.to_thread(self.services.user_repo.get, owner_id)
-            task_context = body.task_context or default_task_context(
-                body.request_id,
-                body.prompt
-                or tr("agents.resident.attachment_only_prompt", user.locale if user else "en"),
-                configuration["model_ref"],
+            task_prompt = body.prompt or tr(
+                "agents.resident.attachment_only_prompt", user.locale if user else "en"
             )
-            configuration["resident_task_context"] = task_context.model_dump(mode="json")
         from octop.infra.projects.resident_tasks import ensure_task, task_id
 
         identifier = task_id(owner_id, thread_id)
-        if body.attachment_ids:
-            await ensure_task(self.services, owner_id, thread_id, body.request_id)
+        if getattr(self.gateway, "_task_worker", None) is not None:
+            async with self._task_initialization_locks.setdefault(thread_id, asyncio.Lock()):
+                await ensure_task(self.services, owner_id, thread_id, body.request_id)
         accepted_at = now_ms()
         timezone = self.services.config.default_timezone
 
@@ -570,10 +571,29 @@ class ResidentConversationRuntime:
                 has_images = any(
                     input_attachments.is_image(item.media_type) for item in task_attachments
                 )
+                context = self.services.project_task_turn_repo.context(identifier)
+                has_images = has_images or bool(
+                    context
+                    and any(
+                        content_blocks_need_vision(message.content)
+                        for message in messages_from_dict(json.loads(context[1]))
+                    )
+                )
+                model_ref = self.registry.providers.resolve_model_for_multimodal_turn(
+                    configuration["model_ref"], needs_multimodal=has_images
+                )
+                if model_ref != configuration["model_ref"]:
+                    configuration["model_ref"] = model_ref
+                    configuration["automatic_model_route"] = True
                 if has_images and not self.registry.providers.is_model_ref_multimodal(
                     configuration["model_ref"] or ""
                 ):
                     raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
+                if binding.role == "primary":
+                    task_context = body.task_context or default_task_context(
+                        body.request_id, task_prompt, configuration["model_ref"]
+                    )
+                    configuration["resident_task_context"] = task_context.model_dump(mode="json")
                 return self.services.resident_request_repo.create(
                     owner_id,
                     thread_id,

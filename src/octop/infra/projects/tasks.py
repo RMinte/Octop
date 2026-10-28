@@ -8,6 +8,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Self, cast
 
+from langchain_core.messages import messages_from_dict
 from pydantic import Field, StrictBool, StrictInt, StringConstraints, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
@@ -18,6 +19,7 @@ from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.gateway.media.attachment_hints import content_blocks_need_vision
 from octop.infra.knowledge.tools import SEARCH_KNOWLEDGE_TOOL
 from octop.infra.projects import (
     approval_policy,
@@ -125,7 +127,7 @@ class TaskExecutionOptions(ProjectModel):
         | None
     ) = Field(
         default=None,
-        description="本轮模型引用，原样使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传，优先于 routing；省略或 null 且未启用 routing 时使用发送时的服务端默认模型，不继承上一轮选择。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
+        description="本轮优先模型引用，使用 GET /api/project-tasks/resources 的 models[].model_ref。创建、追问和重试均可传，优先于 routing；省略或 null 且未启用 routing 时使用发送时的服务端默认模型，不继承上一轮选择。未启用 routing 时，当前或历史图片需要视觉能力可临时选择兼容模型；原选项保留，实际模型以轮次 model_ref 为准。显式不可用模型返回 409 TASK_MODEL_UNAVAILABLE。",
         examples=["Box/RM-01 VLM"],
     )
     routing: RoutingRequest | None = Field(
@@ -883,6 +885,7 @@ def _configuration(
     action_mode: ActionMode = "craft",
     configuration_revision: int = 1,
     engine: EngineSelection | None = None,
+    requires_images: bool = False,
 ) -> tuple[str, str]:
     engine = engine or EngineSelection()
     entry = engine_catalog.validate_engine(services, owner_id, engine, action_mode=action_mode)
@@ -913,6 +916,7 @@ def _configuration(
             mode=options.routing.mode,
             level=options.routing.level,
             explicit_model_ref=options.model_ref,
+            requires_images=requires_images,
         )
     if options.routing is not None and routing_decision is None and not options.model_ref:
         # Hybrid admission must classify outside the database transaction.
@@ -928,6 +932,13 @@ def _configuration(
     providers = ProviderStore(services.provider_repo)
     if not ref or not providers.is_model_ref_usable(ref):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE, status=409)
+    if requires_images and options.routing is None:
+        selected_ref = ref
+        ref = providers.resolve_model_for_multimodal_turn(ref, needs_multimodal=True)
+        if not ref or not providers.is_model_ref_multimodal(ref):
+            raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
+        if ref != selected_ref:
+            snapshot["capability_model_route"] = True
     return json.dumps(
         {
             **snapshot,
@@ -950,6 +961,38 @@ def resolve_model_ref(services: SharedServices) -> str | None:
             else providers.resolve_first_model_ref()
         )
     return ref
+
+
+def _requires_images(
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    task_id: str | None,
+    body: TaskMessage,
+) -> bool:
+    if is_compaction(body.prompt, body.attachment_ids):
+        return False
+    attached = [
+        input_attachments._available(
+            services.project_task_attachment_repo.get(conn, owner_id, attachment_id)
+        )
+        for attachment_id in body.attachment_ids
+    ]
+    if any(row.task_id not in {None, task_id} for row in attached):
+        raise OctopError.localized(ErrorCode.TASK_ATTACHMENT_UNAVAILABLE)
+    existing = (
+        services.project_task_attachment_repo.for_task(conn, owner_id, task_id) if task_id else []
+    )
+    if any(input_attachments.is_image(row.media_type) for row in [*attached, *existing]):
+        return True
+    context = services.project_task_turn_repo.context(task_id) if task_id else None
+    return bool(
+        context
+        and any(
+            content_blocks_need_vision(message.content)
+            for message in messages_from_dict(json.loads(context[1]))
+        )
+    )
 
 
 def _same_prompt(old: ProjectTaskTurnRow, body: TaskMessage, retry_of_turn_id: str | None) -> None:
@@ -1158,6 +1201,9 @@ def send_in_transaction(
     if previous is not None:
         assert task is not None
         return task.task_id, previous.turn_id
+    requires_images = _requires_images(
+        services, conn, owner_id, task.task_id if task else None, body
+    )
     if task:
         configuration, model_ref = _configuration(
             services,
@@ -1169,6 +1215,7 @@ def send_in_transaction(
             action_mode=cast(ActionMode, task.action_mode),
             configuration_revision=task.configuration_revision,
             engine=engine_catalog.read_engine(task.execution_json),
+            requires_images=requires_images,
         )
         configuration = json.dumps(
             {
@@ -1230,6 +1277,7 @@ def send_in_transaction(
             selected_expert_id=selected_expert_id,
             action_mode=action_mode,
             engine=selected_engine,
+            requires_images=requires_images,
         )
         task_id, turn_id, now = "task_" + new_ulid(), "turn_" + new_ulid(), now_ms()
         web_search_enabled = (

@@ -28,7 +28,15 @@ def automatic_route(configuration: dict[str, Any]) -> bool:
     if configuration.get("execution_kind") == "resident":
         return configuration.get("resident_configuration", {}).get("automatic_model_route") is True
     options = configuration.get("execution_options")
-    if not isinstance(options, dict) or options.get("model_ref"):
+    if not isinstance(options, dict):
+        return False
+    if (
+        configuration.get("capability_model_route") is True
+        and not options.get("routing")
+        and not configuration.get("routing")
+    ):
+        return True
+    if options.get("model_ref"):
         return False
     profile = configuration.get("expert_profile") or {}
     routing = configuration.get("routing") or {}

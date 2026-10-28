@@ -336,6 +336,51 @@ def test_resolve_model_for_multimodal_turn(
     assert resolved == expected
 
 
+def test_image_upgrade_prefers_same_provider_and_preserves_text_selection(
+    store: ProviderStore,
+) -> None:
+    for name, models in (
+        ("a", [{"id": "image-a", "input": ["text", "image"]}]),
+        ("z", [{"id": "text"}, {"id": "image-z", "input": ["text", "image"]}]),
+    ):
+        store._provider_repo.create(
+            name=name,
+            kind="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test",
+            models_json=json.dumps(models),
+        )
+    assert store.resolve_model_for_multimodal_turn("z/text", needs_multimodal=True) == "z/image-z"
+    assert store.resolve_model_for_multimodal_turn("z/text", needs_multimodal=False) == "z/text"
+    assert store.resolve_model_for_multimodal_turn(None, needs_multimodal=True) == "a/image-a"
+
+
+@pytest.mark.parametrize("unusable", ["disabled", "no-url", "no-key", "disabled-model"])
+def test_image_upgrade_skips_unusable_selected_vision_provider(
+    store: ProviderStore, unusable: str
+) -> None:
+    pid = store._provider_repo.create(
+        name="a",
+        kind="openai",
+        base_url=None if unusable == "no-url" else "https://api.example.com/v1",
+        api_key=None if unusable == "no-key" else "sk-test",
+        models_json=json.dumps(
+            [{"id": "image-a", "input": ["text", "image"], "enabled": unusable != "disabled-model"}]
+        ),
+    )
+    if unusable == "disabled":
+        store._provider_repo.update(pid, enabled=False)
+    store._provider_repo.create(
+        name="b",
+        kind="box",
+        base_url="https://box.example.com/v1",
+        models_json=json.dumps([{"id": "image-b", "input": ["text", "image"]}]),
+    )
+    assert (
+        store.resolve_model_for_multimodal_turn("a/image-a", needs_multimodal=True) == "b/image-b"
+    )
+
+
 def test_resolve_first_model_ref_returns_first_enabled_model(store: ProviderStore) -> None:
     store._provider_repo.create(
         name="p1",

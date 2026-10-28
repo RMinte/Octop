@@ -481,7 +481,7 @@ async def test_failed_image_turn_retry_reuses_original_image(task_env, monkeypat
     assert response.status_code == 202 and len(captured) == 2
 
 
-async def test_nonvision_model_rejected_for_new_and_historical_images(task_env):
+async def test_routed_nonvision_model_rejected_for_new_and_historical_images(task_env):
     client, _, auth, calls = task_env
     await create_provider(
         client,
@@ -495,7 +495,10 @@ async def test_nonvision_model_rejected_for_new_and_historical_images(task_env):
     rejected = await client.post(
         "/api/project-tasks",
         headers=auth,
-        json={**body, "options": {"model_ref": "text-only/plain-chat"}},
+        json={
+            **body,
+            "options": {"model_ref": "text-only/plain-chat", "routing": {"mode": "box"}},
+        },
     )
     assert rejected.status_code == 422
     assert rejected.json()["error"]["code"] == "TASK_IMAGE_MODEL_REQUIRED"
@@ -513,7 +516,7 @@ async def test_nonvision_model_rejected_for_new_and_historical_images(task_env):
         json={
             "request_id": "text-model-history",
             "prompt": "Remember the image",
-            "options": {"model_ref": "text-only/plain-chat"},
+            "options": {"model_ref": "text-only/plain-chat", "routing": {"mode": "box"}},
         },
     )
     assert rejected.status_code == 422
