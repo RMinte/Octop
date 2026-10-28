@@ -103,3 +103,17 @@ it("inspects engine capabilities and patches selections only on the selected box
     expect.objectContaining({ method: "PATCH" }),
   );
 });
+
+it("passes report artifact cancellation signals through the authenticated Task transport", async () => {
+  const controller = new AbortController();
+  await createProjectTasksApi().downloadArtifact(
+    "delegated/task",
+    "artifact/id",
+    controller.signal,
+  );
+  expect(requestBlob).toHaveBeenCalledWith(
+    "/project-tasks/delegated%2Ftask/artifacts/artifact%2Fid/download",
+    { signal: controller.signal },
+    undefined,
+  );
+});

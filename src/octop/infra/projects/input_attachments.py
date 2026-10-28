@@ -191,11 +191,22 @@ def _validate_ids(ids: list[str]) -> None:
 
 
 def bind(
-    services: SharedServices, conn: Any, owner_id: int, task_id: str, ids: list[str]
+    services: SharedServices,
+    conn: Any,
+    owner_id: int,
+    task_id: str,
+    ids: list[str],
+    *,
+    resident: bool = False,
 ) -> list[TaskInputAttachment]:
     """Bind uploads inside the send transaction, after its owner lock is held."""
     _validate_ids(ids)
-    if services.project_task_repo.get_in_transaction(conn, task_id, owner_id) is None:
+    task = (
+        services.project_task_repo.get_internal_in_transaction(conn, task_id, owner_id)
+        if resident
+        else services.project_task_repo.get_in_transaction(conn, task_id, owner_id)
+    )
+    if task is None or (resident and task.internal_kind != "resident"):
         raise OctopError.localized(ErrorCode.TASK_ATTACHMENT_UNAVAILABLE)
     rows = [
         _available(services.project_task_attachment_repo.get(conn, owner_id, attachment_id))

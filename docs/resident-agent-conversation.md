@@ -1,6 +1,6 @@
 # 私人智能体常驻会话：服务端接入说明
 
-本说明对应 2026 年 10 月 21 日的服务端文字会话实现。服务端自动准备用户的唯一管家，客户端读取绑定后即可发送文字、查询受理结果、读取最近会话快照和停止指定轮次；无需用户创建或配置管家，也无需客户端先调用初始化接口。本轮没有修改 AgentComputer 客户端。
+本说明以 2026 年 10 月 21 日的服务端会话实现为基础，已补齐内置搜索、图片与普通文件输入及成果下载。服务端自动准备用户的唯一管家，客户端读取绑定后即可发送文字、查询受理结果、读取最近会话快照和停止指定轮次；无需用户创建或配置管家，也无需客户端先调用初始化接口。本轮没有修改 AgentComputer 客户端。
 
 完整能力汇总见[服务端能力与接入顺序](resident-server-capabilities.md)。用户通过唯一 `primary` 身份与生活工作管家持续交流，专业工作通过普通 Task 委派，结果回到同一会话；授权主动跟进使用独立接口。
 
@@ -20,9 +20,9 @@
 
 私人实例复用现有 `agents`，内部 `kind="expert"` 用于沿用现有实例类型约束；这不代表发布了专家，不创建 `published_experts`，也不把项目或 Task 绑定到专家。初始化只创建唯一管家，不从用户已有专家中挑选第一个或最近使用者，也不创建专业助手集合。
 
-对话正文支持普通文字。新 primary 消息默认提供 `resident_create_task` 和本会话委派任务查询工具；用户说出工作需求即可由模型按语义判断是否派发，闲聊和咨询直接回答，信息不足先追问。无需客户端先提交 `task_context`；省略时固定为无项目普通 Task，使用任务自己的独立工作空间，不附加客户端工具、附件、Skill、MCP、插件、子代理、知识库、长期记忆或团队授权。实际执行继续遵守普通 Task 的权限与审批规则，独立工作空间不等于操作系统沙箱。
+对话支持普通文字、图片与文件输入。附件通过统一任务附件接口上传，发送时提供 `attachment_ids`，回执通过 `attachments` 返回；委派任务发布的文件通过回报 `artifacts` 提供鉴权下载，完整约定见[能力对照](resident-task-capabilities.md)。新 primary 消息默认提供 `resident_create_task` 和本会话委派任务查询工具；用户说出工作需求即可由模型按语义判断是否派发，闲聊和咨询直接回答，信息不足先追问。无需客户端先提交 `task_context`；省略时固定为无项目普通 Task，使用任务自己的独立工作空间，不附加客户端工具、附件、Skill、MCP、插件、子代理、知识库、长期记忆或团队授权。实际执行继续遵守普通 Task 的权限与审批规则，独立工作空间不等于操作系统沙箱。
 
-管家会话不直接开放 shell、文件、MCP 或电脑操作工具，仍关闭对话附件、斜杠指令、自动长期事实沉淀和随机关怀。额外私人记忆查询、知识库选择和可选 `task_context` 的项目、设备、附件范围见能力汇总，不从历史提及或默认配置继承。当前可通过独立接口管理手工记忆并有界召回。模型会话上下文和检查点用于追问，与长期记忆分别管理。既有普通专家和 Task 的能力不因这些限制而关闭。
+管家会话支持内置网络搜索、直接图片输入及专用工具只读本会话上传文件；不直接开放 shell、任意文件访问、MCP 或电脑操作工具。斜杠指令、自动长期事实沉淀和随机关怀仍未开放。额外私人记忆查询、知识库选择和可选 `task_context` 的项目、设备、附件范围见能力汇总，不从历史提及或默认配置继承。当前可通过独立接口管理手工记忆并有界召回。模型会话上下文和检查点用于追问，与长期记忆分别管理。既有普通专家和 Task 的能力不因这些限制而关闭。
 
 ## 认证、身份与时间
 
@@ -86,12 +86,13 @@ Authorization: Bearer <access_token>
 
 ### 发送文字与查询原请求
 
-请求体为 `ResidentMessage`，必填以下两个字段。只传它们即可普通交流，并由模型按工作需求自主判断是否委派普通 Task；默认可查询本会话委派任务。另支持可选的 `read_tools`、`knowledge_base_ids` 和 `task_context`，用于额外记忆查询、知识库与高级执行范围选择，不是默认委派的前置条件，详细规则见[服务端能力汇总](resident-server-capabilities.md#按轮授权的助手工具)。
+请求体为 `ResidentMessage`，文字消息使用以下两个字段；附件消息还支持 `attachment_ids`，有图片或文件时可省略 `prompt` 或传空字符串。只传它们即可普通交流，并由模型按工作需求自主判断是否委派普通 Task；默认可查询本会话委派任务。另支持可选的 `read_tools`、`knowledge_base_ids` 和 `task_context`，用于额外记忆查询、知识库与高级执行范围选择，不是默认委派的前置条件，详细规则见[服务端能力汇总](resident-server-capabilities.md#按轮授权的助手工具)。
 
 | 字段 | 类型 | 规则 |
 | --- | --- | --- |
 | `request_id` | string | 去除首尾空白后 1–200 字符，仅限 `A–Z a–z 0–9 _ -`；建议使用 UUID，每个新的用户发送操作生成一次，网络重试复用。路径分隔符、百分号和点等不接受，避免受理后无法按原 ID 查询。 |
-| `prompt` | string | 1–32768 字符，必须包含非空白文字；去除开头空白后以 `/` 开始的输入不支持。 |
+| `prompt` | string | 最多 32768 字符；没有附件时必须包含非空白文字；去除开头空白后以 `/` 开始的输入不支持。 |
+| `attachment_ids` | string[] | 默认空数组；最多 9 个当前用户上传的附件 ID，受理后绑定本私人会话。 |
 
 ```http
 POST /api/agents/01RESIDENTAGENTEXAMPLE/threads/thr_01RESIDENTTHREADAMPLE/messages
@@ -127,14 +128,15 @@ Content-Type: application/json
 | `request_id` | string | 原用户发送请求身份。 |
 | `user_message_id` | string | 宿主分配的稳定用户消息 ID，也写入正式聊天历史。 |
 | `assistant_message_id` | string | 受理记录的稳定展示 ID，用于客户端合并本轮回复；不等同于 Provider/Harness 产生的正式 AI 消息 ID。 |
-| `prompt`、`reply` | string | 原始用户文字与当前已保存的完整回答；`reply` 可为空或为部分正文。 |
+| `prompt`、`reply` | string | 原始用户文字与当前已保存的完整回答；仅附件消息的 `prompt` 可为空，`reply` 可为空或为部分正文。 |
+| `attachments` | array | 本轮上传图片或文件的 `TaskInputAttachment` 元数据，文字消息为空数组。 |
 | `status` | string enum | `queued / running / completed / failed / cancelled / interrupted`。 |
 | `created_at`、`updated_at` | datetime | UTC ISO 8601 时间。 |
 | `error_code`、`error_message` | string 或 null | 安全错误码及本地化说明；无错误时为 null。 |
 
 服务端先保存受理记录，再返回 202。新请求的响应可能已经是 `queued` 或 `running`；原请求重传还可能返回其已有终态。202 表示请求已受理或找到了原受理记录，不保证模型已成功回答。
 
-`ResidentTurn.authorization` 回显原发送请求中的额外显式选择；自然语言委派和本会话任务查询以受理时冻结的能力配置为准，不要求额外字段为 true。升级前已受理的旧请求保留原能力，不因恢复或重传而升级。发送幂等按同一 owner 的 `request_id` 处理：同一 thread、相同 `prompt` 重传返回原轮次当前状态，不增加用户消息、不重复执行或创建任务。相同 ID 换 thread、文字或授权选择返回 `409 RESIDENT_REQUEST_CONFLICT`。`prompt` 保留原值，空白差异也属于输入变化；不得重试时擅自改写文字。已结束的原请求重传也不会重跑；确实需要新的对话轮次时使用新 `request_id`。
+`ResidentTurn.authorization` 回显原发送请求中的额外显式选择；自然语言委派和本会话任务查询以受理时冻结的能力配置为准，不要求额外字段为 true。升级前已受理的旧请求保留原能力，不因恢复或重传而升级。发送幂等按同一 owner 的 `request_id` 处理：同一 thread、相同 `prompt`、附件 ID 和授权重传返回原轮次当前状态，不增加用户消息、不重复执行或创建任务。相同 ID 换 thread、文字、附件或授权选择返回 `409 RESIDENT_REQUEST_CONFLICT`。`prompt` 保留原值，空白差异也属于输入变化；不得重试时擅自改写文字。已结束的原请求重传也不会重跑；确实需要新的对话轮次时使用新 `request_id`。
 
 同一常驻 thread 最多有一个 `queued/running` 轮次。活动轮未结束时，另一个新的发送请求返回 `409 AGENT_BUSY`；相同发送请求的幂等重传不受此限制。
 
@@ -233,13 +235,13 @@ HTTP 业务错误沿用标准 envelope，例如：
 | 发送或取消 ID 与原内容/目标冲突 | HTTP `409 RESIDENT_REQUEST_CONFLICT`。 |
 | 当前会话已有活动轮次 | HTTP `409 AGENT_BUSY`。 |
 | 绑定未 ready 或私人实例未启用 | HTTP `409 AGENT_NOT_RUNNING`。 |
-| 空白正文、以 `/` 开始的正文 | HTTP `422 RESIDENT_TEXT_ONLY`。 |
-| 字段缺失、长度非法、额外附件/工具等请求字段、limit 越界 | HTTP 422，请求 schema 校验失败。 |
+| 没有附件的空白正文、以 `/` 开始的正文 | HTTP `422 RESIDENT_TEXT_ONLY`。 |
+| 字段缺失、长度非法、未声明的附件/工具等请求字段、limit 越界 | HTTP 422，请求 schema 校验失败。 |
 | 已受理轮次执行时模型不可用 | 轮次 `failed`，常见错误码 `RESIDENT_MODEL_UNAVAILABLE`；受理响应 202 不替代此结果。 |
 | 租约失效或停服中断 | 轮次 `interrupted`，`RESIDENT_INTERRUPTED`。 |
 | 未知内部异常或未识别的流错误码 | 安全映射为 `INTERNAL_ERROR`，不返回原始异常和凭据。 |
 
-轮次错误位于 `ResidentTurn.error_code/error_message`，不表示轮询 HTTP 本身失败。例如原轮次已经 failed，其查询仍正常返回 HTTP 200。私人对话不直接执行工具审批、附件上传或客户端本机操作；实际工作进入普通 Task，附加资源须由用户明确选择。长期记忆通过独立接口管理，原始采集需显式开启，候选需用户确认；主动跟进同样需要独立明确授权，详见能力汇总。
+轮次错误位于 `ResidentTurn.error_code/error_message`，不表示轮询 HTTP 本身失败。例如原轮次已经 failed，其查询仍正常返回 HTTP 200。私人对话的附件上传复用统一任务附件接口，文件只读工具限定当前会话；不直接执行工具审批或客户端本机操作。实际工作进入普通 Task，附加资源须由用户明确选择。长期记忆通过独立接口管理，原始采集需显式开启，候选需用户确认；主动跟进同样需要独立明确授权，详见能力汇总。
 
 ## 验证与未验收范围
 

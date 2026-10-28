@@ -1,6 +1,6 @@
 # 私人智能体：服务端能力与接入顺序
 
-本说明汇总统一生活工作管家的正式服务端接口，包括持续交流、私人记忆、任务委派和主动跟进。AgentComputer 本轮没有改动；先用 `GET /api/agents/resident-capabilities` 读取实际能力，再接入正式页面。全部入口属于普通 `/api`，需要正常认证，不增加 AgentComputer 专用协议或远程项目任务 Bridge。
+本说明汇总统一生活工作管家的正式服务端接口，包括持续交流、内置网络搜索、图片与文件输入、成果下载、私人记忆、任务委派和主动跟进。AgentComputer 本轮没有改动；先用 `GET /api/agents/resident-capabilities` 读取实际能力，再接入正式页面。全部入口属于普通 `/api`，需要正常认证，不增加 AgentComputer 专用协议或远程项目任务 Bridge。
 
 ## 领域关系
 
@@ -35,6 +35,18 @@
 - [统一管家与专业工作委派](resident-professional-instances.md)
 - [授权主动跟进、定时 Task 与通知](resident-followups.md)
 
+## 内置搜索与双向附件
+
+新受理的私人助手消息默认开放内置网络搜索，复用普通任务已配置的搜索服务与免配置搜索工具；查询事实和近期信息可直接回答，无需仅为搜索创建任务。已受理旧轮次仍沿用原能力快照。此能力不代表放开浏览器、任意网页或主机文件读取、命令或 MCP。
+
+`ResidentCapabilities.web_search=true`，`message_types` 包含 `text/image/file`。附件上传和预览或下载复用 `/api/project-tasks/attachments`，发送时把附件 ID 放入 `ResidentMessage.attachment_ids`；每条最多 9 个、单个最多 25 MiB，仍受服务端上传限制。可仅发附件；JPEG、PNG、WebP、GIF 图片需视觉模型，普通文件不要求视觉。`ResidentTurn.attachments` 在回执、快照、实时更新与历史中返回同一份附件元数据。重传原请求须保留正文与附件 ID；附件不自动转交委派任务。
+
+新轮次默认提供 `resident_read_attachment`，按 ID 只读当前私人会话的上传文件；省略 ID 列出普通附件，`offset/limit` 控制分页。支持文本、PDF、Word、Excel、PowerPoint 等可提取文字的文档，无 OCR；不支持的格式、损坏文件或无文字内容返回明确错误。文件内容不构成执行授权，工具不能读取模型提供的主机路径。
+
+委派任务发布的真实成果通过回报 `artifacts` 回到原会话与历史。Dashboard 直接展示文件名、大小和下载按钮，使用回报 `task_id`、`artifact_id` 调用鉴权的 `GET /api/project-tasks/{task_id}/artifacts/{artifact_id}/download`。文件产出仍由普通 Task 完成；私人会话不直接执行任意文件写入或命令。
+
+完整差异与示例见[私人助手与任务能力对照](resident-task-capabilities.md)。
+
 ## 按轮授权的助手工具
 
 `POST B/messages` 只需 `request_id/prompt` 即可开始。新 primary 轮次默认向管家提供 `resident_create_task` 和本会话任务查询工具：管家理解用户实际工作请求，按需整理交付要求并委派，不按“任务”“派发”等关键词硬触发。闲聊、知识咨询和可直接回答的问题继续在会话中处理；信息不足时先追问，不为显示派发而创建 Task。
@@ -65,7 +77,7 @@
 
 已由用户确认的少量有效事实仍会沿用既有的有界上下文召回；`read_tools` 控制额外的按需查询，不控制原始观察采集。
 
-所有额外选择与实际能力配置快照持久保存，`ResidentTurn.authorization` 回显该原请求的显式选择；默认自然语言委派能力以受理时冻结的配置为准。相同请求 ID 改正文或授权返回冲突；服务端模型、提示或能力后来改变不重跑或升级旧请求。管家会话不直接获得 shell、文件、MCP 或电脑操作工具，实际执行进入普通 Task。原始记忆采集、知识库访问及主动跟进继续独立授权，不因提出一个工作请求而开启。
+所有额外选择与实际能力配置快照持久保存，`ResidentTurn.authorization` 回显该原请求的显式选择；默认自然语言委派能力以受理时冻结的配置为准。相同请求 ID 改正文或授权返回冲突；服务端模型、提示或能力后来改变不重跑或升级旧请求。管家会话只读自己的上传附件，不直接获得 shell、任意文件访问、MCP 或电脑操作工具，实际执行进入普通 Task。原始记忆采集、知识库访问及主动跟进继续独立授权，不因提出一个工作请求而开启。
 
 ## 未读与重连
 
@@ -91,7 +103,7 @@
 
 1. 读取能力声明及 `GET /api/agents/resident-conversation` 的唯一管家绑定；`ready` 后将生活与工作需求送入同一会话。客户端不依赖先调用 PUT，也不展示创建或配置管家的步骤。GET 始终只读，仍须处理 `not_created / initializing / failed` 等状态；PUT 仅保留作显式幂等重试或修复。
 2. 持久发送收据、最近快照、按日历史与搜索；重连沿用原请求和 thread。
-3. 直接发送自然语言工作请求，展示关联任务卡与真实产物跳转，结果回到原管家会话；高级范围选择按需接入 `task_context`。
+3. 接入图片和普通文件上传，直接发送自然语言工作请求，展示关联任务卡与真实成果下载，结果回到原管家会话；高级范围选择按需接入 `task_context`。
 4. 记忆管理、采集授权、候选与来源查看。
 5. 关注事项的明确授权、暂停、取消，以及通知历史与共享已读水位。
 6. 模型上下文用量与显式整理。

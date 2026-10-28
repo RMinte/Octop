@@ -24,6 +24,7 @@ it("preserves original send and exact cancellation identities and explicit false
     read_tools: false,
     knowledge_base_ids: [],
     task_context: null,
+    attachment_ids: ["private-image-1", "private-file-1"],
   };
   await residentApi.send(scope, message);
   await residentApi.request(scope, "send/1");

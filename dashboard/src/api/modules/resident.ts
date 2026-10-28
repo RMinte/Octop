@@ -1,5 +1,5 @@
 import { request } from "../request";
-import type { TaskMessage } from "./projects";
+import type { TaskInputAttachment, TaskMessage } from "./projects";
 
 export interface ResidentScope {
   agent_id: string;
@@ -25,7 +25,8 @@ export interface ResidentCapabilities {
     path: "/api/project-tasks/ws";
     protocol_version: 3;
   };
-  message_types: "text"[];
+  message_types: ("text" | "image" | "file")[];
+  web_search?: boolean;
   history_days_search_location: boolean;
   memory_management: boolean;
   memory_capture: "explicit_opt_in_raw_events";
@@ -47,6 +48,7 @@ export interface ResidentAuthorization {
 export interface ResidentMessage extends ResidentAuthorization {
   request_id: string;
   prompt: string;
+  attachment_ids?: string[];
 }
 export interface ResidentTurn {
   turn_id: string;
@@ -68,12 +70,21 @@ export interface ResidentTurn {
   error_code: string | null;
   error_message: string | null;
   authorization: ResidentAuthorization;
+  attachments?: TaskInputAttachment[];
 }
 export interface ResidentSnapshot extends ResidentScope {
   revision: number;
   active_turn_id: string | null;
   has_earlier: boolean;
   turns: ResidentTurn[];
+}
+export interface ResidentReportArtifact {
+  artifact_id: string;
+  name: string;
+  media_type: string;
+  byte_count: number;
+  sha256: string;
+  business_category: string;
 }
 export interface ResidentTaskReport {
   report_id: string;
@@ -84,7 +95,7 @@ export interface ResidentTaskReport {
   text: string;
   error_code: string | null;
   error_message: string | null;
-  artifacts: Record<string, unknown>[];
+  artifacts: ResidentReportArtifact[];
   delivery_status: "pending" | "delivered";
 }
 export interface ResidentHistoryNotification {

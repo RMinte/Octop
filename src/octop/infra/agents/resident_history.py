@@ -8,8 +8,13 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from octop.i18n import error_message
-from octop.infra.agents.resident_conversation import ResidentModel, ResidentTurn, TurnStatus
-from octop.infra.agents.resident_tools import ResidentToolInput
+from octop.infra.agents.resident_conversation import (
+    ResidentInput,
+    ResidentModel,
+    ResidentTurn,
+    TurnStatus,
+    turn_attachments,
+)
 from octop.infra.db.repos.resident_conversations import ResidentConversationRow
 from octop.infra.db.repos.resident_history import ResidentHistoryRow
 from octop.infra.db.services import SharedServices
@@ -134,12 +139,13 @@ def _item(row: ResidentHistoryRow, locale: str) -> ResidentHistoryItem:
             assistant_message_id=f"resident:{row.source_id}:assistant",
             prompt=row.prompt,
             reply=row.reply,
+            attachments=turn_attachments(row.configuration_json),
             status=cast(TurnStatus, row.status),
             created_at=created,
             updated_at=updated,
             error_code=code,
             error_message=error_message(code, locale) if code else None,
-            authorization=ResidentToolInput.model_validate_json(row.input_json),
+            authorization=ResidentInput.model_validate_json(row.input_json),
         )
     elif row.kind == "task_report":
         artifacts = json.loads(row.artifacts_json)

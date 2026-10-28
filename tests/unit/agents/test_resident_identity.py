@@ -181,6 +181,7 @@ async def test_runtime_has_no_capture_bootstrap_or_tool_execution(services, mana
     assert not config.bootstrap_enabled and not config.team_enabled
     assert not config.acp_runners and not config.acp_delegate_enabled
     assert not config.mcp_server_configs and not config.tools
+    assert config.web_search_tools is True
     assert not config.subagents and not config.subagents_auto_load
     guard = next(item for item in config.middleware if isinstance(item, ResidentTextOnlyMiddleware))
     request = SimpleNamespace(override=lambda **values: values)

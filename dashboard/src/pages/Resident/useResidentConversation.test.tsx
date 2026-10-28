@@ -539,3 +539,35 @@ it("continues with REST when the optional capability probe is unavailable", asyn
   expect(hook.result.current.connectionState).toBe("polling");
   expect(Socket.instances).toHaveLength(0);
 });
+
+it.each(["image-original", "file-original"])(
+  "freezes %s before delivery and replays it after draft changes",
+  async (attachmentID) => {
+    const hook = await ready();
+    api.send.mockRejectedValue(new Error("network unavailable"));
+    const selected = [attachmentID];
+    await act(() => hook.result.current.send(selected));
+    const original = api.send.mock.calls[0][1];
+    expect(original).toMatchObject({
+      prompt: "",
+      attachment_ids: [attachmentID],
+    });
+    selected[0] = "changed-outside";
+    act(() => hook.result.current.setDraft("next draft"));
+    expect(hook.result.current.pendingIntent?.attachment_ids).toEqual([
+      attachmentID,
+    ]);
+    expect(
+      JSON.parse(localStorage.getItem(residentStorageKey(1, scope))!).pending,
+    ).toEqual(original);
+    hook.unmount();
+    api.send.mockImplementation(async (_scope, body) =>
+      turn({ request_id: body.request_id, prompt: body.prompt }),
+    );
+    const recovered = await ready();
+    await waitFor(() => expect(api.send).toHaveBeenCalledTimes(2));
+    expect(api.send.mock.calls[1][1]).toEqual(original);
+    expect(recovered.result.current.draft).toBe("next draft");
+    expect(recovered.result.current.acceptedIntent).toEqual(original);
+  },
+);

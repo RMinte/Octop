@@ -591,5 +591,7 @@ async def test_resident_routes_require_authentication_and_expose_typed_openapi(r
     message_operation = schema["paths"][f"{template}/messages"]["post"]
     request_schema = message_operation["requestBody"]["content"]["application/json"]["schema"]
     message_model = schema["components"]["schemas"][request_schema["$ref"].rsplit("/", 1)[-1]]
-    assert set(message_model["required"]) == {"request_id", "prompt"}
+    assert set(message_model["required"]) == {"request_id"}
+    assert message_model["properties"]["prompt"]["default"] == ""
+    assert message_model["properties"]["attachment_ids"]["maxItems"] == 9
     assert message_model["additionalProperties"] is False

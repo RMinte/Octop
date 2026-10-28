@@ -85,7 +85,7 @@ async def tools_http(env_with_provider, monkeypatch):
         assert request["thread_id"] != binding.thread_id
         assert self.config.tools == [] and self.config.mcp_server_configs == {}
         assert self.config.subagents == [] and not self.config.team_enabled
-        assert not self.config.acp_delegate_enabled and not self.config.web_search_tools
+        assert not self.config.acp_delegate_enabled and self.config.web_search_tools is True
         guard = ResidentTextOnlyMiddleware("en", binding.owner_id, binding.thread_id)
         system = SystemMessage(content="Private assistant")
         prepared = guard._prepare(
@@ -197,7 +197,11 @@ async def test_existing_steward_uses_current_policy_and_recovery_keeps_accepted_
         await runtime.start()
         await _settled(env.client, env.auth, env.base, body["request_id"])
         assert env.observed[-1]["system_prompt"].startswith(frozen["system_prompt"])
-        assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        assert set(env.observed[-1]["tools"]) == {
+            "resident_create_task",
+            "resident_read_tasks",
+            "resident_read_attachment",
+        }
         await _send(env)
         assert env.observed[-1]["system_prompt"].startswith(
             tr("agents.resident.system_prompt", "en")
@@ -242,7 +246,11 @@ async def test_http_default_dispatch_tools_and_explicit_private_memory_are_per_t
     )
 
     async def default(guard, current):
-        assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        assert set(current["tools"]) == {
+            "resident_create_task",
+            "resident_read_tasks",
+            "resident_read_attachment",
+        }
         return [
             await _call(guard, "resident_read_tasks"),
             await _call(guard, "resident_read_memory"),
@@ -261,6 +269,7 @@ async def test_http_default_dispatch_tools_and_explicit_private_memory_are_per_t
             "resident_create_task",
             "resident_read_memory",
             "resident_read_tasks",
+            "resident_read_attachment",
         }
         return [
             await _call(guard, "resident_read_memory"),
@@ -297,7 +306,11 @@ async def test_http_task_context_freezes_options_and_one_task_returns_to_origina
     env = tools_http
 
     async def delegate(guard, current):
-        assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        assert set(current["tools"]) == {
+            "resident_create_task",
+            "resident_read_tasks",
+            "resident_read_attachment",
+        }
         return [
             await _call(guard, "resident_create_task", {"brief": "Write the authorized draft"}),
             await _call(guard, "resident_create_task", {"brief": "Write the authorized draft"}),
@@ -365,7 +378,11 @@ async def test_http_plain_language_delegation_has_host_defaults_and_returns_to_s
     prompt = "请把下周工作和生活安排交给任务处理，完成后回到这里告诉我。"
 
     async def delegate(guard, current):
-        assert set(current["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        assert set(current["tools"]) == {
+            "resident_create_task",
+            "resident_read_tasks",
+            "resident_read_attachment",
+        }
         return [
             await _call(guard, "resident_create_task", {"brief": "制定五个工作日的安排"}),
             await _call(guard, "resident_create_task", {"brief": "制定五个工作日的安排"}),
@@ -434,7 +451,11 @@ async def test_http_plain_language_delegation_has_host_defaults_and_returns_to_s
 async def test_http_plain_small_talk_never_precreates_a_task(tools_http):
     env = tools_http
     await _send(env, prompt="你好，今天心情怎么样？")
-    assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
+    assert set(env.observed[-1]["tools"]) == {
+        "resident_create_task",
+        "resident_read_tasks",
+        "resident_read_attachment",
+    }
     assert not env.task_calls
     assert (
         _json(await env.client.get(f"{env.base}/conversation/delegations", headers=env.auth))[
@@ -485,7 +506,11 @@ async def test_http_accepted_legacy_turn_does_not_gain_new_default_dispatch(tool
         )
         assert not env.task_calls
         await _send(env, prompt="New ordinary text.")
-        assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
+        assert set(env.observed[-1]["tools"]) == {
+            "resident_create_task",
+            "resident_read_tasks",
+            "resident_read_attachment",
+        }
     finally:
         await runtime.start()
 
@@ -575,6 +600,7 @@ async def test_http_selected_knowledge_is_per_turn_and_revocation_does_not_break
         assert set(current["tools"]) == {
             "resident_create_task",
             "resident_read_tasks",
+            "resident_read_attachment",
             "resident_search_knowledge",
         }
         first = await _call(guard, "resident_search_knowledge", {"query": "Selected evidence"})
@@ -612,7 +638,11 @@ async def test_http_selected_knowledge_is_per_turn_and_revocation_does_not_break
     )
     assert denied.status_code == 404
     await _send(env)
-    assert set(env.observed[-1]["tools"]) == {"resident_create_task", "resident_read_tasks"}
+    assert set(env.observed[-1]["tools"]) == {
+        "resident_create_task",
+        "resident_read_tasks",
+        "resident_read_attachment",
+    }
     assert (await env.client.get(f"{env.base}/conversation", headers=other)).status_code == 404
 
 

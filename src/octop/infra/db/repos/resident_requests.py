@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -105,13 +106,17 @@ class ResidentRequestRepo:
                 ResidentRequestRow.from_row(row) for row in reversed(rows)
             ]
 
+    @staticmethod
+    def get_in_transaction(conn: Any, owner_id: int, request_id: str) -> ResidentRequestRow | None:
+        row = conn.execute(
+            "SELECT * FROM resident_requests WHERE owner_id=? AND request_id=?",
+            (owner_id, request_id),
+        ).fetchone()
+        return ResidentRequestRow.from_row(row) if row else None
+
     def get(self, owner_id: int, request_id: str) -> ResidentRequestRow | None:
         with self._db.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM resident_requests WHERE owner_id=? AND request_id=?",
-                (owner_id, request_id),
-            ).fetchone()
-        return ResidentRequestRow.from_row(row) if row else None
+            return self.get_in_transaction(conn, owner_id, request_id)
 
     def get_by_turn(self, turn_id: str, owner_id: int) -> ResidentRequestRow | None:
         with self._db.connect() as conn:
@@ -147,8 +152,10 @@ class ResidentRequestRepo:
         day_key: str = "",
         timezone: str = "",
         input_json: str = "{}",
+        *,
+        connection: Any | None = None,
     ) -> tuple[ResidentRequestRow, bool]:
-        with self._db.transaction() as conn:
+        with self._db.transaction() if connection is None else nullcontext(connection) as conn:
             conn.execute("UPDATE users SET id=id WHERE id=?", (owner_id,))
             prior = conn.execute(
                 "SELECT * FROM resident_requests WHERE owner_id=? AND request_id=?",

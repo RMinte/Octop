@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage, ToolMessage
@@ -64,7 +64,7 @@ def resident_execution_allowed(owner_id: int, thread_id: str) -> bool:
 
 
 class ResidentTextOnlyMiddleware(AgentMiddleware[Any, Any]):
-    """Limit the model to resident host tools; execution belongs to delegated Tasks."""
+    """Allow private host tools and built-in search; delegate other execution to Tasks."""
 
     def __init__(self, locale: str, owner_id: int, thread_id: str) -> None:
         self.locale = locale
@@ -76,9 +76,17 @@ class ResidentTextOnlyMiddleware(AgentMiddleware[Any, Any]):
 
     def _prepare(self, request: ModelRequest) -> ModelRequest:
         self._require_scope()
-        from octop.infra.agents.resident_tools import resident_tool_definitions
+        from octop.infra.agents.resident_tools import (
+            resident_tool_definitions,
+            resident_web_search_tools,
+        )
 
-        tools = resident_tool_definitions(self.owner_id, self.thread_id, self.locale)
+        tools = [
+            *resident_web_search_tools(
+                self.owner_id, self.thread_id, getattr(request, "tools", None) or []
+            ),
+            *resident_tool_definitions(self.owner_id, self.thread_id, self.locale),
+        ]
         prompt = _PROMPT_CONTEXT.get()
         memory = _MEMORY_CONTEXT.get()
         if prompt is None and not memory and not tools:
@@ -115,8 +123,15 @@ class ResidentTextOnlyMiddleware(AgentMiddleware[Any, Any]):
         return await handler(self._prepare(request))
 
     def wrap_tool_call(self, request: Any, handler: Any) -> ToolMessage:
-        from octop.infra.agents.resident_tools import execute_resident_tool
+        from octop.infra.agents.resident_tools import (
+            execute_resident_tool,
+            resident_web_search_allowed,
+        )
 
+        if resident_web_search_allowed(
+            self.owner_id, self.thread_id, request.tool_call, getattr(request, "tool", None)
+        ):
+            return cast(ToolMessage, handler(request))
         return execute_resident_tool(
             owner_id=self.owner_id,
             thread_id=self.thread_id,
@@ -125,8 +140,19 @@ class ResidentTextOnlyMiddleware(AgentMiddleware[Any, Any]):
         )
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> ToolMessage:
-        from octop.infra.agents.resident_tools import aexecute_resident_tool
+        from octop.infra.agents.resident_tools import (
+            aexecute_resident_tool,
+            resident_web_search_allowed,
+        )
 
+        if await asyncio.to_thread(
+            resident_web_search_allowed,
+            self.owner_id,
+            self.thread_id,
+            request.tool_call,
+            getattr(request, "tool", None),
+        ):
+            return cast(ToolMessage, await handler(request))
         return await aexecute_resident_tool(
             owner_id=self.owner_id,
             thread_id=self.thread_id,
@@ -174,7 +200,7 @@ def resident_harness_config(
         skills_dir=[],
         mcp_server_configs={},
         tools=[],
-        web_search_tools=False,
+        web_search_tools=True,
         acp_runners={},
         acp_delegate_enabled=False,
         middleware=[ResidentTextOnlyMiddleware(locale, int(row.user_id or 0), thread_id)],

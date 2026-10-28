@@ -1,4 +1,4 @@
-"""Authenticated private Agent identity and durable text-conversation receipts."""
+"""Authenticated private Agent identity and durable conversation receipts."""
 
 from __future__ import annotations
 
@@ -106,8 +106,8 @@ async def conversation(
     _THREAD + "/messages",
     response_model=ResidentTurn,
     status_code=202,
-    summary="Durably accept a plain-text turn for the resident conversation",
-    description="Reuse request_id after a lost response. Disconnecting does not cancel execution; changed input conflicts.",
+    summary="Durably accept text, images and files for the resident conversation",
+    description="Reuse request_id after a lost response. Text and owned attachment_ids are frozen together; changed input conflicts. Upload images and files through /api/project-tasks/attachments. Uploaded files are readable only through the private conversation attachment reader and are not automatically delegated to tasks. Disconnecting does not cancel execution.",
 )
 async def send_message(
     agent_id: str,

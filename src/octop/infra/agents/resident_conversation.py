@@ -1,4 +1,4 @@
-"""Durable text turns for a private resident Agent, independent of HTTP clients."""
+"""Durable resident turns with immutable attachments, independent of HTTP clients."""
 
 from __future__ import annotations
 
@@ -48,6 +48,9 @@ from octop.infra.gateway.gateway import Gateway
 from octop.infra.gateway.threads import ThreadRegistry
 from octop.infra.gateway.ws import WS_CHANNEL_ID
 from octop.infra.history.service import HistoryArchive
+from octop.infra.projects import input_attachments
+from octop.infra.projects.input_attachment_models import TaskInputAttachment
+from octop.infra.projects.models import Reference
 from octop.infra.users.preferences import get_preferred_model_from_json
 from octop.infra.utils.ulid import new_ulid
 
@@ -112,7 +115,10 @@ class ResidentCapabilities(ResidentModel):
         default_factory=ResidentConversationStream,
         description="Preferred live observation. REST snapshots and command receipts remain available; this declaration does not mean a client has subscribed.",
     )
-    message_types: list[Literal["text"]] = ["text"]
+    message_types: list[Literal["text", "image", "file"]] = ["text", "image", "file"]
+    web_search: bool = Field(
+        default=True, description="Built-in web search is available directly in new resident turns."
+    )
     history_days_search_location: bool = True
     memory_management: bool = True
     memory_capture: Literal["explicit_opt_in_raw_events"] = "explicit_opt_in_raw_events"
@@ -137,10 +143,19 @@ RequestId = Annotated[
 ]
 
 
-class ResidentMessage(ResidentToolInput):
+class ResidentInput(ResidentToolInput):
+    attachment_ids: list[Reference] = Field(
+        default_factory=list,
+        max_length=input_attachments.MAX_ATTACHMENTS,
+        description="Owned upload IDs from /api/project-tasks/attachments, in display order; images and other files share a limit of nine. First send binds them to this private conversation.",
+    )
+
+
+class ResidentMessage(ResidentInput):
     request_id: RequestId = Field(description="Stable send identity; reuse after a lost response.")
-    prompt: Annotated[str, StringConstraints(min_length=1, max_length=32768)] = Field(
-        description="Plain user text; the steward may delegate requested work to a task. Optional task_context selects additional execution scope. Direct chat attachments and slash commands are unavailable."
+    prompt: Annotated[str, StringConstraints(max_length=32768)] = Field(
+        default="",
+        description="User text; may be empty when attachment_ids are supplied. Optional task_context selects additional execution scope. Uploaded files remain private conversation inputs and are not automatically delegated to tasks. Slash commands are unavailable.",
     )
 
 
@@ -162,6 +177,7 @@ class ResidentTurn(ResidentModel):
     )
     prompt: str
     reply: str
+    attachments: list[TaskInputAttachment] = Field(default_factory=list)
     status: TurnStatus
     created_at: datetime
     updated_at: datetime
@@ -188,7 +204,7 @@ def _task_context(row: ResidentRequestRow) -> ResidentTaskContext | None:
         return ResidentTaskContext.model_validate(configuration["resident_task_context"])
     # Admitted turns keep their original scope, including turns queued before
     # natural-language delegation was introduced.
-    return ResidentToolInput.model_validate_json(row.input_json).task_context
+    return ResidentInput.model_validate_json(row.input_json).task_context
 
 
 def turn_view(row: ResidentRequestRow, locale: str) -> ResidentTurn:
@@ -201,13 +217,21 @@ def turn_view(row: ResidentRequestRow, locale: str) -> ResidentTurn:
         assistant_message_id=f"resident:{row.turn_id}:assistant",
         prompt=row.prompt,
         reply=row.reply,
+        attachments=turn_attachments(row.configuration_json),
         status=cast(TurnStatus, row.status),
         created_at=datetime.fromtimestamp(row.created_at / 1000, UTC),
         updated_at=datetime.fromtimestamp(row.updated_at / 1000, UTC),
         error_code=code,
         error_message=error_message(code, locale) if code else None,
-        authorization=ResidentToolInput.model_validate_json(row.input_json),
+        authorization=ResidentInput.model_validate_json(row.input_json),
     )
+
+
+def turn_attachments(configuration_json: str) -> list[TaskInputAttachment]:
+    return [
+        TaskInputAttachment.model_validate(item)
+        for item in json.loads(configuration_json).get("attachments", [])
+    ]
 
 
 def _known_error_code(value: str) -> str:
@@ -368,14 +392,14 @@ class ResidentConversationRuntime:
         self, owner_id: int, agent_id: str, thread_id: str, body: ResidentMessage
     ) -> ResidentRequestRow:
         binding = await asyncio.to_thread(self._require, owner_id, agent_id, thread_id)
-        if not body.prompt.strip() or body.prompt.lstrip().startswith("/"):
+        if (not body.prompt.strip() and not body.attachment_ids) or body.prompt.lstrip().startswith(
+            "/"
+        ):
             raise OctopError.localized(ErrorCode.RESIDENT_TEXT_ONLY)
         # Freeze only explicit turn selections. Replays return the original receipt
         # even when a formerly selected knowledge base has since been revoked.
-        authorization = ResidentToolInput(
-            read_tools=body.read_tools,
-            task_context=body.task_context,
-            knowledge_base_ids=body.knowledge_base_ids,
+        authorization = ResidentInput.model_validate(
+            body.model_dump(exclude={"request_id", "prompt"})
         )
         input_json = json.dumps(
             authorization.model_dump(mode="json", exclude_defaults=True),
@@ -394,35 +418,92 @@ class ResidentConversationRuntime:
             ):
                 raise OctopError.localized(ErrorCode.RESIDENT_REQUEST_CONFLICT)
             return previous
+        if body.attachment_ids and getattr(self.gateway, "_task_worker", None) is None:
+            # Immutable Task attachments require the canonical Task worker.
+            # The retained legacy gateway path remains explicitly text-only.
+            raise OctopError.localized(ErrorCode.RESIDENT_TEXT_ONLY)
         if body.knowledge_base_ids:
             await asyncio.to_thread(
                 self.registry.validate_knowledge_base_ids, owner_id, body.knowledge_base_ids
             )
         configuration = await asyncio.to_thread(self._configuration, owner_id, agent_id)
         configuration["resident_input"] = json.loads(input_json)
+        configuration["web_search_enabled"] = True
+        configuration["attachment_read_enabled"] = True
         if binding.role == "primary":
+            user = await asyncio.to_thread(self.services.user_repo.get, owner_id)
             task_context = body.task_context or default_task_context(
-                body.request_id, body.prompt, configuration["model_ref"]
+                body.request_id,
+                body.prompt
+                or tr("agents.resident.attachment_only_prompt", user.locale if user else "en"),
+                configuration["model_ref"],
             )
             configuration["resident_task_context"] = task_context.model_dump(mode="json")
+        from octop.infra.projects.resident_tasks import ensure_task, task_id
+
+        identifier = task_id(owner_id, thread_id)
+        if body.attachment_ids:
+            await ensure_task(self.services, owner_id, thread_id, body.request_id)
         accepted_at = now_ms()
         timezone = self.services.config.default_timezone
+
+        def create() -> tuple[ResidentRequestRow, bool]:
+            with self.services.db.transaction() as conn:
+                if not self.services.project_task_repo.lock_owner(conn, owner_id):
+                    raise OctopError.localized(ErrorCode.FORBIDDEN)
+                existing = self.services.resident_request_repo.get_in_transaction(
+                    conn, owner_id, body.request_id
+                )
+                if existing is not None:
+                    if (
+                        existing.thread_id != thread_id
+                        or existing.prompt != body.prompt
+                        or existing.input_json != input_json
+                    ):
+                        raise ResidentRequestConflict("request input changed")
+                    return existing, False
+                if body.attachment_ids:
+                    attached = input_attachments.bind(
+                        self.services,
+                        conn,
+                        owner_id,
+                        identifier,
+                        body.attachment_ids,
+                        resident=True,
+                    )
+                    configuration["attachments"] = [
+                        item.model_dump(mode="json") for item in attached
+                    ]
+                task_attachments = self.services.project_task_attachment_repo.for_task(
+                    conn, owner_id, identifier
+                )
+                if task_attachments and getattr(self.gateway, "_task_worker", None) is None:
+                    raise OctopError.localized(ErrorCode.RESIDENT_TEXT_ONLY)
+                has_images = any(
+                    input_attachments.is_image(item.media_type) for item in task_attachments
+                )
+                if has_images and not self.registry.providers.is_model_ref_multimodal(
+                    configuration["model_ref"] or ""
+                ):
+                    raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
+                return self.services.resident_request_repo.create(
+                    owner_id,
+                    thread_id,
+                    body.request_id,
+                    new_ulid(),
+                    body.prompt,
+                    accepted_at,
+                    configuration_json=json.dumps(configuration),
+                    day_key=datetime.fromtimestamp(accepted_at / 1000, ZoneInfo(timezone))
+                    .date()
+                    .isoformat(),
+                    timezone=timezone,
+                    input_json=input_json,
+                    connection=conn,
+                )
+
         try:
-            row, _ = await asyncio.to_thread(
-                self.services.resident_request_repo.create,
-                owner_id,
-                thread_id,
-                body.request_id,
-                new_ulid(),
-                body.prompt,
-                accepted_at,
-                configuration_json=json.dumps(configuration),
-                day_key=datetime.fromtimestamp(accepted_at / 1000, ZoneInfo(timezone))
-                .date()
-                .isoformat(),
-                timezone=timezone,
-                input_json=input_json,
-            )
+            row, _ = await asyncio.to_thread(create)
         except ResidentRequestConflict as exc:
             raise OctopError.localized(ErrorCode.RESIDENT_REQUEST_CONFLICT) from exc
         except ResidentRequestArchived as exc:
@@ -680,7 +761,7 @@ class ResidentConversationRuntime:
             if binding is None or binding.owner_id != queued.owner_id:
                 raise OctopError.localized(ErrorCode.NOT_FOUND)
             config = json.loads(queued.configuration_json)
-            authorization = ResidentToolInput.model_validate_json(queued.input_json)
+            authorization = ResidentInput.model_validate_json(queued.input_json)
             model = config.get("model_ref")
             if not model or not await asyncio.to_thread(
                 self.registry.providers.is_model_ref_usable, model
@@ -689,6 +770,8 @@ class ResidentConversationRuntime:
             if getattr(self.gateway, "_task_worker", None) is not None:
                 reply, status, code = await self._execute_task(queued)
                 return
+            if authorization.attachment_ids:
+                raise OctopError.localized(ErrorCode.RESIDENT_TEXT_ONLY)
             try:
                 harness = self.registry.get_agent(binding.agent_id)
             except OctopError:
@@ -723,6 +806,8 @@ class ResidentConversationRuntime:
                     read_tools=authorization.read_tools,
                     task_context=_task_context(queued),
                     knowledge_base_ids=authorization.knowledge_base_ids,
+                    web_search_enabled=bool(config.get("web_search_enabled", False)),
+                    attachment_read_enabled=bool(config.get("attachment_read_enabled", False)),
                 ),
             ):
                 chunks = cast(
@@ -893,7 +978,7 @@ class ResidentConversationRuntime:
         binding: ResidentConversationRow, row: ResidentRequestRow, model: str
     ) -> InboundMessage:
         session_key = f"{binding.agent_id}:dashboard:{row.owner_id}:resident"
-        authorization = ResidentToolInput.model_validate_json(row.input_json)
+        authorization = ResidentInput.model_validate_json(row.input_json)
         has_host_tools = bool(
             authorization.read_tools or _task_context(row) or authorization.knowledge_base_ids
         )

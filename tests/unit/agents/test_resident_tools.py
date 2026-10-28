@@ -75,7 +75,14 @@ async def tool_env(profile_env):
 
 
 @contextmanager
-def _scope(tool_env, *, read_tools=True, task_context=None, knowledge_base_ids=None):
+def _scope(
+    tool_env,
+    *,
+    read_tools=True,
+    task_context=None,
+    knowledge_base_ids=None,
+    web_search_enabled=False,
+):
     services, profile, source = tool_env
     with (
         resident_execution_scope(1, profile.thread_id),
@@ -88,6 +95,7 @@ def _scope(tool_env, *, read_tools=True, task_context=None, knowledge_base_ids=N
             read_tools=read_tools,
             task_context=task_context,
             knowledge_base_ids=knowledge_base_ids,
+            web_search_enabled=web_search_enabled,
         ),
     ):
         yield

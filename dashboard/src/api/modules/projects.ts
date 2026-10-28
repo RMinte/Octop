@@ -644,11 +644,16 @@ export function createProjectTasksApi(hostID: string | null = null) {
       request<void>(taskPath(id), {
         method: "DELETE",
       }),
-    downloadArtifact: (taskID: string, artifactID: string) =>
+    downloadArtifact: (
+      taskID: string,
+      artifactID: string,
+      signal?: AbortSignal,
+    ) =>
       requestBlob(
         `${taskPath(taskID)}/artifacts/${encodeURIComponent(
           artifactID,
         )}/download`,
+        { signal },
       ),
     resources: () =>
       request<TaskResources>("/project-tasks/resources", { cache: "no-store" }),

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -25,6 +25,7 @@ from pydantic import (
 )
 
 from octop.i18n import error_message, tr
+from octop.infra.agents.resident_attachments import ReadAttachmentInput, read_resident_attachment
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.models import Reference
 from octop.infra.projects.tasks import TaskExecutionOptions, TaskMessage
@@ -33,6 +34,19 @@ if TYPE_CHECKING:
     from octop.infra.db.services import SharedServices
 
 logger = logging.getLogger(__name__)
+
+RESIDENT_WEB_SEARCH_TOOLS: frozenset[str] = frozenset(
+    {
+        "tavily_search",
+        "brave_search",
+        "deepseek_search",
+        "google_search",
+        "kimi_search",
+        "yuanbao_search",
+        "searchfree_search",
+        "you_search",
+    }
+)
 
 
 class _Model(BaseModel):
@@ -116,6 +130,8 @@ class _Scope:
     read_tools: bool
     task_context: ResidentTaskContext | None
     knowledge_base_ids: tuple[str, ...]
+    web_search_enabled: bool
+    attachment_read_enabled: bool
 
 
 _SCOPE: ContextVar[_Scope | None] = ContextVar("resident_host_tools", default=None)
@@ -132,6 +148,8 @@ def resident_tools_scope(
     read_tools: bool = False,
     task_context: ResidentTaskContext | None = None,
     knowledge_base_ids: list[str] | None = None,
+    web_search_enabled: bool = False,
+    attachment_read_enabled: bool = False,
 ) -> Iterator[None]:
     # Copy the caller-owned Pydantic object so mutable request objects cannot broaden an in-flight scope.
     token = _SCOPE.set(
@@ -144,6 +162,8 @@ def resident_tools_scope(
             read_tools,
             task_context.model_copy(deep=True) if task_context is not None else None,
             tuple(knowledge_base_ids or []),
+            web_search_enabled,
+            attachment_read_enabled,
         )
     )
     try:
@@ -184,6 +204,10 @@ def resident_tool_definitions(
         specifications.append(
             ("resident_search_knowledge", "tool_knowledge_description", SearchKnowledgeInput)
         )
+    if context.attachment_read_enabled:
+        specifications.append(
+            ("resident_read_attachment", "tool_attachment_description", ReadAttachmentInput)
+        )
     for name, description, model in specifications:
         tools.append(
             {
@@ -217,6 +241,42 @@ def _require_live(context: _Scope) -> None:
         or source.lease_until <= now_ms()
     ):
         raise OctopError.localized(ErrorCode.FORBIDDEN)
+
+
+def resident_web_search_tools(
+    owner_id: int, thread_id: str, tools: Iterable[object]
+) -> list[BaseTool]:
+    """Retain only registered built-in searches authorized by the accepted turn."""
+    context = _scope(owner_id, thread_id)
+    if context is None or not context.web_search_enabled:
+        return []
+    return [
+        tool
+        for tool in tools
+        if isinstance(tool, BaseTool) and tool.name in RESIDENT_WEB_SEARCH_TOOLS
+    ]
+
+
+def resident_web_search_allowed(
+    owner_id: int, thread_id: str, tool_call: dict[str, Any], tool: object
+) -> bool:
+    """Recheck the private request immediately before a registered search runs."""
+    context = _scope(owner_id, thread_id)
+    if (
+        context is None
+        or not context.web_search_enabled
+        or not isinstance(tool, BaseTool)
+        or tool.name not in RESIDENT_WEB_SEARCH_TOOLS
+        or tool_call.get("name") != tool.name
+        or not isinstance(tool_call.get("id"), str)
+        or not tool_call["id"].strip()
+    ):
+        return False
+    try:
+        _require_live(context)
+    except OctopError:
+        return False
+    return True
 
 
 def _bounded(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -387,6 +447,13 @@ def execute_resident_tool(
             result = _create_task(context, CreateTaskInput.model_validate(arguments))
         elif name == "resident_search_knowledge" and context.knowledge_base_ids:
             result = _search_knowledge(context, arguments)
+        elif name == "resident_read_attachment" and context.attachment_read_enabled:
+            result = read_resident_attachment(
+                context.services,
+                context.owner_id,
+                context.thread_id,
+                ReadAttachmentInput.model_validate(arguments),
+            )
         else:
             raise OctopError.localized(ErrorCode.FORBIDDEN)
         return ToolMessage(

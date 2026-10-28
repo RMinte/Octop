@@ -26,6 +26,7 @@ from langchain_core.messages import (
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from octop_harness.request import ChatRequest
 
+from octop.i18n import tr
 from octop.infra.agents.memory.backend import open_memory_kwargs
 from octop.infra.agents.providers.box import OctopHarnessAgent as HarnessAgent
 from octop.infra.agents.providers.store import ProviderStore
@@ -35,7 +36,7 @@ from octop.infra.agents.resident_identity import (
     resident_memory_scope,
     resident_prompt_scope,
 )
-from octop.infra.agents.resident_tools import ResidentToolInput, resident_tools_scope
+from octop.infra.agents.resident_tools import resident_tools_scope
 from octop.infra.db.repos.project_task_turns import ProjectTaskTurnRow
 from octop.infra.db.repos.project_tasks import ProjectTaskRow
 from octop.infra.db.repos.resident_conversations import ResidentConversationRow
@@ -43,10 +44,13 @@ from octop.infra.db.repos.resident_requests import ResidentRequestRow
 from octop.infra.db.repos.unified_sources import UnifiedSourceRouteRepo
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.gateway.media.attachment_hints import content_blocks_need_vision
 from octop.infra.gateway.process.usage_record import UsageTracker
-from octop.infra.projects import source_routes
+from octop.infra.projects import input_attachments, source_routes
 from octop.infra.projects.checkpoint_saver import TaskCheckpointSaver
 from octop.infra.projects.context import capture_memory, close_pending_tools, model_context
+from octop.infra.projects.image_middleware import TaskImageMaterializeMiddleware
+from octop.infra.projects.input_attachment_models import TaskInputAttachment
 from octop.infra.projects.settings import snapshot_presentation
 from octop.infra.projects.stream import TASK_PROTOCOL
 from octop.infra.users.resource_policy import assert_token_quota_available
@@ -123,6 +127,8 @@ def history_messages(
 ) -> list[BaseMessage] | None:
     """Read the private timeline without opening an executable legacy graph."""
     _require(services, owner, thread_id)
+    user = services.user_repo.get(owner)
+    locale = normalize_locale(user.locale if user else "en")
     identifier = task_id(owner, thread_id)
     if services.project_task_repo.get_internal(identifier, owner) is None:
         return None
@@ -141,7 +147,7 @@ def history_messages(
                 continue
             messages.append(
                 HumanMessage(
-                    content=turn.prompt,
+                    content=_user_content(turn, locale),
                     id=f"resident:{turn.turn_id}:user",
                     additional_kwargs={
                         "resident_request_id": turn.request_id,
@@ -165,6 +171,47 @@ def history_messages(
                     )
                 )
     return messages
+
+
+def _user_content(turn: ProjectTaskTurnRow, locale: str = "en") -> str | list[str | dict[Any, Any]]:
+    raw = json.loads(turn.configuration_json)
+    identifiers = raw.get("resident_input", {}).get("attachment_ids", [])
+    if not identifiers:
+        return turn.prompt
+    metadata = {
+        item.attachment_id: item
+        for item in (
+            TaskInputAttachment.model_validate(item)
+            for item in raw.get("resident_configuration", {}).get("attachments", [])
+        )
+    }
+    blocks: list[str | dict[Any, Any]] = []
+    if turn.prompt:
+        blocks.append({"type": "text", "text": turn.prompt})
+    for identifier in identifiers:
+        attachment = metadata.get(identifier)
+        if attachment is None:
+            raise OctopError.localized(ErrorCode.TASK_ATTACHMENT_UNAVAILABLE)
+        if input_attachments.is_image(attachment.media_type):
+            blocks.extend(
+                cast(
+                    list[str | dict[Any, Any]],
+                    input_attachments.content("", [identifier], [attachment]),
+                )
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": tr(
+                        "agents.resident.attachment_hint",
+                        locale,
+                        name=attachment.name,
+                        attachment_id=identifier,
+                    ),
+                }
+            )
+    return blocks
 
 
 def history_active(services: SharedServices, owner: int, thread_id: str) -> bool:
@@ -463,8 +510,25 @@ async def run(
     cfg.providers = await asyncio.to_thread(providers.build_harness_configs)
     from octop.infra.projects.model_failover import automatic_route, task_failover_middleware
 
+    user_content = _user_content(turn, locale)
+    needs_images = content_blocks_need_vision(user_content) or any(
+        content_blocks_need_vision(
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
+        for message in history
+    )
+    if needs_images and not await asyncio.to_thread(
+        providers.is_model_ref_multimodal, turn.model_ref
+    ):
+        raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
     failover = await task_failover_middleware(services, owner, turn, raw, cfg.providers)
-    cfg.middleware = [*(cfg.middleware or []), failover]
+    cfg.middleware = [
+        *(cfg.middleware or []),
+        failover,
+        TaskImageMaterializeMiddleware(services, owner, turn.task_id),
+    ]
     cfg.protocol = TASK_PROTOCOL
     cfg.model_retry_enabled = False
     cfg.session_log_enabled = False
@@ -472,13 +536,17 @@ async def run(
     cfg.system_prompt = raw["resident_configuration"].get("system_prompt") or row.system_prompt
     directory = services.paths.root / "project-tasks" / turn.task_id / turn.turn_id
     await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
-    from octop.infra.agents.resident_conversation import _known_error_code, _task_context
+    from octop.infra.agents.resident_conversation import (
+        ResidentInput,
+        _known_error_code,
+        _task_context,
+    )
     from octop.infra.agents.resident_memory import resident_memory_context
 
     request = await asyncio.to_thread(services.resident_request_repo.get, owner, turn.request_id)
     if request is None or request.turn_id != turn.turn_id or request.cancel_requested:
         raise OctopError.localized(ErrorCode.RESIDENT_INTERRUPTED)
-    authorization = ResidentToolInput.model_validate(raw["resident_input"])
+    authorization = ResidentInput.model_validate(raw["resident_input"])
     memory = await asyncio.to_thread(
         resident_memory_context, services, owner, binding.agent_id, thread_id
     )
@@ -507,6 +575,12 @@ async def run(
                     read_tools=authorization.read_tools,
                     task_context=_task_context(request),
                     knowledge_base_ids=authorization.knowledge_base_ids,
+                    web_search_enabled=bool(
+                        raw["resident_configuration"].get("web_search_enabled", False)
+                    ),
+                    attachment_read_enabled=bool(
+                        raw["resident_configuration"].get("attachment_read_enabled", False)
+                    ),
                 ),
             ):
                 events = cast(
@@ -516,7 +590,7 @@ async def run(
                             messages=[
                                 *history,
                                 HumanMessage(
-                                    content=turn.prompt,
+                                    content=user_content,
                                     id=f"resident:{turn.turn_id}:user",
                                     additional_kwargs={
                                         "resident_request_id": turn.request_id,

@@ -6,10 +6,12 @@ import {
   Drawer,
   Empty,
   Input,
+  Image,
   Modal,
   Spin,
   Tag,
   Tooltip,
+  Typography,
 } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import {
@@ -19,14 +21,17 @@ import {
   BookOpen,
   CheckCheck,
   ChevronLeft,
+  FileText,
   History,
   LockKeyhole,
   MessageCircle,
+  Paperclip,
   RefreshCw,
   RotateCcw,
   Send,
   Sparkles,
   Square,
+  X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -37,12 +42,20 @@ import type {
   ResidentTurn,
 } from "../../api/modules/resident";
 import Markdown from "../../components/Markdown/LazyMarkdown";
+import { TaskHostProvider } from "../../context/TaskHostContext";
 import { useCurrentUser } from "../../hooks/useCurrentUser";
 import { useServerTimezone } from "../../hooks/useServerTimezone";
 import { apiErrorMessage } from "../../utils/apiError";
 import { formatServerIsoDateTime } from "../../utils/formatMessageTime";
+import TaskInputImages from "../BoxProjects/TaskInputImages";
+import {
+  isTaskImage,
+  MAX_TASK_IMAGES,
+  useTaskImages,
+} from "../BoxProjects/useTaskImages";
 import ResidentActivityPanel from "./ResidentActivityPanel";
 import ResidentMemoryPanel from "./ResidentMemoryPanel";
+import ResidentReportAttachments from "./ResidentReportAttachments";
 import { useResidentConversation } from "./useResidentConversation";
 import styles from "./index.module.less";
 
@@ -81,6 +94,7 @@ function mergeItems(items: ResidentHistoryItem[], turns: ResidentTurn[]) {
 function itemText(item: ResidentHistoryItem) {
   return (
     item.turn?.prompt ||
+    item.turn?.attachments?.map((attachment) => attachment.name).join(", ") ||
     item.turn?.reply ||
     item.report?.text ||
     item.notification?.text ||
@@ -90,7 +104,11 @@ function itemText(item: ResidentHistoryItem) {
 
 export default function ResidentPage() {
   const user = useCurrentUser();
-  return <ResidentBody key={user?.id ?? "loading"} />;
+  return (
+    <TaskHostProvider hostID={null}>
+      <ResidentBody key={user?.id ?? "loading"} />
+    </TaskHostProvider>
+  );
 }
 
 function ResidentBody() {
@@ -115,6 +133,8 @@ function ResidentBody() {
   const searchSequence = useRef(0);
   const locationSequence = useRef(0);
   const input = useRef<TextAreaRef>(null);
+  const imageInput = useRef<HTMLInputElement>(null);
+  const [imageError, setImageError] = useState("");
   const end = useRef<HTMLDivElement>(null);
   const messages = useRef<HTMLDivElement>(null);
   const seenMessages = useRef(new Set<string>());
@@ -131,6 +151,19 @@ function ResidentBody() {
   const scopeKey = `${user?.id ?? ""}:${scope?.agent_id ?? ""}:${
     scope?.thread_id ?? ""
   }`;
+  const images = useTaskImages(scopeKey);
+  const { attachmentIDs, clear: clearImages } = images;
+  const consumedReceipt = useRef("");
+  const supportsImages =
+    conversation.capabilities?.message_types?.includes("image") ?? false;
+  const supportsFiles =
+    conversation.capabilities?.message_types?.includes("file") ?? false;
+  const supportsAttachments = supportsImages || supportsFiles;
+  const attachmentLabel = t(
+    `${prefix}.${supportsFiles ? "addAttachments" : "addImages"}`,
+  );
+  const attachmentsDisabled =
+    !scope || conversation.sending || !!conversation.pendingIntent;
   const currentScope = useRef(scopeKey);
   currentScope.current = scopeKey;
   const observationAllowed = useRef(false);
@@ -158,6 +191,7 @@ function ResidentBody() {
     setMemoryOpen(false);
     setActivityOpen(false);
     setActionError(null);
+    setImageError("");
     setCancelling(false);
     setFollowing(true);
     if (!scope) return;
@@ -178,6 +212,17 @@ function ResidentBody() {
       if (currentScope.current === key) currentScope.current = "";
     };
   }, [scopeKey, scope, loadHistory]);
+
+  useEffect(() => {
+    const accepted = conversation.acceptedIntent;
+    if (!accepted || consumedReceipt.current === accepted.request_id) return;
+    consumedReceipt.current = accepted.request_id;
+    if (
+      accepted.attachment_ids?.length &&
+      JSON.stringify(accepted.attachment_ids) === JSON.stringify(attachmentIDs)
+    )
+      clearImages();
+  }, [conversation.acceptedIntent, attachmentIDs, clearImages]);
 
   useEffect(() => {
     if (!focused && following) end.current?.scrollIntoView?.({ block: "end" });
@@ -312,18 +357,32 @@ function ResidentBody() {
   const reusePrompt = (turn: ResidentTurn) => {
     const apply = () => {
       conversation.setDraft(turn.prompt);
+      images.restore(turn.attachments ?? []);
+      setImageError("");
       input.current?.focus();
     };
-    if (conversation.draft.trim())
+    if (conversation.draft.trim() || images.items.length)
       Modal.confirm({ title: t(`${prefix}.replaceDraft`), onOk: apply });
     else apply();
   };
   const canSend =
     !!scope &&
-    !!conversation.draft.trim() &&
+    (!!conversation.draft.trim() ||
+      (supportsAttachments && !!images.attachmentIDs.length)) &&
+    !images.blocked &&
+    images.items.every((item) => item.isImage || supportsFiles) &&
     !conversation.sending &&
     !conversation.pendingIntent &&
     !conversation.activeTurn;
+  const send = () => action(() => conversation.send(images.attachmentIDs));
+  const addAttachments = (files: File[]) => {
+    if (attachmentsDisabled || !supportsAttachments) return;
+    const valid = supportsFiles
+      ? files
+      : files.filter((file) => isTaskImage(file.type));
+    setImageError(valid.length < files.length ? t(`${prefix}.imagesOnly`) : "");
+    images.add(valid);
+  };
   const error = actionError ?? conversation.error;
   const kindLabel = (item: ResidentHistoryItem) =>
     t(
@@ -441,7 +500,10 @@ function ResidentBody() {
                 {timestamp(turn.created_at)}
               </time>
             </div>
-            <div className={styles.userText}>{turn.prompt}</div>
+            {turn.prompt && (
+              <div className={styles.userText}>{turn.prompt}</div>
+            )}
+            <TaskInputImages attachments={turn.attachments ?? []} />
           </article>
           <article
             className={styles.assistantMessage}
@@ -501,6 +563,11 @@ function ResidentBody() {
           {item.report.error_message && (
             <Alert type="warning" message={item.report.error_message} />
           )}
+          <ResidentReportAttachments
+            key={`${scopeKey}:${item.report.report_id}`}
+            taskID={item.report.task_id}
+            artifacts={item.report.artifacts}
+          />
           {taskLink(item.report.task_id)}
           <span
             className={styles.readAnchor}
@@ -746,6 +813,58 @@ function ResidentBody() {
               />
             )}
             <div className={styles.inputBox}>
+              {!!images.items.length && (
+                <div className={styles.draftImages}>
+                  {images.items.map((image) => (
+                    <div className={styles.draftImage} key={image.id}>
+                      {image.isImage ? (
+                        image.url && (
+                          <Image
+                            src={image.url}
+                            alt={image.name}
+                            width={112}
+                            height={88}
+                          />
+                        )
+                      ) : (
+                        <div className={styles.draftFilePreview}>
+                          <FileText size={32} />
+                        </div>
+                      )}
+                      <Button
+                        className={styles.removeImage}
+                        size="small"
+                        icon={<X size={14} />}
+                        aria-label={t("projects.tasks.removeImage", {
+                          name: image.name,
+                        })}
+                        disabled={attachmentsDisabled}
+                        onClick={() => images.remove(image.id)}
+                      />
+                      <Typography.Text ellipsis title={image.name}>
+                        {image.name}
+                      </Typography.Text>
+                      {image.error ? (
+                        <Typography.Text type="danger" role="alert">
+                          {image.error}
+                        </Typography.Text>
+                      ) : !image.attachment ? (
+                        <Typography.Text type="secondary">
+                          <Spin size="small" />{" "}
+                          {t("projects.tasks.imageUploading")}
+                        </Typography.Text>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(imageError || images.error) && (
+                <Alert
+                  type="error"
+                  showIcon
+                  message={imageError || images.error}
+                />
+              )}
               <Input.TextArea
                 ref={input}
                 aria-label={t(`${prefix}.message`)}
@@ -755,6 +874,13 @@ function ResidentBody() {
                 autoSize={{ minRows: 2, maxRows: 8 }}
                 placeholder={t(`${prefix}.placeholder`)}
                 disabled={!user}
+                onPaste={(event) => {
+                  const files = Array.from(event.clipboardData.files);
+                  if (files.length && supportsAttachments) {
+                    event.preventDefault();
+                    addAttachments(files);
+                  }
+                }}
                 onKeyDown={(event) => {
                   if (
                     event.key === "Enter" &&
@@ -763,12 +889,57 @@ function ResidentBody() {
                     event.keyCode !== 229
                   ) {
                     event.preventDefault();
-                    if (canSend) void action(conversation.send);
+                    if (canSend) void send();
                   }
                 }}
               />
               <div className={styles.inputActions}>
-                <span>{t(`${prefix}.textOnly`)}</span>
+                <span>
+                  {t(
+                    `${prefix}.${
+                      supportsFiles
+                        ? "attachmentChat"
+                        : supportsImages
+                        ? "imageChat"
+                        : "textOnly"
+                    }`,
+                  )}
+                </span>
+                {supportsAttachments && (
+                  <>
+                    <input
+                      ref={imageInput}
+                      className={styles.imageFileInput}
+                      type="file"
+                      accept={
+                        supportsFiles
+                          ? undefined
+                          : "image/jpeg,image/png,image/webp,image/gif"
+                      }
+                      multiple
+                      aria-label={attachmentLabel}
+                      disabled={
+                        attachmentsDisabled ||
+                        images.items.length >= MAX_TASK_IMAGES
+                      }
+                      onChange={(event) => {
+                        addAttachments(Array.from(event.target.files ?? []));
+                        event.target.value = "";
+                      }}
+                    />
+                    <Button
+                      size="small"
+                      icon={<Paperclip size={14} />}
+                      disabled={
+                        attachmentsDisabled ||
+                        images.items.length >= MAX_TASK_IMAGES
+                      }
+                      onClick={() => imageInput.current?.click()}
+                    >
+                      {attachmentLabel}
+                    </Button>
+                  </>
+                )}
                 {conversation.activeTurn && (
                   <Button
                     size="small"
@@ -785,7 +956,7 @@ function ResidentBody() {
                   icon={<Send size={14} />}
                   loading={conversation.sending}
                   disabled={!canSend}
-                  onClick={() => void action(conversation.send)}
+                  onClick={() => void send()}
                 >
                   {t(`${prefix}.send`)}
                 </Button>

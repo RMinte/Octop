@@ -252,6 +252,38 @@
   border-left-color: var(--fn-text-tertiary, #aaa);
 }
 
+.reportAttachments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+  margin: 10px 0;
+  list-style: none;
+}
+
+.reportAttachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--resident-border);
+  border-radius: 6px;
+
+  > svg {
+    flex-shrink: 0;
+    color: var(--resident-muted);
+  }
+}
+
+.reportAttachmentInfo {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+  font-size: 11px;
+}
+
 .taskLink {
   display: inline-flex;
   align-items: center;
@@ -380,6 +412,47 @@
     color: var(--resident-muted);
     font-size: 10px;
   }
+}
+
+.draftImages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
+.draftImage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 112px;
+
+  :global(img) {
+    object-fit: cover;
+    border-radius: 6px;
+  }
+}
+
+.draftFilePreview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 88px;
+  border: 1px solid var(--resident-border);
+  border-radius: 6px;
+  background: var(--fn-bg-secondary, #f7f8fa);
+  color: var(--resident-muted);
+}
+
+.removeImage {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+}
+
+.imageFileInput {
+  display: none;
 }
 
 .historyDrawer :global(:is(.ant-drawer-body, .octop-drawer-body)) {

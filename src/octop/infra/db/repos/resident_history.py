@@ -35,6 +35,7 @@ class ResidentHistoryRow:
     notification_kind: str = ""
     payload_json: str = "{}"
     input_json: str = "{}"
+    configuration_json: str = "{}"
 
     @classmethod
     def from_row(cls, row: DbRow) -> ResidentHistoryRow:
@@ -61,6 +62,7 @@ class ResidentHistoryRow:
             notification_kind=str(row["notification_kind"]),
             payload_json=str(row["payload_json"]),
             input_json=str(row["input_json"]),
+            configuration_json=str(row["configuration_json"]),
         )
 
 
@@ -69,18 +71,18 @@ class ResidentHistoryRow:
 _TURN = """SELECT 'turn:' || turn_id AS item_id,'turn' AS kind,turn_id AS source_id,
 day_key,timezone,created_at,updated_at,status,revision,prompt,reply,error_code,request_id,
 '' AS task_id,'' AS task_turn_id,'' AS message_id,'[]' AS artifacts_json,
-'' AS delivery_status,'' AS followup_id,'' AS notification_kind,'{}' AS payload_json,input_json
+'' AS delivery_status,'' AS followup_id,'' AS notification_kind,'{}' AS payload_json,input_json,configuration_json
 FROM resident_requests WHERE owner_id=? AND thread_id=?"""
 _REPORT = """SELECT 'report:' || report_id AS item_id,'task_report' AS kind,report_id AS source_id,
 day_key,timezone,captured_at AS created_at,updated_at,status,0 AS revision,'' AS prompt,text AS reply,
 error_code,'' AS request_id,task_id,task_turn_id,message_id,artifacts_json,delivery_status,
-'' AS followup_id,'' AS notification_kind,'{}' AS payload_json,'{}' AS input_json
+'' AS followup_id,'' AS notification_kind,'{}' AS payload_json,'{}' AS input_json,'{}' AS configuration_json
 FROM resident_task_reports WHERE owner_id=? AND thread_id=?"""
 _NOTIFICATION = """SELECT 'notification:' || notification_id AS item_id,'notification' AS kind,
 notification_id AS source_id,day_key,timezone,created_at,updated_at,status,0 AS revision,'' AS prompt,
 text AS reply,'' AS error_code,'' AS request_id,'' AS task_id,'' AS task_turn_id,
 message_id,'[]' AS artifacts_json,status AS delivery_status,followup_id,
-kind AS notification_kind,payload_json,'{}' AS input_json FROM resident_notifications
+kind AS notification_kind,payload_json,'{}' AS input_json,'{}' AS configuration_json FROM resident_notifications
 WHERE owner_id=? AND thread_id=? AND status='delivered'"""
 _TABLES = (
     ("resident_requests", ""),

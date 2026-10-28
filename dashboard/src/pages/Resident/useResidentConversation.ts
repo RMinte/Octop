@@ -56,7 +56,12 @@ function restore(key: string): StoredConversation {
     (parsed.pending !== null &&
       (!parsed.pending ||
         typeof parsed.pending.request_id !== "string" ||
-        typeof parsed.pending.prompt !== "string"))
+        typeof parsed.pending.prompt !== "string" ||
+        (parsed.pending.attachment_ids !== undefined &&
+          (!Array.isArray(parsed.pending.attachment_ids) ||
+            parsed.pending.attachment_ids.some(
+              (id) => typeof id !== "string",
+            )))))
   )
     throw new Error(i18n.t("resident.page.savedIntentInvalid"));
   return { ...parsed, cancellations: parsed.cancellations ?? {} };
@@ -111,6 +116,10 @@ export function useResidentConversation(accountId: string | number | null) {
   storedRef.current = stored;
   const [sendingKey, setSendingKey] = useState("");
   const sendingRef = useRef("");
+  const [accepted, setAccepted] = useState<{
+    key: string;
+    intent: ResidentMessage;
+  } | null>(null);
   const [historyState, setHistoryState] = useState<{
     key: string;
     page: ResidentHistoryPage | null;
@@ -163,6 +172,12 @@ export function useResidentConversation(accountId: string | number | null) {
           );
         }
       }
+      const pending =
+        storedRef.current.key === expectedKey
+          ? storedRef.current.value.pending
+          : null;
+      if (pending?.request_id === turn.request_id)
+        setAccepted({ key: expectedKey, intent: pending });
       persist(expectedKey, (previous) =>
         previous.pending?.request_id === turn.request_id
           ? {
@@ -555,38 +570,46 @@ export function useResidentConversation(accountId: string | number | null) {
   const retryPending = useCallback(async () => {
     if (scope && key) await recover(key, scope, true);
   }, [key, scope, recover]);
-  const send = useCallback(async () => {
-    if (
-      !scope ||
-      !key ||
-      currentKey.current !== key ||
-      sendingRef.current === key
-    )
-      return;
-    try {
-      const value =
-        storedRef.current.key === key ? storedRef.current.value : restore(key);
-      if (!value.pending) {
-        if (
-          !value.draft.trim() ||
-          value.draft.length > 32768 ||
-          snapshotRef.current?.turns.some(active)
-        )
-          return;
-        persist(key, (previous) => ({
-          ...previous,
-          pending: {
-            request_id: crypto.randomUUID(),
-            prompt: previous.draft,
-            read_tools: previous.readTools,
-          },
-        }));
+  const send = useCallback(
+    async (attachmentIDs: string[] = []) => {
+      if (
+        !scope ||
+        !key ||
+        currentKey.current !== key ||
+        sendingRef.current === key
+      )
+        return;
+      try {
+        const value =
+          storedRef.current.key === key
+            ? storedRef.current.value
+            : restore(key);
+        if (!value.pending) {
+          if (
+            (!value.draft.trim() && !attachmentIDs.length) ||
+            value.draft.length > 32768 ||
+            snapshotRef.current?.turns.some(active)
+          )
+            return;
+          persist(key, (previous) => ({
+            ...previous,
+            pending: {
+              request_id: crypto.randomUUID(),
+              prompt: previous.draft,
+              read_tools: previous.readTools,
+              ...(attachmentIDs.length
+                ? { attachment_ids: [...attachmentIDs] }
+                : {}),
+            },
+          }));
+        }
+        await recover(key, scope, true);
+      } catch (failure) {
+        if (currentKey.current === key) setError(failure);
       }
-      await recover(key, scope, true);
-    } catch (failure) {
-      if (currentKey.current === key) setError(failure);
-    }
-  }, [key, scope, persist, recover]);
+    },
+    [key, scope, persist, recover],
+  );
   const cancel = useCallback(
     async (turn: ResidentTurn) => {
       if (!scope || !key || currentKey.current !== key || !active(turn)) return;
@@ -717,6 +740,7 @@ export function useResidentConversation(accountId: string | number | null) {
     setReadTools,
     send,
     pendingIntent: state.pending,
+    acceptedIntent: accepted?.key === key ? accepted.intent : null,
     retryPending,
     cancel,
     refresh,
