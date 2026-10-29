@@ -363,6 +363,10 @@
   },
   "connector": {
     "oauth": {
+      "start_local_not_supported": "Local and LAN MCP servers do not use remote OAuth. Configure authentication using the method supported by the MCP server.",
+      "start_dcr_not_supported": "This authorization server does not support dynamic client registration (DCR). Configure authentication using the method supported by the MCP server.",
+      "start_network_error": "Network request failed ({error_type}).",
+      "start_invalid_response": "The authorization server returned an invalid or unsupported OAuth configuration.",
       "callback_auth_failed": "Authorization failed: {error}",
       "callback_missing_params": "Missing authorization code or state.",
       "callback_invalid_state": "Invalid or expired authorization state.",
@@ -463,6 +467,7 @@
     "CONNECTOR_NOT_FOUND": "Connector not found.",
     "CONNECTOR_NAME_TAKEN": "This connector name is already in use. Please choose another.",
     "CONNECTOR_INVALID_CREDENTIALS": "Invalid connector credentials.",
+    "CONNECTOR_OAUTH_START_FAILED": "Could not start connector authorization. Check the server network, proxy, and connector configuration, then try again.",
     "CONNECTOR_OAUTH_HTTPS_REQUIRED": "Octop is currently being accessed over public HTTP, but MCP OAuth callbacks require HTTPS. Use HTTPS, or access Octop locally through localhost or 127.0.0.1.",
     "CONNECTOR_MCP_URL_INVALID": "Invalid MCP server URL: {reason}",
     "CONNECTOR_MCP_HTTPS_REQUIRED": "Public MCP server URLs must use HTTPS. Local and LAN addresses may use HTTP.",

@@ -10,6 +10,7 @@ from html import escape
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit
 
+import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
@@ -70,6 +71,7 @@ from octop.infra.connectors.service import ConnectorNameTakenError, ConnectorSer
 from octop.infra.db.repos.connectors import ConnectorRepo
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.utils.locale import resolve_request_locale
+from octop.infra.utils.ssrf_guard import UnsafeOutboundUrl
 from octop.infra.utils.ulid import new_ulid
 
 logger = logging.getLogger(__name__)
@@ -220,12 +222,18 @@ async def _begin_oauth_flow(
     target_type = str(target.get("type") or "").strip()
     if target_type == "catalog":
         kind = str(target.get("kind") or "").strip()
+        target = {"type": "catalog", "kind": kind}
         if not oauth_ready_for_kind(kind, server.services.settings_repo):
             raise OctopError(
                 ErrorCode.CONNECTOR_INVALID_CREDENTIALS,
                 f"OAuth for {kind} is not available",
             )
-    elif target_type != "custom_mcp":
+    elif target_type == "custom_mcp":
+        target = {
+            "type": "custom_mcp",
+            "server_name": str(target.get("server_name") or "").strip(),
+        }
+    else:
         raise OctopError(ErrorCode.CONNECTOR_INVALID_CREDENTIALS, "unsupported oauth target")
 
     state = secrets.token_urlsafe(24)
@@ -256,12 +264,36 @@ async def _begin_oauth_flow(
             state=state,
             settings_repo=server.services.settings_repo,
             mcp_url=mcp_url,
+            locale=resolve_request_locale(request),
         )
-    except ValueError as exc:
-        raise OctopError(ErrorCode.CONNECTOR_INVALID_CREDENTIALS, str(exc)) from exc
+    except OctopError:
+        raise
     except Exception as exc:
-        logger.exception("oauth start failed for target %s", target)
-        raise OctopError(ErrorCode.CONNECTOR_INVALID_CREDENTIALS, str(exc)) from exc
+        details: dict[str, Any] = {}
+        unsafe_url = exc if isinstance(exc, UnsafeOutboundUrl) else exc.__cause__
+        if isinstance(unsafe_url, UnsafeOutboundUrl):
+            details["reason"] = str(unsafe_url)
+        elif isinstance(exc, httpx.HTTPStatusError):
+            details["reason"] = f"HTTP {exc.response.status_code}"
+            details["upstream_status"] = exc.response.status_code
+        elif isinstance(exc, httpx.RequestError):
+            details["reason"] = tr(
+                "connector.oauth.start_network_error",
+                resolve_request_locale(request),
+                error_type=type(exc).__name__,
+            )
+        elif isinstance(exc, ValueError):
+            details["reason"] = tr(
+                "connector.oauth.start_invalid_response", resolve_request_locale(request)
+            )
+        logger.warning(
+            "oauth start failed for %s (%s): %s", target_type, type(exc).__name__, details
+        )
+        raise OctopError(
+            ErrorCode.CONNECTOR_OAUTH_START_FAILED,
+            "connector OAuth start failed",
+            details=details,
+        ) from None
 
     server.services.repos.connector_repo.create_oauth_state(
         state_id=state_id,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from octop.i18n import tr
 from octop.infra.connectors.catalog import get_catalog_entry, get_mcp_oauth_remote
 from octop.infra.connectors.custom_mcp import CUSTOM_MCP_KIND
 from octop.infra.connectors.oauth.discovery import discover_oauth_from_mcp_url
@@ -19,10 +20,23 @@ from octop.infra.connectors.oauth.mcp import (
     resource_for_kind,
 )
 from octop.infra.connectors.oauth.pkce import new_pkce_pair
+from octop.infra.errors import ErrorCode, OctopError
 
 OAUTH_CTX_PREFIX = "connector.oauth.ctx."
 
 _AUTH_CODE_PASSTHROUGH_KINDS: frozenset[str] = frozenset()
+
+
+def _oauth_unavailable(reason: str, locale: str) -> OctopError:
+    key = {
+        "local_mcp": "connector.oauth.start_local_not_supported",
+        "dynamic_registration": "connector.oauth.start_dcr_not_supported",
+    }[reason]
+    return OctopError(
+        ErrorCode.CONNECTOR_INVALID_CREDENTIALS,
+        "remote MCP OAuth is not supported",
+        details={"reason": tr(key, locale)},
+    )
 
 
 def _scope_from_metadata(metadata: dict[str, Any]) -> str | None:
@@ -135,7 +149,10 @@ async def _start_mcp_oauth_from_discovery(
     server_name: str | None = None,
     mcp_url: str | None = None,
     scope: str | None = None,
+    locale: str = "en",
 ) -> tuple[str, str, dict[str, Any]]:
+    if not metadata.get("registration_endpoint"):
+        raise _oauth_unavailable("dynamic_registration", locale)
     verifier, challenge = new_pkce_pair()
     reg = await register_dynamic_client(metadata, issuer=issuer, redirect_uri=redirect_uri)
     client_id = str(reg["client_id"])
@@ -172,6 +189,7 @@ async def start_oauth(
     redirect_uri: str,
     state: str,
     settings_repo: Any,
+    locale: str = "en",
 ) -> tuple[str, str, dict[str, Any]]:
     """Return authorize_url, code_verifier, ctx for a catalog connector kind."""
     del settings_repo
@@ -189,6 +207,7 @@ async def start_oauth(
         resource=resource,
         metadata=metadata,
         scope=_scopes_for_kind(kind, metadata),
+        locale=locale,
     )
 
 
@@ -199,6 +218,7 @@ async def start_oauth_for_target(
     state: str,
     settings_repo: Any,
     mcp_url: str | None = None,
+    locale: str = "en",
 ) -> tuple[str, str, dict[str, Any]]:
     """Unified OAuth start for catalog connectors and custom MCP servers."""
     target_type = str(target.get("type") or "").strip()
@@ -211,6 +231,7 @@ async def start_oauth_for_target(
             redirect_uri=redirect_uri,
             state=state,
             settings_repo=settings_repo,
+            locale=locale,
         )
     if target_type == "custom_mcp":
         server_name = str(target.get("server_name") or "").strip()
@@ -224,6 +245,7 @@ async def start_oauth_for_target(
             mcp_url=url,
             redirect_uri=redirect_uri,
             state=state,
+            locale=locale,
         )
     raise ValueError(f"unsupported oauth target type: {target_type!r}")
 
@@ -252,10 +274,14 @@ async def start_custom_mcp_oauth(
     redirect_uri: str,
     state: str,
     discovery: dict[str, Any] | None = None,
+    locale: str = "en",
 ) -> tuple[str, str, dict[str, Any]]:
     """Start OAuth for a user-defined MCP server (issuer discovered from MCP URL)."""
     found = discovery if discovery is not None else await discover_oauth_from_mcp_url(mcp_url)
     if not found.get("available"):
+        unsupported = found.get("unsupported_reason")
+        if unsupported in ("local_mcp", "dynamic_registration"):
+            raise _oauth_unavailable(unsupported, locale)
         raise ValueError(str(found.get("error") or "OAuth not available for this MCP URL"))
     issuer = str(found["issuer"])
     resource = str(found.get("resource") or "").strip() or None
@@ -279,6 +305,7 @@ async def start_custom_mcp_oauth(
         server_name=server_name,
         mcp_url=mcp_url,
         scope=scope,
+        locale=locale,
     )
 
 

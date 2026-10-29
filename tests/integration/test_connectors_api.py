@@ -10,10 +10,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 
 from octop.infra.connectors.custom_mcp import CUSTOM_MCP_KIND
 from octop.infra.connectors.oauth.registry import save_oauth_ctx
+from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.utils.ssrf_guard import UnsafeOutboundUrl
 from octop.infra.utils.ulid import new_ulid
 from tests.support.app import octop_client, write_octop_config
 from tests.support.auth import auth_header, bootstrap_admin, create_user, resolve_user_id
@@ -439,6 +442,196 @@ async def test_oauth_start_public_http_notion_error_is_actionable(tmp_octop_home
     assert body["error"]["code"] == "CONNECTOR_OAUTH_HTTPS_REQUIRED"
     assert "OAuth" in body["error"]["message"]
     assert "HTTPS" in body["error"]["message"]
+    mocked_start.assert_not_awaited()
+
+
+@pytest.mark.parametrize("locale", ["en", "zh"])
+@pytest.mark.parametrize(
+    "failure", ["blocked_url", "upstream_http", "network", "metadata", "other"]
+)
+async def test_oauth_start_failure_reports_cause_without_credentials(env, failure, locale, caplog):
+    c, _, auth, _ = env
+    secret = "synthetic-client-secret"
+    exc: Exception
+    if failure == "blocked_url":
+        exc = ValueError("issuer_metadata: private or reserved IP addresses are not allowed")
+        exc.__cause__ = UnsafeOutboundUrl(str(exc))
+    elif failure == "upstream_http":
+        request = httpx.Request("POST", f"https://auth.example.com/register?api_key={secret}")
+        response = httpx.Response(503, request=request, text=secret)
+        exc = httpx.HTTPStatusError(secret, request=request, response=response)
+    elif failure == "network":
+        exc = httpx.ConnectError(secret)
+    elif failure == "metadata":
+        exc = ValueError(f"dynamic client registration failed: {{'client_secret': '{secret}'}}")
+    else:
+        exc = RuntimeError(secret)
+
+    with patch("octop.api.routers.connectors.start_oauth_for_target", side_effect=exc):
+        r = await c.post(
+            "/api/connectors/oauth/start",
+            headers={**auth, "Accept-Language": locale, "Host": "localhost"},
+            json={"target": {"type": "catalog", "kind": "openalex"}},
+        )
+
+    assert r.status_code == 502
+    error = r.json()["error"]
+    assert error["code"] == "CONNECTOR_OAUTH_START_FAILED"
+    assert secret not in r.text
+    assert secret not in caplog.text
+    assert (
+        "Could not start connector authorization" if locale == "en" else "无法启动连接器授权"
+    ) in error["message"]
+    details = error["details"]
+    if failure == "blocked_url":
+        assert details["reason"] == str(exc.__cause__)
+    elif failure == "upstream_http":
+        assert details == {"reason": "HTTP 503", "upstream_status": 503}
+    elif failure == "network":
+        assert "ConnectError" in details["reason"]
+    elif failure == "metadata":
+        assert ("OAuth configuration" if locale == "en" else "OAuth 配置") in details["reason"]
+    else:
+        assert details == {}
+
+
+async def test_oauth_start_preserves_domain_error(env):
+    c, _, auth, _ = env
+    exc = OctopError(ErrorCode.CONNECTOR_MCP_HTTPS_REQUIRED, "HTTPS required")
+    with patch("octop.api.routers.connectors.start_oauth_for_target", side_effect=exc):
+        r = await c.post(
+            "/api/connectors/oauth/openalex/start", headers={**auth, "Host": "localhost"}, json={}
+        )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "CONNECTOR_MCP_HTTPS_REQUIRED"
+
+
+async def test_oauth_start_normalizes_target_and_does_not_log_extra_credentials(env, caplog):
+    c, _, auth, _ = env
+    secret = "synthetic-target-client-secret"
+    mocked_start = AsyncMock(side_effect=httpx.ConnectError("synthetic-network-secret"))
+    with patch("octop.api.routers.connectors.start_oauth_for_target", mocked_start):
+        response = await c.post(
+            "/api/connectors/oauth/start",
+            headers={**auth, "Host": "localhost"},
+            json={
+                "target": {
+                    "type": " catalog ",
+                    "kind": " openalex ",
+                    "client_secret": secret,
+                    "mcp_url": f"https://example.com/mcp?key={secret}",
+                    "headers": {"Authorization": secret},
+                }
+            },
+        )
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "CONNECTOR_OAUTH_START_FAILED"
+    assert mocked_start.await_args.kwargs["target"] == {"type": "catalog", "kind": "openalex"}
+    assert secret not in caplog.text + response.text
+    assert "synthetic-network-secret" not in caplog.text + response.text
+
+
+@pytest.mark.parametrize("locale", ["en", "zh"])
+@pytest.mark.parametrize("url", ["http://127.0.0.1:9000/mcp", "https://192.168.1.2/mcp"])
+async def test_custom_oauth_local_server_is_a_configuration_error_without_network(env, locale, url):
+    c, _, auth, _ = env
+    saved = await c.put(
+        "/api/connectors/custom-mcp",
+        headers=auth,
+        json={"servers": {"local-server": {"transport": "streamable_http", "url": url}}},
+    )
+    assert saved.status_code == 200, saved.text
+    mocked_request = AsyncMock(
+        side_effect=AssertionError("local OAuth must not access the network")
+    )
+    with patch("octop.infra.connectors.oauth.discovery.safe_request", mocked_request):
+        response = await c.post(
+            "/api/connectors/oauth/start",
+            headers={**auth, "Host": "localhost", "Accept-Language": locale},
+            json={"target": {"type": "custom_mcp", "server_name": "local-server"}},
+        )
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "CONNECTOR_INVALID_CREDENTIALS"
+    assert ("Local and LAN" if locale == "en" else "本机与局域网") in error["details"]["reason"]
+    mocked_request.assert_not_awaited()
+
+
+@pytest.mark.parametrize("locale", ["en", "zh"])
+@pytest.mark.parametrize("target_type", ["catalog", "custom_mcp"])
+async def test_oauth_without_dynamic_registration_is_a_configuration_error(
+    env, locale, target_type
+):
+    c, _, auth, _ = env
+    metadata = {
+        "authorization_endpoint": "https://auth.example.com/authorize",
+        "token_endpoint": "https://auth.example.com/token",
+    }
+    target = {"type": "catalog", "kind": "openalex"}
+    if target_type == "custom_mcp":
+        saved = await c.put(
+            "/api/connectors/custom-mcp",
+            headers=auth,
+            json={
+                "servers": {
+                    "remote-server": {
+                        "transport": "streamable_http",
+                        "url": "https://mcp.example.com/mcp",
+                    }
+                }
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        target = {"type": "custom_mcp", "server_name": "remote-server"}
+    with (
+        patch(
+            "octop.infra.connectors.oauth.registry.fetch_authorization_metadata",
+            AsyncMock(return_value=metadata),
+        ),
+        patch(
+            "octop.infra.connectors.oauth.discovery._probe_401_resource_metadata",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "octop.infra.connectors.oauth.discovery._fetch_prm_document",
+            AsyncMock(return_value={"authorization_servers": ["https://auth.example.com"]}),
+        ),
+        patch(
+            "octop.infra.connectors.oauth.discovery.fetch_authorization_metadata",
+            AsyncMock(return_value=metadata),
+        ),
+        patch(
+            "octop.infra.connectors.oauth.registry.register_dynamic_client",
+            AsyncMock(side_effect=AssertionError("unsupported DCR must not register a client")),
+        ) as register,
+    ):
+        response = await c.post(
+            "/api/connectors/oauth/start",
+            headers={**auth, "Host": "localhost", "Accept-Language": locale},
+            json={"target": target},
+        )
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "CONNECTOR_INVALID_CREDENTIALS"
+    assert "DCR" in error["details"]["reason"]
+    assert ("does not support" if locale == "en" else "不支持") in error["details"]["reason"]
+    register.assert_not_awaited()
+
+
+async def test_oauth_start_keeps_authentication_and_target_validation_errors(env):
+    c, _, auth, _ = env
+    mocked_start = AsyncMock(side_effect=AssertionError("invalid input must not start OAuth"))
+    with patch("octop.api.routers.connectors.start_oauth_for_target", mocked_start):
+        anonymous = await c.post(
+            "/api/connectors/oauth/start", json={"target": {"type": "catalog", "kind": "openalex"}}
+        )
+        assert anonymous.status_code == 401
+        for target in (None, {"type": "unsupported"}, {"type": "catalog", "kind": "github"}):
+            invalid = await c.post(
+                "/api/connectors/oauth/start", headers=auth, json={"target": target}
+            )
+            assert invalid.status_code == 400, invalid.text
+            assert invalid.json()["error"]["code"] == "CONNECTOR_INVALID_CREDENTIALS"
     mocked_start.assert_not_awaited()
 
 

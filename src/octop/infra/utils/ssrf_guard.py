@@ -27,6 +27,21 @@ _LOCAL_HOSTNAMES = frozenset(
 )
 _LOCAL_HOST_SUFFIXES = (".local", ".localhost", ".internal")
 
+# Shadowrocket and other TUN proxies synthesize addresses in the benchmark
+# range. These are routing tokens, never trusted outbound destinations.
+_FAKE_IP_NETWORK = ipaddress.IPv4Network("198.18.0.0/15")
+_IPV4_TRANSLATED_NETWORK = ipaddress.IPv6Network("::ffff:0:0:0/96")
+
+
+def _is_proxy_fake_ip(ip_str: str) -> bool:
+    addr = ipaddress.ip_address(ip_str)
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped
+        elif addr in _IPV4_TRANSLATED_NETWORK:
+            addr = ipaddress.IPv4Address(addr.packed[-4:])
+    return isinstance(addr, ipaddress.IPv4Address) and addr in _FAKE_IP_NETWORK
+
 
 def is_private_or_local_host(host: str) -> bool:
     """True for loopback / RFC1918 / link-local literals and well-known local names.
@@ -49,19 +64,23 @@ def is_private_or_local_host(host: str) -> bool:
 
 
 def _parse_https_host(url: str) -> tuple[str, int | None]:
-    parsed = urlparse(url)
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL as exc:
+        raise UnsafeOutboundUrl("invalid URL") from exc
     if parsed.scheme != "https":
         raise UnsafeOutboundUrl("only https URLs are allowed")
-    host = parsed.hostname
+    # Match httpcore's ASCII host so IDNA normalization cannot bypass IP pinning.
+    host = parsed.raw_host.decode("ascii").rstrip(".")
     if not host:
         raise UnsafeOutboundUrl("missing hostname")
-    return host.lower().rstrip("."), parsed.port
+    return host, parsed.port
 
 
 def _check_ip_not_private(ip_str: str) -> None:
     addr = ipaddress.ip_address(ip_str)
     if (
-        addr.is_private
+        not addr.is_global
         or addr.is_loopback
         or addr.is_link_local
         or addr.is_reserved
@@ -123,6 +142,7 @@ async def _resolve_validated_ip(url: str) -> str:
     IP for the actual connection to defeat DNS-rebinding (TOCTOU).
     """
     host, port = _parse_https_host(url)
+    _check_ip_literal(host)
     loop = asyncio.get_running_loop()
     try:
         infos = await loop.getaddrinfo(
@@ -135,8 +155,15 @@ async def _resolve_validated_ip(url: str) -> str:
         raise UnsafeOutboundUrl(f"cannot resolve hostname {host!r}") from exc
     if not infos:
         raise UnsafeOutboundUrl(f"cannot resolve hostname {host!r}")
+    has_fake_ip = False
     for info in infos:
-        _check_resolved_ip(info[4][0])
+        address = info[4][0]
+        if _is_proxy_fake_ip(address):
+            has_fake_ip = True
+        else:
+            _check_resolved_ip(address)
+    if has_fake_ip:
+        return await _resolve_public_dns(host)
     return infos[0][4][0]
 
 
@@ -191,6 +218,48 @@ class PinnedIPTransport(httpx.AsyncHTTPTransport):
     def __init__(self, target_host: str, pin_ip: str) -> None:
         super().__init__()
         self._pool._network_backend = _PinnedNetworkBackend(target_host, pin_ip)
+
+
+async def _resolve_public_dns(host: str) -> str:
+    """Recover a real public IP when a TUN proxy supplies Fake-IP DNS answers.
+
+    Bootstrap DoH at a fixed public IP so the resolver itself does not depend
+    on synthetic DNS. Keep TLS hostname verification and never connect to the
+    synthetic address, even when the encrypted lookup fails.
+    """
+    transport = PinnedIPTransport("cloudflare-dns.com", "1.1.1.1")
+    addresses: list[str] = []
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, timeout=10.0, trust_env=False, follow_redirects=False
+        ) as client:
+            responses = await asyncio.gather(
+                *(
+                    client.get(
+                        "https://cloudflare-dns.com/dns-query",
+                        params={"name": host, "type": record_type},
+                        headers={"Accept": "application/dns-json"},
+                    )
+                    for record_type in ("A", "AAAA")
+                )
+            )
+        for response in responses:
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict) or body.get("Status") != 0:
+                raise UnsafeOutboundUrl(f"public DNS lookup failed for {host!r}")
+            for answer in body.get("Answer", []):
+                if answer.get("type") in (1, 28):
+                    address = str(answer["data"])
+                    _check_resolved_ip(address)
+                    addresses.append(address)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        raise UnsafeOutboundUrl(
+            f"cannot resolve a public address for {host!r} via encrypted DNS"
+        ) from exc
+    if not addresses:
+        raise UnsafeOutboundUrl(f"cannot resolve a public address for {host!r} via encrypted DNS")
+    return addresses[0]
 
 
 async def safe_request(

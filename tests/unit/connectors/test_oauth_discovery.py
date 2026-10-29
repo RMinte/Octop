@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from octop.infra.connectors.custom_mcp import (
@@ -20,7 +22,9 @@ from octop.infra.connectors.oauth.discovery import (
 from octop.infra.connectors.oauth.registry import (
     oauth_state_kind_for_target,
     oauth_target_requires_https,
+    start_custom_mcp_oauth,
 )
+from octop.infra.errors import ErrorCode, OctopError
 
 
 def test_build_protected_resource_metadata_urls_path_and_root():
@@ -158,3 +162,69 @@ async def test_discover_oauth_from_mcp_url_uses_cache(monkeypatch: pytest.Monkey
     bypass = await discover_oauth_from_mcp_url("https://example.com/mcp", use_cache=False)
     assert bypass == cached_result
     assert calls == 2
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:9000/mcp", "https://192.168.1.2/mcp"])
+async def test_local_discovery_marks_unsupported_without_fetching(url, monkeypatch):
+    request = AsyncMock(side_effect=AssertionError("local discovery must not fetch"))
+    monkeypatch.setattr("octop.infra.connectors.oauth.discovery.safe_request", request)
+    result = await discover_oauth_from_mcp_url(url, use_cache=False)
+    assert result["available"] is False
+    assert result["unsupported_reason"] == "local_mcp"
+    request.assert_not_awaited()
+
+
+async def test_discovery_marks_missing_dynamic_registration(monkeypatch):
+    monkeypatch.setattr(
+        "octop.infra.connectors.oauth.discovery._probe_401_resource_metadata",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "octop.infra.connectors.oauth.discovery._fetch_prm_document",
+        AsyncMock(return_value={"authorization_servers": ["https://auth.example.com"]}),
+    )
+    monkeypatch.setattr(
+        "octop.infra.connectors.oauth.discovery.fetch_authorization_metadata",
+        AsyncMock(return_value={"authorization_endpoint": "https://auth.example.com/authorize"}),
+    )
+    result = await discover_oauth_from_mcp_url("https://mcp.example.com/mcp", use_cache=False)
+    assert result["available"] is False
+    assert result["unsupported_reason"] == "dynamic_registration"
+
+
+@pytest.mark.parametrize("reason", ["local_mcp", "dynamic_registration"])
+@pytest.mark.parametrize("locale", ["en", "zh"])
+async def test_custom_oauth_unsupported_reason_is_localized_without_upstream_text(reason, locale):
+    with pytest.raises(OctopError) as failure:
+        await start_custom_mcp_oauth(
+            server_name="test-server",
+            mcp_url="https://mcp.example.com/mcp",
+            redirect_uri="http://localhost/api/connectors/oauth/callback",
+            state="test-state",
+            discovery={
+                "available": False,
+                "unsupported_reason": reason,
+                "error": "synthetic-upstream-client-secret",
+            },
+            locale=locale,
+        )
+    assert failure.value.status == 400
+    assert failure.value.code is ErrorCode.CONNECTOR_INVALID_CREDENTIALS
+    assert "synthetic-upstream-client-secret" not in str(failure.value.details)
+    if reason == "local_mcp":
+        assert ("Local and LAN" if locale == "en" else "本机与局域网") in failure.value.details[
+            "reason"
+        ]
+    else:
+        assert "DCR" in failure.value.details["reason"]
+
+
+async def test_custom_oauth_unknown_discovery_failure_remains_an_upstream_failure():
+    with pytest.raises(ValueError):
+        await start_custom_mcp_oauth(
+            server_name="test-server",
+            mcp_url="https://mcp.example.com/mcp",
+            redirect_uri="http://localhost/api/connectors/oauth/callback",
+            state="test-state",
+            discovery={"available": False, "error": "metadata could not be fetched"},
+        )

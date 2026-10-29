@@ -173,7 +173,11 @@ async def _discover_oauth_from_mcp_url_uncached(url: str) -> dict[str, Any]:
     if not url:
         return {"available": False, "error": "empty mcp url"}
     if _is_local_or_lan_mcp_url(url):
-        return {"available": False, "error": "local/LAN MCP does not use remote OAuth"}
+        return {
+            "available": False,
+            "error": "local/LAN MCP does not use remote OAuth",
+            "unsupported_reason": "local_mcp",
+        }
 
     www_auth_prm = await _probe_401_resource_metadata(url)
     prm_doc: dict[str, Any] | None = None
@@ -203,6 +207,7 @@ async def _discover_oauth_from_mcp_url_uncached(url: str) -> dict[str, Any]:
         return {
             "available": False,
             "error": "authorization server does not support dynamic client registration",
+            "unsupported_reason": "dynamic_registration",
             "issuer": issuer,
             "resource": resource,
         }
