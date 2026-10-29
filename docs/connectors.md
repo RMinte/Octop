@@ -55,6 +55,7 @@ are updating `catalog.json` in the same change.
 | `notion` | Notion | Notion | knowledge | oauth2 | remote |
 | `openalex` | OpenAlex | OpenAlex | knowledge | oauth2 | remote |
 | `dida365` | TickTick | 滴答清单 | productivity | oauth2 | remote |
+| `github` | GitHub | GitHub | productivity | personal_token | remote |
 | `feishu-cli` | Feishu CLI | 飞书 CLI | office | api_key | gateway |
 | `wecom-cli` | WeCom CLI | 企业微信 CLI | office | api_key | gateway |
 | `dingtalk-cli` | DingTalk CLI | 钉钉 CLI | office | custom_fields | gateway |
@@ -92,4 +93,5 @@ Optional: `quick_auth_url`, `login_url`, `guide_url`, `manual_url`, `auth_hint`,
 ## Deep dives / 深入说明
 
 - [Agent Mail CLI](connectors-agently-mail.md)
+- [GitHub MCP](connectors-github.md)
 - [Qichacha / 企查查](connectors-qcc.md)

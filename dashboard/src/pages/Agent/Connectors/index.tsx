@@ -1200,6 +1200,9 @@ function ConnectorConfigDrawer({
   const guidedKind = isGuidedConnector(entry.kind) ? entry.kind : null;
 
   const preview = instanceDetail?.credentials_preview;
+  const tokenField = entry.credential_fields?.find(
+    (field) => field.key === "token",
+  );
   const secretRequired = !hasStoredCredentials;
   const hideTopAuth = entry
     ? INLINE_CREDENTIAL_GUIDE_KINDS.has(entry.kind)
@@ -1676,10 +1679,11 @@ function ConnectorConfigDrawer({
           {entry.auth_kind === "personal_token" && (
             <Form.Item
               name="token"
-              label={t("connectors.token", "访问 Token")}
+              label={tokenField?.label ?? t("connectors.token", "访问 Token")}
               rules={secretFieldRules(secretRequired)}
               extra={
                 configuredExtra(preview, "token_configured", t) ??
+                tokenField?.help ??
                 (!hideFieldGuide && manualUrl ? (
                   <a href={manualUrl} target="_blank" rel="noreferrer">
                     {t("connectors.getTokenAt", "前往获取 Token")}
@@ -1692,7 +1696,11 @@ function ConnectorConfigDrawer({
               }
             >
               <Input.Password
-                placeholder={hasStoredCredentials ? "••••••••" : undefined}
+                placeholder={
+                  hasStoredCredentials
+                    ? t("connectors.secretPlaceholder", "留空表示不修改")
+                    : tokenField?.placeholder ?? undefined
+                }
               />
             </Form.Item>
           )}

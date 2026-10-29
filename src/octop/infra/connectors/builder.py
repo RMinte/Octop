@@ -131,6 +131,16 @@ def _build_stdio_spec(entry: ConnectorCatalogEntry, creds: dict[str, Any]) -> di
 
 
 def _build_remote_spec(entry: ConnectorCatalogEntry, creds: dict[str, Any]) -> dict[str, Any]:
+    if entry.kind == "github":
+        token = str(creds.get("token") or "").strip()
+        return {
+            "transport": "http",
+            "url": entry.mcp_url,
+            "headers": {
+                **_mcp_http_headers(),
+                "Authorization": f"Bearer {token}",
+            },
+        }
     if entry.kind == "didi":
         api_key = str(creds.get("api_key") or "").strip()
         return {

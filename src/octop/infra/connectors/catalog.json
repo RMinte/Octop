@@ -498,6 +498,47 @@
       "oauth_scopes": "tasks:read tasks:write"
     },
     {
+      "kind": "github",
+      "name": { "en": "GitHub", "zh": "GitHub" },
+      "description": {
+        "en": "Browse repositories and code, manage issues and pull requests, and inspect GitHub Actions",
+        "zh": "浏览仓库与代码，管理 Issue 和 Pull Request，查看 GitHub Actions"
+      },
+      "auth_kind": "personal_token",
+      "doc_url": "https://github.com/github/github-mcp-server",
+      "icon": "github",
+      "color": "#24292f",
+      "phase": "available",
+      "mcp_mode": "remote",
+      "category": "productivity",
+      "quick_auth_url": "https://github.com/settings/personal-access-tokens/new",
+      "guide_url": "https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md",
+      "manual_url": "https://github.com/settings/personal-access-tokens/new",
+      "auth_hint": {
+        "en": "Create a GitHub personal access token, select the repositories and permissions you need, then paste the token below. Organization access may require approval or SSO authorization.",
+        "zh": "创建 GitHub Personal Access Token，选择需要的仓库和权限，再将 Token 粘贴到下方。组织仓库可能需要管理员批准或 SSO 授权。"
+      },
+      "mcp_url": "https://api.githubcopilot.com/mcp/",
+      "remote_transport": "streamable_http",
+      "credential_fields": [
+        {
+          "key": "token",
+          "label": { "en": "Personal Access Token", "zh": "访问令牌（PAT）" },
+          "field_type": "password",
+          "required": true,
+          "secret": true,
+          "placeholder": {
+            "en": "github_pat_... or ghp_...",
+            "zh": "github_pat_... 或 ghp_..."
+          },
+          "help": {
+            "en": "Supports fine-grained and classic tokens. Access is limited to the repositories and permissions granted to the token.",
+            "zh": "支持细粒度和经典 Token；仅能访问该 Token 已授权的仓库和操作。"
+          }
+        }
+      ]
+    },
+    {
       "kind": "feishu-cli",
       "name": { "en": "Feishu CLI", "zh": "飞书 CLI" },
       "description": {
