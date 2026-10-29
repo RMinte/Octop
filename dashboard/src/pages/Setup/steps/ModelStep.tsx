@@ -202,6 +202,7 @@ export default function ModelStep({ onBack, onSkip, onContinue }: Props) {
           setPresets(data);
           const { featured } = buildWizardPresetDisplay(data);
           const initial =
+            data.find((p) => p.id === "box") ??
             (featured[0] ? defaultPresetFromItem(featured[0]) : null) ??
             data[0];
           setSelectedPresetId(initial.id);
