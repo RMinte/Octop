@@ -12,6 +12,7 @@ from octop_harness.config import ModelConfig, ProviderConfig
 from octop.infra.agents.providers.model_flags import is_chat_eligible_model, is_vision_model
 from octop.infra.agents.providers.opencode_session import session_header_for_provider
 from octop.infra.agents.providers.reasoning import reasoning_capability
+from octop.infra.agents.providers.selection import rank_model_refs
 
 if TYPE_CHECKING:
     from octop.infra.crypto.sealed_repos import SealedProviderRepo
@@ -216,16 +217,9 @@ class ProviderStore:
         return False
 
     def resolve_multimodal_model_ref(self) -> str | None:
-        """First enabled image-capable model across usable providers."""
-        for row in self.iter_usable_rows():
-            for model in row.get_models():
-                if not is_chat_eligible_model(
-                    model, provider_name=row.name, provider_api_key=row.api_key
-                ):
-                    continue
-                if _model_dict_supports_image(model):
-                    return f"{row.name}/{model['id']}"
-        return None
+        """Highest-ranked enabled image-capable model across usable providers."""
+        candidates = self.list_auto_route_candidates(needs_multimodal=True)
+        return candidates[0].ref if candidates else None
 
     def resolve_model_for_multimodal_turn(
         self,
@@ -248,24 +242,16 @@ class ProviderStore:
         return candidates[0].ref if candidates else ref
 
     def resolve_first_model_ref(self) -> str | None:
-        """First chat-eligible enabled model across usable providers."""
-        for row in self.iter_usable_rows():
-            for model in row.get_models():
-                if not is_chat_eligible_model(
-                    model, provider_name=row.name, provider_api_key=row.api_key
-                ):
-                    continue
-                model_id = str(model.get("id") or "").strip()
-                if model_id:
-                    return f"{row.name}/{model_id}"
-        return None
+        """Highest-ranked usable chat model (legacy method name)."""
+        candidates = self.list_auto_route_candidates(needs_multimodal=False)
+        return candidates[0].ref if candidates else None
 
     def list_auto_route_candidates(
         self,
         *,
         needs_multimodal: bool,
     ) -> list[AutoRouteCandidate]:
-        """Return stable, usable candidates for one automatic route."""
+        """Return usable candidates in flagship-first automatic routing order."""
         candidates: list[AutoRouteCandidate] = []
         for row in self.iter_usable_rows():
             for model in row.get_models():
@@ -291,7 +277,8 @@ class ProviderStore:
                         max_input_tokens=capacity,
                     )
                 )
-        return candidates
+        by_ref = {candidate.ref: candidate for candidate in candidates}
+        return [by_ref[ref] for ref in rank_model_refs(list(by_ref))]
 
     def is_model_ref_usable(self, ref: str) -> bool:
         """Return True when *ref* points at a chat-eligible model on a usable provider."""

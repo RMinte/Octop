@@ -14,6 +14,7 @@ from octop.infra.utils.url import normalize_nav_url
 MAX_REMOTE_BROWSER_BOOKMARKS = 12
 PREFERENCES_KEY_REMOTE_BROWSER_BOOKMARKS = "remote_browser_bookmarks"
 PREFERENCES_KEY_PREFERRED_MODEL = "preferred_model"
+PREFERENCES_KEY_PREFERRED_BOX_MODEL = "preferred_box_model"
 PREFERENCES_KEY_MODEL_REASONING = "model_reasoning"
 PREFERENCES_KEY_TIMEZONE = "timezone"
 PREFERENCES_KEY_SIDEBAR_NAV = "sidebar_nav"
@@ -134,6 +135,10 @@ def get_preferred_model_from_json(raw: str | None) -> str | None:
     return normalize_model_ref(parse_preferences_json(raw).get(PREFERENCES_KEY_PREFERRED_MODEL))
 
 
+def get_preferred_box_model_from_json(raw: str | None) -> str | None:
+    return normalize_model_ref(parse_preferences_json(raw).get(PREFERENCES_KEY_PREFERRED_BOX_MODEL))
+
+
 def normalize_reasoning_preference(value: Any) -> ModelReasoningPreference:
     if not isinstance(value, dict):
         return ModelReasoningPreference()
@@ -182,6 +187,7 @@ def merge_model_preferences_json(
     current_raw: str | None,
     *,
     preferred_model: str | None | object = ...,
+    preferred_box_model: str | None | object = ...,
     model_reasoning: dict[str, ModelReasoningPreference] | None = None,
 ) -> str:
     data = parse_preferences_json(current_raw)
@@ -193,6 +199,14 @@ def merge_model_preferences_json(
             if ref is None:
                 raise OctopError(ErrorCode.SLASH_BAD_ARGS, "invalid preferred_model")
             data[PREFERENCES_KEY_PREFERRED_MODEL] = ref
+    if preferred_box_model is not ...:
+        if preferred_box_model is None:
+            data.pop(PREFERENCES_KEY_PREFERRED_BOX_MODEL, None)
+        else:
+            ref = normalize_model_ref(preferred_box_model)
+            if ref is None:
+                raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
+            data[PREFERENCES_KEY_PREFERRED_BOX_MODEL] = ref
     if model_reasoning is not None:
         data[PREFERENCES_KEY_MODEL_REASONING] = {
             ref: {"mode": pref.mode, "effort": pref.effort} for ref, pref in model_reasoning.items()

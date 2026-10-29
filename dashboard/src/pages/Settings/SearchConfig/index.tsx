@@ -332,7 +332,7 @@ export default function SearchConfigPage() {
   });
 
   const configuredProviders = providers.filter((p) => p.configured);
-  const activeSource = configuredProviders[0];
+  const hasConfiguredSource = configuredProviders.length > 0;
   const configuredCount = configuredProviders.length;
 
   if (loading) {
@@ -352,33 +352,43 @@ export default function SearchConfigPage() {
       />
 
       <div
-        className={`${styles.status} ${activeSource ? styles.statusOk : ""}`}
+        className={`${styles.status} ${
+          hasConfiguredSource ? styles.statusOk : ""
+        }`}
       >
         <span className={styles.statusIcon} aria-hidden="true">
-          {activeSource ? <CheckCircle size={18} /> : <Search size={18} />}
+          {hasConfiguredSource ? (
+            <CheckCircle size={18} />
+          ) : (
+            <Search size={18} />
+          )}
         </span>
         <div className={styles.statusBody}>
           <p className={styles.statusTitle}>
-            {activeSource
+            {hasConfiguredSource
               ? t(
                   "advancedSettings.search.sourceConfiguredTitle",
-                  "当前搜索源：{{name}}",
-                  { name: activeSource.name },
+                  "已配置搜索服务：{{name}}",
+                  {
+                    name: configuredProviders
+                      .map((provider) => provider.name)
+                      .join("、"),
+                  },
                 )
               : t(
                   "advancedSettings.search.sourceBuiltinTitle",
-                  "当前搜索源：内置搜索",
+                  "可用搜索：内置搜索",
                 )}
           </p>
           <p className={styles.statusDesc}>
-            {activeSource
+            {hasConfiguredSource
               ? t(
                   "advancedSettings.search.sourceConfiguredDesc",
-                  "已配置第三方搜索服务，内置搜索默认不再加载，避免多个搜索工具同时暴露给模型。",
+                  "开启搜索时，已配置服务与内置搜索均可供模型调用。由模型选择搜索工具，不保证失败后自动切换服务。",
                 )
               : t(
                   "advancedSettings.search.sourceBuiltinDesc",
-                  "未配置第三方搜索服务时，仍可使用产品内置搜索服务；该服务无需 API Key，但不保证稳定性和可用性。配置第三方服务后会自动切换。",
+                  "未配置第三方服务时，开启搜索仍可使用内置搜索，无需 API Key。配置第三方服务会增加可用搜索工具，不会停用内置搜索。",
                 )}
           </p>
         </div>
@@ -386,7 +396,7 @@ export default function SearchConfigPage() {
 
       <div className={styles.grid}>
         {sortedProviders.map((provider) => {
-          const isActive = activeSource?.id === provider.id;
+          const isActive = provider.configured;
           const needsSetup = !provider.configured;
           const logo = searchProviderLogo(provider.id);
           const cardClass = [

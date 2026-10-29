@@ -1,6 +1,6 @@
 /**
  * ActiveModelPool — shows all resolved (enabled + authorized) models
- * grouped by provider, with a star button to set the global preferred model.
+ * grouped by provider, with independent per-user box and remote preferences.
  *
  * Mirrors finnie's ActiveModelPool component.
  */
@@ -25,6 +25,7 @@ interface ActiveModel {
 interface ActiveModelPoolProps {
   resolvedModels: ResolvedModel[];
   activeModel: ActiveModel;
+  boxModelRef: string | null;
   providers: ProviderRow[];
   modelReasoning: Record<
     string,
@@ -43,6 +44,7 @@ interface GroupedModels {
 export function ActiveModelPool({
   resolvedModels,
   activeModel,
+  boxModelRef,
   providers,
   modelReasoning,
   onSaved,
@@ -81,15 +83,14 @@ export function ActiveModelPool({
   }, [resolvedModels]);
 
   const handleSetPreferred = async (m: ResolvedModel) => {
-    const isAlready =
-      m.provider_name === activeModel.provider_name &&
-      m.model === activeModel.model;
-    if (isAlready) return;
-
     const key = `${m.provider_name}/${m.model}`;
     setSetting(key);
     try {
-      await preferencesApi.patch({ preferred_model: key });
+      await preferencesApi.patch(
+        m.provider_kind === "box"
+          ? { preferred_box_model: key }
+          : { preferred_model: key },
+      );
       message.success(
         t("models.preferredModelSet", {
           model: modelOptionLabel(m),
@@ -303,6 +304,13 @@ export function ActiveModelPool({
                     ? t("models.boxNoAuth")
                     : group.providerKind}
                 </Tag>
+                <Tag>
+                  {t(
+                    group.providerKind === "box"
+                      ? "models.boxPreference"
+                      : "models.remotePreference",
+                  )}
+                </Tag>
               </div>
               <span className={styles.poolGroupCount}>
                 {group.models.length} {t("models.modelUnit")}
@@ -312,8 +320,10 @@ export function ActiveModelPool({
               {group.models.map((m) => {
                 const key = `${m.provider_name}/${m.model}`;
                 const isPreferred =
-                  m.provider_name === activeModel.provider_name &&
-                  m.model === activeModel.model;
+                  m.provider_kind === "box"
+                    ? key === boxModelRef
+                    : m.provider_name === activeModel.provider_name &&
+                      m.model === activeModel.model;
                 const isLoading = setting === key;
                 const isTesting = testingKey === key;
                 const canTest = providerHasKey.get(m.provider_id) ?? false;
@@ -335,6 +345,12 @@ export function ActiveModelPool({
                       }
                     >
                       <Button
+                        aria-label={t(
+                          m.provider_kind === "box"
+                            ? "models.setBoxPreferred"
+                            : "models.setRemotePreferred",
+                          { model: modelOptionLabel(m) },
+                        )}
                         type="text"
                         size="small"
                         loading={isLoading}

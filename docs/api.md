@@ -121,7 +121,7 @@ Task 是一段持久的多轮对话。发送首条消息时创建 Task；后续�
 | POST | `/api/projects/{project_id}/tasks` | 在项目中发送首条消息，原子创建任务和首轮，返回 202 |
 | GET | `/api/project-tasks` | 分页列出无项目任务；archived=true 查看归档任务 |
 | GET | `/api/project-tasks/resources` | 本轮可用的模型、专家/团队、Skill、MCP、路由与审批能力 |
-| GET / PUT | `/api/project-tasks/routing/settings` | 读取部署模型路由配置；修改需要 `providers` 管理权限 |
+| GET / PUT | `/api/project-tasks/routing/settings` | 读取当前用户偏好解析后的模型路由；修改部署默认需要 `providers` 管理权限 |
 | POST | `/api/project-tasks/attachments` | multipart 的 file 上传本人任务输入附件，返回 201 和附件元数据 |
 | GET | `/api/project-tasks/attachments/{attachment_id}` | 本人输入附件的鉴权读取，图片预览、其他文件下载 |
 | GET | `/api/project-tasks/artifacts` | 跨任务成果资料库，按文件发布时间倒序分页，支持项目、任务、类型、文件名及归档筛选 |
@@ -446,7 +446,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 
 `options.model_ref` 省略或为 null 且未开启路由时，每一轮都使用本轮入队时的当前默认选择，不隐式继承上一轮模型；希望连续追问沿用同一模型时，客户端须在每次请求中再次携带同一个完整 `model_ref`。显式指定不可用模型返回 HTTP 409 / `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。入队后模型随本轮固定，`turns[].model_ref` 返回该轮实际模型，客户端应据此展示执行结果，不以输入框当前选择反推历史。skills、mcp_servers 省略或 null 时，合并当前所选专家默认能力与发送时项目配置并去重；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。连接器 default_open 不自动叠加到统一 Task。无项目任务同样可以继承专家默认能力或显式选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
 
-客户端可在同一 `options` 中显式提交 `routing`：`{"mode":"box"}` 固定盒子，`{"mode":"hybrid","level":60}` 由盒子根据本轮消息、有效历史及项目行动指南判难。仅支持 `box/hybrid`；混合档位严格接受整数 `0/20/40/60/80/100`，不是调用比例或任务占比。0 档始终盒子，不要求远端配置；20/40/60/80/100 档的远端难度阈值分别为 80/60/40/20/10，因此 100 档的 0–9 基础工作仍走盒子。省略 `level` 使用部署默认档位；省略或为 null 的 `routing` 保持原有默认模型语义，非空 `model_ref` 始终优先并跳过判难。希望下一轮沿用策略时须再次携带 `routing`。部署配置由 `GET/PUT /api/project-tasks/routing/settings` 读取和保存，不改变项目或全局默认模型；资源接口的 `routing` 返回安全能力声明，`turns[].routing` 返回本轮实际来源、档位、难度和原因快照。判难失败保守使用盒子；真实取消不入队；同一已受理请求的幂等重传不重新判难。完整 REST/WS 示例、图片约束与用量边界见[任务模型路由接入](project-task-model-routing.md)。
+客户端可在同一 `options` 中显式提交 `routing`：`{"mode":"box"}` 固定盒子，`{"mode":"hybrid","level":60}` 由盒子根据本轮消息、有效历史及项目行动指南判难。仅支持 `box/hybrid`；混合档位严格接受整数 `0/20/40/60/80/100`，不是调用比例或任务占比。0 档始终盒子，不要求远端配置；20/40/60/80/100 档的远端难度阈值分别为 80/60/40/20/10，因此 100 档的 0–9 基础工作仍走盒子。省略 `level` 使用部署默认档位；省略或为 null 的 `routing` 保持原有默认模型语义，非空 `model_ref` 始终优先并跳过判难。希望下一轮沿用策略时须再次携带 `routing`。模型池的盒子星标（`preferred_box_model`）与远端星标（`preferred_model`）独立保存到用户偏好，任务路由优先使用这两组偏好。`GET /api/project-tasks/routing/settings` 返回当前用户解析结果，`PUT` 保存兼容部署默认，不改变项目或全局默认模型；资源接口的 `routing` 返回安全能力声明，`turns[].routing` 返回本轮实际来源、档位、难度和原因快照。判难失败保守使用盒子；真实取消不入队；同一已受理请求的幂等重传不重新判难。完整 REST/WS 示例、图片约束与用量边界见[任务模型路由接入](project-task-model-routing.md)。
 
 options 也接受 plugins、subagents、memory_enabled、team_enabled。省略或 null 继承发送时的项目值；无项目任务默认 plugins/subagents=[]、memory_enabled=true、team_enabled=false。列表 [] 清空本轮选择，布尔值 false 仅关闭本轮能力。资源接口增加 plugins（plugin_id/name/description/available）和 subagents（slug/name/description）；全局禁用或未成功加载的插件不可选择。turns[].options 返回全部实际选择。保存项目只保存引用，不安装插件、执行工具或创建专家。
 

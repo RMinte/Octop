@@ -458,3 +458,33 @@ def test_list_auto_route_candidates_filters_and_preserves_capacity(
     assert [(item.ref, item.max_input_tokens) for item in vision_candidates] == [
         ("p/vision", 32_000)
     ]
+
+
+def test_flagship_order_respects_enabled_models_and_image_support(store: ProviderStore) -> None:
+    store._provider_repo.create(
+        name="p",
+        kind="openai",
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        models_json=json.dumps(
+            [
+                {"id": "glm-4.7-flash", "context_window": 9_000_000},
+                {"id": "glm-5.1", "context_window": 200_000},
+                {"id": "glm-5.2", "context_window": 100_000},
+                {"id": "glm-5.3", "enabled": False},
+                {"id": "glm-5v-turbo", "input": ["text", "image"]},
+            ]
+        ),
+    )
+    assert store.resolve_first_model_ref() == "p/glm-5.2"
+    assert store.resolve_multimodal_model_ref() == "p/glm-5v-turbo"
+    assert (
+        store.resolve_model_for_multimodal_turn("p/glm-5.2", needs_multimodal=True)
+        == "p/glm-5v-turbo"
+    )
+    assert [item.ref for item in store.list_auto_route_candidates(needs_multimodal=False)] == [
+        "p/glm-5.2",
+        "p/glm-5.1",
+        "p/glm-5v-turbo",
+        "p/glm-4.7-flash",
+    ]

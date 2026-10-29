@@ -789,7 +789,7 @@ async def task_resources(
     "/routing/settings",
     response_model=model_routing.ModelRoutingSettings,
     summary="读取盒子与混合模式配置",
-    description="登录用户可读取两侧模型引用及默认难度档位；不返回服务地址或凭据，不改变现有默认模型。",
+    description="读取当前用户偏好解析后的盒子、远端模型及默认难度档位；无偏好时使用部署默认或同类可用模型，不返回服务地址或凭据。",
 )
 async def read_model_routing_settings(
     response: Response,
@@ -797,7 +797,7 @@ async def read_model_routing_settings(
     user: User = Depends(current_user),
 ) -> model_routing.ModelRoutingSettings:
     response.headers["Cache-Control"] = "no-store"
-    return await asyncio.to_thread(model_routing.load_settings, _services(server))
+    return await asyncio.to_thread(model_routing.load_settings, _services(server), user.id)
 
 
 @task_router.put(

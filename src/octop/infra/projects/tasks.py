@@ -918,7 +918,7 @@ def _configuration(
     if options.routing is not None and options.model_ref and routing_decision is None:
         routing_decision = decide_model(
             ProviderStore(services.provider_repo),
-            load_routing_settings(services),
+            load_routing_settings(services, owner_id),
             mode=options.routing.mode,
             level=options.routing.level,
             explicit_model_ref=options.model_ref,
@@ -1551,7 +1551,7 @@ def resources(services: SharedServices, owner_id: int) -> TaskResources:
         experts=experts,
         models=models,
         default_model_ref=resolve_model_ref(services),
-        routing=routing_capabilities(services),
+        routing=routing_capabilities(services, owner_id),
         approval=approval_policy.capabilities(services),
         execution_engines=engine_catalog.catalog(services, owner_id),
     )

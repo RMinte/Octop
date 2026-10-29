@@ -25,6 +25,7 @@ export interface UserPreferences {
   locale: string;
   remote_browser_bookmarks: RemoteBrowserBookmark[];
   preferred_model: string | null;
+  preferred_box_model: string | null;
   model_reasoning: Record<
     string,
     { mode: "auto" | "enabled" | "disabled"; effort?: string | null }
@@ -36,6 +37,7 @@ export type PatchPreferencesBody = {
   locale?: string;
   remote_browser_bookmarks?: RemoteBrowserBookmark[];
   preferred_model?: string | null;
+  preferred_box_model?: string | null;
   model_reasoning?: UserPreferences["model_reasoning"];
   sidebar_nav?: SidebarNavLayoutPref | null;
 };

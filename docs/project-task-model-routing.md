@@ -1,6 +1,6 @@
 # 任务模型路由接入
 
-服务端在现有任务创建、追问和重试请求中接受 `options.routing`，由盒子估计本轮工作难度，再固定本轮实际执行模型。客户端自行调用这些接口；本轮未新增网页、Swift 页面或客户端自动选择逻辑。
+服务端在现有任务创建、追问和重试请求中接受 `options.routing`，由盒子估计本轮工作难度，再固定本轮实际执行模型。客户端调用这些接口；网页「模型」页的可用模型池提供盒子与远端两组独立星标，Swift 客户端协议保持不变。
 
 Task 仍是多轮会话。每次新消息单独判难，同一轮中的执行、暂停后继续及恢复使用已保存的模型。第一句问候走盒子，不会把之后的复杂重构也固定在盒子。
 
@@ -29,7 +29,9 @@ REST 使用现有 Octop 登录令牌 `Authorization: Bearer <Octop access_token>
 
 ## 部署策略配置
 
-`GET /api/project-tasks/routing/settings` 允许已登录用户读取配置。`PUT` 同一路径需要 `providers` 管理权限，接受完整配置并返回保存值：
+模型池中，盒子星标通过 `PATCH /api/preferences` 的 `preferred_box_model` 保存，远端星标沿用 `preferred_model`。两者属于当前用户，互不覆盖；旧的盒子 `preferred_model` 仍可作为盒子偏好读取。任务受理和资源接口按当前用户解析，修改星标从下一轮生效。
+
+每侧按「可用用户偏好 → 同类候选的旗舰优先排序」解析，不再要求用户重复绑定。无有效星标时，旧部署绑定和全局默认不覆盖任务自动选择。`GET /api/project-tasks/routing/settings` 返回当前用户解析后的模型引用。`PUT` 同一路径需要 `providers` 管理权限，接受完整配置并返回保存值：
 
 ```json
 {
@@ -39,7 +41,17 @@ REST 使用现有 Octop 登录令牌 `Authorization: Bearer <Octop access_token>
 }
 ```
 
-配置保存到服务端部署范围，不保存到账号或项目。盒子引用必须指向可用的 `box` 主模型。默认档位大于 0 时，远端引用必须指向可用的非 `box` 主模型；默认档位为 0 时允许 `remote_model_ref=null`，只配置盒子即可使用。
+`PUT` 配置仍保存到服务端部署范围，保留旧接口读写兼容；当前用户的任务自动路由仅使用其中的默认档位，模型引用由星标和自动排序解析。盒子引用必须指向可用的 `box` 主模型。默认档位大于 0 时，远端引用必须指向可用的非 `box` 主模型；默认档位为 0 时允许 `remote_model_ref=null`，只配置盒子即可使用。
+
+### 无有效星标时的自动排序
+
+仅在已经配置、启用且满足图片等能力要求的候选内排序，不添加模型、不自动申请权限。`ProviderStore` 的自动选择与执行失败后的候选队列使用同一顺序；盒子和远端仍各自筛选，不因回退越过来源约束。运行时继续检查健康状态和上下文容量，显式指定模型不受该排序覆盖。
+
+识别 GLM、GPT、Claude、Gemini 的明确产品命名：优先旗舰档位，再比较同系列数字版本（如 5.10 新于 5.9）。Turbo/Sonnet 和 Flash/Mini 等档位随后。未知名字保留原顺序，排在已识别系列后；不把上下文长度、参数量字符串或任意数字当作综合实力。不同系列之间没有统一版本或发布日期，处于相同档位时沿用候选首次出现的系列顺序，不声称跨厂商质量排名或全网最新。未识别的新命名需更新规则或设置星标。
+
+例如已配置的 GLM-5.2、GLM-5.1、GLM-5、GLM-5-Turbo、GLM-5V-Turbo、GLM-4.7-Flash，在没有星标时按上述顺序尝试；图片请求先过滤图片能力。星标 GLM-4.7-Flash 仍优先处理其支持的请求，失效后才进入自动队列。
+
+档位参考厂商产品定位：[智谱模型概览](https://docs.bigmodel.cn/cn/guide/start/model-overview)、[OpenAI 模型目录](https://developers.openai.com/api/docs/models)、[Claude 模型概览](https://platform.claude.com/docs/en/models/overview)、[Gemini 模型目录](https://ai.google.dev/gemini-api/docs/models)。这是确定性的选择策略，并非基准测试或逐次联网发现；语音与搜索配置独立，不参与主对话模型排序。
 
 `default_level` 只为显式开启的 `hybrid` 请求补齐省略或为 null 的 `level`，不会接管现有全局默认模型，也不会使省略 `routing` 的旧客户端自动进入混合模式。修改配置只影响之后受理的轮次。
 
@@ -209,3 +221,9 @@ Content-Type: application/json
 现有 `/api/usage/summary` 的 `by_model/by_project/by_task` 可查看已记录主任务及旁路累计用量，仍遵循原有统计覆盖边界。新增 `classifier_*` 只作为本轮判难审计，尚未并入统一用量或用户 Token 配额，不能视为完整账单；主轮次的 `model_ref` 也不能代表判难调用的模型。服务端未新增路由聚合或价格接口，不承诺精确远端占比、成本、节省或预算。
 
 验证依据为 [路由集成测试](../tests/integration/test_project_task_routing.py)，基础任务协议见 [API 文档](api.md)与[任务 WebSocket 接入指南](project-task-websocket.md)。
+
+## 图片与偏好
+
+自动路由先筛选支持图片的可用模型，再应用难度策略。每侧优先使用该侧偏好模型；偏好不支持图片时，选择同侧启用的图片模型。盒子模式及 0 档绝不使用远端；混合模式两侧都有图片模型时按难度选择，只有一侧支持图片时直接使用该侧，不再判难。均不支持时返回 `TASK_IMAGE_MODEL_REQUIRED`。显式 `model_ref` 仍是固定选择，不兼容图片时直接提示错误。历史消息与工具上下文中的图片同样参与约束。
+
+切换只写入本轮实际模型快照，不修改星标偏好；纯文本新轮次继续优先使用偏好。

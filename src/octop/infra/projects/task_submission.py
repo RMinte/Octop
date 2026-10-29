@@ -86,7 +86,7 @@ def _prepare_in_transaction(
     tasks.validate_preparation(services, conn, owner_id, preparation, task)
     configuration = preparation.configuration
     assert message.options.routing is not None
-    settings = load_settings(services)
+    settings = load_settings(services, owner_id)
     attached = [
         input_attachments._available(
             services.project_task_attachment_repo.get(conn, owner_id, attachment_id)

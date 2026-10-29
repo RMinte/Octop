@@ -185,7 +185,7 @@ def test_wrong_source_configuration_is_rejected_without_cross_source_guessing(se
     assert exc.value.code == ErrorCode.TASK_MODEL_UNAVAILABLE
 
 
-def test_image_capable_box_remains_selected_when_remote_supports_only_text(services) -> None:
+def test_images_use_compatible_remote_when_remote_preference_is_text_only(services) -> None:
     local = services.provider_repo.get_by_name("box")
     services.provider_repo.update(
         local.id,
@@ -197,8 +197,11 @@ def test_image_capable_box_remains_selected_when_remote_supports_only_text(servi
         decision = decide_model(
             store, settings, level=100, difficulty=difficulty, requires_images=True
         )
-        assert decision.model_ref == "box/local" and decision.target == "box"
-        assert decision.reason_code == "capability_image_box"
+        if difficulty == 100:
+            assert decision.model_ref == "cloud/strong" and decision.target == "remote"
+            assert decision.reason_code == "capability_image"
+        else:
+            assert decision.model_ref == "box/local" and decision.target == "box"
     with pytest.raises(OctopError) as exc:
         decide_model(
             store,
@@ -264,3 +267,47 @@ def test_decision_audit_fields_reject_negative_usage() -> None:
     assert decision.classifier_input_truncated is False
     with pytest.raises(ValidationError):
         ModelRoutingDecision(**values, classifier_input_tokens=-1)
+
+
+def test_box_images_select_local_vision_without_changing_preference(services) -> None:
+    local = services.provider_repo.get_by_name("box")
+    services.provider_repo.update(
+        local.id,
+        models_json=json.dumps(
+            [
+                {"id": "local", "enabled": True, "input": ["text"]},
+                {"id": "disabled-vision", "enabled": False, "input": ["text", "image"]},
+                {"id": "vision", "enabled": True, "input": ["text", "image"]},
+            ]
+        ),
+    )
+    settings = configured()
+    decision = decide_model(
+        ProviderStore(services.provider_repo), settings, mode="box", requires_images=True
+    )
+    assert decision.model_ref == "box/vision" and decision.target == "box"
+    assert settings.box_model_ref == "box/local"
+    text = decide_model(ProviderStore(services.provider_repo), settings, mode="box")
+    assert text.model_ref == "box/local"
+
+
+def test_image_hybrid_falls_back_to_box_when_no_remote_can_see(services) -> None:
+    local = services.provider_repo.get_by_name("box")
+    services.provider_repo.update(
+        local.id,
+        models_json=json.dumps(
+            [
+                {"id": "local", "enabled": True, "input": ["text", "image"]},
+            ]
+        ),
+    )
+    cloud = services.provider_repo.get_by_name("cloud")
+    services.provider_repo.update(cloud.id, enabled=False)
+    decision = decide_model(
+        ProviderStore(services.provider_repo),
+        configured(remote_model_ref="another/chat"),
+        level=100,
+        difficulty=100,
+        requires_images=True,
+    )
+    assert decision.model_ref == "box/local" and decision.reason_code == "capability_image_box"

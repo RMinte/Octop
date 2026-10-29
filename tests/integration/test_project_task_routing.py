@@ -775,3 +775,112 @@ async def test_image_in_saved_tool_context_constrains_routing_without_attachment
     assert decision["difficulty"] is None
     assert [call.model_ref for call in calls] == [BOX_MODEL, BOX_MODEL]
     judge.assert_not_awaited()
+
+
+@pytest.mark.parametrize("transport", ["rest", "websocket"])
+async def test_stars_drive_routing_without_hidden_bindings(
+    routing_env: Any, transport: str
+) -> None:
+    client, server, auth, judge, calls = routing_env
+    server.services.settings_repo.delete("task_model_routing")
+    for name, kind in (("second-box", "box"), ("zz-preferred-remote", "openai")):
+        response = await client.post(
+            "/api/admin/providers",
+            headers=auth,
+            json={
+                "name": name,
+                "kind": kind,
+                "base_url": "http://models.invalid/v1",
+                "api_key": "fixture-key",
+                "models": [{"id": "text", "enabled": True}],
+            },
+        )
+        assert response.status_code == 201
+    remote = "zz-preferred-remote/text"
+    box = "second-box/text"
+    response = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_model": remote}
+    )
+    assert response.status_code == 200
+    response = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_box_model": box}
+    )
+    assert response.status_code == 200
+    assert response.json()["preferred_model"] == remote
+    assert response.json()["preferred_box_model"] == box
+    resources = (await client.get("/api/project-tasks/resources", headers=auth)).json()["routing"]
+    assert resources["box_model_ref"] == box and resources["remote_model_ref"] == remote
+    assert resources["box_available"] and resources["remote_available"]
+    effective = (await client.get(SETTINGS_URL, headers=auth)).json()
+    assert effective["box_model_ref"] == box and effective["remote_model_ref"] == remote
+    judge.side_effect = [DifficultyAssessment(9, "basic"), DifficultyAssessment(90, "reasoning")]
+    for number, expected in enumerate((box, remote)):
+        result = await _submit(
+            client,
+            auth,
+            transport,
+            {
+                "request_id": f"preferred-{number}",
+                "prompt": "Route with my preferences",
+                "options": {"routing": {"mode": "hybrid", "level": 60}},
+            },
+        )
+        detail = await _settled(client, auth, result["task_id"])
+        assert detail["turns"][0]["model_ref"] == expected
+    assert [call.model_ref for call in calls] == [box, remote]
+    # A separate user must never inherit the first user's stars.
+    other_auth = await create_user(client, auth, username="independent-stars")
+    other = (await client.get("/api/project-tasks/resources", headers=other_auth)).json()["routing"]
+    assert other["box_model_ref"] == BOX_MODEL and other["remote_model_ref"] == REMOTE_MODEL
+    invalid = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_box_model": remote}
+    )
+    assert invalid.status_code == 409
+    saved = (await client.get("/api/preferences", headers=auth)).json()
+    assert saved["preferred_box_model"] == box and saved["preferred_model"] == remote
+    cleared = await client.patch(
+        "/api/preferences", headers=auth, json={"preferred_box_model": None}
+    )
+    assert cleared.status_code == 200 and cleared.json()["preferred_model"] == remote
+
+
+@pytest.mark.parametrize("transport", ["rest", "ws"])
+async def test_unstarred_routing_uses_latest_flagship(routing_env: Any, transport: str) -> None:
+    client, server, auth, judge, calls = routing_env
+    provider = server.services.provider_repo.get_by_name("remote")
+    assert provider is not None
+    server.services.provider_repo.update(
+        provider.id,
+        models_json=json.dumps(
+            [
+                {"id": "cloud-chat", "enabled": True},
+                {"id": "glm-4.7-flash", "enabled": True},
+                {"id": "glm-5.1", "enabled": True},
+                {"id": "glm-5.2", "enabled": True},
+                {"id": "glm-5.3", "enabled": False},
+            ]
+        ),
+    )
+    # Existing deployment and global defaults point to cloud-chat. They must
+    # not mask the new automatic policy for an unstarred user.
+    effective = (await client.get(SETTINGS_URL, headers=auth)).json()
+    assert effective["remote_model_ref"] == "remote/glm-5.2"
+    for number, star in enumerate((None, "remote/glm-4.7-flash")):
+        response = await client.patch(
+            "/api/preferences", headers=auth, json={"preferred_model": star}
+        )
+        assert response.status_code == 200
+        judge.return_value = DifficultyAssessment(90, "reasoning")
+        result = await _submit(
+            client,
+            auth,
+            transport,
+            {
+                "request_id": f"flagship-{number}",
+                "prompt": "Use my automatic selection policy",
+                "options": {"routing": {"mode": "hybrid", "level": 60}},
+            },
+        )
+        detail = await _settled(client, auth, result["task_id"])
+        assert detail["turns"][0]["model_ref"] == (star or "remote/glm-5.2")
+    assert [call.model_ref for call in calls] == ["remote/glm-5.2", "remote/glm-4.7-flash"]

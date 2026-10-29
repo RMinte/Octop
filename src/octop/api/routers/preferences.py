@@ -16,6 +16,7 @@ from octop.infra.users.preferences import (
     PREFERENCES_KEY_TIMEZONE,
     ModelReasoningPreference,
     get_model_reasoning_from_json,
+    get_preferred_box_model_from_json,
     get_preferred_model_from_json,
     get_remote_browser_bookmarks_from_json,
     get_sidebar_nav_from_json,
@@ -66,6 +67,9 @@ class PreferencesResponse(BaseModel):
         default=None,
         description="Per-user preferred model ref. The global active model is only a fallback.",
     )
+    preferred_box_model: str | None = Field(
+        default=None, description="Independent per-user box model preference for task routing."
+    )
     model_reasoning: dict[str, ModelReasoningPreferenceModel] = Field(
         default_factory=dict,
         description="Per-model reasoning defaults for this user.",
@@ -84,6 +88,9 @@ class PatchPreferencesBody(BaseModel):
         description="Replace remote-browser bookmarks (max 12).",
     )
     preferred_model: str | None = None
+    preferred_box_model: str | None = Field(
+        default=None, description="Enabled box model reference; null clears the box preference."
+    )
     model_reasoning: dict[str, ModelReasoningPreferenceModel] | None = None
     timezone: str | None = None
     sidebar_nav: SidebarNavLayoutModel | None = Field(
@@ -98,6 +105,7 @@ class PatchPreferencesBody(BaseModel):
                 "locale",
                 "remote_browser_bookmarks",
                 "preferred_model",
+                "preferred_box_model",
                 "model_reasoning",
                 "timezone",
                 "sidebar_nav",
@@ -128,6 +136,7 @@ def _response(row: Any) -> PreferencesResponse:
         locale=normalize_locale(row.locale if row else None),
         remote_browser_bookmarks=_bookmarks_response(row),
         preferred_model=get_preferred_model_from_json(raw),
+        preferred_box_model=get_preferred_box_model_from_json(raw),
         model_reasoning={
             ref: ModelReasoningPreferenceModel(mode=pref.mode, effort=pref.effort)
             for ref, pref in get_model_reasoning_from_json(raw).items()
@@ -164,7 +173,10 @@ async def patch_preferences(
     if body.remote_browser_bookmarks is not None:
         items = [b.model_dump() for b in body.remote_browser_bookmarks]
         await server.user_manager.set_remote_browser_bookmarks(user.username, items)
-    if "preferred_model" in body.model_fields_set or body.model_reasoning is not None:
+    if (
+        body.model_fields_set.intersection({"preferred_model", "preferred_box_model"})
+        or body.model_reasoning is not None
+    ):
         preferred: str | None | object = ...
         if "preferred_model" in body.model_fields_set:
             preferred = body.preferred_model
@@ -185,6 +197,9 @@ async def patch_preferences(
         await server.user_manager.set_model_preferences(
             user.username,
             preferred_model=preferred,
+            preferred_box_model=(
+                body.preferred_box_model if "preferred_box_model" in body.model_fields_set else ...
+            ),
             model_reasoning=reasoning,
         )
     if "timezone" in body.model_fields_set:

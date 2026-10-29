@@ -194,3 +194,40 @@ async def test_explicit_task_failure_is_raised_without_another_model(environment
         )
     assert attempted == ["box/local"]
     assert not services.audit_repo.query(action="task.model_failover")
+
+
+@pytest.mark.asyncio
+async def test_failover_tries_newest_flagship_before_lightweight_model(environment, monkeypatch):
+    services, turn, raw, models = environment
+    provider = services.provider_repo.get_by_name("box")
+    ids = ["local", "glm-4.7-flash", "glm-5.1", "glm-5.2"]
+    services.provider_repo.update(
+        provider.id,
+        models_json=json.dumps([{"id": mid, "context_window": 100_000} for mid in ids]),
+    )
+    for mid in ids:
+        models[f"box/{mid}"] = SimpleNamespace(
+            model=f"box/{mid}", profile={"max_input_tokens": 100_000}
+        )
+    middleware = await model_failover.task_failover_middleware(
+        services, 1, turn, raw, ProviderStore(services.provider_repo).build_harness_configs()
+    )
+    configurable = {"model": "box/local", "octop_auto_route": True}
+    monkeypatch.setattr(middleware_module, "_configurable", lambda _request: configurable)
+    attempted = []
+
+    async def handler(request):
+        attempted.append(request.model.model)
+        if request.model.model in {"box/local", "box/glm-5.2"}:
+            raise ConnectionError("offline")
+        return ModelResponse(result=[AIMessage(content="recovered")])
+
+    try:
+        response = await middleware.awrap_model_call(
+            ModelRequest(model=models["box/local"], messages=[HumanMessage(content="continue")]),
+            handler,
+        )
+        assert response.result[0].content == "recovered"
+        assert attempted == ["box/local", "box/glm-5.2", "box/glm-5.1"]
+    finally:
+        await middleware.aclose()

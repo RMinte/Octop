@@ -730,14 +730,29 @@ class UserManager:
         username: str,
         *,
         preferred_model: str | None | object = ...,
+        preferred_box_model: str | None | object = ...,
         model_reasoning: dict[str, ModelReasoningPreference] | None = None,
     ) -> None:
         row = self._services.user_repo.get_by_username(username)
         if row is None:
             raise OctopError(ErrorCode.NOT_FOUND, "user not found")
+        if isinstance(preferred_box_model, str):
+            from octop.infra.agents.providers.store import ProviderStore
+
+            providers = ProviderStore(self._services.provider_repo)
+            provider = self._services.provider_repo.get_by_name(
+                preferred_box_model.partition("/")[0]
+            )
+            if (
+                provider is None
+                or provider.kind != "box"
+                or not providers.is_model_ref_usable(preferred_box_model)
+            ):
+                raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
         merged = merge_model_preferences_json(
             row.preferences_json,
             preferred_model=preferred_model,
+            preferred_box_model=preferred_box_model,
             model_reasoning=model_reasoning,
         )
         self._services.user_repo.set_preferences_json(row.id, merged)

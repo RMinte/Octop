@@ -80,6 +80,7 @@ export interface UseProvidersResult {
   presets: ProviderPreset[];
   resolvedModels: ResolvedModel[];
   activeModel: { provider_name: string; model: string };
+  boxModelRef: string | null;
   modelReasoning: Record<
     string,
     { mode: "auto" | "enabled" | "disabled"; effort?: string | null }
@@ -98,6 +99,7 @@ export function useProviders(): UseProvidersResult {
     provider_name: "",
     model: "",
   });
+  const [boxModelRef, setBoxModelRef] = useState<string | null>(null);
   const [modelReasoning, setModelReasoning] = useState<
     UseProvidersResult["modelReasoning"]
   >({});
@@ -119,6 +121,10 @@ export function useProviders(): UseProvidersResult {
           "/providers/active-model",
         ),
         preferencesApi.get(),
+        request<{
+          box_model_ref: string | null;
+          remote_model_ref: string | null;
+        }>("/project-tasks/routing/settings"),
       ]);
       const rows =
         settled[0].status === "fulfilled" && Array.isArray(settled[0].value)
@@ -136,6 +142,8 @@ export function useProviders(): UseProvidersResult {
         settled[3].status === "fulfilled" ? settled[3].value : null;
       const preferences =
         settled[4].status === "fulfilled" ? settled[4].value : null;
+      const routing =
+        settled[5].status === "fulfilled" ? settled[5].value : null;
 
       if (
         settled[0].status === "rejected" &&
@@ -153,7 +161,14 @@ export function useProviders(): UseProvidersResult {
       setProviders(normalized);
       setPresets(presetList);
       setResolvedModels(resolved);
-      const preferredParts = (preferences?.preferred_model || "").split("/");
+      const preferredParts = (
+        routing?.remote_model_ref ||
+        preferences?.preferred_model ||
+        ""
+      ).split("/");
+      setBoxModelRef(
+        routing?.box_model_ref || preferences?.preferred_box_model || null,
+      );
       setActiveModel(
         preferredParts.length > 1
           ? {
@@ -188,6 +203,7 @@ export function useProviders(): UseProvidersResult {
     presets,
     resolvedModels,
     activeModel,
+    boxModelRef,
     modelReasoning,
     loading,
     error,

@@ -18,6 +18,10 @@ from octop.infra.agents.providers.store import ProviderStore
 from octop.infra.db.services import SharedServices
 from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.projects.models import ProjectModel
+from octop.infra.users.preferences import (
+    get_preferred_box_model_from_json,
+    get_preferred_model_from_json,
+)
 
 SETTINGS_KEY = "task_model_routing"
 POLICY_VERSION: Literal["difficulty-v1"] = "difficulty-v1"
@@ -114,14 +118,32 @@ def _settings_invalid() -> OctopError:
     )
 
 
-def load_settings(services: SharedServices) -> ModelRoutingSettings:
+def load_settings(services: SharedServices, owner_id: int | None = None) -> ModelRoutingSettings:
     raw = services.settings_repo.get(SETTINGS_KEY)
-    if raw is None:
-        return ModelRoutingSettings()
     try:
-        return ModelRoutingSettings.model_validate_json(raw)
+        settings = ModelRoutingSettings.model_validate_json(raw) if raw else ModelRoutingSettings()
     except ValidationError as exc:
         raise _settings_invalid() from exc
+    if owner_id is None:
+        return settings
+    user = services.user_repo.get(owner_id)
+    preferences = user.preferences_json if user else None
+    preferred = get_preferred_model_from_json(preferences)
+    preferred_box = get_preferred_box_model_from_json(preferences)
+    providers = ProviderStore(services.provider_repo)
+
+    def resolve(box: bool, *candidates: str | None) -> str | None:
+        for ref in candidates:
+            if _source_available(providers, ref, box=box):
+                return ref
+        return _source_candidate(providers, box=box)
+
+    return settings.model_copy(
+        update={
+            "box_model_ref": resolve(True, preferred_box, preferred),
+            "remote_model_ref": resolve(False, preferred),
+        }
+    )
 
 
 def _source_available(providers: ProviderStore, ref: str | None, *, box: bool) -> bool:
@@ -131,6 +153,20 @@ def _source_available(providers: ProviderStore, ref: str | None, *, box: bool) -
     return any(
         row.name == provider_name and (row.kind == "box") == box
         for row in providers.iter_usable_rows()
+    )
+
+
+def _source_candidate(
+    providers: ProviderStore, *, box: bool, requires_images: bool = False
+) -> str | None:
+    names = {row.name for row in providers.iter_usable_rows() if (row.kind == "box") == box}
+    return next(
+        (
+            candidate.ref
+            for candidate in providers.list_auto_route_candidates(needs_multimodal=requires_images)
+            if candidate.ref.partition("/")[0] in names
+        ),
+        None,
     )
 
 
@@ -146,8 +182,10 @@ def save_settings(services: SharedServices, settings: ModelRoutingSettings) -> M
     return settings
 
 
-def routing_capabilities(services: SharedServices) -> RoutingCapabilities:
-    settings = load_settings(services)
+def routing_capabilities(
+    services: SharedServices, owner_id: int | None = None
+) -> RoutingCapabilities:
+    settings = load_settings(services, owner_id)
     providers = ProviderStore(services.provider_repo)
     return RoutingCapabilities(
         **settings.model_dump(),
@@ -195,8 +233,33 @@ def decide_model(
     if not _source_available(providers, settings.box_model_ref, box=True):
         raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
     assert settings.box_model_ref is not None
+    box_ref: str | None = settings.box_model_ref
+    remote_ref = settings.remote_model_ref
+    if requires_images:
+
+        def compatible(ref: str | None, *, box: bool) -> str | None:
+            if _source_available(providers, ref, box=box) and providers.is_model_ref_multimodal(
+                ref or ""
+            ):
+                return ref
+            return _source_candidate(providers, box=box, requires_images=True)
+
+        box_ref = compatible(box_ref, box=True)
+        remote_ref = compatible(remote_ref, box=False) if selected_level > 0 else None
+        if box_ref is None and remote_ref is None:
+            raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
+        # With only one image-capable source, difficulty cannot change the route.
+        if selected_level > 0 and (box_ref is None or remote_ref is None):
+            return ModelRoutingDecision(
+                mode=mode,
+                level=selected_level,
+                target="box" if box_ref else "remote",
+                model_ref=box_ref or remote_ref or "",
+                reason_code="capability_image_box" if box_ref else "capability_image",
+            )
+    assert box_ref is not None
     target: Literal["box", "remote"] = "box"
-    selected_ref = settings.box_model_ref
+    selected_ref = box_ref
     selected_reason = "box_mode" if mode == "box" else "level_zero"
     selected_difficulty = None
     if selected_level > 0:
@@ -206,29 +269,16 @@ def decide_model(
         selected_reason = reason_code or (
             "classifier_unavailable" if difficulty is None else "difficulty_below_threshold"
         )
-        if requires_images and not providers.is_model_ref_multimodal(selected_ref):
-            if _source_available(providers, settings.remote_model_ref, box=False) and (
-                providers.is_model_ref_multimodal(settings.remote_model_ref or "")
-            ):
-                target = "remote"
-                selected_ref = settings.remote_model_ref or ""
-                selected_reason = "capability_image"
-            else:
-                raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
-        elif (
-            requires_images
-            and _source_available(providers, settings.remote_model_ref, box=False)
-            and not providers.is_model_ref_multimodal(settings.remote_model_ref or "")
-        ):
-            selected_reason = "capability_image_box"
-        elif difficulty is not None and difficulty >= REMOTE_THRESHOLDS[selected_level]:
-            if not _source_available(providers, settings.remote_model_ref, box=False):
+        if difficulty is not None and difficulty >= REMOTE_THRESHOLDS[selected_level]:
+            if not _source_available(providers, remote_ref, box=False):
                 raise OctopError.localized(ErrorCode.TASK_MODEL_UNAVAILABLE)
             target = "remote"
-            selected_ref = settings.remote_model_ref or ""
-            selected_reason = reason_code or "difficulty_at_or_above_threshold"
-    if requires_images and not providers.is_model_ref_multimodal(selected_ref):
-        raise OctopError.localized(ErrorCode.TASK_IMAGE_MODEL_REQUIRED)
+            selected_ref = remote_ref or ""
+            selected_reason = (
+                "capability_image"
+                if requires_images and remote_ref != settings.remote_model_ref
+                else reason_code or "difficulty_at_or_above_threshold"
+            )
     return ModelRoutingDecision(
         mode=mode,
         level=selected_level,
