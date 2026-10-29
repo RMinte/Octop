@@ -1,5 +1,7 @@
 # API Reference
 
+MCP、连接器管理、授权流程及项目／Task 资源选择的 APP 接入见 [APP MCP 与连接器接入](app-mcp-connectors.md)。
+
 客户端本轮接线先读[统一 Task 客户端接口交接](agentcomputer-unified-conversations-handoff.md)。统一 Task 基础接口参考 `feature/agentcomputer-foundation @ 4cd685b7`，Bridge 安全修复由 `34e918d5` 提供；项目自动停止后级联删除为其后的本次修订，准确运行版本见交接文档及交付资料包。REST 完整模型见运行服务的 `/api/openapi.json`，Task WS 报文见[协议与 JSON Schema](project-task-websocket.md)。协议号不用于判断这些后续修订是否已部署。
 
 ## 统一会话与可选专家（2026-10-23）
@@ -442,7 +444,7 @@ Idempotency-Key: 2b30948c-0b02-42a1-b2ed-386f04cd758a
 }
 ```
 
-`options.model_ref` 省略或为 null 且未开启路由时，每一轮都使用本轮入队时的当前默认选择，不隐式继承上一轮模型；希望连续追问沿用同一模型时，客户端须在每次请求中再次携带同一个完整 `model_ref`。显式指定不可用模型返回 HTTP 409 / `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。入队后模型随本轮固定，`turns[].model_ref` 返回该轮实际模型，客户端应据此展示执行结果，不以输入框当前选择反推历史。skills、mcp_servers 省略或 null 继承项目配置；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。无项目任务同样可以选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
+`options.model_ref` 省略或为 null 且未开启路由时，每一轮都使用本轮入队时的当前默认选择，不隐式继承上一轮模型；希望连续追问沿用同一模型时，客户端须在每次请求中再次携带同一个完整 `model_ref`。显式指定不可用模型返回 HTTP 409 / `TASK_MODEL_UNAVAILABLE`，不会静默改用其他模型。入队后模型随本轮固定，`turns[].model_ref` 返回该轮实际模型，客户端应据此展示执行结果，不以输入框当前选择反推历史。skills、mcp_servers 省略或 null 时，合并当前所选专家默认能力与发送时项目配置并去重；[] 仅在本轮停用该类资源，非空列表完整替换该类选择。连接器 default_open 不自动叠加到统一 Task。无项目任务同样可以继承专家默认能力或显式选择本人有权使用的资源。重复引用、未知字段或无权访问的资源被拒绝，不创建空轮次。
 
 客户端可在同一 `options` 中显式提交 `routing`：`{"mode":"box"}` 固定盒子，`{"mode":"hybrid","level":60}` 由盒子根据本轮消息、有效历史及项目行动指南判难。仅支持 `box/hybrid`；混合档位严格接受整数 `0/20/40/60/80/100`，不是调用比例或任务占比。0 档始终盒子，不要求远端配置；20/40/60/80/100 档的远端难度阈值分别为 80/60/40/20/10，因此 100 档的 0–9 基础工作仍走盒子。省略 `level` 使用部署默认档位；省略或为 null 的 `routing` 保持原有默认模型语义，非空 `model_ref` 始终优先并跳过判难。希望下一轮沿用策略时须再次携带 `routing`。部署配置由 `GET/PUT /api/project-tasks/routing/settings` 读取和保存，不改变项目或全局默认模型；资源接口的 `routing` 返回安全能力声明，`turns[].routing` 返回本轮实际来源、档位、难度和原因快照。判难失败保守使用盒子；真实取消不入队；同一已受理请求的幂等重传不重新判难。完整 REST/WS 示例、图片约束与用量边界见[任务模型路由接入](project-task-model-routing.md)。
 
@@ -1082,10 +1084,12 @@ for non-`/` paths.
 
 ## Connectors & OAuth
 
+APP requests, response examples, OAuth/device login and per-turn MCP selection: [APP MCP 与连接器接入](app-mcp-connectors.md).
+
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
 | `GET`    | `/connectors/catalog` | user | connector catalog (Notion, Figma, …) |
-| `GET`    | `/connectors/test-credentials` | user | preflight credentials |
+| `POST`   | `/connectors/test-credentials` | user | preflight credentials |
 | `GET`    | `/connector-instances` | user | list instances |
 | `POST`   | `/connector-instances` | user | create instance |
 | `GET`/`PATCH`/`DELETE` | `/connector-instances/{id}` | user | CRUD on an instance |
@@ -1096,8 +1100,8 @@ for non-`/` paths.
 | `POST`   | `/connectors/auth/{kind}/exchange-code` | user | exchange auth code |
 | `POST`   | `/connectors/oauth/start` | user | start OAuth (catalog or custom MCP via `target`) |
 | `POST`   | `/connectors/oauth/{kind}/start` | user | legacy catalog OAuth start |
-| `PUT`    | `/connectors/custom-mcp` | user | save custom MCP server map |
-| `PATCH`  | `/connectors/custom-mcp/servers/{name}` | user | patch `enabled` / `default_open` on one server |
+| `GET`/`PUT` | `/connectors/custom-mcp` | user | read / replace custom MCP server map |
+| `PATCH`  | `/connectors/custom-mcp/servers/{name}` | user | patch `enabled` / `default_open` / `shared` on one server |
 | `POST`   | `/connectors/custom-mcp/test` | user | probe a custom MCP server (inline spec or saved name) |
 | `GET`    | `/connectors/oauth/callback` | public | OAuth redirect target |
 | `GET`    | `/connectors/oauth/pending/{state_id}` | user | poll the OAuth result |
@@ -1112,7 +1116,7 @@ discovery.
 
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
-| `POST`/`GET`/… | `/internal/mcp/*` | public (mTLS / network-isolated) | MCP gateway used by octop-harness agents (not the dashboard) |
+| `POST`/`GET`/`DELETE` | `/internal/mcp/{kind}/{instance_id}` | internal instance token (JWT-exempt) | MCP gateway used by octop-harness agents; not an APP management API |
 
 ## Observability & security
 
@@ -1299,7 +1303,9 @@ dashboard mirrors every code under `apiErrors.*` in
 | `ATTACHMENT_TOO_LARGE` | 413 | Chat / inbound attachment exceeds the configured size limit (`max_mb` in details) |
 | `WORKSPACE_PATH_INVALID` | 400 | Path outside the agent's workspace |
 | `STORAGE_BACKEND_UNREACHABLE` | 502 | Remote backend connect / list failed |
-| `CONNECTOR_OAUTH_FAILED` | 400 | OAuth flow could not complete |
+| `CONNECTOR_INVALID_CREDENTIALS` | 400 | Invalid connector credentials or unsupported OAuth target, including local/LAN MCP OAuth and targets without DCR |
+| `CONNECTOR_OAUTH_START_FAILED` | 502 | OAuth start failed; optional `details.reason` and `details.upstream_status` describe network, authorization-service or configuration failures |
+| `CONNECTOR_OAUTH_HTTPS_REQUIRED` | 400 | A non-loopback OAuth callback requires HTTPS |
 | `INTERNAL_ERROR` | 500 | Unhandled exception (logged with traceback) |
 
 私人智能体完整服务端接口与客户端接入顺序见 [resident-server-capabilities.md](resident-server-capabilities.md)，包含统一管家身份、自然语言专业工作委派、可选高级执行范围、成果回流、授权跟进与定时任务、通知和共享已读水位、记忆候选及上下文整理。

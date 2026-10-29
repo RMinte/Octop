@@ -1,6 +1,6 @@
 # 任务 WebSocket 客户端接入指南
 
-协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 23 日。
+协议版本：`3`，对应 `ready.protocol_version`。更新日期：2026 年 10 月 29 日。
 
 统一会话扩展保持版本 3。迁移轮次新增 `source_trajectory`，仅包含有来源、脱敏且 `history_only=true/restorable=false` 的旧公开轨迹，不是执行回执或可恢复检查点。远端 Task 通过 `/api/bridge/connections/{connection_id}/project-tasks/ws` 复用 Task 命令子集；私人 resident 订阅只保留在本机专用入口，Bridge 不转发。主机身份、能力握手和缓存隔离见 [APP 统一接线文档](agentcomputer-unified-conversations-handoff.md)。
 
@@ -449,17 +449,17 @@ TaskDetail 在 TaskSummary 上增加 `turns:TaskTurn[]`、`next_page_cursor:stri
 | model_ref | 每轮使用入队时的当前默认模型，不继承前轮 | 1–512 字符；不可用返回 status=409 / TASK_MODEL_UNAVAILABLE，不静默换模型 |
 | reasoning_mode | 使用所选模型的默认模式 | auto / enabled / disabled；不支持的模式返回 422 TASK_REASONING_INVALID |
 | reasoning_effort | 使用所选模型的默认强度 | 必须来自该模型 reasoning_config.efforts；不支持的值或关闭思考时指定强度返回 422 TASK_REASONING_INVALID |
-| skills | 继承发送时项目选择，无项目时为空 | 完整替换本轮选择；[] 禁用；最多 64 项，不可重复 |
-| mcp_servers | 继承发送时项目选择，无项目时为空 | 完整替换本轮选择；[] 禁用；最多 64 项，不可重复 |
+| skills | 合并当前所选专家默认 Skill 与发送时项目选择并去重；无专家及项目时为空 | 完整替换本轮选择；[] 禁用；最多 64 项，不可重复 |
+| mcp_servers | 合并当前所选专家默认 MCP 与发送时项目选择并去重；无专家及项目时为空；不叠加连接器 default_open | 完整替换本轮选择；[] 禁用；最多 64 项，不可重复 |
 | knowledge_base_ids | 优先所选专家的非空默认集合，否则使用当前用户默认开启的可见知识库 | 最多 64 个可见知识库 ID，不可重复；[] 本轮禁用；仍校验当前可见性 |
-| plugins | 继承发送时项目选择，无项目时为空 | 已安装且全局启用的插件 ID；[] 禁用；最多 64 项，不可重复 |
-| subagents | 继承发送时项目角色，无项目时为空 | 内置角色 slug；[] 清空；最多 16 项，不可重复 |
+| plugins | 合并当前所选专家默认插件与发送时项目选择并去重；无专家及项目时为空 | 已安装且全局启用的插件 ID；[] 禁用；最多 64 项，不可重复 |
+| subagents | 合并当前所选专家默认子代理角色与发送时项目角色并去重；无专家及项目时为空 | 内置角色 slug；[] 清空；最多 16 项，不可重复 |
 | memory_enabled | 继承项目，无项目时为 true | 严格布尔值；任务独立的持久记忆捕获与搜索 |
 | team_enabled | 继承项目，无项目时为 false | 严格布尔值；通过 agent_list/ask_agent 与所选角色同步协作 |
 | client_id | 无客户端执行端 | 8–128 位字母、数字、短横线或下划线；与 client.attach 一致 |
 | client_tools | 本轮无客户端工具，不继承前轮或项目 | 完整工具定义，最多 64 项，名称唯一；非空时必须同时传 client_id；[] 禁用 |
 
-已安装 Skill 使用 `{package_id,slug}`；SkillHub 引用使用 `{source:"skillhub",slug,name,description?}`。MCP 使用当前账号可用的 server_name，不提交凭据或任意连接地址。候选资源来自 `GET /api/project-tasks/resources`。
+已安装 Skill 使用 `{package_id,slug}`；SkillHub 引用使用 `{source:"skillhub",slug,name,description?}`。MCP 使用当前账号可用的 server_name，不提交凭据或任意连接地址。候选资源来自 `GET /api/project-tasks/resources`。连接管理、授权及选择示例见 [APP MCP 与连接器接入](app-mcp-connectors.md)。
 
 options 只影响本轮，不写回项目或全局默认模型。本轮入队后模型固定；`result.data.turns[].model_ref`、后续历史及轮次更新里的 `model_ref` 是实际执行选择，客户端按该轮返回值标注，不能用当前输入框选择替代历史模型。相同 request_id 的网络重发必须保持原 options，包括 model_ref 当时的显式值或省略/null 形态；不要用响应中解析后的 options 填回原请求，也不要在重连时重新计算默认模型。要更换模型执行新一轮，使用新的 request_id。
 

@@ -11,6 +11,9 @@ Octop ships a catalog of OAuth / MCP connectors. Dashboard copy (`name`,
 
 You can also add **custom MCP** servers in the dashboard; they are not listed here.
 
+For APP API requests, authorization flows and project/task MCP selection, see
+[APP MCP 与连接器接入](app-mcp-connectors.md).
+
 # 内置连接器
 
 [English](#built-in-connectors) · **中文**
