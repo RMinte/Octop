@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -107,7 +108,7 @@ export default function TaskExpertMemory({
     const key = JSON.stringify([taskID, source, content.trim()]);
     if (key === uncertainKey) return;
     if (pending.current?.key !== key)
-      pending.current = { key, requestID: crypto.randomUUID() };
+      pending.current = { key, requestID: randomUUID() };
     setSaving(true);
     setError("");
     try {

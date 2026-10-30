@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -83,7 +84,7 @@ export default function TaskMigrations({ projects }: { projects: Project[] }) {
   const prepare = () =>
     run(async () => {
       pending.current = {
-        request_id: crypto.randomUUID(),
+        request_id: randomUUID(),
         thread_ids: [],
         project_id: projectID,
       };

@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import i18n from "../../i18n";
 import { taskSocketPath } from "../taskTransport";
 import { getWsUrl } from "../config";
@@ -206,7 +207,7 @@ export class ProjectTaskSocket {
     await this.connect();
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) throw disconnected();
-    const id = crypto.randomUUID();
+    const id = randomUUID();
     // A lost receipt is ambiguous. Never replay a mutating command automatically.
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {

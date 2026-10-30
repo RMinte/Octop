@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Modal, Popover, Select, Space, Typography } from "antd";
@@ -171,7 +172,7 @@ export default function TaskApprovalModePicker({
       return;
     }
     void save({
-      request_id: crypto.randomUUID(),
+      request_id: randomUUID(),
       expected_revision: confirmed.current.revision,
       mode,
     });

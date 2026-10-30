@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { useRef, useState } from "react";
 import { Alert, Button, Input, Space, Spin, Tag, Typography } from "antd";
@@ -86,7 +87,7 @@ function InteractionCard({
       pending.current = {
         key,
         body: {
-          request_id: crypto.randomUUID(),
+          request_id: randomUUID(),
           expected_revision: item.revision,
           response,
         },

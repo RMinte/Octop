@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { conversationUrl } from "../../api/taskTransport";
 import { parseBridgeAgentId } from "../../utils/remoteExpert";
@@ -69,7 +70,7 @@ export default function LegacyConversationContinuation({
     };
     const key = JSON.stringify(body);
     if (request.current?.key !== key)
-      request.current = { key, requestID: crypto.randomUUID() };
+      request.current = { key, requestID: randomUUID() };
     setSaving(true);
     setError("");
     try {

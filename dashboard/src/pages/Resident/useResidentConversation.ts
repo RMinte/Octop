@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import i18n from "../../i18n";
 import { getWsUrl } from "../../api/config";
@@ -453,7 +454,7 @@ export function useResidentConversation(accountId: string | number | null) {
             ws.send(
               JSON.stringify({
                 type: "resident.subscribe",
-                id: crypto.randomUUID(),
+                id: randomUUID(),
                 ...target,
               }),
             );
@@ -594,7 +595,7 @@ export function useResidentConversation(accountId: string | number | null) {
           persist(key, (previous) => ({
             ...previous,
             pending: {
-              request_id: crypto.randomUUID(),
+              request_id: randomUUID(),
               prompt: previous.draft,
               read_tools: previous.readTools,
               ...(attachmentIDs.length
@@ -616,7 +617,7 @@ export function useResidentConversation(accountId: string | number | null) {
       try {
         let requestId = "";
         persist(key, (value) => {
-          requestId = value.cancellations[turn.turn_id] ?? crypto.randomUUID();
+          requestId = value.cancellations[turn.turn_id] ?? randomUUID();
           return {
             ...value,
             cancellations: {

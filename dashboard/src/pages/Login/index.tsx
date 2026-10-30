@@ -15,7 +15,7 @@ import {
   type LdapStatus,
   type OauthProviderStatus,
 } from "../../api/modules/auth";
-import { apiErrorMessage } from "../../utils/apiError";
+import { apiErrorMessage, parseApiError } from "../../utils/apiError";
 import { refreshServerLabels } from "../../i18n";
 import { applyUserLocale, applyGuestLocale } from "../../utils/locale";
 import { useTheme } from "../../context/ThemeContext";
@@ -228,7 +228,11 @@ export default function LoginPage() {
       void refreshServerLabels(res.user.locale);
       navigate("/chat", { replace: true });
     } catch (err) {
-      message.error(apiErrorMessage(err, t("login.failed"), t));
+      message.error(
+        parseApiError(err)?.code === "AUTH_FAILED"
+          ? t("login.invalidCredentials")
+          : apiErrorMessage(err, t("login.failed"), t),
+      );
       resetCaptcha();
     } finally {
       setLoading(false);

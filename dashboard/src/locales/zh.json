@@ -5596,6 +5596,7 @@
     "forgotPasswordDockerCommand": "docker exec -it <容器名> octop user passwd <用户名> --password <新密码>",
     "forgotPasswordOk": "知道了",
     "failed": "登录失败",
+    "invalidCredentials": "账号或密码不正确，请检查后重试。",
     "slideHint": "拖动滑块到最右侧完成验证",
     "slideVerified": "验证通过",
     "unsupportedCaptcha": "当前客户端不支持此验证码。请使用支持的客户端登录。",

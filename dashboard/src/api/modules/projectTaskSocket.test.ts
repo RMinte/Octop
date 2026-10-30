@@ -72,6 +72,33 @@ afterEach(() => {
 });
 
 describe("shared task WebSocket", () => {
+  it("sends and correlates task commands without secure-context randomUUID", async () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues: globalThis.crypto.getRandomValues.bind(
+        globalThis.crypto,
+      ),
+    });
+    const connection = new ProjectTaskSocket();
+    const first = connection.command("task.create", { prompt: "你好？" });
+    const ws = await ready();
+    expect(ws.sent.at(-1)).toMatchObject({
+      type: "task.create",
+      id: expect.any(String),
+    });
+    const firstID = ws.sent.at(-1)!.id;
+    ws.result("task.create", { task_id: "task_a" });
+    await expect(first).resolves.toEqual({ task_id: "task_a" });
+    const next = connection.command("task.message", {
+      task_id: "task_a",
+      prompt: "继续",
+    });
+    await flush();
+    expect(ws.sent.at(-1)!.id).not.toBe(firstID);
+    ws.result("task.message", { task_id: "task_a" });
+    await expect(next).resolves.toEqual({ task_id: "task_a" });
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+
   it("keeps account approval pushes alive without a selected task", async () => {
     const connection = new ProjectTaskSocket();
     const controller = new AbortController();

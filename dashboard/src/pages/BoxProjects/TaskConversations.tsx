@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { isImeComposing } from "../../utils/ime";
 import { Dropdown } from "antd";
 import TaskMemory from "./TaskMemory";
@@ -349,7 +350,7 @@ export default function TaskConversations({
     );
     const key = `${detail.task_id}:${activeTurn.turn_id}:${paused}`;
     if (controlRequest.current?.key !== key)
-      controlRequest.current = { key, requestID: crypto.randomUUID() };
+      controlRequest.current = { key, requestID: randomUUID() };
     try {
       const incoming = await projectTasksApi.control(
         detail.task_id,
@@ -690,7 +691,7 @@ export default function TaskConversations({
       pending.current = {
         target,
         body: {
-          request_id: crypto.randomUUID(),
+          request_id: randomUUID(),
           prompt,
           ...revisions,
           ...(!taskID
@@ -791,7 +792,7 @@ export default function TaskConversations({
       compactRequest.current = {
         target: taskID,
         body: {
-          request_id: crypto.randomUUID(),
+          request_id: randomUUID(),
           prompt: "/compact",
           ...revisions,
           ...(options.model_ref
@@ -910,7 +911,7 @@ export default function TaskConversations({
     )
       retryRequest.current = {
         turnID,
-        requestID: crypto.randomUUID(),
+        requestID: randomUUID(),
         optionsKey,
       };
     inFlight.current = true;
@@ -1091,7 +1092,7 @@ export default function TaskConversations({
       return;
     const key = JSON.stringify([taskID, branch]);
     if (branchRequest.current?.key !== key)
-      branchRequest.current = { key, requestID: crypto.randomUUID() };
+      branchRequest.current = { key, requestID: randomUUID() };
     setForking(true);
     setError("");
     try {

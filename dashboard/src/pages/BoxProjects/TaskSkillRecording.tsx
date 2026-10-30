@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Input, Space, Tag, Typography } from "antd";
@@ -126,7 +127,7 @@ export default function TaskSkillRecording({
   const apply = () =>
     run(async () => {
       if (!generatedID || !content.trim() || !name.trim()) return;
-      requestID.current ??= crypto.randomUUID();
+      requestID.current ??= randomUUID();
       await taskWorkbenchApi.applyRecording(scope.task_id, generatedID, {
         request_id: requestID.current,
         name: name.trim(),

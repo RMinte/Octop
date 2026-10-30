@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -61,7 +62,7 @@ export default function TaskMemory({
   }, [open, taskID, query, version, taskExtrasApi, t]);
   const save = async () => {
     if (!content.trim() || busy) return;
-    request.current ??= crypto.randomUUID();
+    request.current ??= randomUUID();
     setBusy(true);
     setError("");
     try {
@@ -86,7 +87,7 @@ export default function TaskMemory({
       content: entry.content,
       okButtonProps: { danger: true },
       onOk: async () => {
-        const id = deletes.current.get(entry.id) ?? crypto.randomUUID();
+        const id = deletes.current.get(entry.id) ?? randomUUID();
         deletes.current.set(entry.id, id);
         try {
           await taskExtrasApi.deleteMemory(taskID, entry.id, id);

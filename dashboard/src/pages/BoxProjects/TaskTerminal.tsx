@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Modal, Space, Typography } from "antd";
@@ -95,7 +96,7 @@ export default function TaskTerminal({ scope }: { scope: TaskWorkbenchScope }) {
     taskWorkbenchApi,
   ]);
   const start = () => {
-    const next = crypto.randomUUID();
+    const next = randomUUID();
     sessionStorage.setItem(storageKey, next);
     terminal.current?.reset();
     pending.current = "";

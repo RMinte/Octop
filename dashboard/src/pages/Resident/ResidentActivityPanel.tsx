@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -147,7 +148,7 @@ function ActivityScope({
   const create = () =>
     run(async () => {
       const intent: FollowupIntent = pending ?? {
-        request_id: crypto.randomUUID(),
+        request_id: randomUUID(),
         purpose: purpose.trim(),
         kind,
         schedule: kind === "note" ? schedule.trim() : null,

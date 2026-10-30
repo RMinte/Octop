@@ -111,7 +111,10 @@ async function turnSettings(group?: string) {
   return panel;
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 const fixture: TaskDetail = {
   task_id: "task_a",
   project_id: "proj_a",
@@ -299,6 +302,50 @@ it("creates one record with an optional expert and freezes the execution selecti
         expected_project_revision: null,
       }),
     ),
+  );
+});
+
+it("creates a standalone task and sends a follow-up over HTTP without randomUUID", async () => {
+  vi.stubGlobal("crypto", {
+    getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+  });
+  api.create.mockResolvedValue({ ...fixture, project_id: null });
+  api.open.mockResolvedValue({ ...fixture, project_id: null });
+  const user = userEvent.setup();
+  mount("", null);
+  const input = screen.getByRole("textbox", {
+    name: zh.projects.tasks.message,
+  });
+  await user.type(input, "你好？");
+  await user.click(
+    screen.getByRole("button", { name: zh.projects.tasks.send }),
+  );
+  await waitFor(() =>
+    expect(api.create).toHaveBeenCalledWith(
+      null,
+      expect.objectContaining({
+        prompt: "你好？",
+        selected_expert_id: null,
+        request_id: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ),
+      }),
+    ),
+  );
+  await waitFor(() => expect(input).toHaveValue(""));
+  await user.type(input, "继续");
+  await user.keyboard("{Enter}");
+  await waitFor(() =>
+    expect(api.send).toHaveBeenCalledWith(
+      "task_a",
+      expect.objectContaining({
+        prompt: "继续",
+        request_id: expect.any(String),
+      }),
+    ),
+  );
+  expect(api.send.mock.calls[0][1].request_id).not.toBe(
+    api.create.mock.calls[0][1].request_id,
   );
 });
 

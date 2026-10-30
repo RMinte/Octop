@@ -5596,6 +5596,7 @@
     "forgotPasswordDockerCommand": "docker exec -it <container> octop user passwd <username> --password <new-password>",
     "forgotPasswordOk": "Got it",
     "failed": "Login failed",
+    "invalidCredentials": "Incorrect username or password. Please check and try again.",
     "slideHint": "Slide to the end to verify",
     "slideVerified": "Verified",
     "unsupportedCaptcha": "This captcha provider is not supported in this client. Use a supported client to sign in.",

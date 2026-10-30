@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import { useTaskHost } from "../../context/TaskHostContext";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -76,7 +77,7 @@ export function useTaskImages(scope: string) {
       added.push({
         file,
         item: {
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           name: file.name,
           isImage: isTaskImage(file.type),
           url: URL.createObjectURL(file),
@@ -137,7 +138,7 @@ export function useTaskImages(scope: string) {
     const currentGeneration = generation.current;
     const currentScope = scope;
     const restored = attachments.map((attachment) => ({
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       name: attachment.name,
       isImage: isTaskImage(attachment.media_type),
       url: "",

@@ -1,3 +1,4 @@
+import { randomUUID } from "../../utils/randomUUID";
 import TaskHostBoundary from "./TaskHostBoundary";
 import { useTaskHost } from "../../context/TaskHostContext";
 import TaskHostDirectory from "./TaskHostDirectory";
@@ -308,7 +309,7 @@ export function ProjectsManager({
     };
     const body = JSON.stringify(fields);
     if (editing === "new" && creation.current?.body !== body)
-      creation.current = { body, key: crypto.randomUUID() };
+      creation.current = { body, key: randomUUID() };
     try {
       const result =
         editing === "new"
